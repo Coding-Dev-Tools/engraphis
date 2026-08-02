@@ -25,7 +25,7 @@ https://discord.com/invite/Wfr2ejBmY
 ## Measured token and context savings
 
 <p align="center">
-  <img src="docs/images/context-efficiency.png" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 71.1 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -42,11 +42,11 @@ https://discord.com/invite/Wfr2ejBmY
 
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
-| Whole documents | 808.8 tokens | 1.000 |
-| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
+| Whole documents | 740.3 tokens | 1.000 |
+| Engraphis structure-aware chunks | 214.1 tokens | 1.000 |
 
-The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
-per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
+The chunked mode returns the relevant passage instead of the whole document: **526.2 fewer tokens
+per question**. Under the same model-context budget, that leaves roughly **526 tokens** for task
 instructions or other relevant evidence.
 
 ### Measurement details and reproducibility
@@ -57,11 +57,11 @@ boundary.
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
 | Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
-| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.1** tokens | **526.2 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
 | Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
-| Small histories across 26 CodeMem agent tasks | Always retrieve: **2,194** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | **252 tokens avoided** (**11.5% lower**) and all 26 unnecessary searches skipped | Both completed **24/26** tasks with the same deterministic offline task agent |
+| Small histories across 26 CodeMem agent tasks | Always retrieve: **1,883** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | Adaptive routing skipped all 26 unnecessary searches; this fixture does **not** show a token saving | Both completed **24/26** tasks with the same deterministic offline task agent |
 | Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 The compact MCP response avoids duplicating full memory bodies when the packed context and source
@@ -122,7 +122,7 @@ contracts: retrieving focused evidence, returning an answer only with support, a
 abstaining when no support exists.
 
 <p align="center">
-  <img src="docs/images/evidence-backed-agent-examples.png" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
+  <img src="docs/images/evidence-backed-agent-examples.svg" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
   <br>
   <sup>Each card names its deterministic offline fixture and test scope. The examples are illustrative; they are not customer data or external benchmark results.</sup>
 </p>
@@ -245,7 +245,10 @@ key. Plaintext SQLite remains the explicit default on every platform.
 > Alternatively, use Docker (`docker compose up`). `pipx install "engraphis[server]"` also works.
 
 > First run downloads `all-MiniLM-L6-v2` (~80 MB). Without it, the engine falls back
-> to a deterministic offline embedder so it always runs.
+> to deterministic feature hashing so it always runs offline. That fallback captures lexical
+> overlap, not meaning: recall and grounded MCP responses set `degraded_mode=true` and
+> `semantic_support=false`, and disable vector retrieval plus semantic-cosine evidence. Install
+> a declared embedding model for semantic retrieval.
 
 ---
 
@@ -335,7 +338,7 @@ cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 For Command Code scopes, verification, and its optional Provider API setup, see the
 [Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
 
-Your agent now has 31 tools for memory, recall, grounded answers, timelines, consolidation, code
+Your agent now has 33 tools for memory, recall, grounded answers, timelines, consolidation, code
 graph work, and privacy-safe receipts. The full inventory, including `engraphis_check_update`, is
 in the [MCP tool reference](docs/MCP_TOOLS.md).
 
@@ -506,7 +509,7 @@ Engraphis separates automatic write resolution from explicit human governance:
 | `correct` | Replacing one known-wrong memory | Closes the old validity window and links the replacement |
 | `promote` | A narrow learning now applies more broadly | Writes a wider-scope successor and closes/links the source instead of editing scope in place |
 | `merge` | Combining two or more overlapping memories | Retires every source and creates one memory that supersedes all of them |
-| `forget` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
+| `retire` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
 | `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; sources stay live unless explicit supersession is requested |
 
 Manual N→1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
@@ -523,6 +526,16 @@ merged = mem.merge(
 )
 print(merged["compaction"])
 ```
+
+`retire` is intentionally not deletion: it preserves temporal history, FTS, and vector
+evidence for historical reads. If a credential was captured, new writes are blocked before
+storage; for a legacy leak use the explicitly destructive `MemoryService.secure_erase()` or
+`POST /api/secure-erase`/`engraphis_secure_erase`. That flow removes the one memory and local
+FTS/vector/ANN and derived graph/link rows, runs SQLite secure-delete, WAL checkpoint, and
+VACUUM, and scans recognised local SQLite recovery backups. It cannot erase exports, filesystem
+snapshots, remote peers, unknown backups, or information a running/compromised agent already
+read; rotate the credential. See [secure-erasure limits](docs/SECURE_ERASURE.md). `forget`
+remains a deprecated compatibility alias for `retire`.
 
 All sources must belong to the named workspace. The result inherits the strictest source
 sensitivity, remains untrusted if any source was untrusted, and stays pinned if any source was
@@ -548,7 +561,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 31 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 33 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -566,7 +579,7 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes 31 MCP tools across memory, recall, code graphs, governance, sessions, and
+Engraphis exposes 33 MCP tools across memory, recall, code graphs, governance, sessions, and
 privacy-safe audit receipts. The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
 
@@ -694,7 +707,7 @@ engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server: 31 tools
+│   ├── mcp_server.py        # MCP server: 33 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup

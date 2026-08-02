@@ -41,6 +41,9 @@ class ApiEmbedder:
         Known embedding dimension. If not provided, detected from first response.
     """
 
+    supports_semantic_search = True
+    embedding_mode = "semantic"
+
     def __init__(
         self,
         model: str,

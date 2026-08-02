@@ -1,14 +1,15 @@
 """Recall scoring.
 
-Pure, testable functions for the six-term Engraphis recall score:
+Pure, testable functions for the ordinary Engraphis recall score:
 
     score = w_r·retention + w_s·semantic + w_l·lexical + w_g·graph
-          + w_i·importance + w_c·recency − w_x·staleness
+          + w_i·importance − w_x·staleness
 
-Weights are per memory type (a procedural memory weights importance/graph higher;
-a working memory weights recency higher), and arm scores are min-max normalized
-before fusion so no single arm dominates by raw scale. This is the concrete fix
-for "similar ≠ important": semantic similarity is one term among six.
+The proactive agenda additionally uses its own recency signal. Ordinary query recall
+does not: retention already reflects time since reinforcement, and adding validity/
+ingestion age would double-weight the age of an unreinforced record. Arm scores are
+min-max normalized before fusion so no single arm dominates by raw scale. This is the
+concrete fix for "similar ≠ important": semantic similarity is one term among five.
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ class Weights:
     l: float = 0.5   # noqa: E741  (lexical weight w_l; single-letter to match the formula)
     g: float = 0.7   # graph proximity
     i: float = 0.6   # importance
-    c: float = 0.3   # recency
+    c: float = 0.3   # proactive-agenda recency (never ordinary query recall)
     x: float = 0.8   # staleness penalty (subtracted)
 
 
@@ -115,14 +116,21 @@ def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> dict[str, 
 def score_memory(rec: MemoryRecord, *, now: float, weights: Weights,
                  semantic: float = 0.0, lexical: float = 0.0, graph: float = 0.0,
                  recency_tau_days: float = 30.0) -> float:
-    """The six-term recall score for a single candidate."""
+    """Score one ordinary query-recall candidate without age double-counting.
+
+    Retention measures time since the candidate was last reinforced.  Recency is
+    deliberately excluded here because it measures when the fact was valid or
+    ingested; for an unreinforced record, using both makes age count twice.  The
+    separate :func:`score_proactive` agenda retains its explicit recency signal.
+
+    ``recency_tau_days`` is retained as an ignored compatibility parameter for
+    callers that configured previous releases.
+    """
     w = weights
     r = retention(rec.stability, rec.last_access, now)
-    rec_ref = rec.valid_from if rec.valid_from is not None else rec.ingested_at
-    c = recency(rec_ref, now, recency_tau_days)
     x = staleness_penalty(rec.valid_to, now)
     return (w.r * r + w.s * semantic + w.l * lexical + w.g * graph
-            + w.i * (rec.importance or 0.0) + w.c * c - w.x * x)
+            + w.i * (rec.importance or 0.0) - w.x * x)
 
 
 def score_proactive(rec: MemoryRecord, *, now: float, weights: Optional[Weights] = None,

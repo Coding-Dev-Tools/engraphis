@@ -41,7 +41,9 @@ from engraphis.core.graph_scene import (
 )
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
-from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter, embedder_capabilities,
+)
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
     REVIEW_PENDING,
@@ -50,6 +52,7 @@ from engraphis.core.poisoning import (
 )
 from engraphis.core.query_planner import PLANNING_MODES
 from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
+from engraphis.core.secrets import SecretDetectedError, reject_secrets
 from engraphis.core.store import (
     _loads,
     _merge_edge_provenance,
@@ -79,12 +82,37 @@ RECALL_SCORE_SEMANTICS = {
         "this response. It is not a confidence value or threshold."
     ),
     "absolute_support": (
-        "Absolute query-to-memory support in [0, 1]: the maximum of raw retrieval "
-        "cosine and lexical Jaccard. It is not min-max normalized and is computed "
-        "without another embedding pass. Grounded recall applies its stricter, "
-        "separately calibrated evidence gate."
+        "Absolute query-to-memory support in [0, 1]: the maximum of semantic cosine "
+        "(when semantic support is enabled) and lexical Jaccard. It is not min-max "
+        "normalized. Grounded recall applies its stricter, separately calibrated "
+        "evidence gate."
+    ),
+    "semantic_support": (
+        "Whether this response used a declared semantic embedder. When false, vector "
+        "retrieval and semantic cosine support are disabled."
     ),
 }
+
+
+def _recall_score_semantics(capabilities: dict) -> dict:
+    """Describe the support calculation actually used by this response."""
+    semantics = dict(RECALL_SCORE_SEMANTICS)
+    semantics["semantic_support"] = bool(capabilities.get("semantic_support"))
+    if not capabilities.get("semantic_support"):
+        semantics["absolute_support"] = (
+            "Absolute lexical query-to-memory support in [0, 1] (Jaccard only). "
+            "Semantic cosine is disabled because the active embedder is not declared "
+            "semantic."
+        )
+    return semantics
+
+
+def _with_retrieval_capabilities(payload: dict, embedder) -> dict:
+    """Add the stable degraded-mode contract to a public recall-shaped payload."""
+    capabilities = embedder_capabilities(embedder)
+    payload.update(capabilities)
+    payload["score_semantics"] = _recall_score_semantics(capabilities)
+    return payload
 MAX_CONTEXT_TASK_CHARS = 10_000
 MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
@@ -232,6 +260,14 @@ _RECEIPT_VERIFICATION_ERRORS = frozenset({
 
 class ValidationError(ValueError):
     """Raised when untrusted input fails a guard. Message is safe to surface."""
+
+
+def _reject_secret_capture(fields) -> None:
+    """Map the core content-free secret rejection into this facade's error type."""
+    try:
+        reject_secrets(fields)
+    except SecretDetectedError as exc:
+        raise ValidationError(str(exc)) from None
 
 
 class GraphSceneCapacityExceeded(ValidationError):
@@ -1051,6 +1087,10 @@ class MemoryService:
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        _reject_secret_capture((
+            ("content", content), ("title", title), ("keywords", keywords),
+            ("metadata", metadata), ("subject_key", subject_key), ("claim_kind", claim_kind),
+        ))
         provenance = (
             _local_cli_provenance()
             if _local_cli_operator else
@@ -1192,6 +1232,7 @@ class MemoryService:
         every retained fact stays passive until an approved local write records the
         corresponding trusted claim."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        _reject_secret_capture((("content", content), ("metadata", metadata)))
         provenance = _canonical_write_provenance(source, trusted, raw_ingest=True)
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
@@ -1856,38 +1897,38 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return _empty_recall(
+                return _with_retrieval_capabilities(_empty_recall(
                     query, token_budget=token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
-                )
+                ), self.engine.embedder)
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return _empty_recall(
-                    query, token_budget=token_budget, response_mode=response_mode,
-                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                    planning=planning, mtype_limits=mtype_limits,
-                    valid_at=valid_at,
+                    return _with_retrieval_capabilities(_empty_recall(
+                        query, token_budget=token_budget, response_mode=response_mode,
+                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        planning=planning, mtype_limits=mtype_limits,
+                        valid_at=valid_at,
                         known_at=known_at,
                         note=f"no repo named '{rp}' in workspace '{ws}' yet",
-                    )
+                    ), self.engine.embedder)
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return _empty_recall(
+                    return _with_retrieval_capabilities(_empty_recall(
                         query, token_budget=token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
-                    )
+                    ), self.engine.embedder)
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -1948,6 +1989,7 @@ class MemoryService:
             "truncated": packed.truncated,
             "reason": packed.reason,
         } for packed in result.packed_chunks]
+        capabilities = embedder_capabilities(self.engine.embedder)
         out = {
             "query": query, "count": result.count,
             "context": result.context, "memories": memories,
@@ -1966,7 +2008,8 @@ class MemoryService:
             "mtype_limits": dict(mtype_limits),
             "response_mode": response_mode,
             "include_untrusted": include_untrusted,
-            "score_semantics": dict(RECALL_SCORE_SEMANTICS),
+            "score_semantics": _recall_score_semantics(capabilities),
+            **capabilities,
         }
         if diagnostics:
             out["retrieval_trace"] = result.retrieval_trace or []
@@ -2247,19 +2290,19 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return _empty_grounded(
+                return _with_retrieval_capabilities(_empty_grounded(
                     query, reason=f"no workspace named '{ws}' yet",
                     token_budget=token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at,
-                )
+                ), self.engine.embedder)
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return _empty_grounded(
+                    return _with_retrieval_capabilities(_empty_grounded(
                         query,
                         reason=f"no repo named '{rp}' in workspace '{ws}' yet",
                         token_budget=token_budget, response_mode=response_mode,
@@ -2267,21 +2310,21 @@ class MemoryService:
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
-                    )
+                    ), self.engine.embedder)
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return _empty_grounded(
+                    return _with_retrieval_capabilities(_empty_grounded(
                         query, reason=f"no session with id '{sid}'",
                         token_budget=token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
-                    )
+                    ), self.engine.embedder)
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -2393,17 +2436,39 @@ class MemoryService:
         return {"session_id": sid, "status": "summarized", "summary": summary,
                "open_threads": threads}
 
-    # ── governance: forget / pin / correct / promote (audited; history preserved) ──
-    def forget(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-              reason: str = "", actor: str = "user") -> dict:
+    # ── governance: retire / secure erase / pin / correct / promote ───────────
+    def retire(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+               reason: str = "", actor: str = "user") -> dict:
+        """Bi-temporally retire one memory. This preserves history and indexes."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
+        _reject_secret_capture((("reason", reason),))
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.forget(mid, reason=reason, actor=actor)
+            return self.engine.retire(mid, reason=reason, actor=actor)
+        except (KeyError, ValueError) as exc:
+            raise ValidationError(str(exc))
+
+    def forget(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+               reason: str = "", actor: str = "user") -> dict:
+        """Deprecated compatibility alias for :meth:`retire`."""
+        result = self.retire(memory_id, workspace=workspace, repo=repo,
+                             reason=reason, actor=actor)
+        return {**result, "status": "forgotten", "deprecated": True}
+
+    def secure_erase(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+                     actor: str = "user") -> dict:
+        """Irreversibly remove one leaked record; unlike retire, history is destroyed."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        try:
+            return self.engine.secure_erase(mid, actor=actor)
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
@@ -2622,6 +2687,7 @@ class MemoryService:
                      refs: Optional[list] = None) -> dict:
         kind = _clean_name(kind, field="kind")
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        _reject_secret_capture((("event content", content), ("event refs", refs)))
         wid, rid = self._require_scope(workspace, repo)
         session = self._session_for_write(session_id, wid, rid)
         if rid is None and session is not None:
@@ -3652,6 +3718,13 @@ class MemoryService:
             )
 
         for m in source_memories:
+            # This historical row may predate capture-time secret blocking. Never
+            # replicate it into another workspace through this raw SQL copy path.
+            _reject_secret_capture((("title", m.get("title")), ("content", m.get("content")),
+                                    ("summary", m.get("summary")),
+                                    ("keywords", m.get("keywords")),
+                                    ("metadata", m.get("metadata")),
+                                    ("provenance", m.get("provenance"))))
             nmid = memory_remap[m["id"]]
             c.execute(
                 "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
@@ -3811,6 +3884,8 @@ class MemoryService:
         # 8) Events, cloned with fresh ids.
         for ev in [dict(x) for x in c.execute(
                 "SELECT * FROM events WHERE workspace_id=?", (wid_src,))]:
+            _reject_secret_capture((("event content", ev.get("content")),
+                                    ("event refs", ev.get("refs"))))
             c.execute(
                 "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
                 "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -3838,6 +3913,7 @@ class MemoryService:
         sets, params, changes = [], [], []
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+            _reject_secret_capture((("title", title),))
             sets.append("title=?")
             params.append(title)
             changes.append("title")

@@ -41,7 +41,7 @@ Everything runs on your machine. The whole store is a single SQLite file. Local 
 You interact with Engraphis through three surfaces, all backed by the *same* engine (`MemoryService`), so they can never drift apart:
 
 - **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`): a visual product to see, search, and curate memory.
-- **The MCP server** (`engraphis-mcp`): the 31 tools your coding agent calls. **This is the surface Kilo Code uses.**
+- **The MCP server** (`engraphis-mcp`): the 33 tools your coding agent calls. **This is the surface Kilo Code uses.**
 - **The Python library** (`from engraphis.service import MemoryService`): for direct programmatic use.
 
 ### 2.1 The five ideas that make it more than a vector store
@@ -66,7 +66,7 @@ When the agent calls `engraphis_recall`, the query runs through three retrieval 
 - **Lexical**: FTS5/BM25 full-text (with a `LIKE` fallback on SQLite builds without FTS5).
 - **Graph**: Personalized PageRank over an entity/link graph.
 
-The three are combined with Reciprocal Rank Fusion, then scored by a six-term weighted function over **retention, semantic similarity, lexical match, graph centrality, importance, and recency** (minus a staleness penalty), then the top results are reranked and packed into a token budget. The upshot: recall is hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this; it's what `engraphis_recall` does by default.
+The three are combined with Reciprocal Rank Fusion, then ordinary query recall is scored from **retention, semantic similarity, lexical match, graph centrality, and importance** (minus a staleness penalty), before the top results are reranked and packed into a token budget. Retention measures time since reinforcement; it intentionally does not apply a second age-based recency penalty. Recency is reserved for the separate queryless proactive agenda. The upshot: recall is hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this; it's what `engraphis_recall` does by default.
 
 ---
 
@@ -184,7 +184,7 @@ You can also click **Approve Always** on any tool at runtime to write the same r
 
 ---
 
-## 4. The 31 tools: the orchestration surface
+## 4. The 33 tools: the orchestration surface
 
 Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall` exist. The value is in the rest. This is the full surface, grouped by what question each one answers.
 
@@ -212,7 +212,8 @@ Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall`
 | Audit | `engraphis_context_savings` | Cumulative packed-context savings from receipts, separated by token-counter identity. |
 | Audit | `engraphis_verify_receipts` | Verify the tamper-evident receipt chain. |
 | Audit | `engraphis_export_receipts` | Export a privacy-safe receipt-only audit bundle. |
-| **Governance** | `engraphis_forget` | Retire a memory: bi-temporal close, never a hard delete; every request is audited. |
+| **Governance** | `engraphis_retire` | Retire a memory: bi-temporal close, never a hard delete; every request is audited. `engraphis_forget` is a deprecated compatibility alias. |
+| Governance | `engraphis_secure_erase` | Irreversibly remove a leaked memory and its local indexes; rotate the credential and remediate external copies separately. |
 | Governance | `engraphis_pin` | Exempt a memory from decay/pruning; every pin/unpin request is audited. |
 | Governance | `engraphis_correct` | Replace a memory's content without losing history: keeps the "why" chain. |
 | Governance | `engraphis_promote` | Widen scope while preserving and linking the narrow-scope history. |

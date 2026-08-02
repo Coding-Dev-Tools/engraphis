@@ -5,7 +5,7 @@ Exposes the Engraphis memory engine as Model Context Protocol tools so coding
 agents (Claude Code, Cursor, Cline, Zed, Windsurf, …) and general agents can
 ``remember`` facts and ``recall`` them across sessions and repositories, scoped
 to ``workspace → repo → session`` — plus the bi-temporal ``why``/``timeline``
-tools, governance (``forget``/``pin``/``correct``), proactive recall, and
+tools, governance (``retire``/``pin``/``correct``), proactive recall, and
 explicit linking/event logging.
 
 Run it (stdio transport, the default for local MCP clients)::
@@ -285,7 +285,7 @@ def engraphis_recall(
         description="Optional maximum returned count per memory type; limits never boost "
                     "relevance.")] = None,
 ) -> str:
-    """Retrieve the memories most relevant to a query (hybrid vector + lexical + graph).
+    """Retrieve the memories most relevant to a query (semantic vector + lexical + graph).
 
     Call this before answering or acting when prior context would help — to avoid re-asking
     the user, to recover decisions/conventions, or to resume earlier work.
@@ -295,10 +295,13 @@ def engraphis_recall(
     Because the receipt is stateful, this surface is neither read-only nor idempotent.
 
     Returns:
-        str: JSON with ``{"query","count","context","score_semantics","memories":[{"id",
+        str: JSON with ``{"query","count","context","degraded_mode","semantic_support",
+        "embedding_mode","score_semantics","memories":[{"id",
         "title","content","scope","mtype","repo_id","score","relative_score",
         "absolute_support","arm","retention","provenance"}]}``. ``score`` is a compatibility
         alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.
+        ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval
+        was disabled because the active embedder is not declared semantic.
         Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
     try:
@@ -359,7 +362,8 @@ def engraphis_recall_context(
     This is the recommended agent path: unlike legacy full recall, it does not
     repeat every complete memory body alongside the already-packed context.  The
     response includes exact accounting for the declared counter, omitted/packed
-    counts, and privacy-safe savings metadata.
+    counts, privacy-safe savings metadata, and the same ``degraded_mode`` /
+    ``semantic_support`` flags as ``engraphis_recall``.
     """
     try:
         payload = service().recall(
@@ -476,12 +480,15 @@ def engraphis_recall_grounded(
     actually supports the query (``grounded: false``). Use it when you want a grounded,
     non-hallucinated answer and would rather get "insufficient evidence" than a guess.
     The deterministic default never introduces a claim that is not in a cited memory.
+    When ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:
+    semantic vector retrieval and semantic cosine support are disabled.
     With ``synthesize=True``, configured LLM prose is accepted only when citations hold.
     Every resolved call appends a privacy-safe receipt (including abstentions), and a
     grounded answer reinforces cited memories.
 
     Returns:
         str: JSON ``{"query","grounded","abstained","answer","support","reason",
+        "degraded_mode","semantic_support","embedding_mode",
         "synthesized":false,"citations":[{"n","id","title","content","score","support",
         "provenance"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``
         explains why (insufficient evidence, or unknown workspace/repo).
@@ -701,22 +708,22 @@ def engraphis_proactive_context(
 
 
 @mcp.tool(
-    name="engraphis_forget",
-    annotations={"title": "Forget a memory", "readOnlyHint": False,
+    name="engraphis_retire",
+    annotations={"title": "Retire a memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def engraphis_forget(
-    memory_id: Annotated[str, Field(description="The memory id to forget (from a prior "
+def engraphis_retire(
+    memory_id: Annotated[str, Field(description="The memory id to retire (from a prior "
                          "remember/recall result, e.g. 'mem_01J...').", min_length=1,
                          max_length=200)],
     workspace: Annotated[str, Field(description="Workspace that owns this memory — checked "
                                     "against the memory's actual workspace before anything is "
-                                    "changed, so you can't forget a memory in a workspace you "
+                                    "changed, so you can't retire a memory in a workspace you "
                                     "weren't already given.", min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Repo that owns this memory, if it's "
                                          "repo-scoped; also checked.",
                                          max_length=200)] = None,
-    reason: Annotated[str, Field(description="Why this is being forgotten (recorded in the "
+    reason: Annotated[str, Field(description="Why this is being retired (recorded in the "
                       "audit trail).", max_length=1_000)] = "",
 ) -> str:
     """Retire a memory: it stops appearing in recall, but history is preserved, not
@@ -726,11 +733,63 @@ def engraphis_forget(
     is deliberately annotated as non-idempotent.
 
     Returns:
-        str: JSON ``{"id","status":"forgotten","reason"}`` or an actionable error if the
+        str: JSON ``{"id","status":"retired","reason"}`` or an actionable error if the
         id is unknown or doesn't belong to ``workspace``/``repo``.
     """
     try:
+        return _ok(service().retire(memory_id, workspace=workspace, repo=repo, reason=reason))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_forget",
+    annotations={"title": "Forget a memory (deprecated; use retire)", "readOnlyHint": False,
+                 "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+)
+def engraphis_forget(
+    memory_id: Annotated[str, Field(description="Deprecated alias for memory_id in "
+                         "engraphis_retire.", min_length=1, max_length=200)],
+    workspace: Annotated[str, Field(description="Workspace that owns this memory.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Optional owning repo.",
+                                         max_length=200)] = None,
+    reason: Annotated[str, Field(description="Retirement reason recorded in the audit trail.",
+                                 max_length=1_000)] = "",
+) -> str:
+    """Deprecated compatibility alias for ``engraphis_retire``.
+
+    It preserves the legacy ``status: \"forgotten\"`` response for existing clients;
+    it still performs a temporal retirement and never deletes the memory.
+    """
+    try:
         return _ok(service().forget(memory_id, workspace=workspace, repo=repo, reason=reason))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_secure_erase",
+    annotations={"title": "Securely erase a leaked memory", "readOnlyHint": False,
+                 "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+)
+def engraphis_secure_erase(
+    memory_id: Annotated[str, Field(description="Leaked memory id to erase irreversibly.",
+                                    min_length=1, max_length=200)],
+    workspace: Annotated[str, Field(description="Workspace that owns the memory.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Optional owning repo.",
+                                         max_length=200)] = None,
+) -> str:
+    """Irreversibly remove one accidentally stored secret from local persistence.
+
+    Unlike retirement, this removes the memory, FTS/vector/ANN and derived graph/link
+    rows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised
+    local SQLite recovery backups. It cannot erase copied exports, snapshots, remote
+    peers, or data already read by a compromised/running agent; rotate the credential.
+    """
+    try:
+        return _ok(service().secure_erase(memory_id, workspace=workspace, repo=repo))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -790,7 +849,7 @@ def engraphis_correct(
     """Replace a memory's content without losing history: the old content is closed
     (bi-temporal invalidate, not deleted) and the correction is stored as a new memory
     that records what it corrects — so the audit trail and ``engraphis_why`` both still
-    work afterward. Prefer this over forget+remember for fixes.
+    work afterward. Prefer this over retire+remember for fixes.
 
     Returns:
         str: JSON ``{"id","superseded":[old_id],"reason"}`` or an actionable error if the

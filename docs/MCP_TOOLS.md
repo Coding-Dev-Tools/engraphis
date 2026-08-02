@@ -4,6 +4,14 @@ Engraphis exposes MCP tools for writing and recalling memory, managing history, 
 checking the local store. Start with `engraphis_recall_context` when an agent needs prompt-ready
 context, and use `engraphis_remember` when it learns a durable fact.
 
+Retrieval responses (`engraphis_recall`, `engraphis_recall_context`,
+`engraphis_recall_grounded`, and `engraphis_answer`) always declare
+`degraded_mode`, `semantic_support`, and `embedding_mode`. A `true` degraded flag means
+the active backend is not a declared semantic embedder (the bundled deterministic fallback
+is feature hashing with lexical overlap). In that mode vector retrieval and semantic-cosine
+evidence are disabled; recall remains lexical/graph/code based and grounded answers use
+lexical support only.
+
 Trust boundary: every MCP write is `pending` review, regardless of a caller-supplied `source` or
 `trusted` label. The same rule applies to REST/dashboard-intent, import, sync, and extractor
 ingress; detector matches are `quarantined` immediately. Pending and quarantined records are
@@ -45,7 +53,9 @@ code that already has local database authority, not a transport permission.
 | Audit | `engraphis_context_savings` | Summarizes packed-context usage by workspace, repository, and token-counter identity. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
 | Audit | `engraphis_export_receipts` | Exports a shareable receipt-only audit bundle. |
-| Governance | `engraphis_forget` | Retires a memory by closing its validity window. It does not delete history. |
+| Governance | `engraphis_retire` | Retires a memory by closing its validity window. It does not delete history. |
+| Governance | `engraphis_secure_erase` | Irreversibly removes one leaked memory and local indexes; reports local-backup and external-copy limitations. |
+| Compatibility | `engraphis_forget` | Deprecated alias for `engraphis_retire`; preserves the legacy response shape. |
 | Governance | `engraphis_pin` | Prevents future automatic decay or pruning. |
 | Governance | `engraphis_correct` | Replaces memory content without losing the previous version; governed provenance remains pending unless separately approved. |
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |

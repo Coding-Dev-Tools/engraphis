@@ -862,7 +862,8 @@
         button('Edit', 'secondary-button', () => openEditor(memory)),
         button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
         button('View timeline', 'secondary-button', () => openMemoryTimeline(memory)),
-        button('Forget', 'danger-button', () => forgetMemory(memory)),
+        button('Retire', 'danger-button', () => retireMemory(memory)),
+        button('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
       );
       target.append(actions);
       const chain = payload.chain || [];
@@ -1027,19 +1028,37 @@
     }
   }
 
-  async function forgetMemory(memory) {
-    if (!window.confirm(`Forget “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`)) return;
+  async function retireMemory(memory) {
+    if (!window.confirm(`Retire “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`)) return;
     try {
-      await api('/forget', {
+      await api('/retire', {
         method: 'POST',
-        body: { id: memory.id, workspace: state.workspace, reason: 'forgotten in Ledger' },
+        body: { id: memory.id, workspace: state.workspace, reason: 'retired in Ledger' },
       });
       state.selectedMemory = '';
       byId('memory-detail').replaceChildren(empty('Memory moved out of live recall. Its history is retained.'));
-      showNotice('Memory forgotten without hard deletion.');
+      showNotice('Memory retired without hard deletion.');
       await selectWorkspace(state.workspace);
     } catch (error) {
-      showNotice(`Could not forget memory: ${error.message}`);
+      showNotice(`Could not retire memory: ${error.message}`);
+    }
+  }
+
+  async function secureEraseMemory(memory) {
+    const name = memory.title || memory.id;
+    if (!window.confirm(`Securely erase “${name}”? This destroys temporal history and local index copies. Rotate the leaked credential; copied exports, snapshots, remote peers, and an already-compromised agent cannot be erased here.`)) return;
+    try {
+      const result = await api('/secure-erase', {
+        method: 'POST', body: { id: memory.id, workspace: state.workspace },
+      });
+      state.selectedMemory = '';
+      byId('memory-detail').replaceChildren(empty('Memory securely erased from this local store. Review the reported backup limitations and rotate the credential.'));
+      showNotice(result.vector_index_cleanup === 'failed'
+        ? 'Memory removed locally; configured vector index needs separate remediation.'
+        : 'Memory securely erased from local persistence.');
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      showNotice(`Could not securely erase memory: ${error.message}`);
     }
   }
 

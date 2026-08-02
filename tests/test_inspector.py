@@ -123,12 +123,14 @@ def test_why_supersedes_and_timeline_endpoints(client):
     assert len(tl["history"]) == 2
 
 
-def test_governance_endpoints_pin_and_forget(client):
+def test_governance_endpoints_pin_retire_and_legacy_forget_alias(client):
     c, out = client
     body = {"memory_id": out["id"], "workspace": "acme", "repo": "backend"}
     assert c.post("/api/pin", json=body).json()["pinned"] is True
-    r = c.post("/api/forget", json={**body, "reason": "test"}).json()
-    assert r["status"] == "forgotten"
+    r = c.post("/api/retire", json={**body, "reason": "test"}).json()
+    assert r["status"] == "retired"
+    alias = c.post("/api/forget", json={**body, "reason": "legacy"}).json()
+    assert alias["status"] == "forgotten" and alias["deprecated"] is True
     assert c.get("/api/stats", params={"workspace": "acme"}).json()["memories"] == 0
 
 

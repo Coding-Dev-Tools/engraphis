@@ -57,6 +57,7 @@ from engraphis.core.poisoning import (
     prompt_eligible,
     provenance_is_approved,
 )
+from engraphis.core.secrets import SecretDetectedError, reject_secrets
 from engraphis.core.store import Store, now_ts
 
 
@@ -467,6 +468,17 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
     mid = d.get("id")
     content = d.get("content")
     if not isinstance(mid, str) or not mid or not isinstance(content, str) or not content:
+        return None
+    # Sync is an external memory write path. Reject the row before it can reach the
+    # raw Store upsert, FTS, or a locally rebuilt vector; a secret-bearing peer row is
+    # simply counted as rejected like any other malformed bundle entry.
+    try:
+        reject_secrets((("title", d.get("title")), ("content", content),
+                        ("summary", d.get("summary")), ("keywords", d.get("keywords")),
+                        ("metadata", d.get("metadata")), ("provenance", d.get("provenance")),
+                        ("subject_key", d.get("subject_key")),
+                        ("claim_kind", d.get("claim_kind"))))
+    except SecretDetectedError:
         return None
     kws = d.get("keywords") or []
     if not isinstance(kws, list):

@@ -273,7 +273,41 @@ class Embedder(Protocol):
     """Turns text or code into dense vectors. Default local; API optional."""
     @property
     def dim(self) -> int: ...
+    @property
+    def supports_semantic_search(self) -> bool: ...
+    @property
+    def embedding_mode(self) -> str: ...
     def embed(self, texts: list[str], *, kind: Literal["text", "code"] = "text") -> np.ndarray: ...
+
+
+def embedder_capabilities(embedder: Any) -> dict[str, Any]:
+    """Return public retrieval capabilities for an embedder.
+
+    Semantic retrieval is opt-in: an embedder that does not explicitly advertise it is
+    treated as degraded.  This prevents a feature-hashing fallback (or an incomplete
+    third-party adapter) from being presented as a semantic model merely because it
+    produces vectors.  The returned shape is transport-safe and is included in recall
+    and grounded-answer responses.
+    """
+    semantic_support = bool(getattr(embedder, "supports_semantic_search", False))
+    mode = str(getattr(embedder, "embedding_mode", "") or "").strip().casefold()
+    if not mode:
+        mode = "semantic" if semantic_support else "unknown"
+    degraded_mode = not semantic_support
+    reason = ""
+    if degraded_mode:
+        reason = str(getattr(embedder, "semantic_support_reason", "") or "").strip()
+        if not reason:
+            reason = (
+                "embedding backend did not declare semantic capability; semantic "
+                "vector retrieval is disabled"
+            )
+    return {
+        "degraded_mode": degraded_mode,
+        "semantic_support": semantic_support,
+        "embedding_mode": mode,
+        "degraded_reason": reason,
+    }
 
 
 @runtime_checkable

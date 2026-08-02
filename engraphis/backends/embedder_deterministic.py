@@ -23,6 +23,20 @@ DETERMINISTIC_EMBEDDING_VERSION = "v2_aliases_measurements"
 
 
 class DeterministicEmbedder:
+    """Deterministic lexical feature hashing for offline operation.
+
+    It emits normalized vectors because the vector-store interface requires them, but
+    those vectors are not semantic embeddings.  The explicit capability flags make
+    callers fail closed instead of using their cosine as semantic evidence.
+    """
+
+    supports_semantic_search = False
+    embedding_mode = "lexical_hashing"
+    semantic_support_reason = (
+        "deterministic feature hashing captures lexical overlap only; semantic vector "
+        "retrieval and semantic grounding are disabled"
+    )
+
     def __init__(self, dim: int = 384) -> None:
         self._dim = dim
 

@@ -87,7 +87,7 @@ def test_readme_distinguishes_every_current_token_context_measurement():
     for evidence in (
         "## Measured token and context savings",
         "98.21 percent less long-history context",
-        "73.0 percent less retrieved content per question",
+        "71.1 percent less retrieved content per question",
         "73.9 percent fewer tokens in the smallest useful memory",
         "55.38 percent smaller memory response",
         "47.8 percent less repeated-memory context after consolidation",
@@ -95,8 +95,8 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         "### Measurement details and reproducibility",
         "49,915,394** tokens → Engraphis: **891,857** tokens",
         "98.2133% lower",
-        "808.8** tokens → structure-aware chunks: **218.4** tokens",
-        "73.0% lower",
+        "740.3** tokens → structure-aware chunks: **214.1** tokens",
+        "71.1% lower",
         "162.2** tokens → chunks: **42.4** tokens",
         "73.9% lower",
         "17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens",
@@ -149,9 +149,9 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "Avoid confident guesses",
         "Avoid dragging the whole project into every prompt",
         "docs/images/engraphis-benefit-flow.png",
-        "docs/images/context-efficiency.png",
+        "docs/images/context-efficiency.svg",
         "### See the behavior in reproducible fixtures",
-        "docs/images/evidence-backed-agent-examples.png",
+        "docs/images/evidence-backed-agent-examples.svg",
         "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
         "Less repeated history means more room for the task, tools, and useful evidence",
     ):
@@ -196,7 +196,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results():
         encoding="utf-8"
     )
 
-    assert chunking["context_reduction_pct"] == 73.0
+    assert chunking["context_reduction_pct"] == 71.1
     assert f"{whole['mean_context_tokens']:.1f} → {chunked['mean_context_tokens']:.1f} tokens" in visual
     assert grounded == {
         "answer_rate": 1.0,
@@ -223,9 +223,9 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results():
         "Engraphis · 891,857 tokens",
         "98.21% less",
         "Focused context; full-history recall was higher",
-        "Whole documents · 808.8 tokens",
-        "Focused chunks · 218.4 tokens",
-        "73.0% less",
+        "Whole documents · 740.3 tokens",
+        "Focused chunks · 214.1 tokens",
+        "71.1% less",
         "Whole document · 162.2 tokens",
         "Useful chunk · 42.4 tokens",
         "73.9% less",

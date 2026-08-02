@@ -15,6 +15,9 @@ from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 
 
 class SentenceTransformerEmbedder:
+    supports_semantic_search = True
+    embedding_mode = "semantic"
+
     def __init__(self, model_name: str, *, revision: Optional[str] = None) -> None:
         from sentence_transformers import SentenceTransformer  # lazy: optional dependency
         kwargs = {"revision": revision} if revision else {}

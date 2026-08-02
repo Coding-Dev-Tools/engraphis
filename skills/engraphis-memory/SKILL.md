@@ -1,6 +1,6 @@
 ---
 name: engraphis-memory
-description: 'Give the agent durable, scoped, explainable memory across sessions and repositories through the Engraphis MCP tools. Use when you learn a convention, decision, bug cause/fix, or user preference worth keeping; when prior context would help before you answer or act (to avoid re-asking or re-deriving); when asked "why is it like this" or "how has this changed over time"; or when starting or resuming work in a repo. Triggers: remember, recall, "what do we know about X", why/rationale, timeline/history, forget/pin/correct, session handoff, index/search code.'
+description: 'Give the agent durable, scoped, explainable memory across sessions and repositories through the Engraphis MCP tools. Use when you learn a convention, decision, bug cause/fix, or user preference worth keeping; when prior context would help before you answer or act (to avoid re-asking or re-deriving); when asked "why is it like this" or "how has this changed over time"; or when starting or resuming work in a repo. Triggers: remember, recall, "what do we know about X", why/rationale, timeline/history, retire/pin/correct, session handoff, index/search code.'
 ---
 
 # Engraphis Memory
@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(31 of them). If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
+(33 of them). If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
@@ -70,7 +70,8 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | Load context, no query | `engraphis_recall_proactive` | Start-of-task; authenticated callers receive only their own last-session handoff. |
 | "Why is it like this?" | `engraphis_why` | Live answer **plus** what it superseded (bi-temporal). |
 | "How has X changed?" | `engraphis_timeline` | Every version oldest→newest with `valid_from/valid_to`. |
-| Retire a stale memory | `engraphis_forget` | Bi-temporal close, not a delete. Prefer `correct` if you have a replacement. |
+| Retire a stale memory | `engraphis_retire` | Bi-temporal close, not a delete. Prefer `correct` if you have a replacement. |
+| Erase a leaked credential | `engraphis_secure_erase` | Destructive local remediation; rotate the secret and handle external copies separately. |
 | Fix a memory's content | `engraphis_correct` | Closes old + stores replacement that records what it fixed; keeps the *why* chain. |
 | Widen a memory's scope | `engraphis_promote` | Session→repo/workspace or repo→workspace; preserves and links narrow history. |
 | Protect from decay | `engraphis_pin` | For identity/durable facts that must never fade. |
@@ -151,6 +152,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A: MCP
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md): all 31 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md): all 33 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md): the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md): memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

@@ -64,7 +64,8 @@ def _recall_side_effect_snapshot(srv):
 _ALL_TOOLS = {
     "engraphis_remember", "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline",
-    "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
+    "engraphis_recall_proactive", "engraphis_retire", "engraphis_forget",
+    "engraphis_secure_erase", "engraphis_pin", "engraphis_correct",
     "engraphis_promote", "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
     "engraphis_search_code", "engraphis_code_path", "engraphis_code_impact",
     "engraphis_export_code_graph", "engraphis_start_session", "engraphis_end_session",
@@ -89,11 +90,11 @@ def test_server_identity_and_tools_registered():
     assert "engraphis_end_session" in srv.mcp.instructions
     assert "open_threads=[]" in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
-    assert len(_ALL_TOOLS) == 31
+    assert len(_ALL_TOOLS) == 33
     assert set(tools) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("## 4. The 31 tools", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("## 4. The 33 tools", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = tools["engraphis_remember"].inputSchema.get("properties", {})
@@ -259,6 +260,9 @@ def test_remember_and_recall_tool_callables(monkeypatch):
     assert memory["score"] == memory["relative_score"]
     assert 0.0 <= memory["absolute_support"] <= 1.0
     assert "Query-relative" in rec["score_semantics"]["relative_score"]
+    assert rec["degraded_mode"] is True
+    assert rec["semantic_support"] is False
+    assert rec["embedding_mode"] == "lexical_hashing"
 
 
 def test_mcp_external_provenance_cannot_be_forged_to_trusted(monkeypatch):
@@ -385,6 +389,9 @@ def test_grounded_recall_tool_returns_flat_answer_payload(monkeypatch):
     assert out["query"] == "Which auth tokens does the API use?"
     assert out["grounded"] is True
     assert out["abstained"] is False
+    assert out["degraded_mode"] is True
+    assert out["semantic_support"] is False
+    assert out["embedding_mode"] == "lexical_hashing"
     assert "PASETO" in out["answer"]
     assert out["citations"]
 
@@ -525,9 +532,13 @@ def test_governance_tools_forget_pin_correct(monkeypatch):
         workspace="acme", reason="typo"))
     assert corrected["superseded"] == [out["id"]]
 
-    forgotten = json.loads(srv.engraphis_forget(memory_id=corrected["id"], workspace="acme",
-                                                reason="no longer needed"))
-    assert forgotten["status"] == "forgotten"
+    retired = json.loads(srv.engraphis_retire(memory_id=corrected["id"], workspace="acme",
+                                              reason="no longer needed"))
+    assert retired["status"] == "retired"
+
+    alias = json.loads(srv.engraphis_forget(memory_id=corrected["id"], workspace="acme",
+                                            reason="legacy retry"))
+    assert alias["status"] == "forgotten" and alias["deprecated"] is True
 
     err = srv.engraphis_forget(memory_id="mem_does_not_exist", workspace="acme")
     assert err.startswith("Error:")

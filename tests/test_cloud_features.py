@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor
 import http.client
 from io import BytesIO
@@ -24,12 +25,15 @@ def _service() -> MemoryService:
     service.remember(
         "A normal managed-compute memory.",
         workspace="acme",
-        metadata={"subject": "  Queue   design  ", "api_key": "metadata-secret"},
+        metadata={"subject": "  Queue   design  "},
     )
-    secret = service.remember("password=do-not-upload", workspace="acme")
+    # Seed historical rows below the new capture-time boundary. These verify cloud
+    # export filtering for legacy data without weakening the public write API.
+    secret = service.remember("A legacy private value.", workspace="acme")
     service.store.conn.execute(
-        "UPDATE memories SET sensitivity='secret' WHERE id=?",
-        (secret["id"],),
+        "UPDATE memories SET metadata=?, content=?, sensitivity='secret' WHERE id=?",
+        (json.dumps({"subject": "Queue design", "api_key": "metadata-secret"}),
+         "password=do-not-upload", secret["id"]),
     )
     service.store.conn.commit()
     return service

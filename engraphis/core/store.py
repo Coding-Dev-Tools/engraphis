@@ -36,6 +36,7 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
+from engraphis.core.secrets import reject_secrets
 from engraphis.core.schema import (
     FTS_SQL_FALLBACK,
     FTS_SQL_FTS5,
@@ -1912,6 +1913,15 @@ class Store:
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
                    commit: bool = True) -> str:
+        # This is the last common write boundary.  Check every persisted text-bearing
+        # field *before* the main row, FTS mirror, or vector are written, including
+        # direct Store callers that do not go through MemoryEngine/MemoryService.
+        reject_secrets((
+            ("title", rec.title), ("content", rec.content), ("summary", rec.summary),
+            ("keywords", rec.keywords), ("metadata", rec.metadata),
+            ("provenance", rec.provenance), ("subject_key", rec.subject_key),
+            ("claim_kind", rec.claim_kind),
+        ))
         # ``Store`` is a local-programmatic capability.  Stamp direct new writes
         # explicitly so prompt-facing recall can fail closed for genuinely legacy
         # rows without making current low-level integrations silently disappear.
@@ -2264,12 +2274,215 @@ class Store:
             (mid, title, content, keywords),
         )
 
+    # ── destructive, per-memory secure erasure ──────────────────────────────
+    @staticmethod
+    def _has_table(conn, name: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?", (name,)
+        ).fetchone() is not None
+
+    @classmethod
+    def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
+        """Remove a memory and all known local derivatives from one SQLite database.
+
+        This deliberately does *not* use temporal retirement. It is for accidentally
+        captured credentials and is intentionally lossy.  The helper also supports
+        recognised local SQLite recovery backups, some of which predate newer tables.
+        """
+        if not cls._has_table(conn, "memories"):
+            return {"present": False, "removed": False}
+        row = conn.execute("SELECT id FROM memories WHERE id=?", (memory_id,)).fetchone()
+        if row is None:
+            return {"present": False, "removed": False}
+
+        # Ask SQLite to overwrite deleted cells where the active VFS supports it. A
+        # later VACUUM rebuild removes free pages/FTS tombstones from the live database.
+        conn.execute("PRAGMA secure_delete=ON")
+        tables = {
+            name for name in (
+                "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
+                "memory_entities", "edge_supports", "edges", "entities", "mem_links",
+                "audit",
+            ) if cls._has_table(conn, name)
+        }
+        incident_entities: list[str] = []
+        if "memory_entities" in tables:
+            incident_entities = [str(item[0]) for item in conn.execute(
+                "SELECT DISTINCT entity_id FROM memory_entities WHERE memory_id=?", (memory_id,)
+            ).fetchall()]
+        supported_edges: list[str] = []
+        if "edge_supports" in tables:
+            supported_edges = [str(item[0]) for item in conn.execute(
+                "SELECT DISTINCT edge_id FROM edge_supports WHERE memory_id=?", (memory_id,)
+            ).fetchall()]
+
+        for table, column in (
+            ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
+            ("code_memory_links", "memory_id"), ("memory_entities", "memory_id"),
+            ("edge_supports", "memory_id"),
+        ):
+            if table in tables:
+                conn.execute(f"DELETE FROM {table} WHERE {column}=?", (memory_id,))
+        if "mem_links" in tables:
+            conn.execute("DELETE FROM mem_links WHERE a=? OR b=?", (memory_id, memory_id))
+
+        # A graph edge whose last provenance support was the erased memory is itself a
+        # derivative of that secret. Preserve shared graph facts with another support.
+        if supported_edges and "edges" in tables:
+            marks = ",".join("?" for _ in supported_edges)
+            if "edge_supports" in tables:
+                conn.execute(
+                    f"DELETE FROM edges WHERE id IN ({marks}) AND NOT EXISTS "
+                    "(SELECT 1 FROM edge_supports s WHERE s.edge_id=edges.id)",
+                    supported_edges,
+                )
+            else:
+                conn.execute(f"DELETE FROM edges WHERE id IN ({marks})", supported_edges)
+
+        # An entity extracted only from this memory can itself contain credential text.
+        # Remove it only if it no longer has any memory or graph incidence.
+        if incident_entities and "entities" in tables:
+            marks = ",".join("?" for _ in incident_entities)
+            clauses = []
+            if "memory_entities" in tables:
+                clauses.append("NOT EXISTS (SELECT 1 FROM memory_entities me "
+                               "WHERE me.entity_id=entities.id)")
+            if "edges" in tables:
+                clauses.append("NOT EXISTS (SELECT 1 FROM edges e "
+                               "WHERE e.src=entities.id OR e.dst=entities.id)")
+            if clauses:
+                conn.execute(
+                    f"DELETE FROM entities WHERE id IN ({marks}) AND " + " AND ".join(clauses),
+                    incident_entities,
+                )
+
+        # Prior audit details are caller text and could itself contain the credential.
+        # Remove those entries, then add only a content-free erasure marker below.
+        if "audit" in tables:
+            conn.execute("DELETE FROM audit WHERE target=?", (memory_id,))
+        conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+        if "audit" in tables:
+            conn.execute(
+                "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
+                (ids.new_id("audit"), now_ts(), actor, "secure_erase", memory_id,
+                 "per-memory secure erasure completed; content intentionally omitted"),
+            )
+        return {
+            "present": True,
+            "removed": True,
+            "graph_edges_considered": len(supported_edges),
+            "entities_considered": len(incident_entities),
+        }
+
+    @staticmethod
+    def _checkpoint_and_vacuum(conn, *, durable: bool) -> dict:
+        """Best-effort physical cleanup after a destructive erase, without overclaiming."""
+        if not durable:
+            return {"secure_delete": True, "wal": "not_applicable", "vacuum": "not_applicable"}
+        result = {"secure_delete": True, "wal": "unavailable", "vacuum": "unavailable"}
+        try:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # SQLite returns (busy, log, checkpointed); never pretend busy means erased.
+            result["wal"] = "truncated" if checkpoint is not None and int(checkpoint[0]) == 0 else "busy"
+        except Exception:  # pragma: no cover - depends on VFS / external connection state
+            result["wal"] = "failed"
+        try:
+            conn.execute("VACUUM")
+            result["vacuum"] = "completed"
+        except Exception:  # pragma: no cover - depends on disk / external connection state
+            result["vacuum"] = "failed"
+        try:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is not None and int(checkpoint[0]) == 0:
+                result["wal"] = "truncated"
+            elif result["wal"] != "failed":
+                result["wal"] = "busy"
+        except Exception:  # pragma: no cover - see initial checkpoint
+            if result["wal"] != "truncated":
+                result["wal"] = "failed"
+        return result
+
+    def _recognised_local_backups(self) -> list[Path]:
+        """Return recovery artefacts this Store created and can safely identify.
+
+        We cannot discover filesystem snapshots, cloud backups, copied databases, or
+        another process's encrypted backup location. Those remain an explicit operator
+        obligation in the secure-erasure result and documentation.
+        """
+        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+            return []
+        primary = Path(self.path).resolve()
+        parent = primary.parent
+        patterns = (
+            f"{primary.name}.pre-migration-v*.bak",
+            f"{primary.name}.embed-repair-*.bak",
+            f"{primary.stem}.v1-backup-*.db",
+        )
+        found: list[Path] = []
+        for pattern in patterns:
+            for candidate in parent.glob(pattern):
+                try:
+                    if candidate.is_file() and candidate.resolve() != primary:
+                        found.append(candidate.resolve())
+                except OSError:
+                    continue
+        return sorted(set(found), key=lambda value: str(value))
+
+    def secure_erase_memory(self, memory_id: str, *, actor: str = "user") -> dict:
+        """Irreversibly erase one memory plus local index copies and known backups.
+
+        This is a breach-remediation operation, not the normal ``retire`` lifecycle.
+        It clears current SQLite rows, FTS/vector/ANN derivatives, related graph/link
+        state, audit details for that record, WAL contents when SQLite can checkpoint,
+        and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
+        peers, and a process that already read the secret cannot be recalled or erased.
+        """
+        current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
+        if not current["present"]:
+            raise KeyError(f"no memory with id '{memory_id}'")
+        self.conn.commit()
+        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
+        maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
+
+        backup_processed = 0
+        backup_failed = 0
+        for backup in self._recognised_local_backups():
+            conn = None
+            try:
+                conn = self._open_connection(str(backup))
+                erased = self._erase_memory_rows(conn, memory_id, actor="secure_erase")
+                conn.commit()
+                self._checkpoint_and_vacuum(conn, durable=True)
+                if erased["present"]:
+                    backup_processed += 1
+            except Exception:  # pragma: no cover - keyed/corrupt/locked backups vary by deployment
+                backup_failed += 1
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        return {
+            "id": memory_id,
+            "status": "securely_erased",
+            "maintenance": maintenance,
+            "recognised_backups_erased": backup_processed,
+            "recognised_backups_failed": backup_failed,
+            "backup_limitations": (
+                "Only recognised local SQLite recovery backups were scanned. Erase or rotate "
+                "filesystem snapshots, copied/exported databases, remote sync peers, and any "
+                "other backups separately; a running agent may already have read the secret."
+            ),
+        }
+
     def fts_search(self, query: str, k: int = 20,
                    *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
         """Lexical arm. Uses FTS5 BM25 when available, else a LIKE fallback."""
         q = (query or "").strip()
         if not q:
             return []
+        terms = _fts_terms(q)
         where, params = self._where(filter, include_invalid=False, alias="m")
         extra = (" AND " + " AND ".join(where)) if where else ""
         if self.has_fts5:
@@ -2286,12 +2499,25 @@ class Store:
                 pass
         # Escape LIKE wildcards: on a non-FTS5 build an unescaped '%'/'_' in the query
         # would be treated as a pattern and over-match (a bare "%" matching everything).
-        like = f"%{_escape_like(q)}%"
+        # Use the same conservative inflection variants as FTS5 so lexical-only degraded
+        # mode remains useful on SQLite builds without FTS5.
+        # Preserve literal wildcard queries.  ``_fts_terms`` intentionally removes
+        # punctuation for FTS syntax, but the LIKE fallback has always supported
+        # searching for a literal percent, underscore, or backslash.
+        like_terms = [q] if any(char in q for char in ("%", "_", "\\")) else terms
+        like_clauses = []
+        like_params: list[Any] = []
+        for term in like_terms:
+            like = f"%{_escape_like(term)}%"
+            like_clauses.append("(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
+            like_params.extend((like, like))
+        if not like_clauses:
+            return []
         rows = self.conn.execute(
             "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
-            "WHERE (f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')"
+            "WHERE (" + " OR ".join(like_clauses) + ")"
             + extra + " LIMIT ?",
-            (like, like, *params, k),
+            (*like_params, *params, k),
         ).fetchall()
         return [(r["id"], 0.5) for r in rows]
 
@@ -4035,6 +4261,10 @@ class Store:
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
                      interaction_level: str = "") -> str:
+        # Events are not memories, but are durable, searchable agent context too. Do
+        # not create a side channel that can retain a credential after memory capture is
+        # blocked.
+        reject_secrets((("event content", content), ("event refs", refs)))
         eid = ids.new_id("event")
         owns_session_transaction = False
         try:
@@ -4695,7 +4925,29 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
     )
 
 
-def _fts_query(q: str) -> str:
-    """Make a safe FTS5 MATCH query: OR the alphanumeric terms as prefixes."""
+def _fts_terms(q: str) -> list[str]:
+    """Return safe lexical terms plus conservative inflection variants."""
     terms = [t for t in "".join(c if c.isalnum() else " " for c in q).split() if t]
-    return " OR ".join(f'{t}*' for t in terms) if terms else '""'
+    expanded: list[str] = []
+    for term in terms:
+        expanded.append(term)
+        if len(term) > 5 and term.endswith("ies"):
+            expanded.append(term[:-3] + "y")
+        elif len(term) > 6 and term.endswith("ions"):
+            expanded.append(term[:-4])
+        elif len(term) > 5 and term.endswith("ion"):
+            expanded.append(term[:-3])
+        elif len(term) > 6 and term.endswith(("ised", "ized")):
+            expanded.append(term[:-1])
+        elif len(term) > 6 and term.endswith("ates"):
+            expanded.append(term[:-2])
+        elif len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
+            expanded.append(term[:-1])
+    # Keep the caller's term order while avoiding duplicate FTS clauses.
+    return list(dict.fromkeys(expanded))
+
+
+def _fts_query(q: str) -> str:
+    """Make a safe FTS5 MATCH query with conservative inflection prefixes."""
+    terms = _fts_terms(q)
+    return " OR ".join(f'{term}*' for term in terms) if terms else '""'

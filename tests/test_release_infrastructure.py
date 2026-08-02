@@ -308,7 +308,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 31
+    assert len(tools) == len(set(tools)) == 33
 
     readme = _text("README.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
@@ -319,8 +319,8 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "31 MCP tools" in architecture
-    assert "(31 of them)" in skill
+    assert "33 MCP tools" in architecture
+    assert "(33 of them)" in skill
     assert "recall_context (compact)" in architecture
     assert "engraphis_recall_context" in readme
     assert "`engraphis_check_update`" in readme

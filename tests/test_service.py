@@ -94,6 +94,11 @@ def test_recall_support_reuses_vector_arm_without_a_second_embedding_batch():
                workspace="acme", repo="web")
 
     class CountingEmbedder:
+        # This test models a declared semantic production adapter while retaining a
+        # deterministic vector implementation to keep the unit test offline.
+        supports_semantic_search = True
+        embedding_mode = "semantic"
+
         def __init__(self, wrapped):
             self.wrapped = wrapped
             self.batches = []
@@ -112,17 +117,48 @@ def test_recall_support_reuses_vector_arm_without_a_second_embedding_batch():
     assert result["score_semantics"]["version"] == "retrieval-support-v1"
 
 
-def test_recall_absolute_support_stays_low_for_a_weak_one_item_pool():
+def test_deterministic_recall_reports_degraded_mode_and_disables_vector_arm():
+    s = _svc()
+    s.remember("Frontend repositories use pnpm for package management.",
+               workspace="acme", repo="web")
+
+    result = s.recall(
+        "which package manager do frontend repositories use?",
+        workspace="acme", repo="web", diagnostics=True,
+    )
+
+    assert result["degraded_mode"] is True
+    assert result["semantic_support"] is False
+    assert result["embedding_mode"] == "lexical_hashing"
+    assert "Semantic cosine is disabled" in result["score_semantics"]["absolute_support"]
+    assert result["retrieval_trace"][0]["raw"]["semantic"] is None
+
+
+def test_deterministic_grounded_recall_is_explicitly_lexical_only():
+    s = _svc()
+    s.remember("Frontend repositories use pnpm for package management.",
+               workspace="acme", repo="web")
+
+    result = s.grounded_recall(
+        "which package manager do frontend repositories use?",
+        workspace="acme", repo="web",
+    )
+
+    assert result["grounded"] is True
+    assert result["degraded_mode"] is True
+    assert result["semantic_support"] is False
+    assert result["embedding_mode"] == "lexical_hashing"
+
+
+def test_degraded_recall_does_not_return_a_weak_vector_neighbour():
     s = _svc()
     s.remember("Production deploys to AWS ECS after approval.",
                workspace="acme", repo="web")
 
     result = s.recall("What sourdough hydration ratio should I use?",
                       workspace="acme", repo="web")
-    memory = result["memories"][0]
-
-    assert memory["relative_score"] > 0.5
-    assert memory["absolute_support"] < 0.15
+    assert result["count"] == 0
+    assert result["memories"] == []
 
 
 def test_public_review_writes_do_not_resolve_claims_before_approval():

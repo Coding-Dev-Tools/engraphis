@@ -67,7 +67,17 @@ All notable changes to Engraphis are documented here. Format loosely follows
   reviewed claim's pin, sensitivity, and keyed identity on its approved successor.
 - The zero-config Compose quickstart remains loopback-only; a LAN deployment is an explicit,
   token-protected operator choice and cannot inherit the local Docker bridge trust exception.
+- Credential-shaped values are rejected before capture can create memory, FTS, vector, event, or
+  sync copies. `retire` is the canonical temporal lifecycle operation; targeted `secure_erase`
+  removes an already-leaked record and known local derivatives while reporting physical limits.
+- The standalone MCP-over-HTTP launcher is explicitly loopback-only. Remote MCP clients must use
+  the dashboard's authenticated `/mcp` endpoint instead of an unauthenticated FastMCP bind.
 
+### Changed
+
+- MCP-over-HTTP has a packaged `engraphis-mcp-http` command and a generic local setup guide. The
+  project makes no client-specific integration claim without a maintained guide and integration
+  test.
 ## [1.3.0] - 2026-08-01
 
 ### Added

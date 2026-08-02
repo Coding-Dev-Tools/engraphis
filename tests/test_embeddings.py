@@ -34,6 +34,13 @@ def test_embedding_remains_deterministic_and_normalized():
     np.testing.assert_allclose(np.linalg.norm(first, axis=1), [1.0, 1.0])
 
 
+def test_deterministic_embedder_explicitly_disables_semantic_search():
+    embedder = DeterministicEmbedder()
+
+    assert embedder.embedding_mode == "lexical_hashing"
+    assert embedder.supports_semantic_search is False
+
+
 def test_unrecognized_ordinary_text_keeps_legacy_feature_mapping():
     # No alias or number-unit feature is present in this input, so the old
     # stable feature-hash mapping remains byte-for-byte compatible.

@@ -3,7 +3,7 @@
 Wires together store + embedder + vector index + reranker + recall engine, and exposes
 everything an agent does against memory: write (``remember``, with deterministic conflict
 resolution), read (``recall``, ``why``, ``timeline``, ``recall_proactive``), governance
-(``forget``, ``pin``, ``correct``), session lifecycle (with cross-session handoff), and the
+(``retire``, ``secure_erase``, ``pin``, ``correct``), session lifecycle (with cross-session handoff), and the
 A-MEM-style linking/event primitives (``link``, ``record_event``). Construct with
 ``MemoryEngine.create(...)`` for sensible, offline-capable defaults, or inject your own
 backends for production.
@@ -56,6 +56,7 @@ from engraphis.core.retrieval_policy import (
     RETRIEVAL_PROFILES,
 )
 from engraphis.core.resolve import RELATED_SIM_FLOOR, Resolution, ResolutionOp, resolve
+from engraphis.core.secrets import reject_secrets
 from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
@@ -469,6 +470,11 @@ class MemoryEngine:
         * ``"quarantined"`` — an explicitly untrusted payload matched the deterministic
           poisoning policy; retained only for governed historical inspection.
         """
+        # Reject credentials before embedding, conflict resolution, graph extraction, or
+        # any SQLite mirror sees them. Store.add_memory repeats this for direct callers.
+        reject_secrets((("title", title), ("content", content), ("keywords", keywords),
+                        ("metadata", metadata), ("subject_key", subject_key),
+                        ("claim_kind", claim_kind)))
         if valid_from is not None:
             if isinstance(valid_from, bool):
                 raise ValueError("valid_from must be a finite timestamp")
@@ -1083,6 +1089,9 @@ class MemoryEngine:
         like any ``remember``); without one this is exactly ``remember`` — the offline
         default never changes behaviour. Extraction failures degrade to passthrough:
         ingest never loses the write."""
+        # Raw input may be sent to a configured extractor, so block credentials before
+        # extraction rather than relying only on the final derived-memory write.
+        reject_secrets((("ingest content", text), ("metadata", metadata)))
         facts = None
         extracted = False
         # Quarantine precedes optional extraction. An explicitly untrusted payload that
@@ -1531,12 +1540,13 @@ class MemoryEngine:
         deliberately excludes (it's the live-recall path), so this recomputes similarity
         directly from ``Store.iter_vectors(..., include_invalid=True)`` instead.
         """
-        qvec = self.embedder.embed([query])[0]
-        qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
         sem: dict[str, float] = {}
-        for mid, vec in self.store.iter_vectors(
-                flt, include_invalid=include_invalid, dim=int(qn.shape[0])):
-            sem[mid] = float(np.dot(qn, vec))
+        if bool(getattr(self.embedder, "supports_semantic_search", False)):
+            qvec = self.embedder.embed([query])[0]
+            qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
+            for mid, vec in self.store.iter_vectors(
+                    flt, include_invalid=include_invalid, dim=int(qn.shape[0])):
+                sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
         records = self.store.list_memories(
@@ -1608,13 +1618,50 @@ class MemoryEngine:
         return {"memories": top, "last_session": last_session}
 
     # ── governance (audited; never a silent hard delete — AGENTS.md §3.2) ───────
-    def forget(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+        """Remove a memory from live recall while retaining temporal history.
+
+        This is deliberately distinct from :meth:`secure_erase`: retirement is the
+        routine, reversible-by-history governance action; it does not remove the row,
+        FTS entry, vector, or historical graph evidence.
+        """
         if self.store.get_memory(memory_id) is None:
             raise KeyError(f"no memory with id '{memory_id}'")
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "forgotten by request")
+        self.store.close_validity(memory_id, actor=actor, reason=reason or "retired by request")
         # Preserve the vector for explicit historical/as_of recall. Temporal filtering
         # keeps this retired row out of the current live view.
-        return {"id": memory_id, "status": "forgotten", "reason": reason}
+        return {"id": memory_id, "status": "retired", "reason": reason}
+
+    def forget(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+        """Deprecated compatibility alias for :meth:`retire`.
+
+        Keep the old status string for programmatic consumers that used this legacy
+        method; new callers must use ``retire`` so its temporal semantics are clear.
+        """
+        result = self.retire(memory_id, reason=reason, actor=actor)
+        return {**result, "status": "forgotten", "deprecated": True}
+
+    def secure_erase(self, memory_id: str, *, actor: str = "user") -> dict:
+        """Irreversibly erase a leaked secret from this local Store and derivatives.
+
+        ``VectorIndex`` may be an injected external backend. Request its deletion first,
+        but do not leave the local SQLite copy intact if that backend is unavailable; the
+        returned status explicitly reports that incomplete external cleanup.
+        """
+        index_cleanup = "not_configured"
+        try:
+            self.index.delete([memory_id])
+            index_cleanup = "deleted"
+        except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
+            index_cleanup = "failed"
+        result = self.store.secure_erase_memory(memory_id, actor=actor)
+        result["vector_index_cleanup"] = index_cleanup
+        if index_cleanup == "failed":
+            result["external_index_limitation"] = (
+                "The configured vector index did not confirm deletion; remediate that backend "
+                "separately before treating the secret as fully erased."
+            )
+        return result
 
     def pin(self, memory_id: str, *, pinned: bool = True, actor: str = "user") -> dict:
         if self.store.get_memory(memory_id) is None:

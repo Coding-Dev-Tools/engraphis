@@ -11,8 +11,9 @@ Two modes, one contract:
 
 * **Deterministic (offline default).** No LLM. The answer is an *extractive* stitch of
   the cited memories — it never introduces a claim that is not in a source. The
-  groundedness verdict is computed from an absolute query-memory support signal
-  (semantic cosine plus lexical/predicate agreement), independent of the relative,
+  feature-hashing fallback is lexical-only: semantic cosine is disabled and the
+  groundedness verdict uses lexical/predicate agreement. A declared semantic backend
+  additionally contributes semantic cosine. Both are independent of the relative,
   per-query recall score, so "insufficient evidence" is a real threshold rather than
   a ranking artefact.
 * **Synthesised (opt-in).** If an object implementing ``core.interfaces.LLM`` is
@@ -37,17 +38,15 @@ from typing import Optional
 import numpy as np
 
 from engraphis.core.context import RegexTokenCounter
-from engraphis.core.interfaces import LLM
+from engraphis.core.interfaces import LLM, embedder_capabilities
 from engraphis.core.poisoning import detect_payload_signals, prompt_eligible
 from engraphis.core.recall import RecallResult
 from engraphis.core.textutil import jaccard, tokenize
 
-# Absolute support floor (max of cosine / Jaccard, both in [0, 1]) below which we
-# abstain. Tuned so an on-topic query clears it while an off-topic one — for which the
-# vector index still returns its nearest, but unrelated, neighbour — does not. On the
-# deterministic (token-hashing) embedder the eval fixture (eval/grounded.py) separates
-# cleanly: answerable support ~0.44-0.65, off-topic ~0.05-0.17, so the floor sits in the
-# empty gap between them. A real embedder only separates these further.
+# Absolute support floor (max of declared semantic cosine / lexical Jaccard, both in [0, 1])
+# below which we abstain. Feature hashing deliberately contributes no cosine: its lexical
+# Jaccard evidence remains enough for the offline fixture while near-neighbour vector matches
+# cannot masquerade as semantic support. A real semantic backend additionally contributes cosine.
 GROUNDED_SUPPORT_FLOOR = 0.25
 ABSTAIN_SENTINEL = "INSUFFICIENT_EVIDENCE"
 _CITE_RE = re.compile(r"\[(\d+)\]")
@@ -93,6 +92,10 @@ class GroundedAnswer:
     planning_mode: str = "off"
     planning_details: Optional[dict] = None
     graph_traversal_details: Optional[list[dict]] = None
+    degraded_mode: bool = False
+    semantic_support: bool = True
+    embedding_mode: str = "semantic"
+    degraded_reason: str = ""
 
     def to_dict(self) -> dict:
         payload = {
@@ -115,6 +118,10 @@ class GroundedAnswer:
             "candidate_depth_reason": self.candidate_depth_reason,
             "context_revision": self.context_revision,
             "planning": self.planning_mode,
+            "degraded_mode": self.degraded_mode,
+            "semantic_support": self.semantic_support,
+            "embedding_mode": self.embedding_mode,
+            "degraded_reason": self.degraded_reason,
         }
         if self.retrieval_trace is not None:
             payload["retrieval_trace"] = self.retrieval_trace
@@ -162,8 +169,52 @@ def _related_term_count(query_tokens: set[str], content_tokens: set[str]) -> int
     return matched
 
 
+def _lexical_stem(token: str) -> str:
+    """Normalize only conservative English inflections for lexical evidence.
+
+    This is deliberately not a semantic expansion.  It lets an offline lexical query
+    match ordinary forms such as ``authentication``/``authenticates`` and
+    ``repository``/``repositories`` after semantic vectors have been fail-closed.
+    """
+    token = str(token or "").casefold()
+    if len(token) > 5 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 6 and token.endswith("ions"):
+        return token[:-4]
+    if len(token) > 5 and token.endswith("ion"):
+        return token[:-3]
+    if len(token) > 6 and token.endswith(("ised", "ized")):
+        return token[:-1]
+    if len(token) > 6 and token.endswith("ates"):
+        return token[:-2]
+    if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _lexical_support(query_tokens: set[str], content_tokens: set[str]) -> float:
+    """Conservative lexical evidence with an anti-single-keyword guard."""
+    normalized_query = {_lexical_stem(token) for token in query_tokens}
+    normalized_content = {_lexical_stem(token) for token in content_tokens}
+    matched = len(normalized_query & normalized_content)
+    # A long question sharing one noun (``bake sourdough bread`` vs. a note that
+    # merely mentions sourdough) is not evidence.  Short, specific questions may
+    # have one decisive identifier and are handled by directional query coverage.
+    if len(normalized_query) >= 3 and matched < 2:
+        return 0.0
+    if not normalized_query:
+        return 0.0
+    return max(
+        jaccard(normalized_query, normalized_content),
+        # Keep a one-term identifier useful without turning exact lexical coverage
+        # into an unconditional 1.0 confidence; callers may still demand a strict
+        # support floor near one.
+        matched / (len(normalized_query) + 1),
+    )
+
+
 def support_scores(query: str, contents: list[str], embedder) -> list[float]:
-    """Absolute per-source support from semantic, lexical, and predicate agreement.
+    """Absolute per-source support from declared semantic and lexical evidence.
 
     Both arms are query-independent in scale — unlike the recall score, which is min-max
     normalised *per query* and so cannot be compared against a fixed threshold. That is
@@ -174,20 +225,26 @@ def support_scores(query: str, contents: list[str], embedder) -> list[float]:
     if not contents:
         return []
     q_tokens = tokenize(query) - _QUERY_FRAMING_TERMS
-    texts = [_filtered_text(query)] + [_filtered_text(c) for c in contents]
-    vecs = embedder.embed(texts)
-    qn = np.asarray(vecs[0], dtype=float)
-    qn = qn / (float(np.linalg.norm(qn)) or 1.0)
+    semantic_support = embedder_capabilities(embedder)["semantic_support"]
+    qn = None
+    vecs = None
+    if semantic_support:
+        texts = [_filtered_text(query)] + [_filtered_text(c) for c in contents]
+        vecs = embedder.embed(texts)
+        qn = np.asarray(vecs[0], dtype=float)
+        qn = qn / (float(np.linalg.norm(qn)) or 1.0)
     out: list[float] = []
     for i, content in enumerate(contents):
         content_tokens = tokenize(content)
-        cv = np.asarray(vecs[i + 1], dtype=float)
-        cn = cv / (float(np.linalg.norm(cv)) or 1.0)
-        cos = max(0.0, float(np.dot(qn, cn)))
-        lex = jaccard(q_tokens, content_tokens)
+        cos = 0.0
+        if qn is not None and vecs is not None:
+            cv = np.asarray(vecs[i + 1], dtype=float)
+            cn = cv / (float(np.linalg.norm(cv)) or 1.0)
+            cos = max(0.0, float(np.dot(qn, cn)))
+        lex = _lexical_support(q_tokens, content_tokens)
         related_terms = _related_term_count(q_tokens, content_tokens)
-        # Hashing and dense embedders can consider two texts topically similar
-        # when they share one salient noun but make unrelated claims. Require a
+        # A declared dense embedder can consider two texts topically similar when they
+        # share one salient noun but make unrelated claims. Require a
         # second predicate/qualifier match for ordinary multi-term questions,
         # while allowing genuinely strong semantic paraphrases to stand alone.
         if len(q_tokens) >= 3 and related_terms < 2 and cos < 0.6:
@@ -354,6 +411,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "planning_mode": result.planning_mode,
         "planning_details": result.planning_details,
         "graph_traversal_details": result.graph_traversal_details,
+        **embedder_capabilities(embedder),
     }
     recall_metadata["usage"]["answer_tokens"] = 0
 

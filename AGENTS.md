@@ -165,10 +165,11 @@ is distilled into discrete facts first; the offline default is passthrough.
 
 ## 4. Core algorithms cheat-sheet (`core/scoring.py`, `core/store.py`)
 
-- **Six-term recall score** (`score_memory`):
-  `score = w_r·retention + w_s·semantic + w_l·lexical + w_g·graph + w_i·importance + w_c·recency − w_x·staleness`.
+- **Ordinary recall score** (`score_memory`):
+  `score = w_r·retention + w_s·semantic + w_l·lexical + w_g·graph + w_i·importance − w_x·staleness`.
   Arm scores are **min-max normalized before fusion** so no arm dominates by raw scale.
-  Default weights: `r1.0 s1.0 l0.5 g0.7 i0.6 c0.3 x0.8`, overridden per memory type.
+  Recency (`c`) is used only by the separate queryless proactive agenda, avoiding a second
+  age penalty alongside retention in ordinary recall. Default weights: `r1.0 s1.0 l0.5 g0.7 i0.6 c0.3 x0.8`, overridden per memory type.
 - **Ebbinghaus retention:** `R(t) = exp(−Δt_days / S)`.
 - **Reinforcement (spacing effect):** `S_new = S·(1 + α·ln(1 + access_count)) + boost`, `α = 0.3`.
   Stability grows sub-linearly with use; this is `Store.reinforce()`.

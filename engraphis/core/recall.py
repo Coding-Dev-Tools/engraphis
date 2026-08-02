@@ -1,10 +1,11 @@
 """Hybrid recall engine.
 
-Pipeline: scope/time filter → hybrid candidate generation (vector + lexical + graph)
-→ RRF fusion → six-term weighted scoring → rerank → context packing → reinforce.
+Pipeline: scope/time filter → hybrid candidate generation (semantic vector + lexical + graph)
+→ RRF fusion → retention-aware weighted scoring → rerank → context packing → reinforce.
 
 The arms are pluggable:
-* vector  — any ``VectorIndex`` (NumPy reference now; sqlite-vec/Qdrant later)
+* vector  — declared semantic embedders through any ``VectorIndex`` (NumPy reference now;
+            sqlite-vec/Qdrant later); disabled for feature hashing and undeclared adapters
 * lexical — ``Store.fts_search`` (FTS5/BM25, with fallback)
 * graph   — Personalized PageRank over the entity/link graph (``core.graphrank``),
             seeded at the query's entities; ``graph_mode="1hop"`` keeps the older
@@ -37,6 +38,7 @@ from engraphis.core.interfaces import (
     GraphTraversalPolicy,
     CandidateDepthPolicy,
     MemoryType,
+    embedder_capabilities,
     MemoryRecord,
     PackedChunk,
     PlannedQuery,
@@ -96,6 +98,12 @@ class RecallResult:
     # a trust-sensitive decision (grounded recall) can still honour a record's
     # quarantine state without exposing arbitrary user metadata through recall().
     source_metadata: dict[str, dict] = field(default_factory=dict, repr=False)
+    # Capabilities are public response metadata, not a score.  In particular, the
+    # deterministic feature-hashing fallback must never be mistaken for semantic recall.
+    degraded_mode: bool = False
+    semantic_support: bool = True
+    embedding_mode: str = "semantic"
+    degraded_reason: str = ""
 
 
 class RecallEngine:
@@ -180,6 +188,12 @@ class RecallEngine:
         # ablations. Normal callers still use only named RetrievalPolicy profiles,
         # so benchmark labels do not expand the public routing contract.
         config = arm_config or profile_config(selected_profile)
+        capabilities = embedder_capabilities(self.embedder)
+        # A vector is not automatically semantic evidence. Feature hashing and any
+        # unclassified third-party adapter fail closed: keep lexical/graph/code recall,
+        # but never query the vector arm or add its cosine to a recall score.
+        if not capabilities["semantic_support"]:
+            config = replace(config, vector=False, semantic_scale=0.0)
         planning_mode = str(planning or "off").strip().casefold()
         if planning_mode not in PLANNING_MODES:
             choices = ", ".join(sorted(PLANNING_MODES))
@@ -217,6 +231,14 @@ class RecallEngine:
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
         ]
+        if not capabilities["semantic_support"]:
+            # Planned subqueries can select their own retrieval profile. Apply the
+            # degraded-mode clamp after that expansion so planning cannot re-enable
+            # feature-hashing vectors for any arm.
+            run_configs = [
+                replace(run_config, vector=False, semantic_scale=0.0)
+                for run_config in run_configs
+            ]
         embedded_texts = [
             item.text for item, run_config in zip(planned_queries, run_configs)
             if run_config.vector
@@ -372,12 +394,13 @@ class RecallEngine:
                     _graph_traversal_details(query_runs) if diagnostics else None
                 ),
                 token_counter=getattr(self.context_packer, "count_tokens", None),
+                **capabilities,
             )
 
         arm_state, rrf = _fuse_query_runs(query_runs, recs)
         primary_vec = query_runs[0]["vector"]
 
-        # ── six-term weighted score (+ small RRF nudge for cross-arm agreement) ──
+        # ── weighted score (+ small RRF nudge for cross-arm agreement) ─────────
         scored: list[Candidate] = []
         score_details: dict[str, dict[str, Any]] = {}
         for mid, rec in recs.items():
@@ -423,7 +446,7 @@ class RecallEngine:
                     "graph": adjusted_graph,
                     "code": adjusted_code,
                 },
-                "six_term_score": base,
+                "ranking_score": base,
                 "rrf_score": rrf.get(mid, 0.0),
                 "fusion_score": fusion_score,
                 "rerank_score": None,
@@ -569,6 +592,7 @@ class RecallEngine:
                 for candidate in final
                 if candidate.record is not None
             },
+            **capabilities,
         )
 
     def _plan_queries(

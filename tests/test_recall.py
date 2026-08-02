@@ -6,6 +6,13 @@ from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
 
+class _SemanticTestEmbedder(DeterministicEmbedder):
+    """Test double that opts into vector semantics without a model download."""
+
+    supports_semantic_search = True
+    embedding_mode = "semantic"
+
+
 def _engine():
     store = Store(":memory:")
     emb = DeterministicEmbedder(256)
@@ -49,6 +56,17 @@ class _RecordingOrderedIndex(_OrderedIndex):
         return super().search(query, k, filter=filter)
 
 
+class _FailingIndex:
+    """Proves degraded recall never reaches the semantic vector backend."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, query, k, *, filter=None):
+        self.calls += 1
+        raise AssertionError("degraded recall must not query the vector index")
+
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -58,6 +76,39 @@ def test_recall_returns_relevant_first():
     res = eng.recall("which package manager do we use?", SearchFilter(workspace_id=wid), k=2)
     assert res.count >= 1
     assert "pnpm" in res.context.lower()
+
+
+def test_degraded_recall_skips_vector_arm_and_uses_lexical_fallback():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    index = _FailingIndex()
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "pnpm is the package manager for frontend projects.")
+
+    result = eng.recall(
+        "package manager", SearchFilter(workspace_id=wid), k=1, diagnostics=True,
+    )
+
+    assert index.calls == 0
+    assert result.degraded_mode is True
+    assert result.semantic_support is False
+    assert result.chunks[0]["arm"] == "lexical"
+    assert result.retrieval_trace[0]["raw"]["semantic"] is None
+
+
+def test_degraded_recall_uses_inflection_aware_like_fallback_without_fts5():
+    store = Store(":memory:")
+    store.has_fts5 = False
+    emb = DeterministicEmbedder(256)
+    eng = RecallEngine(store, emb, _FailingIndex(), IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "The service authenticates API requests with PASETO.")
+
+    result = eng.recall("authentication", SearchFilter(workspace_id=wid), k=1)
+
+    assert result.count == 1
+    assert "paseto" in result.context.lower()
 
 
 def test_lexical_absolute_support_does_not_allow_title_only_evidence():
@@ -93,7 +144,7 @@ def test_absolute_support_treats_non_finite_cosine_as_no_evidence():
 
 def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     untrusted_ids = [
@@ -180,7 +231,12 @@ def test_graph_arm_pulls_related_via_entities():
                                         workspace_id=wid, repo_id=rid))
     store.upsert_edge(Edge(id="", src=redis, dst=checkout, relation="used_by",
                            workspace_id=wid, repo_id=rid))
-    _add(store, emb, wid, rid, "The checkout service had a race condition.")
+    checkout_memory = _add(store, emb, wid, rid, "The checkout service had a race condition.")
+    store.link_memory_entity(
+        memory_id=checkout_memory,
+        entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
     _add(store, emb, wid, rid, "Totally unrelated note about office plants.")
     # Query mentions Redis; graph arm should surface the checkout memory.
     res = eng.recall("how does Redis relate to things?", SearchFilter(workspace_id=wid), k=3)
@@ -445,7 +501,7 @@ def test_lexical_recall_is_filtered_before_candidate_limit():
 
 def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     index = NumpyVectorIndex(store)
     requested: list[int] = []
     original_search = index.search
@@ -473,7 +529,7 @@ def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
 
 def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     wid = store.get_or_create_workspace("w")
     untrusted_ids = [
         _add(

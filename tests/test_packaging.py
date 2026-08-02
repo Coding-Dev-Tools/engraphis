@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import types
 import zipfile
 from pathlib import Path
 
@@ -32,6 +33,59 @@ def test_mcp_cli_module_entrypoint_renders_help():
     assert result.returncode == 0, result.stderr
     assert "usage: engraphis-mcp" in result.stdout
     assert "Run the Engraphis MCP server over stdio" in result.stdout
+
+
+def test_http_mcp_cli_module_entrypoint_renders_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "engraphis.mcp_http_cli", "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage: engraphis-mcp-http" in result.stdout
+    assert "loopback-only Engraphis MCP server over HTTP" in result.stdout
+
+
+def test_http_mcp_cli_rejects_non_loopback_host():
+    from engraphis import mcp_http_cli
+
+    for host in ("0.0.0.0", "localhost"):
+        with pytest.raises(SystemExit) as exc:
+            mcp_http_cli.main(["--host", host])
+
+        assert exc.value.code == 2
+
+
+def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
+    from engraphis import mcp_http_cli
+
+    calls = []
+    fake_mcp = types.SimpleNamespace(
+        settings=types.SimpleNamespace(host=None, port=None),
+        run=lambda *, transport: calls.append(transport),
+    )
+    monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
+    monkeypatch.setitem(sys.modules, "engraphis.mcp_server", types.SimpleNamespace(mcp=fake_mcp))
+
+    mcp_http_cli.main(["--host", "::1", "--port", "9876", "--transport", "sse"])
+
+    assert fake_mcp.settings.host == "::1"
+    assert fake_mcp.settings.port == 9876
+    assert calls == ["sse"]
+
+
+def test_http_mcp_console_entrypoint_is_packaged_and_client_neutral():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    agent_connect = (ROOT / "docs" / "AGENT_CONNECT.md").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "mcp_server_http.py").read_text(encoding="utf-8")
+
+    assert 'engraphis-mcp-http = "engraphis.mcp_http_cli:main"' in pyproject
+    assert "engraphis-mcp-http" in agent_connect
+    assert "Hermes" not in agent_connect + launcher
 
 
 def test_git_plugin_release_version_and_asset_hashes_are_exact():

@@ -18,6 +18,26 @@ The local server exposes the same memory semantics while keeping the database on
 Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or
 seat credential.
 
+## Local MCP over HTTP
+
+For a local MCP client that requires HTTP rather than stdio, install the same `mcp` extra and run
+the packaged loopback server:
+
+```bash
+pip install "engraphis[mcp]"
+engraphis-mcp-http                 # streamable HTTP at http://127.0.0.1:8711/mcp
+# equivalent: engraphis mcp-http
+```
+
+`--transport sse` selects the legacy SSE transport. `--host` deliberately accepts loopback
+addresses only: the standalone FastMCP transport does not carry the dashboard's authentication
+middleware. Do not expose it through a LAN address or proxy. For a remote deployment, install
+`engraphis[all]`, set a strong `ENGRAPHIS_API_TOKEN`, terminate TLS, and use the dashboard's
+authenticated `/mcp` endpoint instead.
+
+Engraphis documents and tests generic MCP transports; it does not claim client-specific support
+unless that client has a maintained setup guide and integration test.
+
 ## Connect through Team Cloud
 
 Use the official hosted dashboard when several people or remote agents need one managed

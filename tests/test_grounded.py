@@ -7,8 +7,9 @@ the synthesis prompt, and the service-layer validation/JSON shape.
 """
 import pytest
 
+from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR
+from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, support_scores
 from engraphis.service import MemoryService, ValidationError
 
 FACTS = [
@@ -74,6 +75,33 @@ def test_grounded_abstains_on_empty_store():
     wid = eng.store.get_or_create_workspace("w")
     ans = eng.grounded_recall("anything at all", workspace_id=wid)
     assert not ans.grounded and ans.answer == "" and ans.citations == []
+
+
+def test_grounded_support_fails_closed_for_an_undeclared_vector_adapter():
+    class UndeclaredVectorAdapter:
+        def embed(self, texts, **kwargs):
+            raise AssertionError("semantic embedding must not run")
+
+    assert support_scores("package manager", ["package manager"], UndeclaredVectorAdapter()) == [1.0]
+
+
+def test_grounded_support_uses_a_declared_semantic_adapter():
+    class DeclaredSemanticAdapter(DeterministicEmbedder):
+        supports_semantic_search = True
+        embedding_mode = "semantic"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def embed(self, texts, **kwargs):
+            self.calls += 1
+            return super().embed(texts, **kwargs)
+
+    embedder = DeclaredSemanticAdapter()
+    support_scores("package manager", ["package manager"], embedder)
+
+    assert embedder.calls == 1
 
 
 def test_grounded_cites_only_supporting_sources():

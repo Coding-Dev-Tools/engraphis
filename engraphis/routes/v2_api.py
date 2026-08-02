@@ -1352,7 +1352,7 @@ def receipts_export(workspace: Optional[str] = None):
     })
 
 
-# ── governance: pin / forget / correct ───────────────────────────────────────
+# ── governance: pin / retire / secure erase / correct ─────────────────────────
 class _IdReq(BaseModel):
     id: str
     workspace: Optional[str] = None
@@ -1369,10 +1369,24 @@ def pin(req: _IdReq):
     return _run(service().pin, req.id, workspace=ws, pinned=req.pinned)
 
 
-@router.post("/forget")
+@router.post("/retire")
+def retire(req: _IdReq):
+    ws = req.workspace or _default_ws()
+    return _run(service().retire, req.id, workspace=ws, reason=req.reason)
+
+
+@router.post("/forget", deprecated=True)
 def forget(req: _IdReq):
+    """Deprecated compatibility route; use POST /api/retire."""
     ws = req.workspace or _default_ws()
     return _run(service().forget, req.id, workspace=ws, reason=req.reason)
+
+
+@router.post("/secure-erase")
+def secure_erase(req: _IdReq):
+    """Irreversibly erase one leaked record and its local indexed derivatives."""
+    ws = req.workspace or _default_ws()
+    return _run(service().secure_erase, req.id, workspace=ws, repo=req.repo)
 
 
 @router.post("/correct")
