@@ -215,8 +215,13 @@ export function formatMcpResult(result: unknown) {
 		?.filter((block) => block.type === "text" && typeof block.text === "string")
 		.map((block) => block.text)
 		.join("\n\n");
-	const declaredError = text?.trim().match(/^Error:\s*([a-z0-9_]+)\s*$/i);
-	if (payload.isError || declaredError) {
+	const normalizedText = text?.trim();
+	const declaredError = normalizedText?.match(/^Error:\s*([a-z0-9_]+)\s*$/i);
+	// Classic handlers return a deliberately anchored plain-text ``Error:`` envelope
+	// for semantic rejections. Its details are not safe to expose to the model, and
+	// the payload can contain spaces, quoted IDs, or other non-token text.
+	const serverError = /^Error:/i.test(normalizedText ?? "");
+	if (payload.isError || serverError) {
 		const message = declaredError
 			? `Engraphis rejected the request: ${declaredError[1]}.`
 			: "Engraphis rejected the request. Verify the parameters and inspect the local Engraphis logs.";

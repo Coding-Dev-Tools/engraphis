@@ -19,6 +19,13 @@ test("throws sanitized failures for MCP error flags and Engraphis error envelope
 		() => formatMcpResult({ isError: false, content: [{ type: "text", text: "Error: invalid_arguments" }] }),
 		/invalid_arguments/,
 	);
+	assert.throws(
+		() => formatMcpResult({
+			isError: false,
+			content: [{ type: "text", text: "Error: no memory with id 'mem_missing'" }],
+		}),
+		/Engraphis rejected the request\. Verify the parameters/,
+	);
 	assert.doesNotThrow(() => formatMcpResult({
 		isError: false,
 		content: [{ type: "text", text: "An Error: inside successful prose is not an error envelope." }],
