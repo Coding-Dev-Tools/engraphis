@@ -3743,7 +3743,8 @@ class Store:
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
                   layers: Optional[list[GraphLayer]] = None,
                   flt: Optional[SearchFilter] = None,
-                  limit: Optional[int] = None) -> list[Edge]:
+                  limit: Optional[int] = None,
+                  prompt_only: bool = False) -> list[Edge]:
         if not node_ids:
             return []
         valid_at, known_at = _temporal_anchors(flt, valid_at=at)
@@ -3786,12 +3787,49 @@ class Store:
             else:
                 sql += " AND repo_id=?"
             params.append(flt.repo_id)
+        row_cap = None if limit is None else max(0, int(limit))
+        if row_cap == 0:
+            return []
         sql += " ORDER BY id"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(max(0, int(limit)))
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_edge(r) for r in rows]
+        if not prompt_only:
+            if row_cap is not None:
+                sql += " LIMIT ?"
+                params.append(row_cap)
+            rows = self.conn.execute(sql, params).fetchall()
+            return [_row_to_edge(r) for r in rows]
+
+        # Prompt-facing graph traversal must not let unreviewed edge evidence use
+        # up the frontier before eligibility is checked. Page raw rows in stable
+        # order and count only prompt-safe edges toward the caller's cap.
+        selected: list[Edge] = []
+        offset = 0
+        page_size = min(1_000, row_cap or 1_000)
+        while row_cap is None or len(selected) < row_cap:
+            rows = self.conn.execute(
+                sql + " LIMIT ? OFFSET ?", (*params, page_size, offset)
+            ).fetchall()
+            if not rows:
+                break
+            edges = [_row_to_edge(row) for row in rows]
+            source_ids = set().union(*(
+                set(_provenance_memory_ids(edge.provenance)) for edge in edges
+            )) if edges else set()
+            memories = self.get_memories(sorted(source_ids))
+            for edge in edges:
+                sources = _provenance_memory_ids(edge.provenance)
+                if sources and not all(
+                    (memory := memories.get(memory_id))
+                    and _row_is_prompt_eligible(memory.provenance, memory.metadata)
+                    for memory_id in sources
+                ):
+                    continue
+                selected.append(edge)
+                if row_cap is not None and len(selected) >= row_cap:
+                    break
+            offset += len(rows)
+            if len(rows) < page_size:
+                break
+        return selected
 
     # ── code symbol graph ────────────────────────────────────────────────────────
     def clear_symbols_for_file(self, repo_id: str, file: str, *,

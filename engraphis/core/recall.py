@@ -1003,7 +1003,7 @@ class RecallEngine:
             next_frontier: set[str] = set()
             edges = self.store.neighbors(
                 batch, at=now, layers=flt.graph_layers, flt=flt,
-                limit=edge_cap - len(edges_by_id),
+                limit=edge_cap - len(edges_by_id), prompt_only=prompt_only,
             )
             if prompt_only:
                 edges = self._prompt_eligible_edges(edges)
@@ -1135,7 +1135,7 @@ class RecallEngine:
             return {}
         related_ids = set(seed_ids)
         edges = self.store.neighbors(
-            seed_ids, at=now, layers=flt.graph_layers, flt=flt
+            seed_ids, at=now, layers=flt.graph_layers, flt=flt, prompt_only=prompt_only,
         )
         if prompt_only:
             edges = self._prompt_eligible_edges(edges)

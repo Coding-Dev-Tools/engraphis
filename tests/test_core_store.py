@@ -1036,6 +1036,30 @@ def test_fts_fallback_escapes_like_wildcards(store):
     assert store.fts_search("_", 10) == []           # '_' is literal, not "any character"
 
 
+def test_prompt_neighbors_filter_unapproved_edges_before_limit(store):
+    wid = store.get_or_create_workspace("w")
+    for index in range(4):
+        memory_id = store.add_memory(MemoryRecord(
+            id=f"mem_pending_{index}", content=f"pending {index}", workspace_id=wid,
+            provenance={"source": "test", "trusted": True, "review_state": "pending"},
+        ))
+        store.upsert_edge(Edge(
+            id=f"edg_pending_{index}", src="seed", dst=f"pending_{index}",
+            relation="uses", workspace_id=wid, provenance={"memory_id": memory_id},
+        ))
+    approved_id = store.add_memory(MemoryRecord(
+        id="mem_approved", content="approved", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.upsert_edge(Edge(
+        id="edg_approved", src="seed", dst="approved", relation="uses", workspace_id=wid,
+        provenance={"memory_id": approved_id},
+    ))
+
+    edges = store.neighbors(["seed"], limit=1, prompt_only=True)
+    assert [edge.id for edge in edges] == ["edg_approved"]
+
+
 @pytest.mark.parametrize(
     ("query", "broad_match", "exact_match"),
     [
