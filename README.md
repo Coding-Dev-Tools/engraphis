@@ -35,11 +35,6 @@
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
 
-> **Evidence boundary:** External LoCoMo-derived figures are not canonical. The historical
-> workload run used an unpinned model revision and has no checked-in raw dataset artifact.
-> Treat its 98.21% context figure as directional until an immutable rerun produces a validated
-> public artifact and checksum. The checked-in deterministic fixtures below remain reproducible.
-
 <details>
 <summary>See benchmark details and reproduce the results</summary>
 
@@ -155,22 +150,6 @@ for the short version of how much less history an agent has to carry.
 | Avoid dragging the whole project into every prompt | Packs context to a configured hard budget and can return a compact MCP response. |
 | Keep knowledge in the operator's control | Runs local-first and offline-capable, with scopes, audit records, and optional privacy-safe receipts. |
 
-### See the behavior in reproducible fixtures
-
-The examples below use synthetic, checked-in evaluation inputs. They show three different
-contracts: retrieving focused evidence, returning an answer only with support, and explicitly
-abstaining when no support exists.
-
-<p align="center">
-  <img src="docs/images/evidence-backed-agent-examples.svg" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
-  <br>
-  <sup>Each card names its deterministic offline fixture and test scope. The examples are illustrative; they are not customer data or external benchmark results.</sup>
-</p>
-
-Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce the behavior;
-the former measures evidence retrieval and context size, while the latter measures the
-answer-versus-abstain decision.
-
 ## Dashboard and local UI
 
 The Engraphis dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
@@ -180,14 +159,6 @@ signup, or API key and stays in a SQLite file on your machine.
 workspaces, and manual consolidation. **Classic** preserves the former full tool suite; both use
 the same local data. Switch in **Manage → Settings → Interface** (Ledger) or **Settings →
 Appearance & Engine** (Classic).
-
-### Managed compute
-
-Managed compute is separate from Cloud Sync. A connected installation may send a bounded,
-non-secret snapshot for a hosted proposal; the hosted service must read it to produce a proposal,
-so this is not end-to-end-encrypted processing. Local-only installations send nothing. Set
-`ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` to opt out; `ENGRAPHIS_RETENTION_SUPERVISOR=none` keeps
-retention supervision local (the default).
 
 ### Start it on every platform
 
@@ -667,40 +638,6 @@ New capability belongs in the v2 path (`engraphis/core/`, `engraphis/backends/`,
 `MemoryService`) behind the interfaces in `core/interfaces.py`. The flat-namespace v1 server
 under `engraphis/app.py`, `routes/`, `stores/`, and `engines/` remains a compatibility/reference
 surface; `engraphis-dashboard`, the MCP server, and the Python quickstart above use v2.
-
----
-
-## Development
-
-The offline quality gate (no network, no API key):
-
-```bash
-pip install numpy pytest ruff
-python -m pytest tests/ -q
-python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
-python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
-python -m eval.ablation
-ruff check .
-```
-
-Numbers, not assertions: the offline harness is a **correctness floor** (deterministic embedder).
-LoCoMo, LongMemEval, MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench adapters are available,
-along with a pinned LongMemEval-V2 reader profile, redacted evidence exporter, and paired
-full-history versus Engraphis code-agent analyzer. External adapters measure only the layer they
-declare; retrieval or tool-argument context coverage is not presented as end-to-end answer,
-action, or task success. Reproduction commands and remaining official-run requirements are in
-[`BENCHMARKS.md`](BENCHMARKS.md).
-
----
-
-## Release evidence
-
-Each tagged release includes `release-evidence.json` and a reproducible CycloneDX JSON SBOM as
-GitHub Release assets. The evidence binds the matching tag and commit to the built wheel and
-source distribution hashes, SBOM hash, source-input hashes, and the completed release-gate checks.
-It is intentionally limited: it does not attest to publication, hosted services, payments,
-deployments, or runtime data; the SBOM describes the build job's Python environment rather than an
-operating-system or container image.
 
 ---
 

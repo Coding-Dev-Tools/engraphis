@@ -115,17 +115,15 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         assert evidence in readme
 
 
-def test_readme_puts_external_evidence_boundary_beside_the_chart():
-    """The external-result caveat must remain visible before collapsed details."""
+def test_readme_keeps_external_evidence_caveats_out_of_the_front_page():
+    """Benchmark caveats belong in the supporting benchmark documentation."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
     boundary = "External LoCoMo-derived figures are not canonical."
-    assert boundary in readme
-    assert readme.index("</p>") < readme.index(boundary) < readme.index("<details>")
-    assert "immutable rerun produces a validated" in readme
-    assert "public artifact and checksum" in readme
+    assert boundary not in readme
+    assert "<summary>See benchmark details and reproduce the results</summary>" in readme
 
     for detail in (
         "Unpinned, noncanonical workload diagnostic",
@@ -152,12 +150,16 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "Avoid dragging the whole project into every prompt",
         "docs/images/knowledge-graph.png",
         "docs/images/context-efficiency.svg",
-        "### See the behavior in reproducible fixtures",
-        "docs/images/evidence-backed-agent-examples.svg",
-        "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
         "Less repeated history means more room for the task, tools, and useful evidence",
     ):
         assert evidence in readme
+
+    for removed in (
+        "### See the behavior in reproducible fixtures",
+        "docs/images/evidence-backed-agent-examples.svg",
+        "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
+    ):
+        assert removed not in readme
 
     for filename in (
         "engraphis-benefit-flow.svg",
