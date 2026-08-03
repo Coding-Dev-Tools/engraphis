@@ -83,6 +83,17 @@ def test_native_vector_backend_compatibility_stays_in_architecture_docs():
     assert guidance in architecture
 
 
+def test_advanced_query_planning_stays_in_architecture_docs():
+    readme = _text("README.md")
+    architecture = _text("docs/ARCHITECTURE_V3.md")
+    guidance = "`planning=\"auto\"` keeps the original query"
+
+    assert "[architecture guide](docs/ARCHITECTURE_V3.md#query-planning)" in readme
+    assert guidance not in readme
+    assert guidance in architecture
+    assert "LLMQueryPlanner(my_llm)" in architecture
+
+
 def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     readme = _text("README.md")
     pi_guide = _text("integrations/pi/README.md")

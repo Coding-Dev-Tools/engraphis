@@ -418,36 +418,8 @@ For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budg
 `token_counter`), and optional diagnostics. Accounting is exact for the named counter; inject the
 reader's tokenizer when reader-model token parity is required. `engraphis_recall` remains the compatible full-recall
 surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
-would duplicate it. Both default to the `balanced` retrieval profile and `planning="off"`.
-Opt-in `planning="auto"` keeps the original query, admits at most two deterministic or injected
-query routes, and fuses them before reranking against the original query. `mtype_limits`, when
-provided, are post-rerank maximum counts rather than relevance boosts. Every packed response has a
-stable `context_revision` derived from the token-counter identity and ordered packed excerpts, so a
-host can retain an unchanged prompt prefix. Planner output, per-query rankings, cap drops, and
-fallback reasons appear only with `diagnostics=True`.
-
-The offline planner is the default injected implementation. An application can opt into an LLM
-planner without coupling `core/` to a provider:
-
-```python
-from engraphis.backends.query_planner import LLMQueryPlanner
-from engraphis.core.engine import MemoryEngine
-
-engine = MemoryEngine.create(
-    "engraphis.db",
-    query_planner=LLMQueryPlanner(my_llm),
-)
-result = engine.recall(
-    "why does ReleaseGate depend on AuditLog?",
-    workspace_id="ws_...",
-    planning="auto",
-    mtype_limits={"working": 1, "semantic": 3},
-)
-```
-
-Planner failures and provider deadlines fail open to the original single-query plan. Planned recall
-remains opt-in until the checked-in budget, safety, and official LongMemEval-V2 gates justify a
-default change.
+would duplicate it. For advanced query-planning configuration, see the
+[architecture guide](docs/ARCHITECTURE_V3.md#query-planning).
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
