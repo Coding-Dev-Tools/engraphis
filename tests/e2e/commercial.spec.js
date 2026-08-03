@@ -280,7 +280,7 @@ test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel.getByText('LOCAL CORE', { exact: true })).toBeVisible();
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toHaveCount(0);
+  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' })).toHaveCount(0);
   await expect(licensePanel).not.toContainText('Support continued Engraphis development with Pro.');
 
@@ -464,8 +464,8 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // Upgrade CTAs belong with individual locked features, not the general settings panel.
-  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toHaveCount(0);
+  // The header GET PRO badge opens this panel, so it must retain the matching checkout action.
+  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
     .toHaveCount(0);
