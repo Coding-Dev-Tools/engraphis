@@ -25,6 +25,24 @@ def test_schema_version(store):
     assert store.schema_version == 7
 
 
+def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved release history.", workspace_id=wid,
+        provenance={"trusted": True, "review_state": "approved"}, ingested_at=1.0,
+    ))
+    store.add_memory(MemoryRecord(
+        id="", content="Pending release history.", workspace_id=wid,
+        provenance={"trusted": False, "review_state": "pending"}, ingested_at=2.0,
+    ))
+
+    rows = store.list_memories(
+        SearchFilter(workspace_id=wid), limit=1, prompt_only=True,
+    )
+
+    assert [row.id for row in rows] == [approved]
+
+
 def test_clean_v7_schema_has_temporal_code_and_memory_link_tables(store):
     tables = {row["name"] for row in store.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -575,6 +593,7 @@ def test_code_history_closes_live_rows_and_supports_time_travel(store):
     mid = store.add_memory(MemoryRecord(
         id="", content="The old implementation called helper.",
         workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     symbol_id = store.upsert_symbol(
         repo_id=rid, kind="function", name="old", fqname="old",
@@ -626,6 +645,7 @@ def test_code_memory_link_listing_requires_visible_symbol_and_memory(store):
     rid = store.get_or_create_repo(wid, "r")
     mid = store.add_memory(MemoryRecord(
         id="", content="deploy", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     symbol_id = store.upsert_symbol(
         repo_id=rid, kind="function", name="deploy", fqname="deploy",
@@ -646,6 +666,51 @@ def test_code_memory_link_listing_requires_visible_symbol_and_memory(store):
     assert store.list_code_memory_links(rid) == []
 
 
+def test_code_memory_link_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    symbol_id = store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    pending = store.add_memory(MemoryRecord(
+        id="", content="Pending deploy note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deploy note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=pending)
+    store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=approved)
+
+    rows = store.list_code_memory_links(rid, limit=1)
+
+    assert [row["memory_id"] for row in rows] == [approved]
+
+
+def test_memories_mentioning_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deployment guidance.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO, ingested_at=1.0,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    for stamp in range(2, 13):
+        store.add_memory(MemoryRecord(
+            id="", content="Pending deployment guidance.", workspace_id=wid, repo_id=rid,
+            scope=Scope.REPO, ingested_at=float(stamp),
+            provenance={"source": "import", "trusted": False, "review_state": "pending"},
+        ))
+
+    rows = store.memories_mentioning(rid, "deployment", limit=1)
+
+    assert [row["id"] for row in rows] == [approved]
+
+
 def test_memory_entity_incidence_is_scoped_and_temporal(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
@@ -663,6 +728,39 @@ def test_memory_entity_incidence_is_scoped_and_temporal(store):
     rows = store.list_memory_entities(SearchFilter(workspace_id=wid, repo_id=rid))
     assert [(row["memory_id"], row["entity_id"], row["source_kind"])
             for row in rows] == [(mid, entity_id, "text_mention")]
+
+
+def test_prompt_memory_entity_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    entity_id = store.upsert_entity(Node(
+        id="", name="Deploy", ntype="service", workspace_id=wid, repo_id=rid,
+    ))
+    pending = store.add_memory(MemoryRecord(
+        id="", content="Pending deployment note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deployment note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.link_memory_entity(
+        memory_id=pending, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.link_memory_entity(
+        memory_id=approved, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=0.5,
+    )
+
+    rows = store.list_memory_entities(
+        SearchFilter(workspace_id=wid, repo_id=rid), entity_ids=[entity_id],
+        prompt_only=True, limit=1,
+    )
+
+    assert [row["memory_id"] for row in rows] == [approved]
 
 
 def test_memory_entity_lookup_chunks_large_memory_id_filters(store, monkeypatch):
@@ -936,6 +1034,68 @@ def test_fts_fallback_escapes_like_wildcards(store):
 
     assert {mid for mid, _ in store.fts_search("%", 10)} == {"mem_pct"}
     assert store.fts_search("_", 10) == []           # '_' is literal, not "any character"
+
+
+def test_prompt_neighbors_filter_unapproved_edges_before_limit(store):
+    wid = store.get_or_create_workspace("w")
+    for index in range(4):
+        memory_id = store.add_memory(MemoryRecord(
+            id=f"mem_pending_{index}", content=f"pending {index}", workspace_id=wid,
+            provenance={"source": "test", "trusted": True, "review_state": "pending"},
+        ))
+        store.upsert_edge(Edge(
+            id=f"edg_pending_{index}", src="seed", dst=f"pending_{index}",
+            relation="uses", workspace_id=wid, provenance={"memory_id": memory_id},
+        ))
+    approved_id = store.add_memory(MemoryRecord(
+        id="mem_approved", content="approved", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.upsert_edge(Edge(
+        id="edg_approved", src="seed", dst="approved", relation="uses", workspace_id=wid,
+        provenance={"memory_id": approved_id},
+    ))
+
+    edges = store.neighbors(["seed"], limit=1, prompt_only=True)
+    assert [edge.id for edge in edges] == ["edg_approved"]
+
+
+def test_prompt_links_touching_filters_unapproved_endpoints_before_limit(store):
+    wid = store.get_or_create_workspace("w")
+    seed = store.add_memory(MemoryRecord(
+        id="mem_seed", content="approved seed", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    pending = store.add_memory(MemoryRecord(
+        id="mem_pending", content="pending endpoint", workspace_id=wid,
+        provenance={"source": "test", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="mem_safe", content="approved endpoint", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.add_link(seed, pending, relation="supports")
+    store.add_link(seed, approved, relation="supports")
+
+    links = store.links_touching([seed], limit=1, prompt_only=True)
+    assert [(link["a"], link["b"]) for link in links] == [(seed, approved)]
+
+
+@pytest.mark.parametrize(
+    ("query", "broad_match", "exact_match"),
+    [
+        ("C++", "C language guide", "C++ compiler guide"),
+        ("v1.2", "v1 migration notes", "v1.2 compatibility notes"),
+    ],
+)
+def test_fts_fallback_prioritizes_literal_punctuation_before_token_variants(
+        store, query, broad_match, exact_match):
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(id="mem_broad", content=broad_match, workspace_id=wid))
+    store.add_memory(MemoryRecord(id="mem_exact", content=exact_match, workspace_id=wid))
+    store.has_fts5 = False
+
+    assert store.fts_search(query, 1) == [("mem_exact", 0.5)]
 
 
 # ── regression: indexes exist, and are added to pre-existing databases ────────

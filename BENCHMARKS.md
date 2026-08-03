@@ -77,16 +77,16 @@ frontier-model QA score.
 The workload benchmark is also allowed to say “this workload is too small for a memory layer.”
 On the 44-memory / 26-question CodeMem regression fixture, every case already fits inside a
 64-token recency window. Full-history and recency therefore use the same 1,180 cumulative reader
-tokens at perfect evidence/answer-token quality, while Engraphis uses 1,375–1,377 reader tokens
-plus a conservative 631-token indexing pass. That is an honest no-break-even boundary result:
-the benefit being measured begins when history is long or reused enough to outweigh retrieval
-framing and indexing.
+tokens at perfect evidence/answer-token quality, while Engraphis uses 1,064–1,066 reader tokens
+plus a conservative 631-token indexing pass. The indexing-inclusive total still costs more over a
+single pass, with break-even at 142–144 queries. This is an intentionally small, reusable-workload
+boundary, not a general cost claim.
 
-The adaptive policy removes that small-workload penalty. On the same 26 CodeMem tasks, every
-history fit the 512-token prompt allowance, so adaptive routing bypassed all 26 memory calls.
-It used **1,942** total agent-facing tokens versus **2,194** for always-on retrieval
-(**11.5% lower**) while both strategies completed **24/26** tasks with the bundled deterministic
-agent. This demonstrates the bypass behavior and token accounting, not general LLM intelligence.
+On the same 26 CodeMem tasks, every history fit the 512-token prompt allowance, so adaptive
+routing bypassed all 26 memory calls. It used **1,942** total agent-facing tokens versus
+**1,883** for always-on retrieval while both strategies completed **24/26** tasks with the bundled
+deterministic agent. This demonstrates bypass behavior and token accounting; this small fixture
+does not establish a token-saving claim for adaptive routing or general LLM intelligence.
 
 The complementary real-model LoCoMo workload diagnostic covers 10 conversations and 1,986
 questions with `all-MiniLM-L6-v2`, `k=10`, a 512-token reader budget, and conflict resolution

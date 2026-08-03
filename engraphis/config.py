@@ -656,6 +656,11 @@ class Settings:
     retention_supervisor: str = field(
         default_factory=lambda: _env("ENGRAPHIS_RETENTION_SUPERVISOR", "none").lower()
     )
+    # A remote retention supervisor is advisory by default. Keep automatic critical
+    # retention at normal strength unless an owner explicitly opts in.
+    allow_automatic_critical_retention: bool = field(
+        default_factory=lambda: _env_bool("ENGRAPHIS_ALLOW_AUTOMATIC_CRITICAL_RETENTION", False)
+    )
 
     loop_interval: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_INTERVAL", 60))
     loop_top_k: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_TOP_K", 20))

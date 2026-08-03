@@ -91,14 +91,17 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 ```
 query
   └─ SearchFilter (scope + valid_at/known_at anchors)    core/interfaces.py
+     └─ optional QueryPlanner (off by default; original + at most 2 routes)
+                                                       core/query_planner.py
      └─ 4 retrieval arms (run in parallel, then fused):
         • vector   — VectorIndex.search (cosine)         backends/vector_*.py
         • lexical  — Store.fts_search (FTS5/BM25 + LIKE fallback)   core/store.py
         • graph    — Personalized PageRank over entities+links      core/recall.py + core/graphrank.py
                      (graph_mode="1hop" keeps the old expansion for ablation)
         • code     — symbols/files/calls with memory bridges          core/engine.py
-     └─ RRF fusion + six-term weighted score             core/scoring.py
+     └─ priority-weighted query/arm RRF + six-term score  core/scoring.py
      └─ rerank top-N                                      backends/reranker.py
+     └─ optional post-rerank memory-type maxima
      └─ context packing (token budget) + optional explicit reinforcement
                                                        core/recall.py / core/store.py
 ```
@@ -162,10 +165,11 @@ is distilled into discrete facts first; the offline default is passthrough.
 
 ## 4. Core algorithms cheat-sheet (`core/scoring.py`, `core/store.py`)
 
-- **Six-term recall score** (`score_memory`):
-  `score = w_r·retention + w_s·semantic + w_l·lexical + w_g·graph + w_i·importance + w_c·recency − w_x·staleness`.
+- **Ordinary recall score** (`score_memory`):
+  `score = w_r·retention + w_s·semantic + w_l·lexical + w_g·graph + w_i·importance − w_x·staleness`.
   Arm scores are **min-max normalized before fusion** so no arm dominates by raw scale.
-  Default weights: `r1.0 s1.0 l0.5 g0.7 i0.6 c0.3 x0.8`, overridden per memory type.
+  Recency (`c`) is used only by the separate queryless proactive agenda, avoiding a second
+  age penalty alongside retention in ordinary recall. Default weights: `r1.0 s1.0 l0.5 g0.7 i0.6 c0.3 x0.8`, overridden per memory type.
 - **Ebbinghaus retention:** `R(t) = exp(−Δt_days / S)`.
 - **Reinforcement (spacing effect):** `S_new = S·(1 + α·ln(1 + access_count)) + boost`, `α = 0.3`.
   Stability grows sub-linearly with use; this is `Store.reinforce()`.

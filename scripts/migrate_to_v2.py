@@ -11,7 +11,8 @@ Usage:
     python -m scripts.migrate_to_v2 --dry-run            # report only, write nothing
 
 Notes:
-* Idempotent target: run against a fresh --new file.
+* ``--new`` must name a fresh path. The migrator refuses an existing or in-place
+  target rather than mixing source history into an existing v2 database.
 * Vectors are carried as-is (original dim). Re-embedding with a SOTA model is a
   Phase-1 step; this migration is lossless and reversible.
 """
@@ -95,7 +96,24 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
 
 def migrate(old_path: str, new_path: str, *, workspace: str = "default",
             dry_run: bool = False) -> dict:
-    src = sqlite3.connect(old_path)
+    source_path = Path(old_path).expanduser().resolve()
+    target_path = Path(new_path).expanduser().resolve()
+    # The migration writes a complete new v2 database. Reusing an output path can
+    # silently mix old and new state, while an in-place run reaches Store() with a
+    # v1-shaped ``memories`` table and fails only after attempting schema work. Refuse
+    # both before opening either database so the source and any existing target remain
+    # untouched. A dry run is read-only and intentionally remains available for either
+    # path, which is useful when planning an upgrade.
+    if not dry_run:
+        if source_path == target_path:
+            raise ValueError("v1 migration requires --new to differ from --old")
+        if target_path.exists():
+            raise FileExistsError(
+                "v1 migration requires a fresh --new path; refusing existing target "
+                f"{target_path}"
+            )
+
+    src = sqlite3.connect(str(source_path))
     src.row_factory = sqlite3.Row
 
     counts = {"memories": 0, "entities": 0, "edges": 0, "events": 0, "thoughts": 0, "repos": 0}
@@ -105,7 +123,7 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
 
     store: Optional[Store] = None
     if not dry_run:
-        store = Store(new_path)
+        store = Store(str(target_path))
         wid = store.get_or_create_workspace(workspace)
 
     # namespace -> repo_id
@@ -253,16 +271,21 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
 
     src.close()
     if store is not None:
-        store.audit("migration", "migrate_v1_to_v2", new_path, str(counts))
+        store.audit("migration", "migrate_v1_to_v2", str(target_path), str(counts))
         store.conn.commit()
         store.close()
     return counts
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Migrate v1 engraphis_v1.db → v2 Engraphis schema.")
+    # Keep argparse output ASCII-only: Windows' default CP1252 console cannot encode
+    # the Unicode arrow formerly used here, which made even ``--help`` crash.
+    ap = argparse.ArgumentParser(description="Migrate v1 engraphis_v1.db -> v2 Engraphis schema.")
     ap.add_argument("--old", default=str(_PROJECT_ROOT / "engraphis_v1.db"))
-    ap.add_argument("--new", default=str(_PROJECT_ROOT / "engraphis_v2.db"))
+    ap.add_argument(
+        "--new", default=str(_PROJECT_ROOT / "engraphis_v2.db"),
+        help="fresh v2 output path (must not already exist unless --dry-run)",
+    )
     ap.add_argument("--workspace", default="default")
     ap.add_argument("--dry-run", action="store_true", help="report counts, write nothing")
     args = ap.parse_args()
@@ -271,7 +294,7 @@ def main() -> None:
         raise SystemExit(f"Old DB not found: {args.old}")
 
     counts = migrate(args.old, args.new, workspace=args.workspace, dry_run=args.dry_run)
-    mode = "DRY RUN — nothing written" if args.dry_run else f"written → {args.new}"
+    mode = "DRY RUN - nothing written" if args.dry_run else f"written -> {args.new}"
     print(f"Engraphis migration ({mode})")
     for k, v in counts.items():
         print(f"  {k:10s}: {v}")

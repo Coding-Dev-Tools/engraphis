@@ -58,11 +58,36 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     assert "http://localhost:<ENGRAPHIS_PORT>" in example
     assert "These settings do not change CORS" in example
     assert "# ENGRAPHIS_DASHBOARD_URL=https://engraphis.example.com" in example
+    assert "# ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in example
+    assert "docker-compose.lan.yml" in example
+    assert "# ENGRAPHIS_DASHBOARD_URL=http://192.168.10.151:8700" in example
+    assert "# ENGRAPHIS_DASHBOARD_URL=http://engraphis.local" in example
 
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
     assert Settings().llm_auto_extract is False
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=0" in example
     assert "| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` |" in readme
+
+    for name in (
+        "ENGRAPHIS_DECAY_HALFLIFE_DAYS",
+        "ENGRAPHIS_LOOP_INTERVAL",
+        "ENGRAPHIS_LOOP_TOP_K",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    configured = Settings()
+    assert f"# ENGRAPHIS_DECAY_HALFLIFE_DAYS={configured.decay_halflife_days:g}" in example
+    assert f"# ENGRAPHIS_LOOP_INTERVAL={configured.loop_interval}" in example
+    assert f"# ENGRAPHIS_LOOP_TOP_K={configured.loop_top_k}" in example
+
+    from engraphis.backends.extractor import (
+        CHUNK_MAX,
+        CHUNK_OVERLAP_TOKENS,
+        CHUNK_TARGET_TOKENS,
+    )
+
+    assert f"# ENGRAPHIS_CHUNK_TOKENS={CHUNK_TARGET_TOKENS}" in example
+    assert f"# ENGRAPHIS_CHUNK_MAX={CHUNK_MAX}" in example
+    assert f"# ENGRAPHIS_CHUNK_OVERLAP={CHUNK_OVERLAP_TOKENS}" in example
 
 
 def test_rerank_model_read_from_env(monkeypatch):
@@ -83,8 +108,14 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     # (DeterministicEmbedder + IdentityReranker) and serves a round-trip — the CI path.
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     from engraphis.service import MemoryService
+    from engraphis.backends.vector_numpy import NumpyVectorIndex
     svc = MemoryService.create(":memory:", rerank_model=(Settings().rerank_model or None))
-    assert svc.remember("a durable fact", workspace="w", repo="r")["stored"] is True
+    assert isinstance(svc.engine.index, NumpyVectorIndex)
+    pending = svc.remember("a durable fact", workspace="w", repo="r")
+    assert pending["stored"] is True
+    svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test_operator", reason="offline control",
+    )
     assert svc.recall("a durable fact", workspace="w", repo="r")["count"] >= 1
 
 

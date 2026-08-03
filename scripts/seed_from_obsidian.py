@@ -2,7 +2,7 @@
 
 Usage:
     python -m scripts.seed_from_obsidian <vault_path> [--namespace vault]
-    python -m scripts.seed_from_obsidian "C:/Users/home/OneDrive/Documents/Obsidian Vault Local"
+    python -m scripts.seed_from_obsidian "/path/to/obsidian-vault"
 
 Each .md file becomes a memory document with:
     document_id = relative path (sanitized)

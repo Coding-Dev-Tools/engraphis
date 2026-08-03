@@ -106,7 +106,14 @@ def test_release_evidence_is_canonical_and_contains_only_public_release_inputs(t
     assert evidence["provenance"]["builder"]["sbom_generator"]["version"] == "7.3.0"
     assert evidence["provenance"]["builder"]["job"] == "release-evidence"
     assert evidence["provenance"]["builder"]["completed_gate_jobs"] == [
-        "build", "python-matrix", "browser-accessibility", "docker-smoke"
+        "build", "python-matrix", "encryption", "browser-accessibility", "docker-smoke"
+    ]
+    assert any(check["id"] == "encryption-at-rest" for check in evidence["checks"]["tests"])
+    assert evidence["checks"]["tests"][-1]["workflow_steps"] == [
+        "Validate Compose configuration",
+        "Verify production image OCR runtime",
+        "Audit production image dependencies",
+        "Run customer-mode readiness smoke",
     ]
     assert len(evidence["limitations"]) == 3
     assert "exported_at" not in evidence
@@ -201,7 +208,11 @@ def test_release_workflow_publishes_evidence_separately_from_package_artifacts()
         "dependency-audit", "container-smoke",
     ):
         assert "--verified-check " + check_id in evidence_job
-    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in evidence_job
+    assert (
+        "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]"
+        in evidence_job
+    )
+    assert "--verified-check encryption-at-rest" in evidence_job
     assert "name: Download distributions" in evidence_job
     assert "npm run test:e2e" in browser_job
     assert "Generate public release evidence" not in build

@@ -7,10 +7,12 @@ server (engraphis/app.py) untouched; run this with `python -m scripts.start_dash
 from __future__ import annotations
 
 import importlib.util
+import hmac
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import os as _os
+import secrets
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +68,16 @@ _PUBLIC = {
 
 class _BrowserSessionReq(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
+
+
+class _DashboardApprovalReq(BaseModel):
+    """Human-review request accepted only by the browser dashboard ceremony."""
+
+    memory_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+_REVIEW_CSRF_HEADER = "X-Engraphis-Review-CSRF"
 
 
 def _embedder_status(embedder, configured_model: str) -> str:
@@ -205,6 +217,10 @@ def create_app() -> FastAPI:
         embed_dim=settings.embed_dim or 384,
         allowed_workspaces=settings.allowed_workspaces)
     app.state.service = svc
+    # The review token is intentionally process-local and is never a general API
+    # credential. It is minted alongside a short-lived browser session and exists only
+    # to authorize the narrowly scoped human-approval dashboard action below.
+    app.state.review_csrf_tokens = {}
     try:
         import sys as _sys
         _ed = svc.engine.embedder
@@ -246,17 +262,104 @@ def create_app() -> FastAPI:
             )
         if not token_ok(req.token, settings.api_token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        response = JSONResponse({"authenticated": True})
+        session_value = browser_session(settings.api_token)
+        review_csrf_token = secrets.token_urlsafe(32)
+        # A dashboard restart deliberately invalidates this token. Keep only the latest
+        # token for each session value; unlike an API bearer, it has no authority by
+        # itself and is not persisted to disk or browser storage.
+        app.state.review_csrf_tokens[session_value] = review_csrf_token
+        response = JSONResponse(
+            {"authenticated": True, "review_csrf_token": review_csrf_token}
+        )
         response.headers["Cache-Control"] = "no-store"
         response.set_cookie(
             BROWSER_SESSION_COOKIE,
-            browser_session(settings.api_token),
+            session_value,
             max_age=BROWSER_SESSION_SECONDS,
             httponly=True,
             secure=wants_https(request),
             samesite="strict",
             path="/",
         )
+        return response
+
+    @app.post("/dashboard/review/approve", include_in_schema=False)
+    def dashboard_review_approve(req: _DashboardApprovalReq, request: Request):
+        """Approve one record from the authenticated browser review surface.
+
+        This is intentionally *not* a v2 API or MCP operation.  A bearer token cannot
+        invoke it: the caller must hold the HttpOnly browser session and echo the
+        per-session CSRF value returned only by the same-origin login exchange.  The
+        private hosted service owns owner/admin approval for hosted deployments.
+        """
+
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "dashboard approval requires ENGRAPHIS_API_TOKEN"},
+                status_code=409,
+            )
+        session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
+        if not browser_session_ok(session_value, settings.api_token):
+            return JSONResponse({"error": "browser session required"}, status_code=401)
+        if request.headers.get("X-Engraphis-Browser-Session") != "1":
+            return JSONResponse({"error": "browser session header required"}, status_code=403)
+        expected = app.state.review_csrf_tokens.get(session_value)
+        supplied = request.headers.get(_REVIEW_CSRF_HEADER, "")
+        if not expected or not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"error": "review CSRF confirmation required"}, status_code=403)
+        reason = req.reason.strip()
+        if not reason:
+            return JSONResponse({"error": "review reason required"}, status_code=422)
+        source = svc.store.get_memory(req.memory_id)
+        if source is None:
+            return JSONResponse({"error": "memory not found"}, status_code=404)
+        workspace = svc.store.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (source.workspace_id,),
+        ).fetchone()
+        if workspace is None:
+            return JSONResponse({"error": "memory not found"}, status_code=404)
+        try:
+            # Approval accepts only an opaque memory id, so recover the authoritative
+            # workspace from the source and run the same allow-list guard as every
+            # service-level workspace operation before the engine creates a successor.
+            svc._authorize_workspace(workspace["name"])
+        except ValueError:
+            return JSONResponse({"error": "workspace approval is not permitted"}, status_code=403)
+        try:
+            result = svc.engine.approve_for_prompt(
+                req.memory_id,
+                reviewer="dashboard_browser_session",
+                reason=reason,
+            )
+        except KeyError:
+            return JSONResponse({"error": "memory not found"}, status_code=404)
+        except ValueError:
+            # Do not expose a governed record's content or arbitrary engine exception.
+            return JSONResponse({"error": "approval was rejected"}, status_code=409)
+        response = JSONResponse({"approved": True, **result})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/dashboard/review/csrf", include_in_schema=False)
+    def dashboard_review_csrf(request: Request):
+        """Return the in-memory CSRF value for an already-authenticated dashboard."""
+
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "dashboard approval requires ENGRAPHIS_API_TOKEN"},
+                status_code=409,
+            )
+        session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
+        if not browser_session_ok(session_value, settings.api_token):
+            return JSONResponse({"error": "browser session required"}, status_code=401)
+        if request.headers.get("X-Engraphis-Browser-Session") != "1":
+            return JSONResponse({"error": "browser session header required"}, status_code=403)
+        token = app.state.review_csrf_tokens.get(session_value)
+        if not token:
+            token = secrets.token_urlsafe(32)
+            app.state.review_csrf_tokens[session_value] = token
+        response = JSONResponse({"review_csrf_token": token})
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     from engraphis.netutil import is_local_request

@@ -132,6 +132,33 @@ def test_auth_failure_is_not_automatically_replayed(monkeypatch):
     assert calls == [("POST", b"one-upload")]
 
 
+def test_http_error_response_is_closed_without_reading_its_body(monkeypatch):
+    class _TrackedBody(io.BytesIO):
+        closed_by_transport = False
+
+        def close(self):
+            self.closed_by_transport = True
+            super().close()
+
+    body = _TrackedBody(b"untrusted relay error body")
+
+    def reject(request, *, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url, 503, "unavailable", None, body
+        )
+
+    monkeypatch.setattr(relay_backend, "_urlopen_no_redirect", reject)
+    transport = RelayTransport(
+        "http://127.0.0.1", "workspace", access_token=TOKEN
+    )
+
+    with pytest.raises(RelayError, match="HTTP 503") as caught:
+        transport.push("bundle.json", b"one-upload")
+
+    assert caught.value.status == 503
+    assert body.closed_by_transport is True
+
+
 def test_relay_client_refuses_redirects():
     handler = relay_backend._NoRedirectHandler()
     assert handler.redirect_request(

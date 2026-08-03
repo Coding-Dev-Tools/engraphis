@@ -8,6 +8,20 @@ import pytest
 from engraphis.config import settings
 
 
+def pytest_collection_modifyitems(items):
+    """Run mutually incompatible SQLite native integrations in safe order.
+
+    Importing SQLCipher before sqlite-vec can bind the latter extension to the
+    wrong SQLite ABI and segfault the interpreter.  SQLCipher tests run last;
+    ordinary engine/service tests use the safe NumPy default in either phase.
+    """
+    priorities = {"native_sqlitevec": 0, "native_sqlcipher": 2}
+    items.sort(key=lambda item: min(
+        (priorities.get(marker.name, 1) for marker in item.iter_markers()),
+        default=1,
+    ))
+
+
 @pytest.fixture(autouse=True)
 def _offline_dns_isolation(monkeypatch):
     """Keep the documented offline gate genuinely offline.

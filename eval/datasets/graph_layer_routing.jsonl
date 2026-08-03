@@ -1,0 +1,3 @@
+{"id":"causal-layer","query":"why did alphasvc change?","preferred_layer":"causal","target_relation":"causes","distractor_relation":"calls"}
+{"id":"temporal-layer","query":"when did alphasvc change?","preferred_layer":"temporal","target_relation":"after","distractor_relation":"calls"}
+{"id":"entity-layer","query":"who works with alphasvc?","preferred_layer":"entity","target_relation":"calls","distractor_relation":"causes"}

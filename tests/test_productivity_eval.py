@@ -294,7 +294,7 @@ def test_cli_prints_aggregate_report_without_private_task_or_source_data(
     assert "PRIVATE-SOURCE" not in output
 
 
-def test_codemem_small_history_bypass_marketing_numbers_are_reproducible() -> None:
+def test_codemem_small_history_strategy_baseline_is_reproducible() -> None:
     report = run(
         load_dataset(str(ROOT / "eval" / "datasets" / "codemem.jsonl")),
         max_context_tokens=512,
@@ -305,7 +305,7 @@ def test_codemem_small_history_bypass_marketing_numbers_are_reproducible() -> No
     assert report["methods"]["full_history"]["tasks_completed"] == 24
     assert report["methods"]["full_history"]["total_tokens"] == 1942
     assert report["methods"]["retrieval"]["tasks_completed"] == 24
-    assert report["methods"]["retrieval"]["total_tokens"] == 2194
+    assert report["methods"]["retrieval"]["total_tokens"] == 1883
     assert report["methods"]["retrieval"]["memory_calls"] == 26
     assert report["methods"]["adaptive"]["tasks_completed"] == 24
     assert report["methods"]["adaptive"]["total_tokens"] == 1942

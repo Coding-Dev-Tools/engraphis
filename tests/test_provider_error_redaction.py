@@ -32,6 +32,16 @@ class _LLMResponseClient:
         return httpx.Response(self.status, request=request, text=self.body)
 
 
+class _LLMTimeoutClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        request = httpx.Request("POST", url)
+        raise httpx.ReadTimeout("private provider timeout detail", request=request)
+
+
 @pytest.mark.parametrize("value", [
     "provider.example/v1",
     "http://provider.example/v1",
@@ -122,6 +132,23 @@ def test_llm_malformed_response_does_not_reflect_provider_payload():
     assert caught.value.__suppress_context__ is True
 
 
+def test_llm_deadline_is_forwarded_without_retry_or_provider_detail_leakage():
+    client = LLMClient(
+        provider="openai", model="safe-model", api_key="safe-key",
+        base_url="https://provider.example",
+    )
+    client._http.close()
+    timeout_client = _LLMTimeoutClient()
+    client._http = timeout_client
+
+    with pytest.raises(TimeoutError, match="exceeded its deadline") as caught:
+        client.chat([{"role": "user", "content": "hello"}], timeout=0.25)
+
+    assert len(timeout_client.calls) == 1
+    assert timeout_client.calls[0][1]["timeout"] == 0.25
+    assert "private provider timeout detail" not in repr(caught.value)
+
+
 def test_api_embedder_logs_no_model_endpoint_or_provider_index(monkeypatch, caplog):
     model_marker = "embedding-model-owner@example.com"
     endpoint_marker = "signed-endpoint-token"
@@ -154,11 +181,12 @@ def test_api_embedder_logs_no_model_endpoint_or_provider_index(monkeypatch, capl
             base_url="https://provider.example/%s" % endpoint_marker,
             api_key="safe-key",
         )
-        result = embedder.embed(["hello"])
+        with pytest.raises(RuntimeError, match="no usable vectors") as caught:
+            embedder.embed(["hello"])
 
-    assert result.shape == (1, 384)
     for marker in (model_marker, endpoint_marker, index_marker, "owner@example.com"):
         assert marker not in caplog.text
+        assert marker not in str(caught.value)
 
 
 def test_api_embedder_failure_logs_do_not_include_api_key(monkeypatch, caplog):
