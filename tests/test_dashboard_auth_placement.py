@@ -540,10 +540,9 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("state,expected,absent", [
-    # Only the state a trial can actually be started in draws the trial buttons; the
-    # control plane refuses one for every organization that already holds an entitlement.
-    ("inactive", "Start 3-day Pro trial", "Subscribe to Pro"),
-    ("trial_expired", "Subscribe to Pro", "Start 3-day Pro trial"),
+    # Upgrade CTAs belong to their respective feature cards, not the general settings panel.
+    ("inactive", "", "Subscribe to Pro"),
+    ("trial_expired", "", "Subscribe to Pro"),
     ("trial", "Open Engraphis Cloud", "Start 3-day Pro trial"),
     ("active", "Open Engraphis Cloud", "Start 3-day Pro trial"),
 ])
@@ -557,7 +556,10 @@ def test_each_access_state_offers_the_one_action_that_can_succeed(
                           "available": state == "inactive", "ends_at": 0}},
     }])[state]["html"]
 
-    assert expected in html
+    if expected:
+        assert expected in html
+    else:
+        assert html == ""
     assert absent not in html
 
 

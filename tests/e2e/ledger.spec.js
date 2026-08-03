@@ -459,6 +459,11 @@ test('Relationships uses the visual explorer controls and applies their state', 
   await flow.click();
   await expect(flow).toHaveAttribute('aria-checked', 'false');
   const freeze = page.getByRole('switch', { name: 'Freeze simulation' });
+  await expect(freeze).toHaveAttribute('aria-checked', 'false');
+  await freeze.click();
+  await expect(freeze).toHaveAttribute('aria-checked', 'true');
+  await freeze.click();
+  await expect(freeze).toHaveAttribute('aria-checked', 'false');
   await freeze.click();
   await expect(freeze).toHaveAttribute('aria-checked', 'true');
 
@@ -502,7 +507,7 @@ test('Relationships uses the visual explorer controls and applies their state', 
   await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
-  await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'false');
 });
 
 test('graph node connections expose linked memory evidence without leaving the graph', async ({ page }) => {
@@ -599,7 +604,7 @@ test('a custom graph view restores every saved control and server filter', async
   await expect(page.locator('#graph-repel')).toHaveValue('80');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('switch', { name: 'Entity labels' })).toHaveAttribute('aria-checked', 'true');
-  await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByLabel('Size by')).toHaveValue('betweenness');
   await expect(page.getByLabel('Highlight bridges')).toBeChecked();
   await expect(page.getByLabel('Auto-collapse clusters')).toBeChecked();

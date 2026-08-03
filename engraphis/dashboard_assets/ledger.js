@@ -1596,7 +1596,6 @@
       palette: byId('graph-palette').value,
       flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
       labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
-      frozen: state.graphFrozen,
       tuning: graphTuningSettings(),
       minDegree: number(byId('graph-min-degree').value),
       depth: number(byId('graph-depth').value),
@@ -1654,7 +1653,9 @@
     byId('graph-ghosts').checked = graphPreference('ghosts', byId('graph-ghosts').checked) !== false;
     byId('graph-size').value = graphPreference('size', byId('graph-size').value,
       ['degree', 'betweenness']);
-    state.graphFrozen = graphPreference('frozen', false) === true;
+    // Freeze is deliberately session-only. A previously frozen arrangement must not make a
+    // freshly opened graph look broken; physics starts live until the person clicks Freeze.
+    state.graphFrozen = false;
     setGraphSwitch('graph-freeze', state.graphFrozen);
     setGraphSwitch('graph-flow', graphPreference('flow', true) !== false);
     setGraphSwitch('graph-labels', graphPreference('labels', false) === true);
@@ -1700,7 +1701,6 @@
       ? view.repoFilter.slice(0, 200) : byId('graph-repo-filter').value;
     state.graphIncludeCode = typeof view.includeCode === 'boolean'
       ? view.includeCode : state.graphIncludeCode;
-    state.graphFrozen = typeof view.frozen === 'boolean' ? view.frozen : state.graphFrozen;
     byId('graph-preset').value = preset;
     byId('graph-style').value = style;
     byId('graph-color').value = color;
