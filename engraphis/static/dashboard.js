@@ -516,7 +516,7 @@ function licStateBanner(state,plan,ends,status){
  if(state==='lapsed'){const note=LIC_STATUS_NOTE[status];return `<div class="lic-banner lic-banner-warn"><strong>Your ${esc(plan||'hosted')} subscription is no longer active</strong>${note?esc(note.charAt(0).toUpperCase()+note.slice(1))+', so hosted':'Hosted'} features are locked until billing is up to date. Your local memories are unaffected. Open the account portal to restore access.</div>`}
  if(state==='inactive')return `<div class="lic-banner"><strong>No hosted plan on this installation</strong>The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation, and Team administration run in Engraphis Cloud.</div>`;
  return ''}
-function licActionsHtml(state){const pro=hostedCta('pro','license');if(state==='active'||state==='lapsed')return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`;const team=hostedCta('team','license_team');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}${ctaLinkHtml(team,'btn btn-ghost btn-sm','license_team')}</div>`}
+function licActionsHtml(state){if(state!=='active'&&state!=='lapsed'&&state!=='trial')return '';const pro=hostedCta('pro','license');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();
@@ -537,8 +537,6 @@ function renderLicense(d){
     so "the dashboard says PRO" and "the cloud says PRO" could not be told apart. */
  if(d.plan_source)h+=`<div class="cfg-row"><span>Plan source</span><span>${esc(LIC_SOURCE_LABEL[d.plan_source]||d.plan_source)}${d.plan_checked_at?' · confirmed '+esc(fmtRel(d.plan_checked_at)):''}</span></div>`;
  if(state==='active')h+=`<div class="pro-support-copy"><strong>Thank you for supporting Engraphis.</strong> Your subscription helps fund hosted infrastructure and ongoing development.</div>`;
- else if(state!=='lapsed')h+=`<div class="pro-support-copy"><strong>Support continued Engraphis development with Pro.</strong> Your subscription helps cover hosted infrastructure and ongoing development while unlocking Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming.</div>`;
- h+=`<div class="field-hint" data-csp-style="s97">The local core remains free. Pro and Team capabilities execute in Engraphis Cloud. The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days; private-service account grace is separate, capped at 24 hours, and never extends cloud access or restricts local MCP and dashboard use.</div>`;
  h+=licActionsHtml(state);
  el.innerHTML=h;
 }
@@ -1226,19 +1224,19 @@ function graphRender(fit=true,reheat=true){
  }
  showAs(empty,false);window.GCOL=graphReadThemeColors();graphApplyStyleChrome();graphUpdateHud(data);
  const reduced=prefersReducedMotion(),reheatButton=document.querySelector('[data-onclick="h27"]');
- if(reheatButton){reheatButton.setAttribute('aria-disabled',String(reduced));reheatButton.setAttribute('aria-label',reduced?'Reheat layout unavailable while reduced motion is enabled':'Reheat layout');reheatButton.title=reduced?'Unavailable while reduced motion is enabled':''}
+ if(reheatButton){reheatButton.setAttribute('aria-disabled','false');reheatButton.setAttribute('aria-label','Reheat layout');reheatButton.title=''}
  if(!FG){
   FG=ForceGraph()(element);
   FG.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).autoPauseRedraw(true)
    .onRenderFramePre((ctx,scale)=>{try{graphStyleBackground(ctx,scale)}catch(e){}})
    .onNodeClick(node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.id)})
    .onNodeHover(node=>{graphSetHighlight(node&&node.id);element.classList.toggle('cursor-pointer',!!node);element.classList.toggle('cursor-grab',!node)})
-   .onEngineStop(()=>graphSetSimulationStatus(prefersReducedMotion()?'Static layout':'Layout settled',false));
+   .onEngineStop(()=>graphSetSimulationStatus('Layout settled',false));
  }
  FG.width(element.clientWidth).height(element.clientHeight)
-  .cooldownTime(reduced?0:(GPERF.large?1100:2200))
-  .cooldownTicks(reduced?1:(GPERF.large?80:160))
-  .warmupTicks(reduced?45:(GPERF.large?18:40))
+  .cooldownTime(GPERF.large?1100:2200)
+  .cooldownTicks(GPERF.large?80:160)
+  .warmupTicks(GPERF.large?18:40)
   .autoPauseRedraw(true);
  if(FG.d3AlphaDecay)FG.d3AlphaDecay(GPERF.large?.055:.035);
  if(FG.d3VelocityDecay)FG.d3VelocityDecay(GPERF.large?.45:.38);
@@ -1299,7 +1297,7 @@ function graphRender(fit=true,reheat=true){
  });
  if(dataChanged)FG.graphData(data);
  graphApplyForces();
- if(reheat){graphSetSimulationStatus(reduced?'Static layout':'Arranging entities',!reduced);if(!reduced)FG.d3ReheatSimulation()}
+ if(reheat){graphSetSimulationStatus('Arranging entities',true);FG.d3ReheatSimulation()}
  else graphRedraw();
  clearTimeout(window.__gfit);
  if(fit){
@@ -1319,7 +1317,7 @@ function graphSet(key,value){
  if(key==='link'&&GACTIVE_DATA)graphRefreshComponentCenters(GACTIVE_DATA.nodes);
  if(layout)graphApplyForces();
  if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}else graphRedraw();
- if(layout&&!prefersReducedMotion()){graphSetSimulationStatus('Updating layout',true);FG.d3ReheatSimulation()}
+ if(layout){graphSetSimulationStatus('Updating layout',true);FG.d3ReheatSimulation()}
 }
 function graphApplyPreset(name){
  const preset=GRAPH_PRESETS[name]||GRAPH_PRESETS.compact;
@@ -1369,7 +1367,7 @@ function graphToggleFreeze(control){
  window.GSET.frozen=control.checked;if(GRAPH_ENGINE){GRAPH_ENGINE.freeze(control.checked);return}if(!FG)return;
  const ns=(FG.graphData().nodes)||[];
  if(control.checked){ns.forEach(n=>{n.fx=n.x;n.fy=n.y});graphSetSimulationStatus('Layout frozen')}
- else{ns.forEach(n=>{n.fx=null;n.fy=null});if(!prefersReducedMotion())FG.d3ReheatSimulation()}
+ else{ns.forEach(n=>{n.fx=null;n.fy=null});FG.d3ReheatSimulation()}
 }
 function graphToggleLabels(control){window.GSET.labels=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({labels:control.checked});else if(FG)graphRender(false,false)}
 function graphRecolor(){
@@ -1382,9 +1380,8 @@ function graphRecolor(){
 }
 function graphFit(){if(GRAPH_ENGINE)GRAPH_ENGINE.fit();else if(FG)FG.zoomToFit(prefersReducedMotion()?0:500,72)}
 function graphReheat(){
- if(GRAPH_ENGINE){if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}GRAPH_ENGINE.reheat();return}
+ if(GRAPH_ENGINE){GRAPH_ENGINE.reheat();return}
  if(!FG)return;
- if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}
  graphSetSimulationStatus('Reheating layout',true);FG.d3ReheatSimulation();
 }
 function graphFocus(name){
