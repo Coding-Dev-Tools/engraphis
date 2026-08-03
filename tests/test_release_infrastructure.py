@@ -77,6 +77,7 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
 
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
 
     lan_compose = _text("docker-compose.lan.yml")
     assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
@@ -89,7 +90,8 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
     assert "ports: !override" in lan_compose
     assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
     assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
-    assert "ENGRAPHIS_COMPOSE_PORT=8787" in readme
+    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert "ENGRAPHIS_COMPOSE_PORT=8787" in docker_docs
 
 
 def test_ci_and_release_audit_production_image_dependencies():

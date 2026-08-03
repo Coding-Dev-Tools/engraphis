@@ -161,8 +161,8 @@ def test_container_examples_do_not_describe_private_license_or_relay_state_as_lo
     assert "Issuance, trial state, leases, and revocations stay private." in compose
 
 
-def test_readme_describes_only_customer_side_cloud_state_as_persisted():
-    """The Docker quickstart must not imply that the public image owns licenses.
+def test_docker_docs_describe_only_customer_side_cloud_state_as_persisted():
+    """Supporting Docker docs must not imply that the public image owns licenses.
 
     The mounted state directory holds a customer-side connection plus a display cache;
     issuance and entitlement authority stay in the private control plane.  Calling that
@@ -170,10 +170,16 @@ def test_readme_describes_only_customer_side_cloud_state_as_persisted():
     """
 
     readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
 
     assert "database plus license state" not in readme
-    assert "customer-side cloud session and non-authoritative entitlement display" in readme
+    assert "customer-side cloud session and non-authoritative entitlement display" not in readme
+    assert "customer-side cloud session and non-authoritative entitlement display" in docker_docs
     assert (
         "License issuance, trials, leases, and revocations remain on the private control plane."
-        in readme
+        not in readme
+    )
+    assert (
+        "License issuance, trials, leases, and revocations remain on the private control plane."
+        in docker_docs
     )
