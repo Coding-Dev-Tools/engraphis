@@ -34,6 +34,15 @@ def _module_with_memory_db(monkeypatch):
     return srv
 
 
+def _approved_successor(srv, result):
+    """Model the local owner approval ceremony for prompt-visible fixtures."""
+    pending = json.loads(result) if isinstance(result, str) else dict(result)
+    approved = srv.service().engine.approve_for_prompt(
+        pending["id"], reviewer="test-owner", reason="approved test fixture",
+    )
+    return {**pending, "id": approved["id"], "pending_id": approved["approved_from"]}
+
+
 def _recall_side_effect_snapshot(srv):
     """State covered by recall's reinforcement, receipt, and event side effects."""
     conn = srv.service().store.conn
@@ -55,7 +64,8 @@ def _recall_side_effect_snapshot(srv):
 _ALL_TOOLS = {
     "engraphis_remember", "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline",
-    "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
+    "engraphis_recall_proactive", "engraphis_retire", "engraphis_forget",
+    "engraphis_secure_erase", "engraphis_pin", "engraphis_correct",
     "engraphis_promote", "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
     "engraphis_search_code", "engraphis_code_path", "engraphis_code_impact",
     "engraphis_export_code_graph", "engraphis_start_session", "engraphis_end_session",
@@ -67,43 +77,59 @@ _ALL_TOOLS = {
     "engraphis_check_update",
 }
 
+_SMART_TOOLS = {
+    "engraphis_session",
+    "engraphis_recall_context",
+    "engraphis_remember",
+    "engraphis_discover_actions",
+    "engraphis_execute_read",
+    "engraphis_execute_action",
+}
+
 
 def test_server_identity_and_tools_registered():
     import asyncio
 
     import engraphis.mcp_server as srv
     assert srv.mcp.name == "engraphis_mcp"
-    assert srv.mcp.instructions == srv._SESSION_PROTOCOL
-    assert "engraphis_recall_proactive" in srv.mcp.instructions
-    assert "operator-configured\nworkspace" in srv.mcp.instructions
-    assert "engraphis_start_session" in srv.mcp.instructions
-    assert "engraphis_end_session" in srv.mcp.instructions
-    assert "open_threads=[]" in srv.mcp.instructions
+    assert srv.mcp.instructions == srv._SMART_SESSION_PROTOCOL
+    assert len(srv.mcp.instructions) <= 512
+    assert "engraphis_session" in srv.mcp.instructions
+    assert "discover_actions" in srv.mcp.instructions
+    assert "engraphis_recall_proactive" not in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
-    assert len(_ALL_TOOLS) == 31
-    assert set(tools) == _ALL_TOOLS
+    assert set(tools) == _SMART_TOOLS
+
+    classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
+    assert srv.classic_mcp.name == "engraphis_mcp"
+    assert len(_ALL_TOOLS) == 33
+    assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("## 4. The 31 tools", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 33-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
-    props = tools["engraphis_remember"].inputSchema.get("properties", {})
+    props = classic["engraphis_remember"].inputSchema.get("properties", {})
     assert "content" in props and "workspace" in props and "params" not in props
     assert {"valid_from", "subject_key", "claim_kind"} <= set(props)
-    assert "as_of" in tools["engraphis_recall"].inputSchema.get("properties", {})
+    assert "as_of" in classic["engraphis_recall"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
-            "response_mode", "diagnostics"} <= set(
-        tools["engraphis_recall"].inputSchema.get("properties", {})
+            "response_mode", "diagnostics", "planning", "mtype_limits"} <= set(
+        classic["engraphis_recall"].inputSchema.get("properties", {})
     )
-    assert tools["engraphis_recall_context"].inputSchema["properties"][
+    assert classic["engraphis_recall_context"].inputSchema["properties"][
         "token_budget"
     ]["default"] == 1024
-    assert "as_of" in tools["engraphis_recall_grounded"].inputSchema.get("properties", {})
-    assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth", "response_mode"} <= set(
-        tools["engraphis_answer"].inputSchema.get("properties", {})
+    assert {"planning", "mtype_limits"} <= set(
+        classic["engraphis_recall_context"].inputSchema.get("properties", {})
+    )
+    assert "as_of" in classic["engraphis_recall_grounded"].inputSchema.get("properties", {})
+    assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
+            "response_mode", "planning", "mtype_limits"} <= set(
+        classic["engraphis_answer"].inputSchema.get("properties", {})
     )
     assert {"as_of", "valid_at", "known_at"} <= set(
-        tools["engraphis_export_code_graph"].inputSchema.get("properties", {})
+        classic["engraphis_export_code_graph"].inputSchema.get("properties", {})
     )
 
 
@@ -121,6 +147,34 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
 
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["id"] == 1
+    assert response["result"]["serverInfo"]["name"] == "engraphis_mcp"
+
+
+def test_classic_mcp_entrypoint_preserves_historical_server_identity():
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "classic-entrypoint-test", "version": "1"},
+        },
+    }) + "\n"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "engraphis.mcp_classic_cli"],
         cwd=ROOT,
         input=payload,
         text=True,
@@ -196,7 +250,7 @@ def test_retrieval_annotations_match_observed_state_mutation(
     import asyncio
 
     srv = _module_with_memory_db(monkeypatch)
-    stored = json.loads(srv.engraphis_remember(
+    stored = _approved_successor(srv, srv.engraphis_remember(
         content="The API uses PASETO tokens for authentication.",
         workspace="acme",
         repo="api",
@@ -220,7 +274,7 @@ def test_retrieval_annotations_match_observed_state_mutation(
     }
     observed_mutation = any(observed_changes.values())
 
-    tools = {tool.name: tool for tool in asyncio.run(srv.mcp.list_tools())}
+    tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     annotations = tools[tool_name].annotations
     assert annotations.readOnlyHint is (not observed_mutation)
     assert annotations.idempotentHint is (not observed_mutation)
@@ -228,9 +282,14 @@ def test_retrieval_annotations_match_observed_state_mutation(
 
 def test_remember_and_recall_tool_callables(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    stored = srv.engraphis_remember(
-        content="We deploy via GitHub Actions on tag push.", workspace="acme", repo="infra")
-    assert json.loads(stored)["stored"] is True
+    stored = _approved_successor(
+        srv,
+        srv.engraphis_remember(
+            content="We deploy via GitHub Actions on tag push.",
+            workspace="acme", repo="infra",
+        ),
+    )
+    assert stored["stored"] is True
 
     recalled = srv.engraphis_recall(
         query="how do we deploy?", workspace="acme", repo="infra")
@@ -241,6 +300,9 @@ def test_remember_and_recall_tool_callables(monkeypatch):
     assert memory["score"] == memory["relative_score"]
     assert 0.0 <= memory["absolute_support"] <= 1.0
     assert "Query-relative" in rec["score_semantics"]["relative_score"]
+    assert rec["degraded_mode"] is True
+    assert rec["semantic_support"] is False
+    assert rec["embedding_mode"] == "lexical_hashing"
 
 
 def test_mcp_external_provenance_cannot_be_forged_to_trusted(monkeypatch):
@@ -264,7 +326,7 @@ def test_mcp_external_provenance_cannot_be_forged_to_trusted(monkeypatch):
 
 def test_recall_context_returns_compact_sources_and_strict_usage(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    json.loads(srv.engraphis_remember(
+    _approved_successor(srv, srv.engraphis_remember(
         content=("Deploy via signed tags after backup verification. " * 20),
         workspace="acme",
         repo="infra",
@@ -302,7 +364,7 @@ def test_recall_context_payload_saves_at_least_half_vs_full_recall(monkeypatch):
         "Continuous integration runs on GitHub Actions. " + detail * 24,
     )
     for fact in facts:
-        json.loads(srv.engraphis_remember(
+        _approved_successor(srv, srv.engraphis_remember(
             content=fact, workspace="acme", repo="platform", dedupe=False
         ))
 
@@ -333,14 +395,14 @@ def test_recall_context_payload_saves_at_least_half_vs_full_recall(monkeypatch):
     assert ratio <= 0.5, f"compact/full fixture ratio was {ratio:.4f}"
 
 
-def test_remember_reports_resolution_op(monkeypatch):
+def test_public_mcp_writes_do_not_resolve_before_review(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
     text = "We standardized on pnpm as the package manager for all frontend repos."
     first = json.loads(srv.engraphis_remember(content=text, workspace="acme", repo="web"))
     second = json.loads(srv.engraphis_remember(content=text, workspace="acme", repo="web"))
     assert first["op"] == "add"
-    assert second["op"] == "noop"
-    assert second["id"] == first["id"]
+    assert second["op"] == "add"
+    assert second["id"] != first["id"]
 
 
 def test_remember_session_id_keeps_repo_default_scope(monkeypatch):
@@ -359,14 +421,17 @@ def test_remember_session_id_keeps_repo_default_scope(monkeypatch):
 
 def test_grounded_recall_tool_returns_flat_answer_payload(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    srv.engraphis_remember(
-        content="The API uses PASETO tokens for authentication.", workspace="acme", repo="api")
+    _approved_successor(srv, srv.engraphis_remember(
+        content="The API uses PASETO tokens for authentication.", workspace="acme", repo="api"))
     out = json.loads(srv.engraphis_recall_grounded(
         query="Which auth tokens does the API use?", workspace="acme", repo="api",
         min_support=0.0))
     assert out["query"] == "Which auth tokens does the API use?"
     assert out["grounded"] is True
     assert out["abstained"] is False
+    assert out["degraded_mode"] is True
+    assert out["semantic_support"] is False
+    assert out["embedding_mode"] == "lexical_hashing"
     assert "PASETO" in out["answer"]
     assert out["citations"]
 
@@ -380,10 +445,10 @@ def test_grounded_recall_tool_returns_flat_answer_payload(monkeypatch):
 def test_grounded_tool_positional_compatibility_keeps_support_and_synthesis_slots(monkeypatch):
     """New temporal/packing fields must not reinterpret legacy direct Python calls."""
     srv = _module_with_memory_db(monkeypatch)
-    srv.engraphis_remember(
+    _approved_successor(srv, srv.engraphis_remember(
         content="The API uses PASETO tokens for authentication.",
         workspace="acme", repo="api",
-    )
+    ))
 
     # The final two positional arguments were min_support and synthesize in the
     # published 1.x callable.  A temporal field inserted before them would turn
@@ -402,13 +467,13 @@ def test_grounded_tool_positional_compatibility_keeps_support_and_synthesis_slot
 
 def test_mcp_tools_expose_point_in_time_write_and_recall(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    old = json.loads(srv.engraphis_remember(
+    old = _approved_successor(srv, srv.engraphis_remember(
         content="The API rate limit is 100 requests per minute.",
         workspace="acme",
         repo="api",
         valid_from=1_000.0,
     ))
-    new = json.loads(srv.engraphis_remember(
+    new = _approved_successor(srv, srv.engraphis_remember(
         content="The API rate limit is 500 requests per minute.",
         workspace="acme",
         repo="api",
@@ -436,7 +501,7 @@ def test_mcp_tools_expose_point_in_time_write_and_recall(monkeypatch):
         min_support=0.0,
     ))
     assert [memory["id"] for memory in before["memories"]] == [old["id"]]
-    assert [citation["id"] for citation in after["citations"]] == [new["id"]]
+    assert {citation["id"] for citation in after["citations"]} == {old["id"], new["id"]}
     assert [citation["id"] for citation in alias["citations"]] == [old["id"]]
 
 
@@ -446,20 +511,31 @@ def test_tool_returns_actionable_error_on_bad_input(monkeypatch):
     assert out.startswith("Error:")
 
 
-def test_why_and_timeline_tools(monkeypatch):
+def test_why_and_timeline_tools_keep_pre_review_claims_non_superseding(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    srv.engraphis_remember(
+    old = srv.engraphis_remember(
         content="Until 2026-01 the rate limit was 100 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
-    srv.engraphis_remember(
+    new = srv.engraphis_remember(
         content="As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
 
+    # MCP tool responses are agent context: pending writes must not leak through
+    # historical views before a human approval ceremony.
+    why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
+    assert why["answer"] == []
+    assert why["supersedes"] == []
+    tl = json.loads(srv.engraphis_timeline(query="rate limit", workspace="acme", repo="web"))
+    assert tl["history"] == []
+
+    _approved_successor(srv, old)
+    _approved_successor(srv, new)
     why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
     assert any("500" in m["content"] for m in why["answer"])
-    assert any("100" in m["content"] for m in why["supersedes"])
+    assert any("100" in m["content"] for m in why["answer"])
+    assert why["supersedes"] == []
 
     tl = json.loads(srv.engraphis_timeline(query="rate limit", workspace="acme", repo="web"))
     assert len(tl["history"]) == 2
@@ -467,8 +543,9 @@ def test_why_and_timeline_tools(monkeypatch):
 
 def test_recall_proactive_tool(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    srv.engraphis_remember(content="High importance convention.", workspace="acme", repo="web",
-                           importance=0.9)
+    _approved_successor(srv, srv.engraphis_remember(
+        content="High importance convention.", workspace="acme", repo="web", importance=0.9,
+    ))
     started = json.loads(srv.engraphis_start_session(workspace="acme", repo="web"))
     assert started["bootstrap"] == {}
     srv.engraphis_end_session(session_id=started["session_id"], summary="mid-work",
@@ -484,8 +561,9 @@ def test_recall_proactive_tool(monkeypatch):
 
 def test_governance_tools_forget_pin_correct(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    out = json.loads(srv.engraphis_remember(content="The API key header is X-Auth-Key.",
-                                            workspace="acme"))
+    out = _approved_successor(srv, srv.engraphis_remember(
+        content="The API key header is X-Auth-Key.", workspace="acme",
+    ))
     pinned = json.loads(srv.engraphis_pin(memory_id=out["id"], workspace="acme"))
     assert pinned["pinned"] is True
 
@@ -494,9 +572,13 @@ def test_governance_tools_forget_pin_correct(monkeypatch):
         workspace="acme", reason="typo"))
     assert corrected["superseded"] == [out["id"]]
 
-    forgotten = json.loads(srv.engraphis_forget(memory_id=corrected["id"], workspace="acme",
-                                                reason="no longer needed"))
-    assert forgotten["status"] == "forgotten"
+    retired = json.loads(srv.engraphis_retire(memory_id=corrected["id"], workspace="acme",
+                                              reason="no longer needed"))
+    assert retired["status"] == "retired"
+
+    alias = json.loads(srv.engraphis_forget(memory_id=corrected["id"], workspace="acme",
+                                            reason="legacy retry"))
+    assert alias["status"] == "forgotten" and alias["deprecated"] is True
 
     err = srv.engraphis_forget(memory_id="mem_does_not_exist", workspace="acme")
     assert err.startswith("Error:")
@@ -504,7 +586,7 @@ def test_governance_tools_forget_pin_correct(monkeypatch):
 
 def test_promote_tool_widens_scope(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    source = json.loads(srv.engraphis_remember(
+    source = _approved_successor(srv, srv.engraphis_remember(
         content="All services use structured logs.", workspace="acme", repo="api"
     ))
 
@@ -520,7 +602,9 @@ def test_promote_tool_widens_scope(monkeypatch):
 
 def test_governance_tools_reject_wrong_workspace(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    out = json.loads(srv.engraphis_remember(content="Alpha's private fact.", workspace="alpha"))
+    out = _approved_successor(
+        srv, srv.engraphis_remember(content="Alpha's private fact.", workspace="alpha"),
+    )
     json.loads(srv.engraphis_remember(content="anchor", workspace="beta"))
 
     assert srv.engraphis_pin(memory_id=out["id"], workspace="beta").startswith("Error:")
@@ -535,8 +619,12 @@ def test_governance_tools_reject_wrong_workspace(monkeypatch):
 
 def test_link_and_record_event_tools(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    a = json.loads(srv.engraphis_remember(content="Memory A.", workspace="acme", repo="web"))
-    b = json.loads(srv.engraphis_remember(content="Memory B.", workspace="acme", repo="web"))
+    a = _approved_successor(
+        srv, srv.engraphis_remember(content="Memory A.", workspace="acme", repo="web"),
+    )
+    b = _approved_successor(
+        srv, srv.engraphis_remember(content="Memory B.", workspace="acme", repo="web"),
+    )
     link = json.loads(srv.engraphis_link(a=a["id"], b=b["id"], workspace="acme", repo="web",
                                          relation="related", reason="same subsystem"))
     assert link["linked"] is True

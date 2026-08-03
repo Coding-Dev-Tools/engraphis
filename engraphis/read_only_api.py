@@ -1,14 +1,16 @@
 """Small read-only HTTP surface for shared recall and repository-graph queries."""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
+from engraphis.netutil import is_local_request
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -27,6 +29,8 @@ class IntentRecallRequest(BaseModel):
     candidate_depth: str = "fixed"
     response_mode: str = "compact"
     diagnostics: bool = False
+    planning: str = "off"
+    mtype_limits: Optional[dict[str, StrictInt]] = None
 
 
 class CodePathRequest(BaseModel):
@@ -65,12 +69,20 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
 
     @app.middleware("http")
     async def authorize(request, call_next):
-        if expected and request.url.path not in {"/health", "/openapi.json"}:
-            supplied = request.headers.get("authorization", "")
-            if not bearer_ok(supplied, expected):
+        public = request.url.path in {"/health", "/openapi.json"}
+        if expected and not public:
+            if not bearer_ok(request.headers.get("authorization", ""), expected):
                 return JSONResponse(
                     {"detail": "invalid bearer token"}, status_code=401
                 )
+        elif not expected and not public and not is_local_request(request):
+            # The packaged launcher refuses a tokenless non-loopback bind, but keep the
+            # same boundary inside the ASGI factory too. This prevents a direct
+            # ``uvicorn ... --factory --host 0.0.0.0`` invocation (or an embedding app)
+            # from publishing workspace content merely by bypassing the launcher.
+            return JSONResponse(
+                {"detail": "remote access requires a bearer token"}, status_code=403
+            )
         return await call_next(request)
 
     def run(fn, *args, **kwargs):
@@ -93,13 +105,22 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
                response_mode: str = "compact",
-               diagnostics: bool = False):
+               diagnostics: bool = False,
+               planning: str = "off",
+               mtype_limits: Optional[str] = None):
+        try:
+            parsed_limits = json.loads(mtype_limits) if mtype_limits else None
+            if parsed_limits is not None and not isinstance(parsed_limits, dict):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid mtype_limits") from exc
         return run(
             svc.recall, query, workspace=workspace, repo=repo, k=k,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
+            planning=planning, mtype_limits=parsed_limits,
             reinforce=False, intent="http_read_only", record_receipt=False,
         )
 
@@ -113,6 +134,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             retrieval_profile=req.retrieval_profile,
             candidate_depth=req.candidate_depth,
             response_mode=req.response_mode, diagnostics=req.diagnostics,
+            planning=req.planning, mtype_limits=req.mtype_limits,
             reinforce=False, record_receipt=False,
         )
 

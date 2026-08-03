@@ -91,6 +91,12 @@ def test_serialization_roundtrip_preserves_signature():
     assert _signature(r2) == _signature(rec)
 
 
+def test_untrusted_record_uses_strict_boolean_pinning():
+    assert dict_to_record({"id": "mem_false", "content": "x", "pinned": "false"}).pinned is False
+    assert dict_to_record({"id": "mem_one", "content": "x", "pinned": 1}).pinned is False
+    assert dict_to_record({"id": "mem_true", "content": "x", "pinned": True}).pinned is True
+
+
 def test_sync_roundtrip_preserves_claim_identity_and_closure_knowledge_time():
     rec = MemoryRecord(
         id="mem_claim",
@@ -292,6 +298,46 @@ def test_sync_quarantine_overwrite_removes_existing_vector():
     ).fetchone() is None
 
 
+def test_sync_benign_overwrite_cannot_clear_an_existing_quarantine_marker():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_quarantined",
+        content="Historical quarantined payload.",
+        workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        last_access=1.0,
+        ingested_at=1.0,
+        valid_from=1.0,
+        metadata={
+            "provenance": {"source": "import", "trusted": False, "quarantined": True},
+            "quarantine": {"state": "quarantined", "policy": "test", "reasons": []},
+        },
+        provenance={"source": "import", "trusted": False, "quarantined": True},
+    ))
+    report = SyncEngine(store).apply_bundle({
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "device_id": "peer",
+        "repos": {},
+        "memories": [{
+            "id": "mem_quarantined",
+            "content": "A benign-looking peer rewrite.",
+            "last_access": 100.0,
+            "ingested_at": 100.0,
+            "valid_from": 100.0,
+        }],
+        "mem_links": [],
+    })
+
+    assert report["updated"] == 1
+    record = store.get_memory("mem_quarantined")
+    assert record.provenance["quarantined"] is True
+    assert record.metadata["quarantine"]["state"] == "quarantined"
+    assert record.valid_to is not None
+
+
 def test_sync_cannot_overwrite_a_trusted_local_memory_with_peer_content():
     store = Store(":memory:")
     workspace_id = store.get_or_create_workspace("w")
@@ -303,7 +349,7 @@ def test_sync_cannot_overwrite_a_trusted_local_memory_with_peer_content():
         last_access=1.0,
         ingested_at=1.0,
         valid_from=1.0,
-        provenance={"source": "human", "trusted": True},
+        provenance={"source": "human", "trusted": True, "review_state": "approved"},
     ))
     bundle = {
         "format": SYNC_FORMAT,
@@ -339,7 +385,7 @@ def test_sync_cannot_attach_peer_graph_edges_to_a_trusted_local_memory():
         content="Production releases deploy to blue.",
         workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
-        provenance={"source": "human", "trusted": True},
+        provenance={"source": "human", "trusted": True, "review_state": "approved"},
     ))
     bundle = {
         "format": SYNC_FORMAT,

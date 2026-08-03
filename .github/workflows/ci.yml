@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (core + server/mcp/code extras; no torch — the offline gate)
+      - name: Install (core + server/mcp/code extras; no torch or SQLCipher)
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
@@ -42,6 +42,28 @@ jobs:
       - name: Ablation (vector-only vs hybrid)
         run: python -m eval.ablation
 
+  encryption:
+    name: encryption driver gate (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install encryption integration gate
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,encryption]"
+      # sqlcipher3-binary currently cannot coexist safely with the stdlib sqlite
+      # extension during the long general suite. Keep its real driver contract in
+      # this dedicated, short-lived process rather than skipping encryption coverage.
+      - name: Encryption at-rest integration tests
+        run: python -m pytest -o addopts="" tests/test_encrypted_store.py -q -rs
+
   core-py39:
     name: core floor (numpy-only, Python 3.9)
     runs-on: ubuntu-latest
@@ -60,6 +82,43 @@ jobs:
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Ablation
         run: python -m eval.ablation
+
+  pi-extension:
+    name: Pi extension (${{ matrix.os }}, Python ${{ matrix.python-version }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+            node-version: "22.19.0"
+          - os: windows-latest
+            python-version: "3.11"
+            node-version: "24"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: integrations/pi/npm-shrinkwrap.json
+      - name: Install the current Smart MCP server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: Install and verify the Pi package
+        working-directory: integrations/pi
+        env:
+          ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
+        run: |
+          npm ci --ignore-scripts
+          npm run verify
+          npm run test:integration
+          npm audit --omit=dev
 
   browser-accessibility:
     name: browser accessibility smoke
@@ -98,7 +157,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
-              | grep -qE '^(Dockerfile|docker-entrypoint\.sh|docker-compose\.yml|railway\.json|deploy/|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/ci\.yml)'; then
+              | grep -qE '^(Dockerfile|docker-entrypoint\.sh|docker-compose(\.lan)?\.yml|railway\.json|deploy/|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/ci\.yml)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -111,6 +170,18 @@ jobs:
     if: needs.docker-gate.outputs.run == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Reject unauthenticated LAN Compose overlay
+        run: |
+          if env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet; then
+            echo "LAN overlay must require ENGRAPHIS_API_TOKEN"
+            exit 1
+          fi
+      - name: Validate token-protected LAN Compose overlay
+        env:
+          ENGRAPHIS_API_TOKEN: ci-lan-overlay-token
+        run: docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet
       - name: Build image
         run: docker build -t engraphis:ci .
       - name: Verify production image OCR runtime
@@ -119,10 +190,22 @@ jobs:
           'python -c "import PIL, pytesseract" && command -v tesseract >/dev/null &&
           tesseract --version | head -n 1'
       - name: Audit the exact production image dependency set
-        run: >-
-          docker run --rm --entrypoint sh engraphis:ci -c
-          'python -m pip install --no-cache-dir pip-audit &&
-          python -m pip_audit --local'
+        # The runtime image intentionally has no pip: it is a build tool whose vendored
+        # dependency snapshot would otherwise remain an unnecessary attack surface. Copy the
+        # exact installed distributions to the runner and audit that set instead of mutating
+        # the production image just to run the audit.
+        run: |
+          audit_dir="$(mktemp -d)"
+          container="engraphis-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            rm -rf "$audit_dir"
+          }
+          trap cleanup EXIT
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit
+          docker create --name "$container" engraphis:ci >/dev/null
+          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          python -m pip_audit --path "$audit_dir"
       - name: Run container (offline deterministic embedder — no model downloads)
         run: |
           docker run -d --name engraphis -p 8700:8700 \

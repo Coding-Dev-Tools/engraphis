@@ -9,12 +9,39 @@ import json
 
 import pytest
 
-from engraphis.core.interfaces import Edge, GraphLayer, Node, SearchFilter
+from engraphis.core.interfaces import Edge, GraphLayer, Node, Scope, SearchFilter
 from engraphis.service import MemoryService, ValidationError
 
 
 def _svc():
     return MemoryService.create(":memory:")
+
+
+def _remember_approved(svc, content, *, workspace, repo=None, scope="workspace", **kwargs):
+    """Create direct, trusted local evidence for data-operation fixtures.
+
+    These tests target workspace copying/merging rather than public ingress.  Calling
+    ``MemoryService.remember`` would correctly retain an additional pending record,
+    changing the dataset whose low-level tables the tests assert.  The engine is the
+    explicit in-process approval boundary, so use it to build the intended fixture.
+    """
+    workspace_id = svc.store.get_or_create_workspace(workspace)
+    repo_id = svc.store.get_or_create_repo(workspace_id, repo) if repo else None
+    result = svc.engine.remember_with_resolution(
+        content,
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        scope=Scope(scope),
+        metadata={
+            "provenance": {
+                "source": "test_fixture",
+                "trusted": True,
+                "review_state": "approved",
+            }
+        },
+        **kwargs,
+    )
+    return result["id"]
 
 
 def _wsid(svc, name):
@@ -218,9 +245,9 @@ def test_merge_discards_source_receipt_chain_without_touching_target_chain():
 
 def test_merge_rehomes_incidence_and_preserves_graph_recall():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    memory_id = svc.remember(
-        "Opaque graph payload.", workspace="a", scope="workspace"
-    )["id"]
+    memory_id = _remember_approved(
+        svc, "Opaque graph payload.", workspace="a", scope="workspace"
+    )
     svc.create_workspace("b")
     wid_src = _wsid(svc, "a")
     wid_dst = _wsid(svc, "b")
@@ -281,9 +308,9 @@ def test_merge_folds_colliding_repos_without_duplicating():
 
 def test_merge_remaps_code_files_and_memory_links_for_colliding_repos():
     svc = _svc()
-    source_memory = svc.remember(
-        "Source deploy helper.", workspace="a", repo="web", scope="repo"
-    )["id"]
+    source_memory = _remember_approved(
+        svc, "Source deploy helper.", workspace="a", repo="web", scope="repo"
+    )
     svc.remember("Target deploy helper.", workspace="b", repo="web", scope="repo")
     c = svc.store.conn
     src_repo = c.execute(
@@ -683,10 +710,13 @@ def test_copy_remaps_graph_evidence_history_and_event_references():
 
 def test_copy_clones_vectors_fts_links_entities_and_edges():
     svc = _svc()
-    m1 = svc.remember("Postgres 16 is the primary database.", workspace="a",
-                      repo="infra", scope="repo")["id"]
-    m2 = svc.remember("Deploys run Fridays at noon.", workspace="a",
-                      repo="infra", scope="repo")["id"]
+    m1 = _remember_approved(
+        svc, "Postgres 16 is the primary database.", workspace="a",
+        repo="infra", scope="repo",
+    )
+    m2 = _remember_approved(
+        svc, "Deploys run Fridays at noon.", workspace="a", repo="infra", scope="repo",
+    )
     svc.link(
         m1, m2, workspace="a", relation="related",
         layer="causal",

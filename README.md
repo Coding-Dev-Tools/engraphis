@@ -2,11 +2,11 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
+[![Support](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
-https://engraphis.com/
+[https://engraphis.com/](https://engraphis.com/)
 
-https://discord.com/invite/Wfr2ejBmY
+[https://discord.com/invite/Wfr2ejBmY](https://discord.com/invite/Wfr2ejBmY)
 
 **Give your AI agents a memory. See it, search it, and maintain it, all in a beautiful WebUI on your own machine.**
 
@@ -30,7 +30,7 @@ https://discord.com/invite/Wfr2ejBmY
 ## Measured token and context savings
 
 <p align="center">
-  <img src="docs/images/context-efficiency.png" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -101,19 +101,49 @@ limitations, canonical external-evaluation requirements, and the no-unsupported-
 
 ---
 
+## Full Engraphis install: pip install "engraphis[all]"
+
+The complete `engraphis[all]` install is the default way to use Engraphis: it includes the local
+dashboard, Smart MCP server, documents, Cloud Sync client, and supported optional integrations.
+Python 3.10+ is required.
+
+```bash
+pip install "engraphis[all]"
+engraphis-dashboard
+```
+
+The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
+account or API key.
+
+### Smaller installation options
+
+Use a smaller package only when you intentionally need a limited surface. The NumPy-only core
+continues to support Python 3.9+.
+
+| Goal | Install | Start |
+|---|---|---|
+| Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
+| Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
+| Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
+
+For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
+the [agent connection guide](docs/AGENT_CONNECT.md).
+
+> **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
+> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> remains version 7, so this MCP surface change does not require a data migration. See the
+> [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
+
+---
+
 ## What Engraphis gives an agent
 
 An agent should not have to reconstruct a project from scattered chat history on every task.
 Engraphis turns local project knowledge into scoped, time-aware memory; retrieves the evidence
 that supports the current question; and returns a bounded, attributable context packet.
 
-<p align="center">
-  <img src="docs/images/engraphis-benefit-flow.png" alt="Diagram: project history becomes scoped and temporal Engraphis memory, hybrid recall, then bounded cited context for an agent" width="100%">
-  <br>
-  <sup>Store durable project knowledge · retrieve supporting evidence · give the agent only what it needs</sup>
-</p>
-
-The flow is the essential path. See [measured token and context savings](#measured-token-and-context-savings)
+The core task is continuity: retrieve the current, supported project decision without dragging the
+whole history into the next prompt. See [measured token and context savings](#measured-token-and-context-savings)
 for the short version of how much less history an agent has to carry.
 
 | Agent need | What Engraphis changes |
@@ -132,7 +162,7 @@ contracts: retrieving focused evidence, returning an answer only with support, a
 abstaining when no support exists.
 
 <p align="center">
-  <img src="docs/images/evidence-backed-agent-examples.png" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
+  <img src="docs/images/evidence-backed-agent-examples.svg" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
   <br>
   <sup>Each card names its deterministic offline fixture and test scope. The examples are illustrative; they are not customer data or external benchmark results.</sup>
 </p>
@@ -141,9 +171,9 @@ Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce th
 the former measures evidence retrieval and context size, while the latter measures the
 answer-versus-abstain decision.
 
-## Full Engraphis install: pip install "engraphis[all]"
+## Dashboard and local UI
 
-Engraphis-Dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
+The Engraphis dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
 signup, or API key and stays in a SQLite file on your machine.
 
 **Ledger** is the primary local interface for recall, memories, graph exploration, provenance,
@@ -249,11 +279,14 @@ key. Plaintext SQLite remains the explicit default on every platform.
 > Alternatively, use Docker (`docker compose up`). `pipx install "engraphis[server]"` also works.
 
 > First run downloads `all-MiniLM-L6-v2` (~80 MB). Without it, the engine falls back
-> to a deterministic offline embedder so it always runs.
+> to deterministic feature hashing so it always runs offline. That fallback captures lexical
+> overlap, not meaning: recall and grounded MCP responses set `degraded_mode=true` and
+> `semantic_support=false`, and disable vector retrieval plus semantic-cosine evidence. Install
+> a declared embedding model for semantic retrieval.
 
 ---
 
-## Quickstart: dashboard (the headline)
+## Quickstart: dashboard
 
 ```bash
 pip install "engraphis[server]"
@@ -267,15 +300,13 @@ engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 docker compose up                     # → http://127.0.0.1:8700
 ```
 
-A fresh clone needs no `.env`: the service runs `engraphis-dashboard --no-open`, stores the v2
-database plus the optional customer-side cloud session and non-authoritative entitlement display
-cache on a named volume mounted at `/data`, and accepts overrides from `.env` or the shell.
-License issuance, trials, leases, and revocations remain on the private control plane.
+For Docker Compose persistence and loopback-port configuration, see the
+[Docker deployment guide](docs/DOCKER.md).
 `engraphis-server` and `engraphis server` are headless compatibility aliases
 for this same v2 service, so every public surface has the same scoped recall and retention model.
 
-Compose publishes the service on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN` before
-changing its port mapping to a non-loopback host address.
+For optional LAN exposure, token configuration, and HTTP MCP setup, see the
+[Docker deployment guide](docs/DOCKER.md).
 
 Set `ENGRAPHIS_API_TOKEN` to require API authentication and `ENGRAPHIS_DB_KEY` to encrypt
 the local database at rest. Hosted-plan credentials configure customer clients; they do not
@@ -295,12 +326,21 @@ cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 For Command Code scopes, verification, and its optional Provider API setup, see the
 [Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
 
-Your agent now has 31 tools for memory, recall, grounded answers, timelines, consolidation, code
-graph work, and privacy-safe receipts. The full inventory, including `engraphis_check_update`, is
-in the [MCP tool reference](docs/MCP_TOOLS.md).
+`engraphis-mcp` is zero-configuration Smart MCP: agents begin with six compact tools for sessions,
+prompt-ready recall, durable memory, action discovery, and safe execution. For code graphs,
+governance, audit, or other advanced work, the agent calls `engraphis_discover_actions` and then
+the indicated read or action executor; no profile selection is required. The gateway validates
+the discovered capability again before it runs it, and clients remain responsible for their
+normal destructive-action approval boundary.
 
-For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
-`engraphis_record_event` use workspace `default` when `workspace` is omitted.
+Existing clients that pin the historical 33 named tools can use
+`engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
+including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOLS.md).
+
+### Pi extension
+
+For installation, configuration, lifecycle commands, and the local trust boundary, see the
+[Pi extension guide](integrations/pi/README.md).
 
 ## Quickstart: repository graph
 
@@ -378,7 +418,8 @@ For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budg
 `token_counter`), and optional diagnostics. Accounting is exact for the named counter; inject the
 reader's tokenizer when reader-model token parity is required. `engraphis_recall` remains the compatible full-recall
 surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
-would duplicate it. Both default to the `balanced` retrieval profile; `auto` remains opt-in.
+would duplicate it. For advanced query-planning configuration, see the
+[architecture guide](docs/ARCHITECTURE_V3.md#query-planning).
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
@@ -403,7 +444,7 @@ Engraphis separates automatic write resolution from explicit human governance:
 | `correct` | Replacing one known-wrong memory | Closes the old validity window and links the replacement |
 | `promote` | A narrow learning now applies more broadly | Writes a wider-scope successor and closes/links the source instead of editing scope in place |
 | `merge` | Combining two or more overlapping memories | Retires every source and creates one memory that supersedes all of them |
-| `forget` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
+| `retire` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
 | `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; sources stay live unless explicit supersession is requested |
 
 Manual N→1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
@@ -421,6 +462,16 @@ merged = mem.merge(
 print(merged["compaction"])
 ```
 
+`retire` is intentionally not deletion: it preserves temporal history, FTS, and vector
+evidence for historical reads. If a credential was captured, new writes are blocked before
+storage; for a legacy leak use the explicitly destructive `MemoryService.secure_erase()` or
+`POST /api/secure-erase`/`engraphis_secure_erase`. That flow removes the one memory and local
+FTS/vector/ANN and derived graph/link rows, runs SQLite secure-delete, WAL checkpoint, and
+VACUUM, and scans recognised local SQLite recovery backups. It cannot erase exports, filesystem
+snapshots, remote peers, unknown backups, or information a running/compromised agent already
+read; rotate the credential. See [secure-erasure limits](docs/SECURE_ERASURE.md). `forget`
+remains a deprecated compatibility alias for `retire`.
+
 All sources must belong to the named workspace. The result inherits the strictest source
 sensitivity, remains untrusted if any source was untrusted, and stays pinned if any source was
 pinned. The full multi-predecessor chain remains visible through inspection, Why, and Timeline.
@@ -430,27 +481,22 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 ## Free forever vs. hosted plans
 
 The core engine, local dashboard, MCP server, and manual consolidation are Apache-2.0 and free.
-**Pro and Team are services**, not hidden modes in this package: a subscription authorizes the
-official hosted service, whose private control plane, relay, compute, billing, and Team identity
-run in a private repository. **Pro is $10/mo ($100/yr); Team is $20/seat/mo ($200/seat/yr).** The
-email-confirmed, no-card trial lasts **exactly 3 active days**.
-
-After a denial, `workspace_write_grace` may retain only private-service-approved hosted-account
-continuity operations for at most **24 hours**. It never extends trial or subscription expiry or
-grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats,
-or credentials. Then `recovery_read_only` provides recovery and data export. Neither state
-restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace
-changes end-to-end; managed compute is a separate readable-snapshot service. See
-[`docs/HOSTED_PLANS.md`](docs/HOSTED_PLANS.md), [`docs/LICENSING.md`](docs/LICENSING.md), and
-[`docs/SYNC.md`](docs/SYNC.md) for the full boundaries.
+**Pro and Team are services** that provide optional access to the official hosted service; its
+control-plane, billing, relay, compute, and Team identity modules live in a private repository.
+They do not limit the local core. See
+[hosted plans](docs/HOSTED_PLANS.md), [licensing](docs/LICENSING.md), and
+[Cloud Sync](docs/SYNC.md) for service boundaries, lifecycle, and pricing.
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
 to support the project and add hosted services.
 
+[Compare hosted plans](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing)
+when you are ready to evaluate the service boundary and billing options.
+
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 31 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 33-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -468,102 +514,35 @@ to support the project and add hosted services.
 
 ## MCP tools
 
-Engraphis exposes 31 MCP tools across memory, recall, code graphs, governance, sessions, and
-privacy-safe audit receipts. The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 33-tool Classic compatibility
+server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
+The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
 
 ---
 
-## Layered graph and privacy receipts
+## Graphs and privacy-safe receipts
 
-Memory relationships, extracted entities, and code structure stay normalized in one SQLite
-database. Edges are tagged as `temporal`, `entity`, `causal`, or `semantic`, so callers can
-select a logical overlay without maintaining separate graphs. Schema migrations are additive
-and idempotent: existing memories and bi-temporal history remain in place, while legacy edge
-layers are inferred once.
-
-`MemoryService.intent_remember()`, `intent_link()`, and `intent_recall()` provide a
-transport-neutral agent protocol while the existing `engraphis_remember`, `engraphis_link`, and
-`engraphis_recall` tools remain the canonical MCP vocabulary. Explicit links can persist both a
-layer and a durable rationale. Intent recall maps `explain`, `summarize_history`, and
-`locate_code` to appropriate layer filters; code intents also return matching symbols when a
-repository is supplied.
-
-The operation-receipt chain is deliberately content-free. It records bounded operation metadata
-and chained hashes, while excluding raw memory/query text, workspace names, memory IDs, and actor
-identities from exported receipt payloads. Use `engraphis_receipts`,
-`engraphis_context_savings`, `engraphis_verify_receipts`, and `engraphis_export_receipts` to
-inspect the chain, aggregate retrieved-source versus packed-context tokens, or compare it with a
-previously saved head/count anchor. Savings stay separated by token-counter identity and are
-reported with chain validity; they are packing measurements, not provider bills. A separately
-maintained local count/head anchor and persistent integrity marker make interior edits, reordering,
-and tail truncation detectable.
-
-See [the v3 architecture document](docs/ARCHITECTURE_V3.md) for the data flow and
-[SECURITY.md](SECURITY.md) for the trust boundaries.
+Memory, entity, and code relationships live in one local graph. Engraphis also provides
+content-free operation receipts for inspectable audit evidence. See the
+[architecture](docs/ARCHITECTURE_V3.md), [MCP tool reference](docs/MCP_TOOLS.md), and
+[security policy](SECURITY.md) for the data model, tools, and guarantees.
 
 ---
 
 ## Cloud sync
 
-**Cloud Sync is a hosted Pro/Team service.** The private service owns relay storage,
-organization authorization, credential rotation, scheduling, isolation, and operations. This
-Apache package contains only the customer protocol, deterministic merge implementation, and
-one-shot client needed to participate after the hosted service authorizes an installation. No
-environment switch turns the public image into an Engraphis relay.
-
-The merge remains a state-based CRDT: every field resolves by a commutative, idempotent rule so
-`merge(A, B) == merge(B, A)`. The current format carries memories and memory-to-memory links;
-entity/code graph reconciliation is not yet part of sync. `secret` memories and all live or
-invalidated session-scoped memories are device-local and excluded from every exported sync
-bundle; links are exported only when both endpoints remain. Inbound bundles cannot create or
-overwrite session state. Cloud Sync encrypts eligible shared-workspace changes end-to-end before
-they leave this device; the relay stores ciphertext and cannot read bundle contents.
-
-Cloud Sync fails closed without its client-held workspace key: install `engraphis[cloud-sync]`
-on Python 3.10+ and set the same 32-byte URL-safe-base64 `ENGRAPHIS_SYNC_E2EE_KEY` on each
-authorized device using a secure out-of-band transfer. The relay and Engraphis Cloud never
-receive that key. [`docs/SYNC.md`](docs/SYNC.md) includes the key-generation command and the
-`--relay-e2ee-key` one-off CLI alternative.
-
-For development, backup interchange, and offline testing, the public client retains an explicit
-one-shot folder exchange. That manual primitive is not the official Cloud Sync product and has
-no hosted identity, seat, managed-storage, availability, or support guarantees. See
-[`docs/SYNC.md`](docs/SYNC.md) for the exact boundary, security model, and client usage.
+Cloud Sync is an optional hosted Pro/Team service. The public package includes the customer client
+and deterministic merge implementation; hosted relay and account operations are separate. See
+[Cloud Sync](docs/SYNC.md) for setup, encryption, merge behavior, and the local folder exchange.
 
 ---
 
-## Security, reliability, and trust boundaries
+## Security and trust boundaries
 
-The public runtime and its hosted-service clients enforce:
-
-- **Single-user local access**: loopback is the default; an optional constant-time-checked
-  bearer protects a remotely exposed customer node. Local Team accounts, invitations, roles,
-  seats, password handling, and organization administration are not shipped here.
-- **Hosted authorization boundary**: Cloud Sync, Analytics, Automation, Team identity, and
-  cost-bearing work require current authorization from the private service. Any bounded
-  `workspace_write_grace` and later `recovery_read_only` state is enforced by that private
-  service for hosted account continuity; neither state grants cloud access or account growth,
-  and neither restricts the free local core.
-- **SQLite transaction safety**: shared v2 connections serialize complete write transactions;
-  a failed statement that opened a transaction rolls it back and releases its lock. Legacy
-  decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
-- **Customer-client isolation**: workspace allow-lists are enforced while applying fetched
-  data, and device-local `secret` memories cannot be uploaded or remotely overwritten,
-  invalidated, or downgraded. Bundle size and record counts are bounded before application;
-  hosted tenant and storage enforcement remains private service responsibility.
-- **Hostile-input handling**: sync-folder peers, graph merge inputs, repository walks,
-  resource files, and PostgreSQL selectors are treated as untrusted; traversal,
-  symlink/replace races, oversized/deep payloads, malformed rows, and non-finite JSON are
-  rejected.
-- **Proxy and network hardening**: default loopback CORS follows `ENGRAPHIS_PORT`;
-  proxy-reported HTTPS produces Secure session cookies, and redirects use the configured
-  dashboard URL rather than a caller-controlled Host header. Managed-service clients reject
-  insecure or malformed endpoints and never forward bearer credentials across HTTP
-  redirects.
-
-See [SECURITY.md](SECURITY.md) for supported versions, deployment requirements, known gaps,
-and the vulnerability-reporting process.
+Engraphis is local-first and binds to loopback by default. Read the
+[security policy](SECURITY.md) before remote deployment or integrating external resources; it
+covers supported versions, data protections, threat model, and vulnerability reporting.
 
 ---
 
@@ -577,8 +556,9 @@ pip install "engraphis[encryption]"
 
 The entire main memory database file is transparently encrypted with AES-256 via SQLCipher;
 full-text search, the graph, and every query keep working unchanged. Customer authentication
-and managed-service state use their respective deployment protections. When a key is set for the main database, Engraphis
-**fails loud** rather than silently falling back to plaintext. Generate a strong key:
+and managed-service state use their respective deployment protections. When a key is set for the
+main database, Engraphis **fails closed with an error** rather than silently falling back to
+plaintext. Generate a strong key:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -589,69 +569,22 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ---
 
-## Import files & folders
+## Import files and folders
 
-Drag-and-drop or server-side import, access-controlled and bounded:
-
-- **Dashboard upload**: accepts text, Markdown, code, JSON/CSV/HTML, DOCX, and exported
-  Google Workspace documents directly; optional adapters add PDF text extraction, image OCR,
-  and audio/video transcription. Native `.gdoc` pointer files contain no document body, so
-  export them as DOCX, PDF, HTML, or plain text before local ingestion.
-- **Server-side folder import**: `MemoryService.import_folder()` reads a directory on the
-  machine running Engraphis. Large resources are chunked deterministically even when the
-  configured extractor is `none`; path-traversal guards still apply.
-- **PostgreSQL**: `engraphis_ingest_postgres_schema`, `POST /api/resources/postgres`, or
-  `engraphis-graph postgres` converts tables, columns, constraints, and foreign keys into a
-  schema memory and entity graph. The DSN is never persisted.
-- **MCP ingest**: `engraphis_ingest` accepts raw text and applies the configured extractor
-  (`chunk`, `llm`, or `llm_structured`); with `none` it stores one verbatim memory.
-- **Sub-file chunking**: set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
-  documents into retrieval-sized, structure-aware pieces (headings start new chunks;
-  ~256-token target with sentence-level overlap) *without an LLM*. Each chunk becomes
-  its own memory, so recall returns the relevant **passage** instead of a whole file,
-  a big context-reduction win on long docs. Works across all three ingest paths
-  (dashboard upload, `import_folder`, and `engraphis_ingest`). Measure the payoff with
-  the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
-  (whole-file vs. chunked, same recall pipeline, offline). The dependency-free default
-  uses the named `engraphis.chars4.v1` estimate. Set
-  `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` and, for reproducible runs,
-  `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` to size prose chunks with the actual reader
-  tokenizer; the chosen counter identity is preserved in each chunk's metadata.
-- **Structured LLM extraction**: `ENGRAPHIS_EXTRACTOR=llm_structured` validates typed
-  facts, entities, relations, and keywords before storage. Its preserved entity/relation
-  metadata feeds the knowledge graph automatically. A successful dashboard connection test
-  enables this mode by default; the Settings switch can disable or re-enable it immediately.
+Import supported documents and code through the dashboard, a local folder, or MCP. Optional
+extractors add offline chunking, structured LLM extraction, document OCR, transcription, and
+PostgreSQL schema ingestion. See the [MCP tool reference](docs/MCP_TOOLS.md),
+[architecture guide](docs/ARCHITECTURE_V3.md), and [security policy](SECURITY.md) for formats,
+configuration, and local-resource safeguards.
 
 ---
 
-## Manual consolidation and hosted automation
+## Consolidation and automation
 
-Manual consolidation is free and remains local. Use the dashboard's **Consolidate** tab,
-`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
-`python -m scripts.consolidate`. Dry-run is the default.
-
-Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. On a connected workspace, the
-first Automation view automatically starts the recommended daily maintenance policy and uploads
-its bounded snapshot; there is no separate enable step. Customers can later pause or tune that
-policy. The public Automation tab displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
-consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
-background loop, cron wrapper, or worker.
-
-Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
-secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB. A connected installation sends that bounded, non-secret snapshot to Engraphis Cloud
-over HTTPS, where the hosted service must read it to produce a proposal; this is not
-end-to-end-encrypted processing. Local-only installations send nothing. Managed compute is
-enabled by default once an installation is connected to Engraphis Cloud. Connecting accepts
-the terms that cover it, and it stays off for a local-only installation with no cloud session;
-cloud entitlement is also required. `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` opts a connected
-installation back out. A managed proposal never silently rewrites the local database.
-
-Manual consolidation can also use schema-validated LLM output through
-`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
-`python -m scripts.consolidate --structured`. Source memories remain live by default;
-`supersede_sources` / `--supersede-sources` closes them only after validated replacement
-facts are written.
+Manual consolidation is free, local, and dry-run by default; use the dashboard, SDK, CLI, or
+MCP. Hosted Pro and Team automation is optional managed compute that produces reviewable
+proposals rather than silently changing local data. See [hosted plans](docs/HOSTED_PLANS.md),
+[licensing](docs/LICENSING.md), and the [MCP tool reference](docs/MCP_TOOLS.md) for scope and use.
 
 ---
 
@@ -677,6 +610,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` | Not set | Optional immutable tokenizer/model revision recorded in the chunk-counter identity; pin this for reproducible benchmark artifacts |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
 | `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = sends a bounded excerpt to the configured provider for advisory ephemeral/normal/critical classification |
+| `ENGRAPHIS_ALLOW_AUTOMATIC_CRITICAL_RETENTION` | `false` | Opt in only when an LLM supervisor may automatically assign the long-lived `critical` class; explicit user-selected critical retention is unaffected |
 | `ENGRAPHIS_WHISPER_MODEL` | Not set | Enables local faster-whisper audio/video transcription |
 | `ENGRAPHIS_POSTGRES_DSN` | Not set | CLI-only PostgreSQL source; used for the connection and never stored |
 | `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
@@ -689,14 +623,14 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
-| `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
+| `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
 | `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
 | `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API |
 | `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | Not set | Hosted organization bound to this customer session |
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out, `1` forces it on |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
 
 See `.env.example` for the full customer-runtime and managed-service client options.
 
@@ -710,7 +644,7 @@ engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server: 31 tools
+│   ├── mcp_server.py        # Smart MCP gateway + 33-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
@@ -722,7 +656,7 @@ engraphis/
 │   ├── config.py / app.py   # env settings / REST server
 │   └── static/              # compatibility dashboard asset paths
 ├── eval/                    # offline retrieval eval harness + datasets
-├── tests/                   # pytest suite (300+ tests, offline numpy-only core)
+├── tests/                   # offline-first pytest suite and release/security contracts
 ├── scripts/                 # dashboard, server, graph, CLI, connect, update, consolidation, sync
 ├── docs/                    # product, API, hosting, sync, and provider guides
 ├── Dockerfile / docker-compose.yml

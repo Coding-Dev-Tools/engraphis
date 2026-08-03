@@ -313,13 +313,32 @@ def create_app(
             actor="inspector-local",
         )
 
-    @app.post("/api/forget")
+    @app.post("/api/retire")
+    async def retire(body: _GovernBody):
+        return svc().retire(
+            body.memory_id,
+            workspace=body.workspace,
+            repo=body.repo,
+            reason=body.reason,
+            actor="inspector-local",
+        )
+
+    @app.post("/api/forget", deprecated=True)
     async def forget(body: _GovernBody):
         return svc().forget(
             body.memory_id,
             workspace=body.workspace,
             repo=body.repo,
             reason=body.reason,
+            actor="inspector-local",
+        )
+
+    @app.post("/api/secure-erase")
+    async def secure_erase(body: _GovernBody):
+        return svc().secure_erase(
+            body.memory_id,
+            workspace=body.workspace,
+            repo=body.repo,
             actor="inspector-local",
         )
 

@@ -5,6 +5,124 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-02
+
+Engraphis 1.4 makes the compact Smart MCP gateway the default agent interface while preserving
+the complete Classic surface for existing integrations. It also strengthens review-gated writes,
+bounded context delivery, secure erasure, and release/runtime hardening without changing the v2
+database schema.
+
+### Upgrade notes
+
+- `engraphis-mcp` now exposes six Smart tools instead of 33 direct tools. Clients that depend on
+  the former names should switch their server command to `engraphis-mcp-classic`; HTTP clients can
+  use `engraphis-mcp-http --classic`.
+- Existing v2 databases remain on schema 7 and require no migration for this release.
+- The NumPy-only core supports Python 3.9+. Dashboard, MCP, documents, Cloud Sync, and `all`
+  installations require Python 3.10+ because their supported dependency versions require it.
+
+### Added
+
+- Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes six compact tools
+  for sessions, prompt-ready recall, durable memory, discovery, and validated read/action
+  execution. `engraphis-mcp-classic` preserves the former 33 direct tool names and legacy alias
+  response shapes for pinned integrations.
+- The first-party `@engraphis/pi` package under `integrations/pi` exposes that Smart MCP surface
+  as native Pi tools, verifies the Engraphis 1.4.x handshake, and ships with independent npm
+  packaging and release gates.
+- Hosts that retain their own conversation history can call the non-MCP
+  `POST /api/adaptive-context` endpoint. Advanced proactive context also supports a bounded,
+  content-lean compact response while Classic keeps its full response by default.
+- Opt-in planned recall adds a bounded deterministic planner, an injectable planner protocol and
+  optional LLM backend, priority-weighted multi-query RRF, post-rerank memory-type maxima, stable
+  context revisions, and diagnostics-only planner traces across Python, service, REST, and MCP
+  recall surfaces. The default remains the existing single-query path on schema 7.
+- A 40-task context-routing stress fixture, four-way five-budget ablation harness, pinned
+  LongMemEval-V2 planner configurations, and evaluation-only imported-resource hierarchy prototype
+  encode local regression gates and matrix tooling. Official benchmark, safety, and hosted-cache
+  artifacts remain mandatory before any default or schema change.
+
+### Security
+
+- The Pi extension preserves the Smart gateway's destructive boundary: every discovered
+  state-changing action requires an explicit Pi confirmation, fails closed without a dialog,
+  and consumes its capability after one approval attempt so unknown outcomes are not retried.
+- Public writes now enter an explicit review gate: MCP, REST/dashboard-intent, import, sync, and
+  extractor ingress are pending regardless of a caller-supplied trust label; detector matches are
+  quarantined before they can contribute to prompt context or derived state. Human approval creates
+  a fresh audited successor only through the CSRF-bound dashboard action or an interactive TTY
+  command, never through MCP or a general REST endpoint. Historical rescans demote non-approved
+  records and retire their derived bridges. Public history, graph/code retrieval and indexing, and
+  consolidation apply prompt eligibility before ranking or capacity decisions, so pending or
+  quarantined records cannot influence prompt-visible results through derived bridges.
+- Smart MCP authorization now fails closed: discovery and read execution require viewer access,
+  state-changing execution requires admin access remotely, and pure reads do not emit write-side
+  telemetry receipts. Executor output is bounded without retrying or double-running handlers.
+- Tokenless remote requests to the read-only recall and repository-graph API now fail closed;
+  health and OpenAPI discovery remain public.
+- The deterministic detector now uses a pinned Unicode TR39 15.1.0 ASCII projection rather than
+  a short hand-picked table, covering additional Latin, Cyrillic, Greek, mathematical, and legacy
+  glyph substitutions without an online lookup or runtime dependency.
+- Secret scanning is cycle-safe and depth-bounded, and PostgreSQL source identities are reduced to
+  credential-free digests for both URI and libpq keyword DSNs.
+
+### Fixed
+
+- Secure erase now rebuilds shared-edge provenance from surviving support rows. Historical-only
+  support remains available to time-travel reads while the edge is closed in the current graph.
+- API embedding backends now validate dimensions, response cardinality, item indices, finite
+  values, and normalization before accepting provider output, with consistent bounded fallback.
+- Planned-recall datasets reject dangling references, vector dimensions are bounded across local
+  and SQLite backends, and sync imports accept pinned state only when it is the literal boolean
+  `true`.
+- The production image now removes build-only pip and its vendored dependency snapshot after
+  installation, eliminating unreachable vulnerable packages from the runtime attack surface.
+- Automatic LLM retention supervision now discards proposed retention values when it
+  demotes an unapproved `critical` label; legacy poisoning rescans also honor
+  `--keep-unlabelled`, and code-memory exports apply eligibility before their result cap.
+- Scope promotion now preserves an owner-approved detector match and its stable claim identity
+  without re-quarantining the approved derived copy.
+- `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
+  printable registration metadata is rendered, preventing malformed control-plane values from
+  being reflected into CLI or JSON output.
+- Explicit local `engraphis-cli ingest` commands now record local-owner-approved provenance,
+  allowing their memories to appear in ordinary subsequent CLI recall. HTTP, MCP, import, and
+  file-ingestion boundaries remain pending review.
+- The standalone v1→v2 migrator now refuses in-place and pre-existing output paths before
+  opening either database, preventing accidental mixing of legacy source history into a v2 target.
+- Cloud Sync now closes failed HTTP response streams without reading their untrusted error bodies,
+  preventing descriptor leaks during repeated relay failures.
+- Hosted customer clients now bind provider credential/session state before persistence and
+  preserve sanitized authorization/billing outcomes when an HTTP error body is truncated, so a
+  one-time connection cannot be stranded by an unreadable state file or retain stale paid badges.
+- Authoritative hosted managed-compute authorization denials now immediately settle local
+  entitlement presentation state, so a revoked, lapsed, or de-authorized account is not shown
+  stale paid feature access while awaiting a background refresh.
+- The production image health probe now follows the active IPv4 or IPv6 loopback listener,
+  preventing a Railway IPv6 deployment from being marked unhealthy while its readiness route
+  is serving traffic.
+- Grounded recall's absolute support floor ignores titles and non-finite semantic scores, so
+  display text cannot independently make an answer eligible.
+- Keyed-claim deduplication ignores harmless punctuation, and legacy zero, negative, or non-finite
+  stability values use the documented one-day default instead of producing invalid decay scores.
+- Approval requires a non-empty audit reason, accepts only a live pending source, and preserves the
+  reviewed claim's pin, sensitivity, and keyed identity on its approved successor.
+- The zero-config Compose quickstart remains loopback-only; a LAN deployment is an explicit,
+  token-protected operator choice and cannot inherit the local Docker bridge trust exception.
+- Credential-shaped values are rejected before capture can create memory, FTS, vector, event, or
+  sync copies. `retire` is the canonical temporal lifecycle operation; targeted `secure_erase`
+  removes an already-leaked record and known local derivatives while reporting physical limits.
+- The standalone MCP-over-HTTP launcher is explicitly loopback-only. Remote MCP clients must use
+  the dashboard's authenticated `/mcp` endpoint instead of an unauthenticated FastMCP bind.
+
+### Changed
+
+- MCP-over-HTTP has a packaged `engraphis-mcp-http` command and a generic local setup guide. The
+  project makes no client-specific integration claim without a maintained guide and integration
+  test.
+- `.env.example` now mirrors runtime defaults for decay, context packing, loop cadence, and recall
+  depth so copied configurations do not silently override the documented behavior.
+
 ## [1.3.0] - 2026-08-01
 
 ### Added

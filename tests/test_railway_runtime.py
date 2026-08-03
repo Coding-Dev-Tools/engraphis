@@ -26,6 +26,9 @@ def test_railway_manifest_builds_the_runtime_image_and_uses_readiness():
     assert manifest["deploy"] == {
         "healthcheckPath": "/api/ready",
         "healthcheckTimeout": 300,
+        # Railway otherwise defaults the SIGTERM-to-SIGKILL grace period to zero.
+        # Give Uvicorn time to stop taking requests and close SQLite cleanly.
+        "drainingSeconds": 30,
         "restartPolicyType": "ON_FAILURE",
         "restartPolicyMaxRetries": 10,
     }
@@ -39,6 +42,11 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert 'ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]' in dockerfile
     assert 'CMD ["engraphis-dashboard", "--no-open"]' in dockerfile
     assert "os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700')" in dockerfile
+    # Railway binds an IPv6-only listener. ``localhost`` lets urllib try the matching
+    # loopback family, whereas a literal 127.0.0.1 probe would keep the Docker health
+    # state unhealthy even while the Railway readiness endpoint is serving traffic.
+    assert "http://localhost:%s/api/ready" in dockerfile
+    assert "http://127.0.0.1:%s/api/ready" not in dockerfile
     assert "useradd --create-home --uid 10001 engraphis" in dockerfile
     assert "HF_HOME=/data/.cache/huggingface" in dockerfile
     assert "ENGRAPHIS_STATE_DIR=/data/.engraphis" in dockerfile
@@ -56,8 +64,20 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
     dockerfile = _text("Dockerfile")
 
     assert "https://download.pytorch.org/whl/cpu torch" in dockerfile
-    assert 'pip install ".[server,documents,cloud-sync]"' in dockerfile
+    assert 'pip install ".[server,mcp,documents,cloud-sync]"' in dockerfile
     assert 'pip install ".[all]"' not in dockerfile
+    # pip is needed while building the image, but no production command invokes it.
+    # Its vendored dependency snapshot must not remain in the runtime attack surface.
+    assert "rm -rf /root/.cache/pip" in dockerfile
+    assert "/usr/local/lib/python3.11/site-packages/pip" in dockerfile
+
+
+def test_ci_audits_the_stripped_image_without_mutating_it():
+    workflow = _text(".github/workflows/ci.yml")
+
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in workflow
+    assert 'python -m pip_audit --path "$audit_dir"' in workflow
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in workflow
 
 
 def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):

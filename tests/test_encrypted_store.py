@@ -10,7 +10,18 @@ import sqlite3
 
 import pytest
 
-sqlcipher3 = pytest.importorskip("sqlcipher3", reason="encryption extra not installed")
+pytestmark = pytest.mark.native_sqlcipher
+
+
+@pytest.fixture(autouse=True)
+def _require_sqlcipher():
+    """Defer the native import until after sqlite-vec integration tests finish.
+
+    sqlite-vec and SQLCipher expose incompatible SQLite ABIs when loaded into
+    the same interpreter.  The suite orders their marked integration tests so
+    both real backends are still exercised without risking a native crash.
+    """
+    pytest.importorskip("sqlcipher3", reason="encryption extra not installed")
 
 from engraphis.backends import encrypted_db  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
@@ -24,6 +35,8 @@ def _hits(res):
 
 
 def test_encrypts_at_rest_unreadable_without_key(monkeypatch, tmp_path):
+    import sqlcipher3
+
     monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
     db = str(tmp_path / "m.db")
     svc = MemoryService.create(db)
@@ -43,7 +56,15 @@ def test_recall_and_reopen_work_encrypted(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
     db = str(tmp_path / "m.db")
     svc = MemoryService.create(db)
-    svc.remember("Deploys run Fridays at noon.", workspace="demo", scope="workspace", title="Deploy")
+    stored = svc.remember(
+        "Deploys run Fridays at noon.", workspace="demo", scope="workspace", title="Deploy"
+    )
+    # Service writes from an agent are deliberately pending until a local reviewer
+    # approves them for prompt use.  Prove encrypted reopen preserves both content
+    # and that governance decision rather than weakening the recall policy here.
+    svc.engine.approve_for_prompt(
+        stored["id"], reviewer="test_operator", reason="encrypted reopen fixture"
+    )
     svc.engine.store.conn.close()
     # Re-open runs the idempotent ALTER TABLE migration → sqlcipher raises its OWN
     # OperationalError; without the translating adapter the core's except would miss it.

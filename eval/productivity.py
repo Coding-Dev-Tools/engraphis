@@ -188,15 +188,16 @@ def _completed(response: str, question: dict, supporting_evidence: tuple[str, ..
     """
     normalized_response = _normalized_answer(response)
     expected = str(question.get("answer", question.get("evidence", "")))
-    if not _normalized_answer(expected):
-        return bool(normalized_response)
     acceptable = [expected, *supporting_evidence]
     configured = question.get("acceptable_answers", ())
     if isinstance(configured, (list, tuple)):
         acceptable.extend(str(value) for value in configured)
-    return normalized_response in {
+    normalized_acceptable = {
         candidate for value in acceptable if (candidate := _normalized_answer(value))
     }
+    if not normalized_acceptable:
+        return bool(normalized_response)
+    return normalized_response in normalized_acceptable
 
 
 def _seed_case(
@@ -233,6 +234,24 @@ def _seed_case(
             valid_from=memory.get("valid_from"),
             subject_key=str(memory.get("subject_key", "")),
             claim_kind=str(memory.get("claim_kind", "")),
+            resolve_conflicts=False,
+        )
+    memory_types = tuple(MemoryType)
+    for index in range(max(0, int(case.get("noise_count") or 0))):
+        content = (
+            f"Unrelated fixture note {case.get('id')} number {index}: "
+            f"routine inventory marker NOISE_{index:03d} was checked and archived. "
+            + "The unrelated checklist covered capacity labels, office inventory, "
+              "training attendance, cafeteria supplies, and routine calendar cleanup. "
+              * 3
+        )
+        source_texts.append(content)
+        engine.remember(
+            content,
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            mtype=memory_types[index % len(memory_types)],
+            scope=Scope.REPO,
             resolve_conflicts=False,
         )
     return store, engine, workspace_id, repo_id, "\n\n".join(source_texts)

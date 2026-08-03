@@ -35,11 +35,16 @@ COPY scripts ./scripts
 
 # Railway runs CPU workloads.  Install the CPU-only PyTorch wheel before the embedding
 # stack so pip cannot select PyPI's multi-gigabyte CUDA dependency chain.  The public
-# customer image needs the dashboard/server surface plus its advertised local OCR path;
-# MCP, transcription, PostgreSQL, and code graph remain opt-in deployment baggage.
+# customer image needs the dashboard/server surface, MCP-over-HTTP, and its advertised local
+# OCR path; transcription, PostgreSQL, and code graph remain opt-in deployment baggage. pip is
+# build-only here, so remove it and its vendored dependency snapshot from the runtime image.
 RUN pip install --upgrade pip "setuptools>=83" \
     && pip install --index-url https://download.pytorch.org/whl/cpu torch \
-    && pip install ".[server,documents,cloud-sync]"
+    && pip install ".[server,mcp,documents,cloud-sync]" \
+    && rm -rf /root/.cache/pip \
+        /usr/local/lib/python3.11/site-packages/pip \
+        /usr/local/lib/python3.11/site-packages/pip-*.dist-info \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11
 
 # Create the non-root app user and pre-own /data. NOTE: the container starts as root so
 # docker-entrypoint.sh can chown a freshly-mounted (root-owned) persistent volume, then
@@ -55,10 +60,11 @@ EXPOSE 8700
 # Railway uses the same endpoint, so a process-only health signal cannot mask a bad mode.
 # start-period is generous: the first cold boot downloads the embedding model (cached to
 # the /data volume via HF_HOME thereafter). The entrypoint selects a bind address suited
-# to Docker or Railway; the check also honors $PORT if the platform overrides it — matching
+# to Docker or Railway; ``localhost`` reaches the matching IPv4 or IPv6 loopback socket.
+# The check also honors $PORT if the platform overrides it — matching
 # scripts/start_dashboard.py, which prefers $PORT over ENGRAPHIS_PORT for the bind.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
-    CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/api/ready' % p).status==200 else 1)"
+    CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700'); sys.exit(0 if urllib.request.urlopen('http://localhost:%s/api/ready' % p).status==200 else 1)"
 
 # The entrypoint fixes volume ownership then drops to the non-root `engraphis` user before
 # running the CMD (or any Railway/compose start-command override, which becomes its args).

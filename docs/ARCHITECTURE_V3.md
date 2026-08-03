@@ -7,7 +7,7 @@ retention-supervision, and privacy-receipt additions introduced with schema vers
 flowchart LR
     Agent["Agent / host LLM"] --> Intent["remember · link · recall_context (compact) · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["31 MCP tools"] --> Service
+    MCP["Smart MCP (6 tools) / Classic MCP (33 tools)"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service
@@ -74,6 +74,47 @@ flowchart LR
 
 Migration is additive and idempotent. Pre-v3 edge layers are inferred exactly once; explicitly
 selected layers are never reclassified when a database is reopened.
+
+## Vector backend compatibility
+
+`MemoryEngine.create()` and `MemoryService.create()` default to the exact NumPy index, even when
+`sqlite-vec` is installed, so the default remains portable and deterministic. `sqlite-vec` and
+SQLCipher load incompatible SQLite native libraries in one process: with `vector_backend="auto"`
+Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails with an actionable
+error. Run accelerated search in a fresh process when using the SQLCipher extra.
+
+## Query planning
+
+Recall defaults to the `balanced` retrieval profile and `planning="off"`. Opt-in
+`planning="auto"` keeps the original query, admits at most two deterministic or injected query
+routes, and fuses them before reranking against the original query. `mtype_limits`, when provided,
+are post-rerank maximum counts rather than relevance boosts. Every packed response has a stable
+`context_revision` derived from the token-counter identity and ordered packed excerpts, so a host
+can retain an unchanged prompt prefix. Planner output, per-query rankings, cap drops, and fallback
+reasons appear only with `diagnostics=True`.
+
+The offline planner is the default injected implementation. An application can opt into an LLM
+planner without coupling `core/` to a provider:
+
+```python
+from engraphis.backends.query_planner import LLMQueryPlanner
+from engraphis.core.engine import MemoryEngine
+
+engine = MemoryEngine.create(
+    "engraphis.db",
+    query_planner=LLMQueryPlanner(my_llm),
+)
+result = engine.recall(
+    "why does ReleaseGate depend on AuditLog?",
+    workspace_id="ws_...",
+    planning="auto",
+    mtype_limits={"working": 1, "semantic": 3},
+)
+```
+
+Planner failures and provider deadlines fail open to the original single-query plan. Planned recall
+remains opt-in until the checked-in budget, safety, and official LongMemEval-V2 gates justify a
+default change.
 
 ## Repo workflow
 

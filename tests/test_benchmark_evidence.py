@@ -87,7 +87,7 @@ def test_readme_distinguishes_every_current_token_context_measurement():
     for evidence in (
         "## Measured token and context savings",
         "98.21 percent less long-history context",
-        "73.0 percent less retrieved content per question",
+        "73.0% lower",
         "73.9 percent fewer tokens in the smallest useful memory",
         "55.38 percent smaller memory response",
         "47.8 percent less repeated-memory context after consolidation",
@@ -103,6 +103,8 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         "55.38% lower",
         "230** tokens → one digest: **120** tokens",
         "47.8% lower",
+        "2,194** total agent-facing tokens",
+        "252 tokens avoided",
         "1,500** tokens; observed mean: **87.73**; observed maximum: **106**",
         "must not be added together",
         "not a storage-reduction claim",
@@ -148,10 +150,10 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "Remember a project across sessions",
         "Avoid confident guesses",
         "Avoid dragging the whole project into every prompt",
-        "docs/images/engraphis-benefit-flow.png",
-        "docs/images/context-efficiency.png",
+        "docs/images/knowledge-graph.png",
+        "docs/images/context-efficiency.svg",
         "### See the behavior in reproducible fixtures",
-        "docs/images/evidence-backed-agent-examples.png",
+        "docs/images/evidence-backed-agent-examples.svg",
         "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
         "Less repeated history means more room for the task, tools, and useful evidence",
     ):
@@ -196,7 +198,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results():
         encoding="utf-8"
     )
 
-    assert chunking["context_reduction_pct"] == 73.0
+    assert chunking["context_reduction_pct"] == 71.1
     assert f"{whole['mean_context_tokens']:.1f} → {chunked['mean_context_tokens']:.1f} tokens" in visual
     assert grounded == {
         "answer_rate": 1.0,

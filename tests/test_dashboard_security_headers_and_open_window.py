@@ -9,11 +9,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 
 
-def _client(monkeypatch, tmp_path, *, api_token="", client_addr=("127.0.0.1", 50000)):
+def _client(monkeypatch, tmp_path, *, api_token="", client_addr=("127.0.0.1", 50000),
+            allowed_workspaces=None):
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "security.db"))
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "embed_dim", 384)
-    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "allowed_workspaces", allowed_workspaces or [])
     monkeypatch.setattr(settings, "api_token", api_token)
     from engraphis.dashboard_app import create_app
     return TestClient(create_app(), client=client_addr)
@@ -93,6 +94,98 @@ def test_browser_session_dies_when_the_deployment_token_changes(monkeypatch, tmp
             headers={"X-Engraphis-Browser-Session": "1"},
         )
         assert response.status_code == 401
+
+
+def test_dashboard_review_approval_requires_browser_session_and_csrf(monkeypatch, tmp_path):
+    token = "deployment-token-with-enough-entropy"
+    with _client(monkeypatch, tmp_path, api_token=token) as client:
+        service = client.app.state.service
+        pending = service.remember(
+            "The release switch is controlled by the operations owner.",
+            workspace="review",
+            source="web",
+            trusted=True,
+        )
+        record = service.store.get_memory(pending["id"])
+        assert record.provenance["review_state"] == "pending"
+
+        # A bearer-only API caller cannot invoke the human approval ceremony.
+        rejected = client.post(
+            "/dashboard/review/approve",
+            json={"memory_id": pending["id"], "reason": "checked"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert rejected.status_code == 401
+        assert client.post(
+            "/api/review/approve",
+            json={"memory_id": pending["id"], "reason": "checked"},
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code == 404
+
+        opened = client.post("/api/auth/session", json={"token": token})
+        assert opened.status_code == 200
+        csrf = opened.json()["review_csrf_token"]
+        missing_csrf = client.post(
+            "/dashboard/review/approve",
+            json={"memory_id": pending["id"], "reason": "checked"},
+            headers={"X-Engraphis-Browser-Session": "1"},
+        )
+        assert missing_csrf.status_code == 403
+
+        approved = client.post(
+            "/dashboard/review/approve",
+            json={"memory_id": pending["id"], "reason": "checked against owner runbook"},
+            headers={
+                "X-Engraphis-Browser-Session": "1",
+                "X-Engraphis-Review-CSRF": csrf,
+            },
+        )
+        assert approved.status_code == 200
+        successor = service.store.get_memory(approved.json()["id"])
+        assert successor.provenance["review_state"] == "approved"
+        assert successor.provenance["approved_from"] == pending["id"]
+        # The original untrusted evidence remains pending instead of being relabeled.
+        assert service.store.get_memory(pending["id"]).provenance["review_state"] == "pending"
+
+
+def test_dashboard_review_approval_enforces_source_workspace_binding(monkeypatch, tmp_path):
+    token = "deployment-token-with-enough-entropy"
+    with _client(
+        monkeypatch, tmp_path, api_token=token, allowed_workspaces=["allowed"],
+    ) as client:
+        service = client.app.state.service
+        pending = service.remember(
+            "The restricted release switch needs review.", workspace="allowed",
+            source="web", trusted=True,
+        )
+        # Simulate a pre-existing foreign workspace, such as one that predates a later
+        # ENGRAPHIS_WORKSPACES binding. Direct SQL is deliberate: public service writes
+        # rightly reject this state, while the route must still fail closed if it exists.
+        foreign_workspace = "ws_foreign"
+        service.store.conn.execute(
+            "INSERT INTO workspaces(id, name, created_at, settings) VALUES (?,?,?,?)",
+            (foreign_workspace, "foreign", 0.0, "{}"),
+        )
+        service.store.conn.execute(
+            "UPDATE memories SET workspace_id=? WHERE id=?",
+            (foreign_workspace, pending["id"]),
+        )
+        service.store.conn.commit()
+
+        csrf = client.post("/api/auth/session", json={"token": token}).json()["review_csrf_token"]
+        rejected = client.post(
+            "/dashboard/review/approve",
+            json={"memory_id": pending["id"], "reason": "checked"},
+            headers={
+                "X-Engraphis-Browser-Session": "1",
+                "X-Engraphis-Review-CSRF": csrf,
+            },
+        )
+
+        assert rejected.status_code == 403
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE id<>?", (pending["id"],),
+        ).fetchone()[0] == 0
 
 
 def test_public_metadata_does_not_expose_team_account_routes(monkeypatch, tmp_path):

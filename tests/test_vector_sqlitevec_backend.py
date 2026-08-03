@@ -11,13 +11,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
-
 from engraphis.backends import DeterministicEmbedder
 from engraphis.backends.vector_sqlitevec import SqliteVecVectorIndex
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.store import Store
+
+
+pytestmark = pytest.mark.native_sqlitevec
+
+pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
 
 DIM = 64
 

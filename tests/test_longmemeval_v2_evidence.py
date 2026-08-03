@@ -70,6 +70,7 @@ def test_official_v2_evidence_export_redacts_private_prompt_material(tmp_path):
     assert report["protocol"]["token_accounting"]["scope"] == (
         "official_harness_memory_context_item_content_excluding_prompt_framing"
     )
+    assert report["protocol"]["config"]["matrix_binding"]["verified"] is False
     assert {item["name"] for item in report["suite"]["sources"]} == {
         "per_question.jsonl", "haystack.json", "trajectories.json", "memory.json",
     }
@@ -154,4 +155,18 @@ def test_official_v2_evidence_export_rejects_malformed_measured_fields(tmp_path)
             haystack_path=source_paths[1],
             trajectories_path=source_paths[2],
             memory_config_path=source_paths[3],
+        )
+
+
+def test_official_v2_evidence_requires_complete_matrix_binding_metadata(tmp_path):
+    config = _write_json(tmp_path / "memory.json", {"memory_type": "engraphis"})
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        build_evidence_report(
+            per_question_path="unused.jsonl",
+            questions_path="unused-questions.json",
+            haystack_path="unused-haystack.json",
+            trajectories_path="unused-trajectories.json",
+            memory_config_path=config,
+            upstream_revision="a" * 40,
         )
