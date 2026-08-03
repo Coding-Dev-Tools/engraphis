@@ -267,7 +267,7 @@ async function openView(page, name) {
   await expect(page.locator(`#view-${name}`)).toHaveClass(/\bactive\b/);
 }
 
-test('local dashboard exposes hosted Pro and Team CTAs without local commercial controls', async ({ page }) => {
+test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({ page }) => {
   const errors = recordBrowserErrors(page);
   const calls = await mockLocalClient(page);
   const response = await page.goto('/classic');
@@ -280,12 +280,9 @@ test('local dashboard exposes hosted Pro and Team CTAs without local commercial 
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel.getByText('LOCAL CORE', { exact: true })).toBeVisible();
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toBeVisible();
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' })).toBeVisible();
-  await expect(licensePanel).toContainText(
-    'The email-confirmed, no-card trial lasts exactly 3 active days; '
-      + 'private-service account grace is separate, capped at 24 hours, and never extends cloud access or restricts local MCP and dashboard use.',
-  );
+  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toHaveCount(0);
+  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' })).toHaveCount(0);
+  await expect(licensePanel).not.toContainText('Support continued Engraphis development with Pro.');
 
   await openView(page, 'team');
   const team = page.locator('#team-body');
@@ -467,17 +464,9 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // Buyable, not trialable.
-  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' }))
-    .toHaveAttribute(
-      'href',
-      'https://cloud.engraphis.test/pro?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=license#billing',
-    );
-  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' }))
-    .toHaveAttribute(
-      'href',
-      'https://cloud.engraphis.test/team?plan=team&interval=monthly&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=license_team#billing',
-    );
+  // Upgrade CTAs belong with individual locked features, not the general settings panel.
+  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toHaveCount(0);
+  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
     .toHaveCount(0);
   expect(errors).toEqual([]);
