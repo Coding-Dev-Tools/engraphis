@@ -1003,7 +1003,7 @@ const engine = {
   setData(data) { log.seeded = data.nodes.length; },
 };
 const api = {
-  apply(fn) { fn(engine); }, communityMap: () => ({}),
+  apply(fn, fit, reheat) { fn(engine); log.apply = { fit: !!fit, reheat: !!reheat }; }, communityMap: () => ({}),
   freeze() {}, destroy() {}, resume() {}, pause() { log.paused += 1; },
 };
 globalThis.EngraphisGraph = { create() { log.created += 1; return api; } };
@@ -1015,7 +1015,7 @@ globalThis.GCOLOR_OVERRIDES = {};
 /* The state the nav-away pause recorded while GRAPH_ENGINE was still null. */
 globalThis.GRAPH_ENGINE_PARKED = scenario.parked;
 globalThis.showAs = () => {};
-globalThis.prefersReducedMotion = () => false;
+globalThis.prefersReducedMotion = () => !!scenario.reducedMotion;
 for (const name of ['graphSetLayoutStatus', 'graphSyncReadouts', 'graphUpdateEditedBadge',
                     'graphUpdateHud', 'graphRenderLegend', 'graphSetHighlight',
                     'graphSetSimulationStatus', 'syncGraphExplorerSelection', 'graphNodeClick',
@@ -1033,12 +1033,18 @@ console.log(JSON.stringify(Object.assign({ rendered }, log)));
 """
 
 
-def _run_render(*, show_unlinked: bool = False, parked: bool = False) -> dict:
+def _run_render(
+    *, show_unlinked: bool = False, parked: bool = False, reduced_motion: bool = False
+) -> dict:
     source = DASHBOARD.read_text(encoding="utf-8")
     # The harness slices real source; keep its landmarks honest.
     assert "function graphRenderEngine(" in source
     assert "/* Nav away from the graph view" in source
-    scenario = json.dumps({"showUnlinked": show_unlinked, "parked": parked})
+    scenario = json.dumps({
+        "showUnlinked": show_unlinked,
+        "parked": parked,
+        "reducedMotion": reduced_motion,
+    })
     result = subprocess.run(
         [NODE, "-e", RENDER_HARNESS, str(DASHBOARD), scenario],
         cwd=ROOT,
@@ -1120,6 +1126,21 @@ def test_a_renderer_created_after_leaving_the_graph_view_is_born_paused() -> Non
     live = _run_render(parked=False)
     assert live["created"] == 1
     assert live["paused"] == 0
+
+
+@requires_node
+def test_classic_graph_starts_live_even_when_the_os_prefers_reduced_motion() -> None:
+    """Reduced visual motion cannot suppress the explicit physics default."""
+
+    report = _run_render(reduced_motion=True)
+    assert report["apply"] == {"fit": True, "reheat": True}
+
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    assert "window.GSET.frozen=false;" in source
+    engine = source[source.index("function graphRenderEngine("):]
+    engine = engine[:engine.index("/* Nav away from the graph view")]
+    assert "},fit,reheat);" in engine
+    assert "reheat&&!prefersReducedMotion()" not in engine
 
 
 def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
