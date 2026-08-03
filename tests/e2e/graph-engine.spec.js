@@ -188,6 +188,45 @@ test('Ledger bounds auto-fit zoom and keeps a dragged node under the pointer', a
   expect(session.pageErrors).toEqual([]);
 });
 
+test('Classic keeps a dragged node under the pointer with reduced visual motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes.length > 0);
+  await page.waitForFunction(() => window.__fg.graphData().nodes
+    .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+  await page.waitForTimeout(500);
+
+  const drag = await page.evaluate(() => {
+    const graph = window.__fg;
+    const node = graph.graphData().nodes[0];
+    const canvas = document.querySelector('#graph-net canvas');
+    const box = canvas.getBoundingClientRect();
+    const point = graph.graph2ScreenCoords(node.x, node.y);
+    return {
+      before: { x: node.x, y: node.y },
+      zoom: canvas.__zoom.k,
+      x: box.left + point.x,
+      y: box.top + point.y,
+    };
+  });
+
+  await page.mouse.move(drag.x, drag.y);
+  await page.mouse.down();
+  await page.mouse.move(drag.x + 80, drag.y + 40, { steps: 8 });
+  await page.mouse.up();
+  const after = await page.evaluate(() => {
+    const node = window.__fg.graphData().nodes[0];
+    return { x: node.x, y: node.y, fx: node.fx, fy: node.fy };
+  });
+
+  expect(after.x - drag.before.x).toBeCloseTo(80 / drag.zoom, 0);
+  expect(after.y - drag.before.y).toBeCloseTo(40 / drag.zoom, 0);
+  expect(after.fx).toBeCloseTo(after.x, 8);
+  expect(after.fy).toBeCloseTo(after.y, 8);
+  expect(session.pageErrors).toEqual([]);
+});
+
 test('a dashboard page that never opens the graph fetches neither graph script', async ({ page }) => {
   // The reason both scripts are lazy is not weight, it is CSP: force-graph applies inline
   // styles at runtime, so an eager <script> reported a violation on every page view — including
