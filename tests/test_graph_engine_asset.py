@@ -1294,11 +1294,33 @@ def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
     assert report["released"] == {}, "unfreezing left a dragged node immovable"
 
 
+@requires_node
+def test_freeze_is_the_physics_gate_even_with_reduced_motion() -> None:
+    """The switch must never claim physics is live while an OS preference disables it."""
+
+    report = _run_engine(
+        """
+        const reheats = () => invocations.d3ReheatSimulation || 0;
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(2));
+        const started = { time: store.cooldownTime, ticks: store.cooldownTicks, reheats: reheats() };
+        api.freeze(true);
+        const frozen = { alpha: store.d3AlphaDecay, reheats: reheats() };
+        api.freeze(false);
+        emit({ started, frozen, resumed: { alpha: store.d3AlphaDecay, reheats: reheats() } });
+        """
+    )
+    assert report["started"] == {"time": 2200, "ticks": 160, "reheats": 1}
+    assert report["frozen"]["alpha"] == 1
+    assert report["resumed"]["alpha"] == 0.035
+    assert report["resumed"]["reheats"] == 2
+
+
 def test_primary_graph_starts_unfrozen_so_the_force_controls_take_effect() -> None:
     """A fresh graph must settle, rather than make every tuning control look inert."""
 
     assert "graphFrozen: false" in PRIMARY_LEDGER.read_text(encoding="utf-8")
-    assert "graphPreference('frozen', false)" in PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert "state.graphFrozen = false;" in PRIMARY_LEDGER.read_text(encoding="utf-8")
     assert 'id="graph-freeze" class="graph-switch"' in PRIMARY_INDEX.read_text(encoding="utf-8")
     freeze_control = PRIMARY_INDEX.read_text(encoding="utf-8").split('id="graph-freeze"', 1)[1]
     assert 'aria-checked="false"' in freeze_control
@@ -1489,11 +1511,12 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
           time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
           alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
         };
-        const still = G.create(el, { reducedMotion: () => true });
-        still.setData(chain(40));
+        const frozen = G.create(el, { reducedMotion: () => true });
+        frozen.setData(chain(40));
+        frozen.freeze(true);
         emit({
           small, big,
-          reduced: { time: store.cooldownTime, ticks: store.cooldownTicks },
+          frozen: { time: store.cooldownTime, ticks: store.cooldownTicks },
         });
         """
     )
@@ -1506,9 +1529,9 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     # A large graph also settles harder, exactly as GPERF.large does on the classic path.
     assert report["big"]["alpha"] > report["small"]["alpha"]
     assert report["big"]["velocity"] > report["small"]["velocity"]
-    # Reduced motion asks for a static layout, not a shorter animation.
-    assert report["reduced"]["time"] == 0
-    assert report["reduced"]["ticks"] == 1
+    # Freeze, not the OS visual-motion preference, is the explicit static-layout control.
+    assert report["frozen"]["time"] == 2200
+    assert report["frozen"]["ticks"] == 160
 
 
 @requires_node
@@ -1518,7 +1541,7 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
     ``graphSet`` (dashboard.js) routes Repel/Link/Gravity/Size/Font/Link-width/Label-density
     through ``setSettings`` under ``?graph-engine=next``.  The classic branch of that same
     function treats ``repel|link|gravity|size`` as *layout* changes: it re-applies the forces
-    and then reheats unless the user asked for reduced motion.  The engine's ``applyForces()``
+    and then reheats unless the user explicitly froze the graph.  The engine's ``applyForces()``
     only swaps the charge/link/forceX-forceY/collide values into the running simulation — and a
     settled graph sits at alpha~0 — so without the reheat those four sliders are inert until
     the user finds the Reheat button.  The paint-only settings must *not* reheat: restarting
@@ -1546,10 +1569,9 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
           flow: bump(api, { flow: false }),
         };
 
-        // The classic path's `if(layout&&!prefersReducedMotion())` exemption.
-        const still = G.create(el, { reducedMotion: () => true });
-        still.setData(chain(40));
-        const reducedMotion = bump(still, { repel: 260 });
+        const reduced = G.create(el, { reducedMotion: () => true });
+        reduced.setData(chain(40));
+        const reducedMotion = bump(reduced, { repel: 260 });
         emit({ layout, paint, reducedMotion });
         """
     )
@@ -1561,7 +1583,7 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
     assert report["paint"] == {
         "font": 0, "linkw": 0, "labelDensity": 0, "labels": 0, "flow": 0
     }, "an appearance change restarted the layout"
-    assert report["reducedMotion"] == 0, "reduced motion still got an animated relayout"
+    assert report["reducedMotion"] == 1, "reduced motion silently disabled live physics"
 
 
 @requires_node
