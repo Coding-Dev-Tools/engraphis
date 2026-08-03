@@ -1382,6 +1382,16 @@
        Shared so reheat() and freeze() cannot drift back to the small-graph constant. */
     function alphaDecay() { return large ? 0.055 : 0.035; }
 
+    // Rendering while frozen deliberately gives force-graph a one-tick budget. Keep the
+    // matching live values in one place so unfreezing after a style, scope, or data render
+    // cannot reheat against that stale one-tick budget.
+    function setSimulationBudget(live) {
+      const simulate = live && !staticFullLayout;
+      if (fg.cooldownTime) fg.cooldownTime(simulate ? (large ? 1100 : 2200) : 0);
+      if (fg.cooldownTicks) fg.cooldownTicks(simulate ? (large ? 80 : 160) : 1);
+      if (fg.warmupTicks) fg.warmupTicks(simulate ? (large ? 18 : 40) : 0);
+    }
+
     function render(fit, reheat) {
       if (destroyed) return;
       if (suspended) {
@@ -1434,9 +1444,7 @@
       /* Bound the simulation the way the classic path does. Without these force-graph keeps its
          15-second default window, so every load and every reheat of a large store runs the
          layout — and repaints every node and link — for more than ten seconds longer. */
-      if (fg.cooldownTime) fg.cooldownTime(motion && !staticFullLayout ? (large ? 1100 : 2200) : 0);
-      if (fg.cooldownTicks) fg.cooldownTicks(motion && !staticFullLayout ? (large ? 80 : 160) : 1);
-      if (fg.warmupTicks) fg.warmupTicks(motion && !staticFullLayout ? (large ? 18 : 40) : 0);
+      setSimulationBudget(motion);
       if (fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
       if (fg.d3VelocityDecay) fg.d3VelocityDecay(large ? 0.45 : 0.38);
       if (fg.linkCurvature) {
@@ -1801,6 +1809,7 @@
       if (staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
+      setSimulationBudget(true);
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
     };
