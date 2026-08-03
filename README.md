@@ -26,10 +26,23 @@
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
 
-## Start in 60 seconds
+## Full Engraphis install: pip install "engraphis[all]"
 
-Choose the smallest surface that matches your use case. Python 3.10+ is recommended and is
-required for the dashboard, MCP, documents, Cloud Sync, and `all` extras; the NumPy-only core
+The complete `engraphis[all]` install is the default way to use Engraphis: it includes the local
+dashboard, Smart MCP server, documents, Cloud Sync client, and supported optional integrations.
+Python 3.10+ is required.
+
+```bash
+pip install "engraphis[all]"
+engraphis-dashboard
+```
+
+The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
+account or API key.
+
+### Smaller installation options
+
+Use a smaller package only when you intentionally need a limited surface. The NumPy-only core
 continues to support Python 3.9+.
 
 | Goal | Install | Start |
@@ -37,11 +50,9 @@ continues to support Python 3.9+.
 | Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
 | Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
 | Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
-| Full cross-platform feature set | `pip install "engraphis[all]"` | `engraphis-dashboard` |
 
-The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
-account or API key. For MCP clients other than Codex, configure a stdio server whose command is
-`engraphis-mcp`; see the [agent connection guide](docs/AGENT_CONNECT.md).
+For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
+the [agent connection guide](docs/AGENT_CONNECT.md).
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
 > require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
