@@ -11,6 +11,9 @@
 
 **Give coding agents durable project memory so the next session can retrieve the current decision, its evidence, and its history.**
 
+> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
+
 <p align="center">
   <img src="docs/images/engraphis-benefit-flow.png" alt="Project history becomes scoped memory, hybrid recall, and bounded cited context for an agent" width="100%">
   <br>
