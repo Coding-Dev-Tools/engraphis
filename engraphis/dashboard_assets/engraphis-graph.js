@@ -1473,8 +1473,9 @@
          but Style, Color by and Labels all just changed how the *same* data must be drawn. */
       if (reused) invalidate();
       if (fit) {
+        const animateFit = motion && !reducedMotion;
         clearTimeout(fitTimer);
-        fitTimer = setTimeout(() => { if (!destroyed) autoFit(motion ? 600 : 0, 40); }, motion ? 320 : 0);
+        fitTimer = setTimeout(() => { if (!destroyed) autoFit(animateFit ? 600 : 0, 40); }, animateFit ? 320 : 0);
       }
       if (opts.onStats) opts.onStats({ nodes: data.nodes.length, links: data.links.length, total: raw.nodes.length, totalLinks: raw.links.length, preset: (PRESETS[state.settings.mode] || PRESETS.compact).label, collapsed: collapsed, ghosts: data.nodes.filter(n => n.ghost).length, bridges: data.links.filter(l => l.bridge).length, suggested: data.links.filter(l => l.suggested).length });
     }
@@ -1810,6 +1811,9 @@
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
       setSimulationBudget(true);
+      // A frozen render removes relation-flow particles. Reapply the live paint settings
+      // before reheating so the enabled flow switch immediately becomes visible again.
+      render(false, false);
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
     };

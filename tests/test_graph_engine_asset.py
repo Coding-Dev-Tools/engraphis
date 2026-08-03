@@ -793,6 +793,48 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
     assert report["particleArrow"] is True
 
 
+@requires_node
+def test_unfreezing_reapplies_enabled_relation_flow_after_a_frozen_render() -> None:
+    """Freeze must not leave a still-enabled relation-flow switch visually inert."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        const particles = () => store.linkDirectionalParticles({ layer: 'semantic' });
+        api.setSettings({ flow: true });
+        api.setData(chain(2));
+        const live = particles();
+        api.freeze(true);
+        api.setData(chain(3));
+        const frozen = particles();
+        api.freeze(false);
+        emit({ live, frozen, resumed: particles() });
+        """
+    )
+    assert report == {"live": 3, "frozen": 0, "resumed": 3}
+
+
+@requires_node
+def test_reduced_motion_keeps_auto_fit_instant_while_physics_stays_live() -> None:
+    """OS visual-motion preferences suppress camera animation, not layout physics."""
+
+    report = _run_engine(
+        """
+        const timers = [];
+        globalThis.setTimeout = (callback, delay) => { timers.push(delay); callback(); return timers.length; };
+        globalThis.clearTimeout = () => {};
+        store.getGraphBbox = { x: [-10, 10], y: [-10, 10] };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(2));
+        emit({ timers, center: store.centerAt, zoom: store.zoom, cooldown: store.cooldownTime });
+        """
+    )
+    assert report["timers"] == [0]
+    assert report["center"][-1] == 0
+    assert report["zoom"][-1] == 0
+    assert report["cooldown"] == 2200
+
+
 def test_legacy_flow_particles_use_small_directional_arrows() -> None:
     """Classic and its static compatibility copy must not regress to round flow dots."""
     for path in (DASHBOARD, CLASSIC_DASHBOARD):
