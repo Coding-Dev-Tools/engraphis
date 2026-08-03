@@ -912,8 +912,9 @@
       });
     }
 
-    /* The dashboard already honours `prefers-reduced-motion` for the classic renderer; this
-       engine must not quietly reintroduce perpetual motion for the same user. */
+    /* Reduced motion still controls cosmetic animation and camera transitions. Physics is
+       deliberately controlled by the visible Freeze switch instead: otherwise the switch can
+       say "off" while an OS preference silently leaves every graph static. */
     function reduced() {
       if (typeof opts.reducedMotion === 'function') return !!opts.reducedMotion();
       try {
@@ -1387,7 +1388,8 @@
         pendingRender = pendingRender ? [pendingRender[0] || fit, pendingRender[1] || reheat] : [fit, reheat];
         return;
       }
-      const motion = !reduced();
+      const motion = !state.settings.frozen;
+      const reducedMotion = reduced();
       const next = visible();
       /* Reuse the arrays force-graph already holds when the view is unchanged: the sizing and
          colouring pass below must write onto the objects the vendor is painting from, and the
@@ -1446,6 +1448,7 @@
         const flowing = !fullGraph
           && state.settings.flow !== false
           && motion
+          && !reducedMotion
           && data.links.length <= PARTICLE_LINK_LIMIT;
         const particles = !flowing
           ? 0
@@ -1781,7 +1784,7 @@
     };
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.reheat = () => {
-      if (destroyed || reduced() || staticFullLayout) return;
+      if (destroyed || state.settings.frozen || staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       if (fg.d3ReheatSimulation) { fg.d3AlphaDecay(alphaDecay()); fg.d3ReheatSimulation(); }
     };
@@ -1798,7 +1801,6 @@
       if (staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
-      if (reduced()) return;
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
     };
