@@ -267,12 +267,6 @@ pipeline. Measure your machine with `python -m eval.vector_scale`, then run
 create the engine with `vector_backend="sqlite-vec"` and remeasure. See [BENCHMARKS.md](BENCHMARKS.md)
 for the reproducible commands and reporting limits.
 
-`MemoryEngine.create()` and `MemoryService.create()` default to the exact NumPy index, even when
-`sqlite-vec` is installed, so the default remains portable and deterministic. `sqlite-vec` and
-SQLCipher load incompatible SQLite native libraries in one process: with `vector_backend="auto"`
-Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails with an actionable
-error. Run accelerated search in a fresh process when using the SQLCipher extra.
-
 `sqlcipher3-binary` publishes CPython manylinux x86-64 wheels. On that target,
 `engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
 omits it so `all` remains resolvable on macOS, Windows, Linux ARM, and musl; on those

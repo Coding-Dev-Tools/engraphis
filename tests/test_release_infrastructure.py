@@ -74,6 +74,15 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert "same v2 service" in readme
 
 
+def test_native_vector_backend_compatibility_stays_in_architecture_docs():
+    readme = _text("README.md")
+    architecture = _text("docs/ARCHITECTURE_V3.md")
+    guidance = "`MemoryEngine.create()` and `MemoryService.create()` default to the exact NumPy index"
+
+    assert guidance not in readme
+    assert guidance in architecture
+
+
 def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_override():
     """Generic desktop .env values must not break the published container contract."""
 

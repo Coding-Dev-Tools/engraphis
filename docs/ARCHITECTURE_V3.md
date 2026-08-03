@@ -75,6 +75,14 @@ flowchart LR
 Migration is additive and idempotent. Pre-v3 edge layers are inferred exactly once; explicitly
 selected layers are never reclassified when a database is reopened.
 
+## Vector backend compatibility
+
+`MemoryEngine.create()` and `MemoryService.create()` default to the exact NumPy index, even when
+`sqlite-vec` is installed, so the default remains portable and deterministic. `sqlite-vec` and
+SQLCipher load incompatible SQLite native libraries in one process: with `vector_backend="auto"`
+Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails with an actionable
+error. Run accelerated search in a fresh process when using the SQLCipher extra.
+
 ## Repo workflow
 
 ```bash
