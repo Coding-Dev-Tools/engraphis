@@ -1164,6 +1164,36 @@ def test_summarize_drops_every_secret_field():
     assert summary["organization_id"] == "org_alpha"
 
 
+def test_summarize_never_reflects_malformed_provider_metadata():
+    secret = "INJECTED_PROVIDER_SECRET"
+    response = {
+        "organization_id": {"nested": secret},
+        "installation_id": "\x1b[31mterminal-control",
+        "device_id": "x" * 300,
+        "member_id": "mem_safe",
+        "workspace_id": "ws_safe",
+        "token_subject": "device",
+        "plan": "team",
+        "cloud_access_active": "true",
+        "cloud_features": ["analytics", {"nested": secret}, "sync\n", "analytics"],
+        "entitlement_version": True,
+        "expires_in_seconds": float("nan"),
+        "refresh_credential": secret,
+        "access_token": secret,
+    }
+
+    summary = device_connect.summarize(response)
+
+    assert summary == {
+        "member_id": "mem_safe",
+        "workspace_id": "ws_safe",
+        "token_subject": "device",
+        "plan": "team",
+        "cloud_features": ["analytics"],
+    }
+    assert secret not in repr(summary)
+
+
 # ------------------------------------------------------------------------- CLI surface
 
 

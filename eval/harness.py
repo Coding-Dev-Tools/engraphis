@@ -1,7 +1,7 @@
 """Eval runner: ingest fixture memories, query, score retrieval.
 
 Routes both ingestion and querying through ``MemoryEngine`` — the same hybrid
-vector+lexical+graph recall, six-term scoring, RRF fusion, and deterministic
+vector+lexical+graph recall, retention-aware weighted scoring, RRF fusion, and deterministic
 conflict resolution that ships in production — not a bare vector-index lookup.
 (Earlier versions of this harness called the vector index directly, which meant
 the CI gate measured plumbing but never exercised the actual recall pipeline or

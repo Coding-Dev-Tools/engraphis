@@ -17,8 +17,8 @@ def test_zero_stability_is_the_v2_legacy_default_not_a_fast_decay_sentinel():
     )
 
 
-def test_proactive_keeps_a_week_old_important_memory_ahead_of_fresh_scratch():
-    """Decay remains a priority signal without starving the proactive agenda."""
+def test_proactive_importance_decays_and_cannot_make_a_week_old_note_immortal():
+    """Important but unreinforced notes yield to fresh evidence as retention decays."""
     engine = MemoryEngine.create(":memory:")
     workspace_id = engine.store.get_or_create_workspace("acme")
     now = now_ts()
@@ -36,13 +36,13 @@ def test_proactive_keeps_a_week_old_important_memory_ahead_of_fresh_scratch():
 
     proactive = engine.recall_proactive(workspace_id=workspace_id, k=1)
 
-    assert [memory.id for memory in proactive["memories"]] == [old_important]
+    assert [memory.id for memory in proactive["memories"]] != [old_important]
 
 
-def test_importance_floor_is_calibrated_by_the_checked_in_ranking_eval():
+def test_decaying_importance_is_calibrated_by_the_checked_in_ranking_eval():
     report = run()
 
-    assert report["no_floor"]["top_1_accuracy"] == 0.2
-    assert report["prior_floor"]["top_1_accuracy"] == 0.4
-    assert report["calibrated_floor"]["top_1_accuracy"] == 1.0
-    assert report["calibrated_floor"]["minimum_expected_margin"] > 0.0
+    result = report["decaying_importance"]
+    assert result["importance_signal"] == "importance_times_retention"
+    assert result["top_1_accuracy"] == 1.0
+    assert result["minimum_expected_margin"] > 0.0

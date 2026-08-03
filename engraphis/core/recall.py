@@ -1,10 +1,11 @@
 """Hybrid recall engine.
 
-Pipeline: scope/time filter → hybrid candidate generation (vector + lexical + graph)
-→ RRF fusion → six-term weighted scoring → rerank → context packing → reinforce.
+Pipeline: scope/time filter → hybrid candidate generation (semantic vector + lexical + graph)
+→ RRF fusion → retention-aware weighted scoring → rerank → context packing → reinforce.
 
 The arms are pluggable:
-* vector  — any ``VectorIndex`` (NumPy reference now; sqlite-vec/Qdrant later)
+* vector  — declared semantic embedders through any ``VectorIndex`` (NumPy reference now;
+            sqlite-vec/Qdrant later); disabled for feature hashing and undeclared adapters
 * lexical — ``Store.fts_search`` (FTS5/BM25, with fallback)
 * graph   — Personalized PageRank over the entity/link graph (``core.graphrank``),
             seeded at the query's entities; ``graph_mode="1hop"`` keeps the older
@@ -12,22 +13,38 @@ The arms are pluggable:
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
+import math
+import queue
 import re
+import threading
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
+import numpy as np
+
 from engraphis.core import scoring
 from engraphis.core.context import DeterministicContextPacker
+from engraphis.core.graph_policy import UniformGraphTraversalPolicy
 from engraphis.core.graphrank import personalized_pagerank
 from engraphis.core.interfaces import (
     Candidate,
     ContextPacker,
     ContextUsage,
+    GraphLayer,
+    GraphTraversalPlan,
+    GraphTraversalPolicy,
     CandidateDepthPolicy,
+    MemoryType,
+    embedder_capabilities,
     MemoryRecord,
     PackedChunk,
+    PlannedQuery,
+    QueryPlanner,
     Reranker,
+    RetrievalPlan,
     RetrievalPolicy,
     SearchFilter,
 )
@@ -37,6 +54,12 @@ from engraphis.core.retrieval_policy import (
     ProfileConfig,
     RETRIEVAL_PROFILES,
     profile_config,
+)
+from engraphis.core.query_planner import (
+    DeterministicQueryPlanner,
+    MAX_PLANNED_PRIORITY,
+    MAX_PLANNED_QUERIES,
+    PLANNING_MODES,
 )
 from engraphis.core.poisoning import inspection_eligible, prompt_eligible
 from engraphis.core.store import Store, memory_matches_filter, now_ts
@@ -66,11 +89,21 @@ class RecallResult:
     candidate_k_used: int = 50
     candidate_depth_reason: str = "fixed requested depth"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
+    context_revision: str = ""
+    planning_mode: str = "off"
+    planning_details: Optional[dict[str, Any]] = None
+    graph_traversal_details: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
     # Safety metadata is kept off the public chunk projection.  Consumers which make
     # a trust-sensitive decision (grounded recall) can still honour a record's
     # quarantine state without exposing arbitrary user metadata through recall().
     source_metadata: dict[str, dict] = field(default_factory=dict, repr=False)
+    # Capabilities are public response metadata, not a score.  In particular, the
+    # deterministic feature-hashing fallback must never be mistaken for semantic recall.
+    degraded_mode: bool = False
+    semantic_support: bool = True
+    embedding_mode: str = "semantic"
+    degraded_reason: str = ""
 
 
 class RecallEngine:
@@ -79,7 +112,10 @@ class RecallEngine:
                  token_budget: int = 1500, graph_mode: str = "ppr",
                  context_packer: Optional[ContextPacker] = None,
                  retrieval_policy: Optional[RetrievalPolicy] = None,
-                 candidate_depth_policy: Optional[CandidateDepthPolicy] = None) -> None:
+                 candidate_depth_policy: Optional[CandidateDepthPolicy] = None,
+                 graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
+                 query_planner: Optional[QueryPlanner] = None,
+                 planner_timeout_s: float = 2.0) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -90,6 +126,10 @@ class RecallEngine:
         self.context_packer = context_packer or DeterministicContextPacker()
         self.retrieval_policy = retrieval_policy or DeterministicRetrievalPolicy()
         self.candidate_depth_policy = candidate_depth_policy or DeterministicRetrievalPolicy()
+        self.graph_traversal_policy = graph_traversal_policy or UniformGraphTraversalPolicy()
+        self.query_planner = query_planner or DeterministicQueryPlanner()
+        self.planner_timeout_s = max(0.0, float(planner_timeout_s))
+        self._planner_slot = threading.BoundedSemaphore(1)
         # "ppr" (default) = Personalized PageRank over entities+links (multi-hop);
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
         self.graph_mode = graph_mode
@@ -102,6 +142,8 @@ class RecallEngine:
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
+               planning: str = "off",
+               mtype_limits: Optional[dict] = None,
                arm_config: Optional[ProfileConfig] = None) -> RecallResult:
         flt = flt or SearchFilter()
         requested_historical = flt.historical
@@ -146,6 +188,26 @@ class RecallEngine:
         # ablations. Normal callers still use only named RetrievalPolicy profiles,
         # so benchmark labels do not expand the public routing contract.
         config = arm_config or profile_config(selected_profile)
+        capabilities = embedder_capabilities(self.embedder)
+        # A vector is not automatically semantic evidence. Feature hashing and any
+        # unclassified third-party adapter fail closed: keep lexical/graph/code recall,
+        # but never query the vector arm or add its cosine to a recall score.
+        if not capabilities["semantic_support"]:
+            config = replace(config, vector=False, semantic_scale=0.0)
+        planning_mode = str(planning or "off").strip().casefold()
+        if planning_mode not in PLANNING_MODES:
+            choices = ", ".join(sorted(PLANNING_MODES))
+            raise ValueError(f"planning must be one of: {choices}")
+        caller_limits = _normalize_mtype_limits(mtype_limits)
+        plan, planner_fallback = self._plan_queries(
+            query,
+            flt,
+            selected_profile=selected_profile,
+            planning_mode=planning_mode,
+        )
+        effective_limits = dict(plan.mtype_limits)
+        effective_limits.update(caller_limits)
+        planned_queries = list(plan.queries)
 
         # ── arms ─────────────────────────────────────────────────────────────
         # Prompt-facing consumers filter untrusted records after retrieval because
@@ -165,32 +227,104 @@ class RecallEngine:
                     max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
                 ),
             )
-        qvec = self.embedder.embed([query])[0] if config.vector else None
+        run_configs = [
+            config if index == 0 and arm_config is not None else profile_config(item.profile)
+            for index, item in enumerate(planned_queries)
+        ]
+        if not capabilities["semantic_support"]:
+            # Planned subqueries can select their own retrieval profile. Apply the
+            # degraded-mode clamp after that expansion so planning cannot re-enable
+            # feature-hashing vectors for any arm.
+            run_configs = [
+                replace(run_config, vector=False, semantic_scale=0.0)
+                for run_config in run_configs
+            ]
+        embedded_texts = [
+            item.text for item, run_config in zip(planned_queries, run_configs)
+            if run_config.vector
+        ]
+        embedded = self.embedder.embed(embedded_texts) if embedded_texts else []
+        embedded_iter = iter(embedded)
+        query_vectors = [
+            next(embedded_iter) if run_config.vector else None
+            for run_config in run_configs
+        ]
 
         while True:
-            if qvec is not None:
-                vec = dict(self.index.search(qvec, arm_candidate_k, filter=flt))
-            else:
-                vec = {}
-            lex = (
-                dict(self.store.fts_search(query, arm_candidate_k, filter=flt))
-                if config.lexical else {}
-            )
-            graph = (
-                self._graph_arm(query, flt, now, candidate_k=arm_candidate_k)
-                if config.graph else {}
-            )
-            code = (
-                self._code_arm(
-                    query, flt, arm_candidate_k, historical=requested_historical
+            query_runs = []
+            for item, run_config, qvec in zip(
+                planned_queries, run_configs, query_vectors
+            ):
+                query_filter = _planned_filter(flt, item.mtypes)
+                if query_filter is None:
+                    query_runs.append({
+                        "query": item,
+                        "config": run_config,
+                        "vector": {},
+                        "lexical": {},
+                        "graph": {},
+                        "code": {},
+                    })
+                    continue
+                vec = (
+                    dict(self.index.search(qvec, arm_candidate_k, filter=query_filter))
+                    if qvec is not None else {}
                 )
-                if config.code else {}
-            )
+                lex = (
+                    dict(self.store.fts_search(
+                        item.text, arm_candidate_k, filter=query_filter
+                    ))
+                    if run_config.lexical else {}
+                )
+                graph_plan, graph_policy_fallback = (
+                    self._plan_graph_traversal(item.text, query_filter)
+                    if run_config.graph else (None, "")
+                )
+                graph = (
+                    self._graph_arm(
+                        item.text,
+                        query_filter,
+                        now,
+                        candidate_k=arm_candidate_k,
+                        traversal_plan=graph_plan,
+                        prompt_only=prompt_only,
+                    )
+                    if run_config.graph else {}
+                )
+                code = (
+                    self._code_arm(
+                        item.text,
+                        query_filter,
+                        arm_candidate_k,
+                        historical=requested_historical,
+                    )
+                    if run_config.code else {}
+                )
+                query_runs.append({
+                    "query": item,
+                    "config": run_config,
+                    "vector": vec,
+                    "lexical": lex,
+                    "graph": graph,
+                    "code": code,
+                    "graph_traversal_plan": graph_plan,
+                    "graph_traversal_policy": getattr(
+                        self.graph_traversal_policy,
+                        "identity",
+                        type(self.graph_traversal_policy).__name__,
+                    ),
+                    "graph_traversal_fallback": graph_policy_fallback,
+                })
 
             # Sorted, not raw set order: a set of ids iterates in hash order, which varies
             # with PYTHONHASHSEED, so equal-scored results used to come back in a different
             # order in every process. One batched lookup replaces per-id lookups.
-            candidate_ids = sorted(set(vec) | set(lex) | set(graph) | set(code))
+            candidate_ids = sorted({
+                memory_id
+                for run in query_runs
+                for arm in ("vector", "lexical", "graph", "code")
+                for memory_id in run[arm]
+            })
             fetched = self.store.get_memories(candidate_ids)
             recs: dict[str, MemoryRecord] = {}
             for mid in candidate_ids:
@@ -207,17 +341,21 @@ class RecallEngine:
                     recs[mid] = rec
 
             can_expand = any(
-                enabled and len(values) >= arm_candidate_k
-                for enabled, values in (
-                    (config.vector, vec),
-                    (config.lexical, lex),
-                    (config.graph, graph),
-                    (config.code, code),
+                enabled and len(run[arm]) >= arm_candidate_k
+                for run in query_runs
+                for arm, enabled in (
+                    ("vector", run["config"].vector),
+                    ("lexical", run["config"].lexical),
+                    ("graph", run["config"].graph),
+                    ("code", run["config"].code),
                 )
             )
             if (
                 not prompt_only
-                or len(recs) >= prompt_target
+                or (
+                    len(recs) >= prompt_target
+                    and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
+                )
                 or arm_candidate_k >= candidate_ceiling
                 or not can_expand
             ):
@@ -235,40 +373,45 @@ class RecallEngine:
                 retrieval_profile=selected_profile,
                 candidate_depth_mode=requested_depth_mode,
                 candidate_k_requested=requested_candidate_k,
-                candidate_k_used=candidate_k,
+                # This is the page depth actually used by the retrieval arms.  A
+                # prompt-only recall may have widened it to find approved evidence.
+                candidate_k_used=arm_candidate_k,
                 candidate_depth_reason=candidate_depth_reason,
                 retrieval_trace=[] if diagnostics else None,
+                context_revision=_context_revision(usage, packed, context),
+                planning_mode=planning_mode,
+                planning_details=(
+                    _planning_details(
+                        plan,
+                        query_runs,
+                        recs,
+                        effective_limits,
+                        [],
+                        planner_fallback,
+                        getattr(self.query_planner, "identity", type(self.query_planner).__name__),
+                        rerank_pool_size=0,
+                        available_candidates=0,
+                    ) if diagnostics else None
+                ),
+                graph_traversal_details=(
+                    _graph_traversal_details(query_runs) if diagnostics else None
+                ),
                 token_counter=getattr(self.context_packer, "count_tokens", None),
+                **capabilities,
             )
 
-        sem_n = scoring.normalize({i: vec[i] for i in vec if i in recs})
-        lex_n = scoring.normalize({i: lex[i] for i in lex if i in recs})
-        grp_n = scoring.normalize({i: graph[i] for i in graph if i in recs})
-        code_n = scoring.normalize({i: code[i] for i in code if i in recs})
-        rrf = scoring.reciprocal_rank_fusion([
-            ranked for ranked in (
-                _ranked(vec, recs),
-                _ranked(lex, recs),
-                _ranked(graph, recs),
-                _ranked(code, recs),
-            ) if ranked
-        ])
+        arm_state, rrf = _fuse_query_runs(query_runs, recs)
+        primary_vec = query_runs[0]["vector"]
 
-        # ── six-term weighted score (+ small RRF nudge for cross-arm agreement) ──
+        # ── weighted score (+ small RRF nudge for cross-arm agreement) ─────────
         scored: list[Candidate] = []
         score_details: dict[str, dict[str, Any]] = {}
         for mid, rec in recs.items():
             w = self.weights.get(rec.mtype, scoring.Weights())
-            adjusted_semantic = sem_n.get(mid, 0.0) * config.semantic_scale
-            adjusted_lexical = lex_n.get(mid, 0.0) * config.lexical_scale
-            adjusted_graph = (
-                grp_n.get(mid, 0.0) * config.graph_scale
-                + (config.graph_presence_bonus if mid in graph else 0.0)
-            )
-            adjusted_code = (
-                code_n.get(mid, 0.0) * config.code_scale
-                + (config.code_presence_bonus if mid in code else 0.0)
-            )
+            adjusted_semantic = arm_state["adjusted"]["semantic"].get(mid, 0.0)
+            adjusted_lexical = arm_state["adjusted"]["lexical"].get(mid, 0.0)
+            adjusted_graph = arm_state["adjusted"]["graph"].get(mid, 0.0)
+            adjusted_code = arm_state["adjusted"]["code"].get(mid, 0.0)
             semantic_score = max(adjusted_semantic, adjusted_code)
             base = scoring.score_memory(
                 rec, now=now, weights=w,
@@ -276,12 +419,8 @@ class RecallEngine:
                 graph=adjusted_graph, recency_tau_days=self.recency_tau_days,
             )
             arms = [
-                name for name, values in (
-                    ("semantic", vec),
-                    ("lexical", lex),
-                    ("graph", graph),
-                    ("code", code),
-                ) if mid in values
+                name for name in ("semantic", "lexical", "graph", "code")
+                if mid in arm_state["raw"][name]
             ]
             fusion_score = base + 0.5 * rrf.get(mid, 0.0)
             arm = (
@@ -293,16 +432,16 @@ class RecallEngine:
             ))
             score_details[mid] = {
                 "raw": {
-                    "semantic": vec.get(mid),
-                    "lexical": lex.get(mid),
-                    "graph": graph.get(mid),
-                    "code": code.get(mid),
+                    "semantic": arm_state["raw"]["semantic"].get(mid),
+                    "lexical": arm_state["raw"]["lexical"].get(mid),
+                    "graph": arm_state["raw"]["graph"].get(mid),
+                    "code": arm_state["raw"]["code"].get(mid),
                 },
                 "normalized": {
-                    "semantic": sem_n.get(mid, 0.0),
-                    "lexical": lex_n.get(mid, 0.0),
-                    "graph": grp_n.get(mid, 0.0),
-                    "code": code_n.get(mid, 0.0),
+                    "semantic": arm_state["normalized"]["semantic"].get(mid, 0.0),
+                    "lexical": arm_state["normalized"]["lexical"].get(mid, 0.0),
+                    "graph": arm_state["normalized"]["graph"].get(mid, 0.0),
+                    "code": arm_state["normalized"]["code"].get(mid, 0.0),
                 },
                 "profile_adjusted": {
                     "semantic": adjusted_semantic,
@@ -310,7 +449,7 @@ class RecallEngine:
                     "graph": adjusted_graph,
                     "code": adjusted_code,
                 },
-                "six_term_score": base,
+                "ranking_score": base,
                 "rrf_score": rrf.get(mid, 0.0),
                 "fusion_score": fusion_score,
                 "rerank_score": None,
@@ -322,10 +461,15 @@ class RecallEngine:
         scored.sort(key=lambda c: (-c.score, c.id))
 
         # ── rerank top-N, keep k ─────────────────────────────────────────────
-        pool = scored[: max(k * 4, k)]
+        # Type limits need candidates beyond the ordinary top-4k window, but sending
+        # the complete multi-query union to a cross-encoder creates an avoidable
+        # latency/cost hazard. Add the best pre-rerank candidates required to fill k
+        # from every eligible memory type; with four types this remains <= 8k.
+        pool = _type_aware_rerank_pool(scored, effective_limits, k=max(0, int(k)))
+        rerank_k = len(pool) if effective_limits else k
         if self.reranker:
             fused_before = {candidate.id: candidate.score for candidate in pool}
-            reranked = self.reranker.rerank(query, pool, k)
+            reranked = self.reranker.rerank(query, pool, rerank_k)
             rerank_raw = {
                 candidate.id: float(candidate.score) for candidate in reranked
             }
@@ -345,13 +489,17 @@ class RecallEngine:
                         + 0.3 * rerank_norm.get(candidate.id, 0.0)
                     )
                 reranked.sort(key=lambda candidate: (-candidate.score, candidate.id))
-            final = reranked[:k]
-            for candidate in final:
+            ranked_final = reranked
+            for candidate in ranked_final:
                 detail = score_details[candidate.id]
                 detail["rerank_score"] = rerank_raw.get(candidate.id)
                 detail["calibrated_score"] = candidate.score
         else:
-            final = pool[:k]
+            ranked_final = pool
+
+        final, type_limit_drops = _apply_mtype_limits(
+            ranked_final, effective_limits, k=max(0, int(k))
+        )
 
         if reinforce and not requested_historical:
             for c in final:
@@ -359,14 +507,30 @@ class RecallEngine:
 
         # ``Candidate.score`` is deliberately query-relative: its retrieval arms are
         # min-max normalised before fusion. Publish a separate absolute signal from the
-        # raw cosine already returned by the vector arm plus lexical Jaccard. Reusing
-        # retrieval evidence avoids a second embedding batch on every ordinary recall.
+        # raw cosine plus lexical Jaccard. A planner-only candidate may have fallen
+        # outside the original vector arm's bounded result set, so recover its cosine
+        # from the persisted vector rather than publishing a false zero support value.
+        support_cosines = dict(primary_vec)
+        original_query_vector = query_vectors[0]
+        missing_support = [
+            candidate.id for candidate in final
+            if candidate.id not in support_cosines
+        ]
+        if original_query_vector is not None and missing_support:
+            query_norm = float(np.linalg.norm(original_query_vector))
+            if query_norm > 0:
+                for memory_id, vector in self.store.get_vectors(missing_support).items():
+                    vector_norm = float(np.linalg.norm(vector))
+                    if vector_norm > 0 and vector.shape == original_query_vector.shape:
+                        support_cosines[memory_id] = float(
+                            np.dot(original_query_vector, vector) / (query_norm * vector_norm)
+                        )
         support = {
             candidate.id: _absolute_retrieval_support(
                 query,
                 candidate.record.content,
                 title=candidate.record.title,
-                semantic_cosine=vec.get(candidate.id, 0.0),
+                semantic_cosine=support_cosines.get(candidate.id, 0.0),
             )
             for candidate in final
         }
@@ -402,16 +566,150 @@ class RecallEngine:
             retrieval_profile=selected_profile,
             candidate_depth_mode=requested_depth_mode,
             candidate_k_requested=requested_candidate_k,
-            candidate_k_used=candidate_k,
+            # Report the final, post-widening arm depth rather than the policy's
+            # initial candidate depth.  This is diagnostic telemetry, not a limit.
+            candidate_k_used=arm_candidate_k,
             candidate_depth_reason=candidate_depth_reason,
             retrieval_trace=trace,
+            context_revision=_context_revision(usage, packed_chunks, context),
+            planning_mode=planning_mode,
+            planning_details=(
+                _planning_details(
+                    plan,
+                    query_runs,
+                    recs,
+                    effective_limits,
+                    type_limit_drops,
+                    planner_fallback,
+                    getattr(self.query_planner, "identity", type(self.query_planner).__name__),
+                    rerank_pool_size=len(pool),
+                    available_candidates=len(scored),
+                ) if diagnostics else None
+            ),
+            graph_traversal_details=(
+                _graph_traversal_details(query_runs) if diagnostics else None
+            ),
             token_counter=getattr(self.context_packer, "count_tokens", None),
             source_metadata={
                 candidate.id: _source_safety_metadata(candidate.record)
                 for candidate in final
                 if candidate.record is not None
             },
+            **capabilities,
         )
+
+    def _plan_queries(
+        self,
+        query: str,
+        flt: SearchFilter,
+        *,
+        selected_profile: str,
+        planning_mode: str,
+    ) -> tuple[RetrievalPlan, str]:
+        identity = RetrievalPlan((PlannedQuery(query, 1, selected_profile),))
+        if planning_mode == "off":
+            return identity, ""
+        try:
+            # Query planning is not a policy boundary. SearchFilter is mutable for
+            # legacy compatibility, so never expose the live retrieval filter to an
+            # injected planner. Clone its collection fields as well to prevent an
+            # in-place list mutation from widening the real query.
+            planner_filter = replace(
+                flt,
+                scopes=list(flt.scopes) if flt.scopes is not None else None,
+                mtypes=list(flt.mtypes) if flt.mtypes is not None else None,
+                graph_layers=(
+                    list(flt.graph_layers) if flt.graph_layers is not None else None
+                ),
+            )
+            proposed = self._run_planner(query, planner_filter)
+            return _sanitize_plan(proposed, query, selected_profile), ""
+        except Exception as exc:
+            return identity, _planner_fallback_reason(exc)
+
+    def _run_planner(self, query: str, planner_filter: SearchFilter) -> RetrievalPlan:
+        """Enforce the planner deadline even for a non-cooperative injected backend.
+
+        Python cannot safely kill an arbitrary running function. A single daemon
+        worker therefore owns the planner slot; recall returns the identity route
+        on deadline, and further calls fail open until the timed-out worker exits.
+        This bounds caller latency and prevents an accumulation of stuck threads.
+        """
+        if self.planner_timeout_s <= 0 or not self._planner_slot.acquire(blocking=False):
+            raise TimeoutError("planner deadline unavailable")
+        outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                outcome.put((True, self.query_planner.plan(
+                    query,
+                    filter=planner_filter,
+                    timeout_s=self.planner_timeout_s,
+                )))
+            except Exception as exc:
+                outcome.put((False, exc))
+            finally:
+                self._planner_slot.release()
+
+        worker = threading.Thread(
+            target=invoke,
+            name="engraphis-query-planner",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(self.planner_timeout_s)
+        if worker.is_alive():
+            raise TimeoutError("planner deadline exceeded")
+        try:
+            succeeded, value = outcome.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError("planner terminated without a result") from exc
+        if succeeded:
+            return value
+        raise value
+
+    def _plan_graph_traversal(
+        self,
+        query: str,
+        flt: SearchFilter,
+    ) -> tuple[GraphTraversalPlan, str]:
+        """Return an injected policy plan or fail closed to uniform traversal.
+
+        Traversal policy is a soft ranking enhancement, never an availability or
+        authorization boundary.  A broken optional policy therefore must not make
+        local recall unavailable or change the established uniform PPR fallback.
+        """
+        try:
+            # Policies may receive filter context to explain a plan, but they are
+            # not an authority boundary. SearchFilter remains mutable for legacy
+            # compatibility, so never expose the live retrieval filter to an
+            # injected policy: a buggy/malicious implementation must not widen
+            # scope, erase temporal anchors, or loosen graph-layer constraints.
+            policy_filter = replace(
+                flt,
+                scopes=list(flt.scopes) if flt.scopes is not None else None,
+                mtypes=list(flt.mtypes) if flt.mtypes is not None else None,
+                graph_layers=(
+                    list(flt.graph_layers) if flt.graph_layers is not None else None
+                ),
+            )
+            proposed = self.graph_traversal_policy.plan(query, filter=policy_filter)
+        except Exception:
+            return GraphTraversalPlan(reason_codes=("policy_unavailable",)), "policy_unavailable"
+        if not isinstance(proposed, GraphTraversalPlan):
+            return GraphTraversalPlan(reason_codes=("invalid_policy_output",)), "invalid_policy_output"
+        try:
+            # Rebuild a base plan rather than invoking a subclass's method in
+            # the hot path. This validates finite, unique weights and prevents
+            # an injected subclass from changing multiplier semantics.
+            plan = GraphTraversalPlan(
+                intent=proposed.intent,
+                layer_weights=proposed.layer_weights,
+                reason_codes=proposed.reason_codes,
+            )
+        except Exception:
+            return GraphTraversalPlan(reason_codes=("invalid_policy_output",)), "invalid_policy_output"
+        return plan, ""
 
     # ── arms / helpers ────────────────────────────────────────────────────────
     def _code_arm(
@@ -600,12 +898,56 @@ class RecallEngine:
         now: float,
         *,
         candidate_k: int = 50,
+        traversal_plan: Optional[GraphTraversalPlan] = None,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         if flt.graph_layers is not None and not flt.graph_layers:
             return {}
         if self.graph_mode == "1hop":
-            return self._graph_arm_1hop(query, flt, now, candidate_k=candidate_k)
-        return self._graph_arm_ppr(query, flt, now, candidate_k=candidate_k)
+            return self._graph_arm_1hop(
+                query, flt, now, candidate_k=candidate_k, prompt_only=prompt_only,
+            )
+        return self._graph_arm_ppr(
+            query,
+            flt,
+            now,
+            candidate_k=candidate_k,
+            traversal_plan=traversal_plan,
+            prompt_only=prompt_only,
+        )
+
+    def _prompt_eligible_memory_ids(self, memory_ids: set[str]) -> set[str]:
+        """Return only approved, non-quarantined memory nodes for prompt PPR."""
+        if not memory_ids:
+            return set()
+        records = self.store.get_memories(sorted(memory_ids))
+        return {
+            memory_id
+            for memory_id, record in records.items()
+            if prompt_eligible(record.provenance, record.metadata)
+        }
+
+    @staticmethod
+    def _edge_source_memory_ids(edge) -> set[str]:
+        provenance = edge.provenance if isinstance(edge.provenance, dict) else {}
+        values = [provenance.get("memory_id")]
+        many = provenance.get("memory_ids")
+        if isinstance(many, (list, tuple, set)):
+            values.extend(many)
+        return {str(value) for value in values if value}
+
+    def _prompt_eligible_edges(self, edges: list) -> list:
+        """Keep direct edges and edges whose every memory support is prompt-eligible."""
+        source_ids = (
+            set().union(*(self._edge_source_memory_ids(edge) for edge in edges))
+            if edges else set()
+        )
+        eligible_ids = self._prompt_eligible_memory_ids(source_ids)
+        return [
+            edge for edge in edges
+            if not (sources := self._edge_source_memory_ids(edge))
+            or sources <= eligible_ids
+        ]
 
     def _graph_arm_ppr(
         self,
@@ -614,6 +956,8 @@ class RecallEngine:
         now: float,
         *,
         candidate_k: int = 50,
+        traversal_plan: Optional[GraphTraversalPlan] = None,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         """Personalized PageRank arm: build the scoped
         entity/memory graph — entity↔entity edges (bi-temporal), memory↔entity
@@ -636,12 +980,15 @@ class RecallEngine:
         if not seeds:
             return {}
 
+        if not isinstance(traversal_plan, GraphTraversalPlan):
+            traversal_plan, _ = self._plan_graph_traversal(query, flt)
         ent = "ent::{}".format
         adj: dict[str, list[tuple[str, float]]] = {}
 
-        def connect(a: str, b: str, w: float) -> None:
-            adj.setdefault(a, []).append((b, w))
-            adj.setdefault(b, []).append((a, w))
+        def connect(a: str, b: str, w: float, layer: GraphLayer) -> None:
+            weighted = max(float(w or 1.0), 1e-6) * traversal_plan.multiplier(layer)
+            adj.setdefault(a, []).append((b, weighted))
+            adj.setdefault(b, []).append((a, weighted))
 
         # Build a bounded edge set outward from the query entities.  A global
         # ULID-ordered cap would let old unrelated edges crowd out a new relation
@@ -657,9 +1004,13 @@ class RecallEngine:
             frontier.difference_update(batch)
             expanded.update(batch)
             next_frontier: set[str] = set()
-            for edge in self.store.neighbors(
-                    batch, at=now, layers=flt.graph_layers, flt=flt,
-                    limit=edge_cap - len(edges_by_id)):
+            edges = self.store.neighbors(
+                batch, at=now, layers=flt.graph_layers, flt=flt,
+                limit=edge_cap - len(edges_by_id), prompt_only=prompt_only,
+            )
+            if prompt_only:
+                edges = self._prompt_eligible_edges(edges)
+            for edge in edges:
                 if edge.id in edges_by_id:
                     continue
                 edges_by_id[edge.id] = edge
@@ -668,7 +1019,12 @@ class RecallEngine:
                     break
             frontier.update(next_frontier - expanded)
         for e in edges_by_id.values():
-            connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
+            connect(
+                ent(e.src),
+                ent(e.dst),
+                max(float(e.weight or 1.0), 1e-6),
+                e.layer or GraphLayer.SEMANTIC,
+            )
 
         # Query only the entity frontier before applying the incidence cap. A
         # global confidence/ID prefix can otherwise omit a memory attached to a
@@ -678,7 +1034,7 @@ class RecallEngine:
             *(endpoint for edge in edges_by_id.values() for endpoint in (edge.src, edge.dst)),
         })
         incidence = self.store.list_memory_entities(
-            flt, entity_ids=incidence_entity_ids, limit=12_000,
+            flt, entity_ids=incidence_entity_ids, limit=12_000, prompt_only=prompt_only,
         )
         # Links are graph evidence in their own right. Restricting their endpoints
         # to incidence rows silently drops a linked memory which has no entity
@@ -696,17 +1052,31 @@ class RecallEngine:
             layers=flt.graph_layers,
             flt=flt,
             limit=20_000,
+            prompt_only=prompt_only,
         )
         # Expand from the entity-incidence frontier before adding the bounded newest
         # memory window. An older unmentioned endpoint can then participate in PPR
         # through its visible link instead of being silently dropped by that window.
-        memory_ids = sorted(incidence_memory_ids | {
+        memory_ids = incidence_memory_ids | {
             endpoint
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
         } | {
-            memory.id for memory in self.store.list_memories(flt, limit=12_000)
-        })
+            memory.id for memory in self.store.list_memories(
+                flt, limit=12_000, prompt_only=prompt_only,
+            )
+        }
+        if prompt_only:
+            memory_ids = self._prompt_eligible_memory_ids(memory_ids)
+            incidence = [
+                row for row in incidence
+                if str(row.get("memory_id") or "") in memory_ids
+            ]
+            frontier_links = [
+                link for link in frontier_links
+                if link["a"] in memory_ids and link["b"] in memory_ids
+            ]
+        memory_ids = sorted(memory_ids)
         incidence_strength: dict[tuple[str, str], float] = {}
         for row in incidence:
             memory_id = str(row.get("memory_id") or "")
@@ -718,15 +1088,23 @@ class RecallEngine:
                     max(float(row.get("confidence") or 0.0), 1e-6),
                 )
         for (memory_id, entity_id), confidence in incidence_strength.items():
-            connect(memory_id, ent(entity_id), confidence)
+            # Incidence is a structural memory↔entity bridge, not an inferred
+            # entity relation.  Preferencing a causal/temporal relation must not
+            # downweight the only path that reaches its supporting memory.
+            adj.setdefault(memory_id, []).append((ent(entity_id), confidence))
+            adj.setdefault(ent(entity_id), []).append((memory_id, confidence))
         for link in self.store.links_among(
             memory_ids,
             layers=flt.graph_layers,
             flt=flt,
             limit=20_000,
         ):
-            connect(link["a"], link["b"], 1.0)
-
+            connect(
+                link["a"],
+                link["b"],
+                1.0,
+                GraphLayer(str(link.get("layer") or GraphLayer.SEMANTIC.value)),
+            )
 
         ranked = personalized_pagerank(adj, [ent(eid) for eid in seeds])
         memory_scores = [
@@ -743,6 +1121,7 @@ class RecallEngine:
         now: float,
         *,
         candidate_k: int = 50,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         entity_map = self._seed_entity_map(query, flt)
         patterns = {
@@ -759,19 +1138,29 @@ class RecallEngine:
         if not seed_ids:
             return {}
         related_ids = set(seed_ids)
-        for edge in self.store.neighbors(
-            seed_ids, at=now, layers=flt.graph_layers, flt=flt
-        ):
+        edges = self.store.neighbors(
+            seed_ids, at=now, layers=flt.graph_layers, flt=flt, prompt_only=prompt_only,
+        )
+        if prompt_only:
+            edges = self._prompt_eligible_edges(edges)
+        for edge in edges:
             related_ids.add(edge.src)
             related_ids.add(edge.dst)
         rows = self.store.list_memory_entities(
-            flt, entity_ids=sorted(related_ids), limit=12_000
+            flt, entity_ids=sorted(related_ids), limit=12_000, prompt_only=prompt_only,
+        )
+        eligible_ids = (
+            self._prompt_eligible_memory_ids({
+                str(row.get("memory_id") or "")
+                for row in rows if row.get("memory_id")
+            })
+            if prompt_only else None
         )
         out: dict[str, float] = {}
         if rows:
             for row in rows:
                 memory_id = str(row.get("memory_id") or "")
-                if memory_id:
+                if memory_id and (eligible_ids is None or memory_id in eligible_ids):
                     out[memory_id] = (
                         out.get(memory_id, 0.0)
                         + max(0.0, float(row.get("confidence") or 0.0))
@@ -860,6 +1249,308 @@ class RecallEngine:
         return context
 
 
+def _sanitize_plan(
+    proposed: RetrievalPlan,
+    original_query: str,
+    selected_profile: str,
+) -> RetrievalPlan:
+    """Validate an untrusted planner result and restore the mandatory identity route."""
+    if not isinstance(proposed, RetrievalPlan):
+        raise ValueError("planner must return RetrievalPlan")
+    # The mandatory route must be the caller's exact query, matching planning-off
+    # behavior. Use a whitespace-normalized key only for duplicate detection.
+    original = str(original_query or "")
+    queries = [PlannedQuery(original, 1, selected_profile)]
+    seen = {" ".join(original.split()).casefold()}
+    candidates = []
+    for position, item in enumerate(proposed.queries):
+        if not isinstance(item, PlannedQuery):
+            raise ValueError("planner queries must be PlannedQuery values")
+        text = " ".join(str(item.text or "").split())[:2048]
+        if not text or text.casefold() in seen:
+            continue
+        if isinstance(item.priority, bool) or not isinstance(item.priority, int):
+            raise ValueError("planned query priority must be a positive integer")
+        priority = min(MAX_PLANNED_PRIORITY, max(2, item.priority))
+        profile = str(item.profile or "balanced").strip().casefold()
+        if profile not in {"balanced", "lexical", "graph", "code"}:
+            raise ValueError("planned query profile is invalid")
+        mtypes = tuple(dict.fromkeys(MemoryType(value) for value in item.mtypes))
+        candidates.append((priority, position, PlannedQuery(text, priority, profile, mtypes)))
+        seen.add(text.casefold())
+    candidates.sort(key=lambda value: (value[0], value[1], value[2].text.casefold()))
+    for _, _, item in candidates[: MAX_PLANNED_QUERIES - 1]:
+        queries.append(item)
+    reasons = tuple(
+        str(reason).strip()[:80]
+        for reason in proposed.reason_codes[:8]
+        if str(reason).strip()
+    )
+    return RetrievalPlan(
+        tuple(queries),
+        _normalize_mtype_limits(proposed.mtype_limits),
+        reasons,
+    )
+
+
+def _planner_fallback_reason(exc: Exception) -> str:
+    """Map planner failures to stable diagnostics without reflecting provider data."""
+    if isinstance(exc, TimeoutError):
+        return "planner_timeout"
+    if isinstance(exc, (TypeError, ValueError)):
+        return "invalid_planner_output"
+    return "planner_unavailable"
+
+
+def _normalize_mtype_limits(values: Optional[dict]) -> dict[MemoryType, int]:
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError("mtype_limits must be an object of memory type to maximum count")
+    normalized = {}
+    for raw_key, raw_limit in values.items():
+        try:
+            key = MemoryType(raw_key)
+        except (TypeError, ValueError) as exc:
+            choices = ", ".join(item.value for item in MemoryType)
+            raise ValueError(f"mtype_limits keys must be one of: {choices}") from exc
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            raise ValueError("mtype_limits values must be non-negative integers")
+        limit = raw_limit
+        if limit < 0:
+            raise ValueError("mtype_limits values must be non-negative integers")
+        normalized[key] = limit
+    return normalized
+
+
+def _planned_filter(
+    flt: SearchFilter,
+    mtypes: tuple[MemoryType, ...],
+) -> Optional[SearchFilter]:
+    if not mtypes:
+        return flt
+    allowed = set(mtypes)
+    if flt.mtypes is not None:
+        allowed &= {MemoryType(value) for value in flt.mtypes}
+    if not allowed:
+        return None
+    ordered = [item for item in MemoryType if item in allowed]
+    return replace(flt, mtypes=ordered)
+
+
+def _fuse_query_runs(
+    query_runs: list[dict[str, Any]],
+    recs: dict[str, MemoryRecord],
+) -> tuple[dict[str, dict[str, dict[str, float]]], dict[str, float]]:
+    """Fuse query/arm rankings with priority-weighted RRF.
+
+    Each arm is normalized within its own planned query before profile scaling.
+    The best contribution per arm feeds the established six-term scorer; agreement
+    across queries and arms is represented separately by weighted RRF.
+    """
+    names = {
+        "vector": "semantic",
+        "lexical": "lexical",
+        "graph": "graph",
+        "code": "code",
+    }
+    state = {
+        category: {name: {} for name in names.values()}
+        for category in ("raw", "normalized", "adjusted")
+    }
+    rrf: dict[str, float] = {}
+    for run in query_runs:
+        item = run["query"]
+        config = run["config"]
+        priority_weight = 1.0 / max(1, int(item.priority))
+        for source_name, output_name in names.items():
+            raw = {mid: score for mid, score in run[source_name].items() if mid in recs}
+            normalized = scoring.normalize(raw)
+            scale = getattr(config, f"{output_name}_scale")
+            bonus = getattr(config, f"{output_name}_presence_bonus", 0.0)
+            for mid, value in raw.items():
+                state["raw"][output_name][mid] = max(
+                    state["raw"][output_name].get(mid, float("-inf")),
+                    float(value),
+                )
+                state["normalized"][output_name][mid] = max(
+                    state["normalized"][output_name].get(mid, 0.0),
+                    normalized.get(mid, 0.0),
+                )
+                adjusted = (normalized.get(mid, 0.0) * scale + bonus) * priority_weight
+                state["adjusted"][output_name][mid] = max(
+                    state["adjusted"][output_name].get(mid, 0.0),
+                    adjusted,
+                )
+            for rank, mid in enumerate(_ranked(raw, recs)):
+                rrf[mid] = rrf.get(mid, 0.0) + priority_weight / (60 + rank + 1)
+    return state, rrf
+
+
+def _apply_mtype_limits(
+    candidates: list[Candidate],
+    limits: dict[MemoryType, int],
+    *,
+    k: int,
+) -> tuple[list[Candidate], list[dict[str, Any]]]:
+    selected = []
+    counts: dict[MemoryType, int] = {}
+    drops = []
+    for candidate in candidates:
+        if len(selected) >= k:
+            break
+        if candidate.record is None:
+            continue
+        mtype = candidate.record.mtype
+        limit = limits.get(mtype)
+        if limit is not None and counts.get(mtype, 0) >= limit:
+            drops.append({"id": candidate.id, "mtype": mtype.value, "limit": limit})
+            continue
+        selected.append(candidate)
+        counts[mtype] = counts.get(mtype, 0) + 1
+    return selected, drops
+
+
+def _mtype_limits_can_fill(
+    records: dict[str, MemoryRecord], limits: dict[MemoryType, int], target: int,
+) -> bool:
+    """Whether the fetched prompt-safe records can fill ``target`` after type caps."""
+    if not limits:
+        return True
+    selected = 0
+    counts: dict[MemoryType, int] = {}
+    for record in records.values():
+        limit = limits.get(record.mtype)
+        if limit is not None and counts.get(record.mtype, 0) >= limit:
+            continue
+        selected += 1
+        counts[record.mtype] = counts.get(record.mtype, 0) + 1
+        if selected >= target:
+            return True
+    return False
+
+
+def _type_aware_rerank_pool(
+    candidates: list[Candidate],
+    limits: dict[MemoryType, int],
+    *,
+    k: int,
+) -> list[Candidate]:
+    """Return a bounded pool that can still fill every eligible memory-type slot."""
+    if k <= 0:
+        return []
+    ordinary = list(candidates[: max(k * 4, k)])
+    if not limits:
+        return ordinary
+    selected_ids = {candidate.id for candidate in ordinary}
+    per_type: dict[MemoryType, int] = {}
+    needed = {
+        mtype: min(k, limits.get(mtype, k))
+        for mtype in MemoryType
+    }
+    for candidate in ordinary:
+        if candidate.record is not None:
+            mtype = candidate.record.mtype
+            per_type[mtype] = per_type.get(mtype, 0) + 1
+    for candidate in candidates[len(ordinary):]:
+        if candidate.record is None or candidate.id in selected_ids:
+            continue
+        mtype = candidate.record.mtype
+        if per_type.get(mtype, 0) >= needed[mtype]:
+            continue
+        ordinary.append(candidate)
+        selected_ids.add(candidate.id)
+        per_type[mtype] = per_type.get(mtype, 0) + 1
+        if all(per_type.get(value, 0) >= count for value, count in needed.items()):
+            break
+    return ordinary
+
+
+def _context_revision(
+    usage: ContextUsage,
+    packed: list[PackedChunk],
+    context: str,
+) -> str:
+    payload = {
+        "token_counter": usage.token_counter,
+        "packed": [[chunk.id, chunk.excerpt] for chunk in packed],
+        # Headers (including titles) are part of the emitted prompt but not part
+        # of PackedChunk.excerpt. Hash the exact prompt text as well so any host-
+        # visible change necessarily produces a new revision.
+        "context": context,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _planning_details(
+    plan: RetrievalPlan,
+    query_runs: list[dict[str, Any]],
+    recs: dict[str, MemoryRecord],
+    limits: dict[MemoryType, int],
+    drops: list[dict[str, Any]],
+    fallback: str,
+    planner_identity: str,
+    *,
+    rerank_pool_size: int,
+    available_candidates: int,
+) -> dict[str, Any]:
+    rankings = []
+    for run in query_runs:
+        item = run["query"]
+        rankings.append({
+            "text": item.text,
+            "priority": item.priority,
+            "profile": item.profile,
+            "mtypes": [value.value for value in item.mtypes],
+            "rankings": {
+                name: _ranked(run[source], recs)
+                for source, name in (
+                    ("vector", "semantic"),
+                    ("lexical", "lexical"),
+                    ("graph", "graph"),
+                    ("code", "code"),
+                )
+            },
+        })
+    return {
+        "planner": str(planner_identity),
+        "reason_codes": list(plan.reason_codes),
+        "queries": rankings,
+        "mtype_limits": {key.value: value for key, value in limits.items()},
+        "type_limit_drops": drops,
+        "fallback_reason": fallback or None,
+        "rerank_pool": {
+            "strategy": "type_aware_bounded" if limits else "top_4k",
+            "size": rerank_pool_size,
+            "available_candidates": available_candidates,
+        },
+    }
+
+
+def _graph_traversal_details(query_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expose bounded graph-policy decisions only in diagnostic recall results."""
+    details = []
+    for run in query_runs:
+        plan = run.get("graph_traversal_plan")
+        if not isinstance(plan, GraphTraversalPlan):
+            continue
+        candidates = sorted(
+            run["graph"].items(), key=lambda item: (-item[1], item[0])
+        )[:50]
+        details.append({
+            "query": run["query"].text,
+            "policy": str(run.get("graph_traversal_policy") or "unknown"),
+            "plan": plan.as_dict(),
+            "fallback_reason": run.get("graph_traversal_fallback") or None,
+            "candidate_scores": [
+                {"id": memory_id, "score": round(float(score), 8)}
+                for memory_id, score in candidates
+            ],
+        })
+    return details
+
+
 def _source_safety_metadata(record: MemoryRecord) -> dict:
     """Project only trust flags needed by grounded recall, never caller metadata."""
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
@@ -894,10 +1585,12 @@ def _absolute_retrieval_support(
     outside the vector arm's top-k. Unlike fused rank, neither component is min-max
     normalised against the other candidates in this response.
     """
-    semantic = max(0.0, min(1.0, float(semantic_cosine)))
-    # FTS indexes title and content together, so its absolute evidence floor
-    # must use the same text rather than rejecting a legitimate title-only hit.
-    lexical = jaccard(tokenize(query), tokenize("\n".join((str(title or ""), content))))
+    raw_semantic = float(semantic_cosine)
+    semantic = max(0.0, min(1.0, raw_semantic)) if math.isfinite(raw_semantic) else 0.0
+    # Titles improve candidate discovery, but are metadata rather than answer-bearing
+    # evidence.  Keeping them out of the absolute gate aligns adaptive routing with
+    # grounded recall and prevents a keyword-stuffed title from qualifying garbage.
+    lexical = jaccard(tokenize(query), tokenize(content or ""))
     return max(semantic, lexical)
 
 

@@ -2,10 +2,13 @@
 # Team identity, roles, seats, and organization management remain in the private account portal.
 #
 # NOTE: the `env_file:` object form below (`- path: .env` + `required: false`, which makes
-# .env OPTIONAL so a fresh clone with no .env still boots) needs Docker Compose v2.24+
+# .env OPTIONAL so a fresh clone with no .env still boots) needs Docker Compose v2.24.4+
 # (Jan 2024). On older Compose, either upgrade, or replace each `env_file:` block with the
-# plain list form `env_file: [.env]` and run `touch .env` first — the `environment:` blocks
-# already supply every default, so .env is only ever for optional overrides.
+# plain list form `env_file: [.env]` and run `touch .env` first. The fixed `environment:`
+# values below deliberately win over generic desktop settings such as ENGRAPHIS_HOST and
+# ENGRAPHIS_DB_PATH: a container must bind its own interface and persist below /data. Use
+# ENGRAPHIS_COMPOSE_PORT when the published host port needs to change. The separate
+# docker-compose.lan.yml overlay is the token-required LAN deployment path.
 services:
   engraphis:
     build: .
@@ -15,9 +18,9 @@ services:
     # itself no longer bakes a host — its entrypoint defaults to `::` dual-stack).
     command: ["engraphis-dashboard", "--no-open"]
     ports:
-      # Keep the zero-token quickstart reachable only from this machine. Do not widen
-      # this bind without first setting ENGRAPHIS_API_TOKEN in .env.
-      - "127.0.0.1:8700:8700"
+      # The zero-token quickstart stays local. docker-compose.lan.yml replaces this mapping
+      # and requires ENGRAPHIS_API_TOKEN before publishing on all IPv4 interfaces.
+      - "127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"
     env_file:
       # Optional: a fresh clone has no .env (it's gitignored), and `docker compose up`
       # must still work using the `environment:` block below plus the shell env.
@@ -25,8 +28,12 @@ services:
         required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
-      # Docker NAT presents the host browser as a private bridge peer. This exception is
-      # safe only because the published host port above is loopback-only.
+      # start_dashboard gives platform PORT precedence. Pin it with ENGRAPHIS_PORT here
+      # so a desktop .env copied from another platform cannot desynchronise the mapping.
+      PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}
+      ENGRAPHIS_PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}
+      # Docker NAT presents the host browser as a private bridge peer. A LAN bind must use an
+      # API token; the loopback-only default is the sole zero-token quickstart.
       ENGRAPHIS_LOCAL_TRUSTED_PEERS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
       ENGRAPHIS_DB_PATH: /data/engraphis.db
       # Persist the customer-side cloud session and non-authoritative entitlement display

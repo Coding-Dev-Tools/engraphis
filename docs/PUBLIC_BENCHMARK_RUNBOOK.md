@@ -8,8 +8,12 @@ contracts are authoritative: see [BENCHMARKS.md](../BENCHMARKS.md),
 
 ## 1. Lock the run
 
-Create a private run directory outside the repository or under an ignored path. Record one
-immutable manifest before execution:
+Create an owner-controlled restricted run directory outside the repository or under an ignored
+path. Set it once, then record one immutable manifest before execution:
+
+```bash
+export ENGRAPHIS_BENCHMARK_RUN_DIR=/path/to/restricted/benchmark-run
+```
 
 - repository commit, clean or dirty state, Python version, OS, hardware, package lock, and command;
 - exact dataset and benchmark-repository revisions plus SHA-256 digests;
@@ -25,11 +29,11 @@ Canonical runs must use a clean worktree, complete source dataset, immutable rev
 
 Use one `engraphis-public-benchmark-manifest/v1` execution manifest for each candidate, baseline,
 and benchmark point. It identifies local dataset bytes, the checked-out commit, models, a pinned
-profile, and private/public output paths. Run it through the allowlisted orchestrator:
+profile, and restricted/public output paths. Run it through the allowlisted orchestrator:
 
 ```bash
-python -m scripts.run_public_benchmark --manifest private/point.json
-python -m scripts.run_public_benchmark --manifest private/point.json --execute
+python -m scripts.run_public_benchmark --manifest "$ENGRAPHIS_BENCHMARK_RUN_DIR/point.json"
+python -m scripts.run_public_benchmark --manifest "$ENGRAPHIS_BENCHMARK_RUN_DIR/point.json" --execute
 ```
 
 The first command is a redacted dry-run. The second is the only form that starts the pinned local
@@ -37,7 +41,7 @@ commands, and it refuses a missing dataset, hash mismatch, commit mismatch, or d
 
 Use one separate `engraphis-public-benchmark-series/v1` manifest as the predeclared comparison
 contract. It records the required baseline and budget matrix, the frozen holdout, and distinct
-private and public artifact locations. Its structural validator does not prove that any point ran.
+restricted and public artifact locations. Its structural validator does not prove that any point ran.
 Treat the series as completed only after validated artifacts exist for every declared point. A
 single point never qualifies as a full comparative public result.
 
@@ -125,7 +129,7 @@ python -m eval.benchmark --input report.json --output artifacts/run.json --canon
 python -m eval.public_readiness \
   --artifact artifacts/run.json \
   --claims artifacts/claims.json
-python -m eval.public_readiness --series private/comparison-series.json
+python -m eval.public_readiness --series "$ENGRAPHIS_BENCHMARK_RUN_DIR/comparison-series.json"
 ```
 
 Publication stops on any validation error, missing baseline, incomplete budget curve, dirty source,

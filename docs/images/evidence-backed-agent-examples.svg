@@ -1,5 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1693" height="929" viewBox="0 0 1693 929" role="img" aria-labelledby="title desc">
   <title id="title">Three evidence-backed Engraphis agent behaviors</title>
-  <desc id="desc">A clear three-card summary of deterministic offline fixtures. Focused context returns 808.8 → 218.4 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions grounded. An unsupported question safely abstains for 5/5 off-topic questions abstained. Reproduce with eval.chunking_eval and eval.grounded.</desc>
-  <image href="evidence-backed-agent-examples.png" width="1693" height="929"/>
+  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.1 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions grounded. An unsupported question safely abstains for 5/5 off-topic questions abstained. Reproduce with eval.chunking_eval and eval.grounded.</desc>
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f8fbff"/><stop offset="1" stop-color="#eef4fb"/></linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-opacity=".12"/></filter>
+  </defs>
+  <rect width="1693" height="929" rx="12" fill="url(#page)"/>
+  <rect width="1693" height="44" fill="#021536"/>
+  <text x="76" y="156" font-family="Inter, Arial, sans-serif" font-size="66" font-weight="700" fill="#061a43">Three evidence-backed agent behaviors</text>
+  <text x="78" y="217" font-family="Inter, Arial, sans-serif" font-size="31" font-weight="600" fill="#53627b">Synthetic offline fixtures · reproducible outcomes · not customer data</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#1763e8" stroke-width="3"/>
+    <rect x="112" y="314" width="255" height="53" rx="14" fill="#eaf2ff" stroke="#a9c9ff" stroke-width="2"/>
+    <text x="134" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#1554c0">FOCUSED CONTEXT</text>
+    <text x="112" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Find the</text>
+    <text x="112" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">relevant passage</text>
+    <rect x="112" y="590" width="410" height="76" rx="15" fill="#f3f7ff" stroke="#c9dcff" stroke-width="2"/>
+    <text x="143" y="640" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">740.3 → 214.1 tokens</text>
+    <rect x="112" y="681" width="410" height="76" rx="15" fill="#f3f7ff" stroke="#c9dcff" stroke-width="2"/>
+    <text x="143" y="731" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">Recall@5 1.000</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="603" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#109252" stroke-width="3"/>
+    <rect x="645" y="314" width="221" height="53" rx="14" fill="#eafbf1" stroke="#ade9c7" stroke-width="2"/>
+    <text x="667" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#08773f">CITED ANSWER</text>
+    <text x="645" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Answer only</text>
+    <text x="645" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">with support</text>
+    <rect x="645" y="590" width="410" height="76" rx="15" fill="#effcf4" stroke="#c5efd6" stroke-width="2"/>
+    <text x="676" y="640" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">5/5 grounded</text>
+    <rect x="645" y="681" width="410" height="76" rx="15" fill="#effcf4" stroke="#c5efd6" stroke-width="2"/>
+    <text x="676" y="731" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">source attached</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="1136" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#f57a19" stroke-width="3"/>
+    <rect x="1178" y="314" width="195" height="53" rx="14" fill="#fff4e9" stroke="#ffd1a4" stroke-width="2"/>
+    <text x="1200" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#d75c06">SAFE ABSTAIN</text>
+    <text x="1178" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">No support,</text>
+    <text x="1178" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">no answer</text>
+    <rect x="1178" y="590" width="410" height="76" rx="15" fill="#fff7ee" stroke="#ffdab9" stroke-width="2"/>
+    <text x="1209" y="640" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">5/5 abstained</text>
+    <rect x="1178" y="681" width="410" height="76" rx="15" fill="#fff7ee" stroke="#ffdab9" stroke-width="2"/>
+    <text x="1209" y="731" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">explicitly says why</text>
+  </g>
+  <line x1="70" y1="832" x2="1623" y2="832" stroke="#ced8e7" stroke-width="2"/>
+  <text x="846" y="885" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="600" fill="#53627b">Reproduce: eval.chunking_eval + eval.grounded</text>
 </svg>

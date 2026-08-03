@@ -63,7 +63,7 @@ There is no destructive edit. When a fact changes:
   When the change became true at a known time, pass `valid_from=<unix timestamp>`; the old
   validity window closes at that effective time, not at ingestion time.
 - Fixing wrong content → `engraphis_correct` (closes old, stores a replacement that records what it
-  fixed). Preferred over forget-then-remember because it keeps the *why* chain intact.
+  fixed). Preferred over retire-then-remember because it keeps the *why* chain intact.
 
 Afterwards, `engraphis_why` and `engraphis_timeline` can still reconstruct "we used to do X, then
 switched to Y because Z". For relevance-ranked time travel, use `valid_at=<unix timestamp>` for
@@ -73,7 +73,7 @@ what was true and `known_at=<unix timestamp>` for what Engraphis had learned; `a
 
 ## Governance: retire, don't delete
 
-- `engraphis_forget`: retire an obsolete memory with no replacement. It stops surfacing but is
+- `engraphis_retire`: retire an obsolete memory with no replacement. It stops surfacing but is
   preserved (bi-temporal close) and audited. Give a `reason`.
 - `engraphis_correct`: fix content while keeping history (see above).
 - `engraphis_pin`: protect from decay.

@@ -1,8 +1,8 @@
-"""Deterministic calibration eval for queryless proactive ranking.
+"""Deterministic regression eval for queryless proactive ranking.
 
-The fixture makes the tradeoff explicit: important policies should survive a fresh
-zero-importance scratch note for a bounded period, while a low-importance old note
-should still yield.  It runs entirely offline:
+The fixture locks in the decay contract: importance contributes only while the memory
+retains support, so an old, unreinforced high-importance note yields to fresh evidence.
+It runs entirely offline:
 
     python -m eval.proactive_ranking
 """
@@ -49,17 +49,14 @@ def _record(spec: dict) -> MemoryRecord:
     )
 
 
-def evaluate(*, importance_retention_floor: float) -> dict:
-    """Return top-1 accuracy and margins for one prospective floor coefficient."""
+def evaluate() -> dict:
+    """Return top-1 accuracy and margins under the single decaying formula."""
     results = []
     for case in load_cases():
         ranked = sorted(
             (
                 (
-                    scoring.score_proactive(
-                        _record(spec), now=NOW,
-                        importance_retention_floor=importance_retention_floor,
-                    ),
+                    scoring.score_proactive(_record(spec), now=NOW),
                     str(spec["id"]),
                 )
                 for spec in case["records"]
@@ -75,7 +72,7 @@ def evaluate(*, importance_retention_floor: float) -> dict:
         })
     hits = sum(result["actual_top"] == result["expected_top"] for result in results)
     return {
-        "importance_retention_floor": importance_retention_floor,
+        "importance_signal": "importance_times_retention",
         "top_1_accuracy": hits / len(results), "hits": hits, "cases": len(results),
         "minimum_expected_margin": min(result["margin"] for result in results),
         "results": results,
@@ -83,14 +80,8 @@ def evaluate(*, importance_retention_floor: float) -> dict:
 
 
 def run() -> dict:
-    """Compare the prior and calibrated floors on the fixed fixture."""
-    return {
-        "no_floor": evaluate(importance_retention_floor=0.0),
-        "prior_floor": evaluate(importance_retention_floor=0.60),
-        "calibrated_floor": evaluate(
-            importance_retention_floor=scoring.PROACTIVE_IMPORTANCE_RETENTION_FLOOR,
-        ),
-    }
+    """Evaluate the one non-immortal proactive ranking policy."""
+    return {"decaying_importance": evaluate()}
 
 
 def main() -> None:

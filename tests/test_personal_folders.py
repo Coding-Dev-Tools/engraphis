@@ -216,10 +216,13 @@ def test_no_user_context_sees_and_reaches_everything():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-scratch", visibility="personal")
-    private = svc.remember(
+    pending = svc.remember(
         "Alice keeps private deployment notes here.",
         workspace="alice-scratch",
         scope="workspace",
+    )
+    private = svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved fixture"
     )
     set_current_user(None)
     assert "alice-scratch" in _names(svc)

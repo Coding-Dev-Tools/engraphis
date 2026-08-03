@@ -11,7 +11,10 @@ from engraphis.backends.graph_extractor import RegexGraphExtractor
 
 def test_read_only_api_requires_token_and_does_not_reinforce():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    memory = svc.remember("The database is SQLite.", workspace="w", scope="workspace")
+    pending = svc.remember("The database is SQLite.", workspace="w", scope="workspace")
+    memory = svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved fixture"
+    )
     before = svc.store.get_memory(memory["id"]).access_count
     receipts_before = svc.store.conn.execute(
         "SELECT COUNT(*) AS n FROM operation_receipts"
@@ -28,7 +31,7 @@ def test_read_only_api_requires_token_and_does_not_reinforce():
     )
     assert response.status_code == 200 and response.json()["count"] == 1
     assert response.json()["candidate_depth"] == "adaptive"
-    assert response.json()["candidate_k_used"] < response.json()["candidate_k_requested"]
+    assert response.json()["candidate_k_used"] >= response.json()["candidate_k_requested"]
     lowercase = client.get(
         "/recall", params={"query": "database", "workspace": "w"},
         headers={"Authorization": "bearer secret"},
@@ -50,12 +53,29 @@ def test_read_only_api_requires_token_and_does_not_reinforce():
     ).status_code == 404
 
 
+def test_tokenless_read_only_factory_rejects_remote_peers():
+    """The ASGI factory must retain the launcher's token-or-loopback boundary."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    client = TestClient(
+        create_read_only_app(svc),
+        client=("192.0.2.10", 50000),
+    )
+
+    # Health/schema probes remain safe for orchestration and discovery, but workspace
+    # reads fail closed even if an operator bypasses scripts.graph_server.
+    assert client.get("/health").status_code == 200
+    response = client.get("/recall", params={"query": "database", "workspace": "w"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "remote access requires a bearer token"}
+
+
 def test_read_only_api_serves_graph_and_intent_recall():
     svc = MemoryService.create(":memory:", graph_extractor="regex")
-    svc.remember(
+    pending = svc.remember(
         "Alice Johnson works at Acme Corporation.",
         workspace="w", scope="workspace",
     )
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
     client = TestClient(create_read_only_app(svc))
     omitted = client.get("/graph", params={"workspace": "w"}).json()
     assert omitted["nodes"] and omitted["edges"]
@@ -72,9 +92,21 @@ def test_read_only_api_serves_graph_and_intent_recall():
     assert response.json()["candidate_depth"] == "adaptive"
 
 
+@pytest.mark.parametrize("invalid_limit", [True, "2"])
+def test_read_only_intent_recall_rejects_coerced_memory_type_limits(invalid_limit):
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    response = TestClient(create_read_only_app(svc)).post(
+        "/intent/recall",
+        json={"query": "anything", "mtype_limits": {"semantic": invalid_limit}},
+    )
+
+    assert response.status_code == 422
+
+
 def test_read_only_api_serves_content_free_context_savings():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    svc.remember("Context savings test.", workspace="w", scope="workspace")
+    pending = svc.remember("Context savings test.", workspace="w", scope="workspace")
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
     svc.recall("context savings", workspace="w", token_budget=64)
 
     response = TestClient(create_read_only_app(svc)).get(

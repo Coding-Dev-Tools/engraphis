@@ -262,6 +262,26 @@ def test_postgres_introspection_is_filtered_bounded_and_cross_schema_safe(monkey
     assert params[:2] == (["auth", "public"], ["auth", "public"])
 
 
+def test_postgres_source_digest_excludes_credentials_and_connection_options():
+    first = postgres_schema._source_digest(
+        "postgresql://alice:first-password@db.example:5433/appdb?sslmode=require"
+    )
+    rotated = postgres_schema._source_digest(
+        "postgresql://bob:second-password@db.example:5433/appdb?sslmode=disable"
+    )
+    other_database = postgres_schema._source_digest(
+        "postgresql://alice:first-password@db.example:5433/other"
+    )
+
+    assert first == rotated
+    assert first != other_database
+    assert postgres_schema._source_digest(
+        "host=db.example dbname=appdb user=alice password=first-password"
+    ) == postgres_schema._source_digest(
+        "host=db.example dbname=appdb user=bob password=second-password"
+    )
+
+
 def test_service_never_persists_postgres_dsn(monkeypatch):
     dsn = "postgresql://user:secret@db.internal/appdb"
     snapshot = SchemaSnapshot(

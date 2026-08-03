@@ -6,20 +6,27 @@ import json
 import pytest
 
 from engraphis.core.context import RegexTokenCounter
+from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.service import MemoryService, ValidationError
 
 
 def _seed_service() -> MemoryService:
     service = MemoryService.create(":memory:")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "api")
     for index in range(4):
-        service.remember(
+        # Fixture data models local, reviewed code-owned facts. The public service
+        # surface is separately covered as pending-only.
+        service.engine.remember(
             (
                 f"Release policy evidence {index}: deployments require a signed tag and "
                 "a successful backup verification before production promotion. "
                 + "Operational rationale and audit detail remain attached to this record. " * 20
             ),
-            workspace="acme",
-            repo="api",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            mtype=MemoryType.SEMANTIC,
+            scope=Scope.REPO,
             title=f"Release policy {index}",
             resolve_conflicts=False,
         )
@@ -164,8 +171,10 @@ def test_service_exposes_claim_identity_for_safe_supersession():
         claim_kind="configured_value",
     )
 
-    assert second["op"] == "invalidate"
-    assert second["superseded"] == [first["id"]]
+    # Public callers cannot use resolution to mutate existing facts before review.
+    assert second["op"] == "add"
+    assert "superseded" not in second
+    assert service.store.get_memory(first["id"]).provenance["review_state"] == "pending"
 
 
 def test_compact_grounded_response_does_not_repeat_cited_bodies():
@@ -174,10 +183,14 @@ def test_compact_grounded_response_does_not_repeat_cited_bodies():
         "The API authenticates with PASETO v4 public tokens. "
         + "This intentionally long evidence body carries bounded operational detail. " * 24
     )
-    service.remember(
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "api")
+    service.engine.remember(
         long_body,
-        workspace="acme",
-        repo="api",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
     )
 
     full = service.grounded_recall(

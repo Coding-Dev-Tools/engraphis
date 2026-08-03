@@ -776,3 +776,65 @@ def test_refresh_save_failure_retires_the_spent_credential_without_replay(monkey
         cloud_session.access_for_workspace("ws", require_compute=False)
     assert len(posts) == 1
     assert len(saves) == 2
+
+
+def test_bootstrap_rejects_an_oversized_provider_credential_before_persisting(tmp_path, monkeypatch):
+    """A single-use connect response cannot create a session this client cannot reread."""
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value)
+    response = {
+        "refresh_credential": "x" * (cloud_session._MAX_CREDENTIAL_BYTES + 1),
+        "organization_id": "org_1",
+    }
+
+    with pytest.raises(cloud_session.CloudSessionError, match="did not return a refresh"):
+        cloud_session.save_bootstrap(response, control_url="https://control.example.test")
+
+    assert not cloud_session._session_path().exists()
+
+
+def test_session_writer_rejects_a_payload_its_reader_would_refuse(tmp_path, monkeypatch):
+    """Future provider fields cannot bypass the private-state read limit by aggregation."""
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+
+    with pytest.raises(cloud_session.CloudSessionError, match="too large to save safely"):
+        cloud_session._save({"future_field": "x" * cloud_session._MAX_SESSION_BYTES})
+
+    assert not cloud_session._session_path().exists()
+
+
+def test_oversized_rotated_credential_is_retired_without_a_replay(tmp_path, monkeypatch):
+    """A refresh response that cannot be saved must fence its spent predecessor."""
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cloud_session, "_UNUSABLE_REFRESHES", set())
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    calls = []
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value)
+
+    def response(*args):
+        calls.append(args)
+        return {
+            "access_token": "short-lived-access",
+            "organization_id": "org_1",
+            "refresh_credential": "x" * (cloud_session._MAX_CREDENTIAL_BYTES + 1),
+            "token_subject": "member",
+        }
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", response)
+
+    with pytest.raises(cloud_session.CloudSessionError, match="incomplete session credentials"):
+        cloud_session.access_for_workspace("ws", require_compute=False)
+
+    with pytest.raises(cloud_session.CloudSessionError, match="cannot be reused"):
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    assert len(calls) == 1

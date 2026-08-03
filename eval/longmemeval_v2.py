@@ -15,6 +15,7 @@ import threading
 from typing import Any, Optional, Protocol, Sequence, Union
 
 from engraphis.core.context import RegexTokenCounter
+from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.service import MemoryService
 from eval.benchmark import CANONICAL_TOKEN_BUDGETS
 
@@ -155,6 +156,8 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
         reader_tokenizer_model: Optional[str] = None,
         reader_tokenizer_revision: Optional[str] = None,
         retrieval_profile: Optional[str] = None,
+        planning: Optional[str] = None,
+        mtype_limits: Optional[dict[str, int]] = None,
         embed_model: Optional[str] = None,
         embed_revision: Optional[str] = None,
         vector_backend: Optional[str] = None,
@@ -170,6 +173,7 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
         params = dict(memory_params or {})
         unknown = set(params) - {
             "context_k", "max_context_tokens", "tokenizer_identity", "retrieval_profile",
+            "planning", "mtype_limits",
             "embed_model", "embed_revision", "vector_backend", "require_exact_reader_tokenizer",
             "reader_tokenizer_model", "reader_tokenizer_revision",
         }
@@ -183,6 +187,10 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
         resolved_profile = (
             retrieval_profile if retrieval_profile is not None
             else params.get("retrieval_profile", "balanced")
+        )
+        resolved_planning = planning if planning is not None else params.get("planning", "off")
+        resolved_limits = (
+            mtype_limits if mtype_limits is not None else params.get("mtype_limits")
         )
         self.context_k = max(1, int(resolved_context_k))
         self.max_context_tokens = int(resolved_max_tokens)
@@ -241,6 +249,12 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             or type(self._tokenizer).__name__
         )
         self.retrieval_profile = str(resolved_profile or "balanced").strip().casefold()
+        self.planning = str(resolved_planning or "off").strip().casefold()
+        if self.planning not in {"off", "auto"}:
+            raise ValueError("planning must be off or auto")
+        if resolved_limits is not None and not isinstance(resolved_limits, dict):
+            raise ValueError("mtype_limits must be an object")
+        self.mtype_limits = dict(resolved_limits or {})
         self.embed_model = str(
             embed_model if embed_model is not None else params.get("embed_model") or ""
         ).strip() or None
@@ -273,6 +287,10 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             "embed_revision": self.embed_revision,
             "vector_backend": self.vector_backend,
         }
+        if self.planning != "off":
+            persisted_params["planning"] = self.planning
+        if self.mtype_limits:
+            persisted_params["mtype_limits"] = self.mtype_limits
         super().__init__(persisted_params)
         self.service = service or MemoryService.create(
             ":memory:",
@@ -315,7 +333,7 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
     @property
     def metadata(self) -> dict[str, Any]:
         """Stable context-budget metadata for the official benchmark artifact."""
-        return {
+        metadata = {
             "memory_type": self.memory_type,
             "context_k": self.context_k,
             "max_context_tokens": self.max_context_tokens,
@@ -333,23 +351,36 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             "vector_backend": self.vector_backend,
             "response_mode": "compact",
         }
+        if self.planning != "off":
+            metadata["planning"] = self.planning
+        if self.mtype_limits:
+            metadata["mtype_limits"] = self.mtype_limits
+        return metadata
 
     def insert(self, trajectory: dict[str, Any]) -> None:
-        """Store one official trajectory without assuming its private schema."""
+        """Store one official trajectory without assuming its private schema.
+
+        The adapter is an in-process benchmark harness, not a public ingress. It uses
+        the documented trusted-code ``MemoryEngine`` boundary so its deterministic
+        fixture evidence remains eligible for the harness's prompt context; MCP/REST
+        writes continue to enter the review gate through ``MemoryService``.
+        """
         trajectory_id = str(trajectory.get("trajectory_id") or trajectory.get("id") or self._counter)
         segments = _trajectory_segments(trajectory)
         if not segments:
             return
+        workspace_id = self.service.store.get_or_create_workspace(self.workspace)
+        repo_id = self.service.store.get_or_create_repo(workspace_id, self.repo)
         sequence = 0
         for state_index, text in segments:
             for chunk_index, chunk in enumerate(_split_trajectory_text(text), start=1):
                 sequence += 1
-                self.service.remember(
+                self.service.engine.remember(
                     chunk,
-                    workspace=self.workspace,
-                    repo=self.repo,
-                    mtype="episodic",
-                    scope="repo",
+                    workspace_id=workspace_id,
+                    repo_id=repo_id,
+                    mtype=MemoryType.EPISODIC,
+                    scope=Scope.REPO,
                     title=f"trajectory:{trajectory_id}:state:{state_index}:part:{chunk_index}",
                     metadata={
                         "benchmark": "LongMemEval-V2",
@@ -358,8 +389,6 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
                         "chunk_index": chunk_index,
                         "sequence": sequence,
                     },
-                    source="benchmark",
-                    kind="longmemeval_v2",
                     resolve_conflicts=False,
                 )
         self._counter += 1
@@ -374,7 +403,10 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             k=self.context_k,
             token_budget=self.max_context_tokens,
             retrieval_profile=self.retrieval_profile,
+            planning=self.planning,
+            mtype_limits=self.mtype_limits,
             response_mode="compact",
+            diagnostics=True,
             reinforce=False,
             # The official harness can build prompts concurrently.  Benchmark
             # retrieval is observational: receipt writes would add contention,
@@ -407,6 +439,12 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
         self._query_result_local.metadata = {
             "memory_type": self.memory_type,
             "retrieval_profile": response.get("retrieval_profile"),
+            "planning": response.get("planning"),
+            "mtype_limits": self.mtype_limits,
+            "planner_failed": bool(
+                (response.get("planning_details") or {}).get("fallback_reason")
+            ),
+            "context_revision": response.get("context_revision"),
             "source_ids": source_ids,
             "usage": response.get("usage", {}),
             "returned_context_tokens": sum(

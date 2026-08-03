@@ -12,7 +12,7 @@ consolidation state. The four lanes covered:
 
 - primary Ledger navigation, memory creation, grounded Ask, and theme controls;
 - Library, import/editor actions, and empty-form behavior;
-- Graph & Relations, Provenance, Manage, exports, saved views, and switches;
+- Relationships, Provenance, Manage, exports, saved views, and switches;
 - broad regression including Classic and responsive/mobile keyboard behavior.
 
 ## Button coverage

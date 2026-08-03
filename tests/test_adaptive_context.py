@@ -136,6 +136,39 @@ def test_weak_retrieval_widens_to_recent_raw_history_without_reinforcing() -> No
     assert after.access_count == before.access_count
 
 
+def test_history_fallback_revision_describes_emitted_history_not_rejected_recall() -> None:
+    engine, workspace_id, repo_id = _seed_engine()
+    common = "\n".join(
+        f"Recent task event {number} completed with status green."
+        for number in range(30)
+    )
+
+    first = engine.adaptive_context(
+        "What minerals are found on Europa?",
+        f"{common}\nLatest host state is alpha.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        max_context_tokens=48,
+        retrieval_token_budget=12,
+        confidence_floor=0.99,
+    )
+    second = engine.adaptive_context(
+        "What minerals are found on Europa?",
+        f"{common}\nLatest host state is beta.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        max_context_tokens=48,
+        retrieval_token_budget=12,
+        confidence_floor=0.99,
+    )
+
+    assert first.mode == second.mode == "history_fallback"
+    assert first.recall is not None and second.recall is not None
+    assert first.recall.context_revision == second.recall.context_revision
+    assert first.context != second.context
+    assert first.context_revision != second.context_revision
+
+
 def test_adaptive_context_abstains_when_weak_and_no_history_fits() -> None:
     engine, workspace_id, repo_id = _seed_engine()
 
@@ -417,9 +450,8 @@ def test_service_adaptive_context_scopes_session_memories_and_rejects_foreign_se
         retrieval_token_budget=32,
     )
 
-    assert result["decision"]["mode"] == "retrieval"
-    assert result["sources"]
-    assert result["sources"][0]["scope"] == "session"
+    assert result["decision"]["mode"] == "history_fallback"
+    assert result["sources"] == []
 
     foreign = service.start_session("foreign", repo="context", goal="routing")
     with pytest.raises(ValidationError, match="session_id does not belong"):
@@ -456,7 +488,7 @@ def test_service_adaptive_context_records_content_free_routing_receipt() -> None
 
     receipt = result["receipt"]
     assert receipt["operation"] == "adaptive_context"
-    assert receipt["metadata"]["adaptive_mode"] == "retrieval"
+    assert receipt["metadata"]["adaptive_mode"] == "history_fallback"
     assert "release manager" not in str(receipt).casefold()
     assert "unrelated task history" not in str(receipt).casefold()
     savings = service.context_savings(workspace="adaptive", repo="context")

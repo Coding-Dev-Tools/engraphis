@@ -62,6 +62,9 @@ def test_bound_instance_allows_and_reads_its_own_workspace():
     svc = _bound("team-a")
     stored = svc.remember("alpha fact", workspace="team-a", repo="r1")
     assert stored["stored"] is True
+    svc.engine.approve_for_prompt(
+        stored["id"], reviewer="test", reason="approved isolation fixture"
+    )
     hit = svc.recall("alpha fact", workspace="team-a", repo="r1")
     assert hit["count"] >= 1
 

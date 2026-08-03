@@ -1,4 +1,5 @@
 import hashlib
+import sys
 
 import numpy as np
 import pytest
@@ -11,6 +12,9 @@ from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.store import Store
+
+
+pytestmark = pytest.mark.native_sqlitevec
 
 
 def _force_load_failure(monkeypatch, module, attr: str) -> None:
@@ -163,6 +167,28 @@ def test_vector_index_factory_modes(monkeypatch):
     monkeypatch.setattr(vs, "SqliteVecVectorIndex", _Unavailable)
     assert isinstance(get_vector_index(s, dim=128, prefer="auto"), NumpyVectorIndex)
     s.close()
+
+
+def test_vector_index_avoids_sqlitevec_after_sqlcipher_load(monkeypatch):
+    """A native-library conflict must degrade safely or fail clearly, never crash."""
+    monkeypatch.setitem(sys.modules, "sqlcipher3", object())
+    store = Store(":memory:")
+
+    assert isinstance(get_vector_index(store, dim=128, prefer="auto"), NumpyVectorIndex)
+    with pytest.raises(RuntimeError, match="cannot share a process with SQLCipher"):
+        get_vector_index(store, dim=128, prefer="sqlite-vec")
+
+    store.close()
+
+
+@pytest.mark.parametrize("dimension", [True, 0, -1, 1.5, "384", 65_537])
+def test_vector_index_rejects_an_invalid_ddl_dimension_before_backend_fallback(dimension):
+    store = Store(":memory:")
+    try:
+        with pytest.raises(ValueError, match="embedding dimension"):
+            get_vector_index(store, dim=dimension, prefer="auto")
+    finally:
+        store.close()
 
 
 def test_reranker_factory_falls_back_offline(monkeypatch):

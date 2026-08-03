@@ -52,14 +52,83 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
 def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
+    dockerfile = _text("Dockerfile")
     launcher = _text("scripts/start_server.py")
 
     assert "engraphis-api:" not in compose
     assert "engraphis_v1.db" not in compose
     assert 'command: ["engraphis-dashboard", "--no-open"]' in compose
+    assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
+    assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in docker_docs
+    assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
+    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert "The Docker image includes the streamable HTTP MCP endpoint" in docker_docs
+    assert "ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in docker_docs
+    assert "docker-compose.lan.yml" in docker_docs
+    assert "LAN overlay refuses to render" in docker_docs
+    assert "ENGRAPHIS_DASHBOARD_URL" in docker_docs
+    assert "ENGRAPHIS_COMPOSE_PORT" in docker_docs
     assert "start_dashboard.main(args)" in launcher
     assert "engraphis.app" not in launcher
     assert "same v2 service" in readme
+
+
+def test_native_vector_backend_compatibility_stays_in_architecture_docs():
+    readme = _text("README.md")
+    architecture = _text("docs/ARCHITECTURE_V3.md")
+    guidance = "`MemoryEngine.create()` and `MemoryService.create()` default to the exact NumPy index"
+
+    assert guidance not in readme
+    assert guidance in architecture
+
+
+def test_advanced_query_planning_stays_in_architecture_docs():
+    readme = _text("README.md")
+    architecture = _text("docs/ARCHITECTURE_V3.md")
+    guidance = "`planning=\"auto\"` keeps the original query"
+
+    assert "[architecture guide](docs/ARCHITECTURE_V3.md#query-planning)" in readme
+    assert guidance not in readme
+    assert guidance in architecture
+    assert "LLMQueryPlanner(my_llm)" in architecture
+
+
+def test_pi_and_public_write_review_details_stay_in_supporting_docs():
+    readme = _text("README.md")
+    pi_guide = _text("integrations/pi/README.md")
+    review_guide = _text("docs/WRITE_REVIEW.md")
+
+    assert "[Pi extension guide](integrations/pi/README.md)" in readme
+    assert "pi install npm:@engraphis/pi" not in readme
+    assert "Every advanced state-changing action requires an explicit Pi confirmation dialog" in pi_guide
+
+    review_gate = "Every public write enters review as `pending`"
+    assert review_gate not in readme
+    assert review_gate in review_guide
+    assert "python -m scripts.rescan_poisoning --db engraphis.db --apply" in review_guide
+
+
+def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_override():
+    """Generic desktop .env values must not break the published container contract."""
+
+    compose = _text("docker-compose.yml")
+    readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
+
+    lan_compose = _text("docker-compose.lan.yml")
+    assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
+    assert "ENGRAPHIS_HOST: 0.0.0.0" in compose
+    assert "ENGRAPHIS_COMPOSE_HOST" not in compose
+    assert "PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
+    assert "ENGRAPHIS_PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
+    assert "ENGRAPHIS_DB_PATH: /data/engraphis.db" in compose
+    assert "ENGRAPHIS_STATE_DIR: /data/.engraphis" in compose
+    assert "ports: !override" in lan_compose
+    assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
+    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
+    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert "ENGRAPHIS_COMPOSE_PORT=8787" in docker_docs
 
 
 def test_ci_and_release_audit_production_image_dependencies():
@@ -75,21 +144,34 @@ def test_ci_and_release_audit_production_image_dependencies():
     publish = release.split("  publish:\n", 1)[1].split("  github-release:\n", 1)[0]
 
     assert "Audit the exact production image dependency set" in ci
+    assert "Validate Compose configuration" in ci
+    assert "docker compose config --quiet" in ci
     assert "docker run --rm --entrypoint sh engraphis:ci" in ci
-    assert "python -m pip_audit --local" in ci
+    assert 'python -m pip_audit --path "$audit_dir"' in ci
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in ci
     assert "tesseract-ocr" in _text("Dockerfile")
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
     assert "docker-entrypoint\\.sh" in ci
+    assert "docker-compose(\\.lan)?\\.yml" in ci
     assert "railway\\.json" in ci
     assert "deploy/" in ci
+    for workflow in (ci, release):
+        assert "Reject unauthenticated LAN Compose overlay" in workflow
+        assert "env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet" in workflow
+        assert "ENGRAPHIS_API_TOKEN: ci-lan-overlay-token" in workflow
+        assert "Validate token-protected LAN Compose overlay" in workflow
     assert 'build twine pip-audit ".[all,test]"' in release_build
     assert "python -m pip_audit --local" in release_build
     assert "docker build -t engraphis:release ." in release_docker
+    assert "Validate Compose configuration" in release_docker
+    assert "docker compose config --quiet" in release_docker
     assert "Audit production image dependencies" in release_docker
-    assert "python -m pip install --no-cache-dir pip-audit" in release_docker
-    assert "python -m pip_audit --local" in release_docker
-    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release_evidence
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in release_docker
+    assert 'docker create --name "$container" engraphis:release' in release_docker
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in release_docker
+    assert 'python -m pip_audit --path "$audit_dir"' in release_docker
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release_evidence
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
@@ -107,6 +189,30 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
     required = 'import fastapi, httpx, mcp, multipart, pydantic, uvicorn'
     assert required in _text(".github/workflows/ci.yml")
     assert required in _text(".github/workflows/release.yml")
+
+
+def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
+    """A bundled SQLCipher extension must not leak into the general test process.
+
+    Its at-rest contract still runs for every supported full-stack Python version;
+    separating the native driver avoids a cross-extension GC crash without making
+    encryption coverage optional.
+    """
+    pyproject = _text("pyproject.toml")
+    general_test = pyproject.split("test = [", 1)[1].split("\n]", 1)[0]
+    encryption = pyproject.split("encryption = [", 1)[1].split("\n]", 1)[0]
+
+    assert "sqlcipher3-binary" not in general_test
+    assert "sqlcipher3-binary" in encryption
+    for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        workflow = _text(path)
+        assert "encryption:" in workflow
+        assert 'pip install -e ".[test,encryption]"' in workflow
+        assert "tests/test_encrypted_store.py" in workflow
+        assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
+
+    release = _text(".github/workflows/release.yml")
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -129,7 +235,7 @@ def test_release_builds_one_portable_open_core_wheel():
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
-    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
     assert "  release-evidence:\n" in release
     assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release
@@ -243,7 +349,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 31
+    assert len(tools) == len(set(tools)) == 33
 
     readme = _text("README.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
@@ -254,8 +360,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "31 MCP tools" in architecture
-    assert "(31 of them)" in skill
+    assert "Smart MCP (6 tools)" in architecture
+    assert "Classic MCP (33 tools)" in architecture
+    assert "default Smart MCP surface has six" in skill
+    assert "Classic direct-tool guide" in skill
+    assert "engraphis-mcp-classic" in skill
     assert "recall_context (compact)" in architecture
     assert "engraphis_recall_context" in readme
     assert "`engraphis_check_update`" in readme
@@ -265,6 +374,16 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "(workspace, repo, authenticated user, agent, goal)" in skill_tools
 
     changelog = _text("CHANGELOG.md")
+    evidence = _text("eval/EVIDENCE.md")
+    runbook = _text("docs/PUBLIC_BENCHMARK_RUNBOOK.md")
+    seed_script = _text("scripts/seed_from_obsidian.py")
+    assert changelog.count("## [1.3.0] - 2026-08-01") == 1
+    assert "ENGRAPHIS_EVIDENCE_RUN_DIR=/path/to/restricted/longmemeval-v2" in evidence
+    assert "/private/longmemeval-v2" not in evidence
+    assert "ENGRAPHIS_BENCHMARK_RUN_DIR=/path/to/restricted/benchmark-run" in runbook
+    assert "private/point.json" not in runbook
+    assert "private/comparison-series.json" not in runbook
+    assert "C:/Users/home/" not in seed_script
     assert "ForceGraph + D3 renderer" in changelog
     assert "## [1.1.0] - 2026-07-26" in changelog
     assert "Public 1.1.0 hosted-connect and graph-experience release." in changelog

@@ -21,6 +21,12 @@ def _bound(engine, allowed):
     return MemoryService(engine, allowed_workspaces=allowed)
 
 
+def _approve(service, pending):
+    service.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved isolation fixture"
+    )
+
+
 def test_parse_csv_helper():
     assert _parse_csv("") == []
     assert _parse_csv("   ") == []
@@ -38,8 +44,8 @@ def test_empty_binding_is_unrestricted():
 def test_unbound_instance_is_unrestricted():
     s = MemoryService.create(":memory:")  # no binding
     assert s.allowed_workspaces is None
-    s.remember("alpha fact about widgets", workspace="alpha")
-    s.remember("beta fact about gadgets", workspace="beta")
+    _approve(s, s.remember("alpha fact about widgets", workspace="alpha"))
+    _approve(s, s.remember("beta fact about gadgets", workspace="beta"))
     # can read any named workspace, and workspace-less (global) reads still work
     assert s.recall("fact", workspace="beta")["count"] >= 1
     assert s.recall("fact")["count"] >= 1
@@ -48,7 +54,7 @@ def test_unbound_instance_is_unrestricted():
 
 def test_bound_instance_allows_its_own_workspace():
     seed = MemoryService.create(":memory:")
-    seed.remember("alpha widget policy", workspace="alpha", repo="r")
+    _approve(seed, seed.remember("alpha widget policy", workspace="alpha", repo="r"))
     bound = _bound(seed.engine, ["alpha"])
     assert bound.recall("policy", workspace="alpha")["count"] >= 1
     # these must resolve without raising for the permitted workspace
