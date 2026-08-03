@@ -1295,6 +1295,32 @@ def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
 
 
 @requires_node
+def test_unfreezing_restores_the_live_simulation_budget_after_a_frozen_render() -> None:
+    """A render while frozen must not leave its one-tick budget behind on unfreeze."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        api.freeze(true);
+        api.setData(chain(3));
+        const frozen = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+        };
+        api.freeze(false);
+        emit({
+          frozen,
+          resumed: {
+            time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          },
+        });
+        """
+    )
+    assert report["frozen"] == {"time": 0, "ticks": 1, "warmup": 0}
+    assert report["resumed"] == {"time": 2200, "ticks": 160, "warmup": 40}
+
+
+@requires_node
 def test_freeze_is_the_physics_gate_even_with_reduced_motion() -> None:
     """The switch must never claim physics is live while an OS preference disables it."""
 
