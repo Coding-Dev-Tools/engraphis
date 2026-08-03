@@ -53,6 +53,11 @@ export class EngraphisMcpClient {
 
 	constructor(private readonly config: EngraphisRuntimeConfig) {}
 
+	/** Changes whenever this extension closes a transport and invalidates server-issued state. */
+	generation(): number {
+		return this.lifecycle;
+	}
+
 	async connect(): Promise<Client> {
 		if (this.client) return this.client;
 		if (this.connecting) return this.connecting;

@@ -352,7 +352,10 @@ class RecallEngine:
             )
             if (
                 not prompt_only
-                or len(recs) >= prompt_target
+                or (
+                    len(recs) >= prompt_target
+                    and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
+                )
                 or arm_candidate_k >= candidate_ceiling
                 or not can_expand
             ):
@@ -1406,6 +1409,25 @@ def _apply_mtype_limits(
         selected.append(candidate)
         counts[mtype] = counts.get(mtype, 0) + 1
     return selected, drops
+
+
+def _mtype_limits_can_fill(
+    records: dict[str, MemoryRecord], limits: dict[MemoryType, int], target: int,
+) -> bool:
+    """Whether the fetched prompt-safe records can fill ``target`` after type caps."""
+    if not limits:
+        return True
+    selected = 0
+    counts: dict[MemoryType, int] = {}
+    for record in records.values():
+        limit = limits.get(record.mtype)
+        if limit is not None and counts.get(record.mtype, 0) >= limit:
+            continue
+        selected += 1
+        counts[record.mtype] = counts.get(record.mtype, 0) + 1
+        if selected >= target:
+            return True
+    return False
 
 
 def _type_aware_rerank_pool(

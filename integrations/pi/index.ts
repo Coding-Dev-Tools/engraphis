@@ -51,6 +51,7 @@ export default function engraphisPiExtension(pi: ExtensionAPI) {
 	const discoveredActions = new Map<string, DiscoveredAction>();
 
 	const call = async (name: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+		const generation = client.generation();
 		try {
 			const result = await client.callTool(name, args, signal);
 			if (name === "engraphis_discover_actions") {
@@ -65,6 +66,9 @@ export default function engraphisPiExtension(pi: ExtensionAPI) {
 			}
 			return formatMcpResult(result);
 		} catch (error) {
+			// The MCP client closes an unhealthy transport before this catch runs. Capabilities
+			// are signed by that subprocess, so a restart makes every cached action invalid.
+			if (client.generation() !== generation) discoveredActions.clear();
 			if (name === "engraphis_execute_action" && !(error instanceof EngraphisMcpToolError)) {
 				throw new Error(
 					"Engraphis action outcome is unknown because the local connection failed. " +

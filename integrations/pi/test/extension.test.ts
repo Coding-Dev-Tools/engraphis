@@ -126,6 +126,41 @@ test("requires a fresh discovery and explicit Pi approval for every advanced act
 	}
 });
 
+test("clears discovered actions after an MCP transport reset", async () => {
+	const originalCall = EngraphisMcpClient.prototype.callTool;
+	const originalGeneration = EngraphisMcpClient.prototype.generation;
+	let generation = 0;
+	EngraphisMcpClient.prototype.generation = function () { return generation; };
+	EngraphisMcpClient.prototype.callTool = async function (name: string) {
+		if (name === "engraphis_discover_actions") {
+			return { content: [{ type: "text", text: JSON.stringify({ actions: [{
+				capability_id: "cap_restart", canonical_action: "retire",
+				schema_digest: "1234567890abcdef", side_effect: "state_change", title: "Retire memory",
+			}] }) }] };
+		}
+		generation += 1;
+		throw new Error("stdio transport closed");
+	};
+	try {
+		const { tools } = extensionHarness();
+		const discover = tools.find((tool) => tool.name === "engraphis_discover_actions")!;
+		const recall = tools.find((tool) => tool.name === "engraphis_recall_context")!;
+		const execute = tools.find((tool) => tool.name === "engraphis_execute_action")!;
+		await discover.execute("discover", { task: "retire stale memory" }, undefined);
+		await assert.rejects(recall.execute("recall", { query: "trigger reset" }, undefined));
+		await assert.rejects(
+			execute.execute("action", {
+				arguments: {}, capability_id: "cap_restart", schema_digest: "1234567890abcdef",
+			}, undefined, undefined, { hasUI: true, ui: { confirm: async () => true } }),
+			/not issued by the current Engraphis discovery session/,
+		);
+	} finally {
+		EngraphisMcpClient.prototype.callTool = originalCall;
+		EngraphisMcpClient.prototype.generation = originalGeneration;
+	}
+});
+
+
 test("fails closed when Pi cannot present an action approval dialog", async () => {
 	const original = EngraphisMcpClient.prototype.callTool;
 	EngraphisMcpClient.prototype.callTool = async function (name: string) {

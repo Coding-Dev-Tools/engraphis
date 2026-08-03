@@ -1,7 +1,7 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
-from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
-from engraphis.core.recall import RecallEngine, _absolute_retrieval_support
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.recall import RecallEngine, _absolute_retrieval_support, _mtype_limits_can_fill
 from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
@@ -11,6 +11,17 @@ class _SemanticTestEmbedder(DeterministicEmbedder):
 
     supports_semantic_search = True
     embedding_mode = "semantic"
+
+
+def test_prompt_candidate_expansion_accounts_for_memory_type_caps():
+    semantic = MemoryRecord(id="mem_semantic", content="", mtype=MemoryType.SEMANTIC)
+    procedural = MemoryRecord(id="mem_procedural", content="", mtype=MemoryType.PROCEDURAL)
+    limits = {MemoryType.SEMANTIC: 0}
+
+    assert not _mtype_limits_can_fill({semantic.id: semantic}, limits, 1)
+    assert _mtype_limits_can_fill(
+        {semantic.id: semantic, procedural.id: procedural}, limits, 1,
+    )
 
 
 def _engine():
