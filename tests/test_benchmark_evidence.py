@@ -148,7 +148,7 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "Remember a project across sessions",
         "Avoid confident guesses",
         "Avoid dragging the whole project into every prompt",
-        "docs/images/engraphis-benefit-flow.png",
+        "docs/images/knowledge-graph.png",
         "docs/images/context-efficiency.svg",
         "### See the behavior in reproducible fixtures",
         "docs/images/evidence-backed-agent-examples.svg",

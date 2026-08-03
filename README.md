@@ -1,23 +1,19 @@
 # Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
-[![CI](https://github.com/Coding-Dev-Tools/engraphis/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Dev-Tools/engraphis/actions/workflows/ci.yml)
-[![Python 3.9+](https://img.shields.io/pypi/pyversions/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
-[![Support](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
-[Website](https://engraphis.com/) · [Documentation](docs/) · [MCP tools](docs/MCP_TOOLS.md) ·
-[Security](SECURITY.md) · [Discord](https://discord.com/invite/Wfr2ejBmY)
+[https://engraphis.com/](https://engraphis.com/)
 
-**Give coding agents durable project memory so the next session can retrieve the current decision, its evidence, and its history.**
+[https://discord.com/invite/Wfr2ejBmY](https://discord.com/invite/Wfr2ejBmY)
 
-> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
-> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
+**Give your AI agents a memory. See it, search it, and maintain it, all in a beautiful WebUI on your own machine.**
 
 <p align="center">
-  <img src="docs/images/engraphis-benefit-flow.png" alt="Project history becomes scoped memory, hybrid recall, and bounded cited context for an agent" width="100%">
+  <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
   <br>
-  <sup>Preserve a project decision · retrieve its supporting evidence · hand the next agent a bounded context</sup>
+  <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
 
 ---
@@ -26,38 +22,10 @@
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
 
-## Full Engraphis install: pip install "engraphis[all]"
+> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
 
-The complete `engraphis[all]` install is the default way to use Engraphis: it includes the local
-dashboard, Smart MCP server, documents, Cloud Sync client, and supported optional integrations.
-Python 3.10+ is required.
-
-```bash
-pip install "engraphis[all]"
-engraphis-dashboard
-```
-
-The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
-account or API key.
-
-### Smaller installation options
-
-Use a smaller package only when you intentionally need a limited surface. The NumPy-only core
-continues to support Python 3.9+.
-
-| Goal | Install | Start |
-|---|---|---|
-| Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
-| Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
-| Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
-
-For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
-the [agent connection guide](docs/AGENT_CONNECT.md).
-
-> **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
-> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
-> remains version 7, so this MCP surface change does not require a data migration. See the
-> [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
+---
 
 ## Measured token and context savings
 
@@ -130,6 +98,41 @@ measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for 
 limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
 
 </details>
+
+---
+
+## Full Engraphis install: pip install "engraphis[all]"
+
+The complete `engraphis[all]` install is the default way to use Engraphis: it includes the local
+dashboard, Smart MCP server, documents, Cloud Sync client, and supported optional integrations.
+Python 3.10+ is required.
+
+```bash
+pip install "engraphis[all]"
+engraphis-dashboard
+```
+
+The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
+account or API key.
+
+### Smaller installation options
+
+Use a smaller package only when you intentionally need a limited surface. The NumPy-only core
+continues to support Python 3.9+.
+
+| Goal | Install | Start |
+|---|---|---|
+| Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
+| Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
+| Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
+
+For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
+the [agent connection guide](docs/AGENT_CONNECT.md).
+
+> **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
+> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> remains version 7, so this MCP surface change does not require a data migration. See the
+> [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
 
 ---
 
