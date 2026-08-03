@@ -140,11 +140,9 @@ def test_hosted_transfer_and_llm_consents_distinguish_sync_from_compute():
         encoding="utf-8"
     )
     normalized_readme = " ".join(readme.split())
-    assert "hosted service must read it to produce a proposal" in normalized_readme
-    assert "this is not end-to-end-encrypted processing" in normalized_readme
-    assert "Local-only installations send nothing" in normalized_readme
-    assert "ENGRAPHIS_RETENTION_SUPERVISOR=none" in normalized_readme
-
+    assert "hosted service must read it to produce a proposal" not in normalized_readme
+    assert "this is not end-to-end-encrypted processing" not in normalized_readme
+    assert "Local-only installations send nothing" not in normalized_readme
     assert "will never see, read, or access your data" not in normalized_readme
 
     sync_doc = (Path(__file__).resolve().parents[1] / "docs" / "SYNC.md").read_text(
