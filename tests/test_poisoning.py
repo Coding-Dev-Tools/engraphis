@@ -560,6 +560,25 @@ def test_approval_requires_a_reason_and_cannot_duplicate_an_approved_successor()
         )
 
 
+def test_approval_retry_cannot_resurrect_a_retired_approved_successor():
+    service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
+    pending = service.remember("The release is green.", workspace="w")
+    approved = service.engine.approve_for_prompt(
+        pending["id"], reviewer="operator", reason="verified in the release dashboard",
+    )
+    service.engine.retire(approved["id"], reason="release was superseded")
+
+    with pytest.raises(ValueError, match="already been approved and retired"):
+        service.engine.approve_for_prompt(
+            pending["id"], reviewer="operator", reason="stale transport retry",
+        )
+    assert [
+        record.id
+        for record in service.store.list_memories(include_invalid=True)
+        if record.provenance.get("approved_from") == pending["id"]
+    ] == [approved["id"]]
+
+
 def test_approval_requires_a_live_pending_source_and_preserves_claim_protections():
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
     retired = service.remember("The retired release is blue.", workspace="w")

@@ -1769,11 +1769,21 @@ class MemoryEngine:
                 repo_id=old.repo_id,
                 session_id=old.session_id if old.scope == Scope.SESSION else None,
             )
-            for candidate in self.store.list_memories(source_scope, include_invalid=False):
+            # Include retired successors in this audit lookup. A retry may return a
+            # live successor, but it must never create a fresh one after the original
+            # approved record was deliberately retired: that would resurrect content
+            # without a new governed write.
+            for candidate in self.store.list_memories(source_scope, include_invalid=True):
                 approved_from = candidate.provenance.get("approved_from")
                 if approved_from is None:
                     approved_from = candidate.metadata.get("approved_from")
                 if (approved_from == old.id and provenance_is_approved(candidate.provenance)):
+                    if (
+                        candidate.expired_at is not None
+                        or (candidate.valid_from is not None and candidate.valid_from > now)
+                        or (candidate.valid_to is not None and candidate.valid_to <= now)
+                    ):
+                        raise ValueError("memory has already been approved and retired")
                     return {
                         "id": candidate.id,
                         "approved_from": old.id,

@@ -3686,7 +3686,8 @@ class Store:
                        layers: Optional[list[GraphLayer]] = None,
                        flt: Optional[SearchFilter] = None,
                        include_invalid: bool = False,
-                       limit: Optional[int] = None) -> list[dict]:
+                       limit: Optional[int] = None,
+                       prompt_only: bool = False) -> list[dict]:
         """Return visible links with at least one endpoint in ``ids``.
 
         This bounded frontier expansion is distinct from :meth:`links_among`: graph
@@ -3726,8 +3727,16 @@ class Store:
                 sql += f" AND layer IN ({layer_marks})"
                 params.extend(_enum(layer) for layer in layers)
             sql += " ORDER BY a, b, relation, valid_from, ingested_at"
-            for row in self.conn.execute(sql, params).fetchall():
-                item = dict(row)
+            found = [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+            endpoint_ids = {endpoint for item in found for endpoint in (item["a"], item["b"])}
+            endpoint_records = self.get_memories(sorted(endpoint_ids)) if prompt_only else {}
+            for item in found:
+                if prompt_only and not all(
+                    (record := endpoint_records.get(endpoint))
+                    and _row_is_prompt_eligible(record.provenance, record.metadata)
+                    for endpoint in (item["a"], item["b"])
+                ):
+                    continue
                 key = (
                     item["a"], item["b"], item["relation"], item["layer"],
                     item["valid_from"], item["valid_to"], item["ingested_at"],

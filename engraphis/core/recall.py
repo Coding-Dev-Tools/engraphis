@@ -1049,6 +1049,7 @@ class RecallEngine:
             layers=flt.graph_layers,
             flt=flt,
             limit=20_000,
+            prompt_only=prompt_only,
         )
         # Expand from the entity-incidence frontier before adding the bounded newest
         # memory window. An older unmentioned endpoint can then participate in PPR

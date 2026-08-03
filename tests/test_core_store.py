@@ -1060,6 +1060,27 @@ def test_prompt_neighbors_filter_unapproved_edges_before_limit(store):
     assert [edge.id for edge in edges] == ["edg_approved"]
 
 
+def test_prompt_links_touching_filters_unapproved_endpoints_before_limit(store):
+    wid = store.get_or_create_workspace("w")
+    seed = store.add_memory(MemoryRecord(
+        id="mem_seed", content="approved seed", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    pending = store.add_memory(MemoryRecord(
+        id="mem_pending", content="pending endpoint", workspace_id=wid,
+        provenance={"source": "test", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="mem_safe", content="approved endpoint", workspace_id=wid,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.add_link(seed, pending, relation="supports")
+    store.add_link(seed, approved, relation="supports")
+
+    links = store.links_touching([seed], limit=1, prompt_only=True)
+    assert [(link["a"], link["b"]) for link in links] == [(seed, approved)]
+
+
 @pytest.mark.parametrize(
     ("query", "broad_match", "exact_match"),
     [
