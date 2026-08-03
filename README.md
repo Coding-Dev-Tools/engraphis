@@ -30,7 +30,7 @@
 ## Measured token and context savings
 
 <p align="center">
-  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 71.1 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -47,11 +47,11 @@
 
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
-| Whole documents | 740.3 tokens | 1.000 |
-| Engraphis structure-aware chunks | 214.1 tokens | 1.000 |
+| Whole documents | 808.8 tokens | 1.000 |
+| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
 
-The chunked mode returns the relevant passage instead of the whole document: **526.2 fewer tokens
-per question**. Under the same model-context budget, that leaves roughly **526 tokens** for task
+The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
+per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
 instructions or other relevant evidence.
 
 ### Measurement details and reproducibility
@@ -62,11 +62,11 @@ boundary.
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
 | Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
-| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.1** tokens | **526.2 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
 | Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
-| Small histories across 26 CodeMem agent tasks | Always retrieve: **1,883** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | Adaptive routing skipped all 26 unnecessary searches; this fixture does **not** show a token saving | Both completed **24/26** tasks with the same deterministic offline task agent |
+| Small histories across 26 CodeMem agent tasks | Always retrieve: **2,194** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | **252 tokens avoided** (**11.5% lower**) and all 26 unnecessary searches skipped | Both completed **24/26** tasks with the same deterministic offline task agent |
 | Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 The compact MCP response avoids duplicating full memory bodies when the packed context and source

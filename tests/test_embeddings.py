@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-import httpx
 
 from engraphis.backends.embedder_api import ApiEmbedder
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder, _tokenize
@@ -99,6 +98,7 @@ def test_api_batch_vectors_require_complete_unique_indices_and_consistent_width(
 
 
 def test_api_per_item_fallback_is_cardinality_safe_and_normalized(monkeypatch):
+    httpx = pytest.importorskip("httpx")
     responses = [
         {"data": [{"index": 0, "embedding": [3.0, 4.0]}]},
         {"data": [{"index": 0, "embedding": [0.0, 2.0]}]},
@@ -137,6 +137,7 @@ def test_api_per_item_fallback_is_cardinality_safe_and_normalized(monkeypatch):
 
 
 def test_api_per_item_fallback_fills_malformed_rows_at_the_valid_width(monkeypatch):
+    httpx = pytest.importorskip("httpx")
     responses = [
         {"data": [{"index": "private-index", "embedding": [9.0]}]},
         {"data": [{"index": 0, "embedding": [0.0, 2.0]}]},
@@ -175,7 +176,16 @@ def test_api_per_item_fallback_fills_malformed_rows_at_the_valid_width(monkeypat
     np.testing.assert_allclose(result, [[0.0, 0.0], [0.0, 1.0]])
 
 
+def test_api_rejects_all_failed_fallback_without_a_known_dimension():
+    embedder = ApiEmbedder(model="model", api_key="key")
+
+    with pytest.raises(RuntimeError, match="no usable vectors"):
+        embedder._finalize_vectors([None, None], 2)
+    assert embedder._dim is None
+
+
 def test_api_rejects_configured_dimension_mismatch_from_batch_response(monkeypatch):
+    httpx = pytest.importorskip("httpx")
     class _Response:
         def raise_for_status(self):
             return None
@@ -203,6 +213,7 @@ def test_api_rejects_configured_dimension_mismatch_from_batch_response(monkeypat
 
 
 def test_api_rejects_configured_dimension_mismatch_during_per_item_fallback(monkeypatch):
+    httpx = pytest.importorskip("httpx")
     class _Response:
         def __init__(self, payload):
             self.payload = payload

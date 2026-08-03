@@ -2554,25 +2554,39 @@ class Store:
         # would be treated as a pattern and over-match (a bare "%" matching everything).
         # Use the same conservative inflection variants as FTS5 so lexical-only degraded
         # mode remains useful on SQLite builds without FTS5.
-        # Preserve literal wildcard queries.  ``_fts_terms`` intentionally removes
-        # punctuation for FTS syntax, but the LIKE fallback has always supported
-        # searching for a literal percent, underscore, or backslash.
-        like_terms = [q] if any(char in q for char in ("%", "_", "\\")) else terms
-        like_clauses = []
-        like_params: list[Any] = []
-        for term in like_terms:
-            like = f"%{_escape_like(term)}%"
-            like_clauses.append("(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
-            like_params.extend((like, like))
-        if not like_clauses:
-            return []
-        rows = self.conn.execute(
-            "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
-            "WHERE (" + " OR ".join(like_clauses) + ")"
-            + extra + " LIMIT ?",
-            (*like_params, *params, k),
-        ).fetchall()
-        return [(r["id"], 0.5) for r in rows]
+        # ``_fts_terms`` intentionally removes punctuation for FTS syntax.  In the
+        # LIKE fallback, retain the literal query first: C++ and v1.2 must not be
+        # reduced to broad C/v1/2 matches that consume the caller's result limit.
+        def search_like(
+            search_terms: list[str], limit: int, excluded: Optional[list[str]] = None
+        ) -> list[str]:
+            clauses = []
+            query_params: list[Any] = []
+            for term in search_terms:
+                like = f"%{_escape_like(term)}%"
+                clauses.append("(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
+                query_params.extend((like, like))
+            if not clauses or limit <= 0:
+                return []
+            exclusions = ""
+            if excluded:
+                marks = ",".join("?" for _ in excluded)
+                exclusions = f" AND f.id NOT IN ({marks})"
+            rows = self.conn.execute(
+                "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
+                "WHERE (" + " OR ".join(clauses) + ")" + extra + exclusions + " LIMIT ?",
+                (*query_params, *params, *(excluded or []), limit),
+            ).fetchall()
+            return [row["id"] for row in rows]
+
+        literal_ids = search_like([q], k)
+        if len(literal_ids) >= k:
+            return [(memory_id, 0.5) for memory_id in literal_ids]
+        # Add the ordinary token/inflection matches only after literal results, and
+        # avoid repeating a literal term for simple punctuation-free queries.
+        variants = [term for term in terms if term.casefold() != q.casefold()]
+        variant_ids = search_like(variants, k - len(literal_ids), literal_ids)
+        return [(memory_id, 0.5) for memory_id in [*literal_ids, *variant_ids]]
 
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:

@@ -1036,6 +1036,23 @@ def test_fts_fallback_escapes_like_wildcards(store):
     assert store.fts_search("_", 10) == []           # '_' is literal, not "any character"
 
 
+@pytest.mark.parametrize(
+    ("query", "broad_match", "exact_match"),
+    [
+        ("C++", "C language guide", "C++ compiler guide"),
+        ("v1.2", "v1 migration notes", "v1.2 compatibility notes"),
+    ],
+)
+def test_fts_fallback_prioritizes_literal_punctuation_before_token_variants(
+        store, query, broad_match, exact_match):
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(id="mem_broad", content=broad_match, workspace_id=wid))
+    store.add_memory(MemoryRecord(id="mem_exact", content=exact_match, workspace_id=wid))
+    store.has_fts5 = False
+
+    assert store.fts_search(query, 1) == [("mem_exact", 0.5)]
+
+
 # ── regression: indexes exist, and are added to pre-existing databases ────────
 
 def _index_names(conn):

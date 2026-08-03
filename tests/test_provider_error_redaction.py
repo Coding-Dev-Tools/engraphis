@@ -181,11 +181,12 @@ def test_api_embedder_logs_no_model_endpoint_or_provider_index(monkeypatch, capl
             base_url="https://provider.example/%s" % endpoint_marker,
             api_key="safe-key",
         )
-        result = embedder.embed(["hello"])
+        with pytest.raises(RuntimeError, match="no usable vectors") as caught:
+            embedder.embed(["hello"])
 
-    assert result.shape == (1, 384)
     for marker in (model_marker, endpoint_marker, index_marker, "owner@example.com"):
         assert marker not in caplog.text
+        assert marker not in str(caught.value)
 
 
 def test_api_embedder_failure_logs_do_not_include_api_key(monkeypatch, caplog):

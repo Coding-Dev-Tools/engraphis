@@ -150,9 +150,15 @@ class ApiEmbedder:
         widths = {len(vector) for vector in vectors if vector is not None}
         if self._dim is not None:
             widths.add(self._dim)
+        if not widths:
+            # Without a configured or successfully observed width, zero vectors
+            # cannot establish an embedding-space contract.  Guessing 384 here
+            # would poison future successful responses from a differently-sized
+            # provider model.
+            raise RuntimeError("embedding provider returned no usable vectors")
         if len(widths) > 1:
             raise RuntimeError("embedding provider returned inconsistent dimensions")
-        dimension = next(iter(widths), 384)
+        dimension = next(iter(widths))
         if not 1 <= dimension <= MAX_EMBEDDING_DIM:
             raise RuntimeError("embedding provider returned an invalid dimension")
         completed = [
