@@ -7,8 +7,9 @@ the synthesis prompt, and the service-layer validation/JSON shape.
 """
 import pytest
 
+from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR
+from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, support_scores
 from engraphis.service import MemoryService, ValidationError
 
 FACTS = [
@@ -74,6 +75,33 @@ def test_grounded_abstains_on_empty_store():
     wid = eng.store.get_or_create_workspace("w")
     ans = eng.grounded_recall("anything at all", workspace_id=wid)
     assert not ans.grounded and ans.answer == "" and ans.citations == []
+
+
+def test_grounded_support_fails_closed_for_an_undeclared_vector_adapter():
+    class UndeclaredVectorAdapter:
+        def embed(self, texts, **kwargs):
+            raise AssertionError("semantic embedding must not run")
+
+    assert support_scores("package manager", ["package manager"], UndeclaredVectorAdapter()) == [1.0]
+
+
+def test_grounded_support_uses_a_declared_semantic_adapter():
+    class DeclaredSemanticAdapter(DeterministicEmbedder):
+        supports_semantic_search = True
+        embedding_mode = "semantic"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def embed(self, texts, **kwargs):
+            self.calls += 1
+            return super().embed(texts, **kwargs)
+
+    embedder = DeclaredSemanticAdapter()
+    support_scores("package manager", ["package manager"], embedder)
+
+    assert embedder.calls == 1
 
 
 def test_grounded_cites_only_supporting_sources():
@@ -180,6 +208,11 @@ def test_delayed_trigger_from_prior_session_cannot_override_fenced_synthesis():
         workspace="acme", repo="backend", session_id=initial["session_id"],
         scope="repo", resolve_conflicts=False,
     )
+    # Service ingress is evidence, not model context. Model the required human
+    # ceremony for the benign control while leaving the delayed trigger pending.
+    fact = svc.engine.approve_for_prompt(
+        fact["id"], reviewer="test_operator", reason="verified benign control",
+    )
     svc.end_session(initial["session_id"], outcome="stored", open_threads=[])
 
     later = svc.start_session("acme", repo="backend", agent="responder",
@@ -208,8 +241,10 @@ def test_delayed_trigger_from_prior_session_cannot_override_fenced_synthesis():
     assert svc.store.get_memory(fact["id"]).access_count > fact_before
     # The detector preserves the payload for audited/historical inspection while normal
     # recall/listing hides its zero-length validity interval.
-    assert len(svc.store.list_memories()) == 1
-    assert len(svc.store.list_memories(include_invalid=True)) == 2
+    # The pending evidence and its approved successor both remain auditable; only
+    # the quarantined payload is outside the current valid-time view.
+    assert len(svc.store.list_memories()) == 2
+    assert len(svc.store.list_memories(include_invalid=True)) == 3
 
 
 def test_grounded_excludes_metadata_quarantine_without_exposing_or_reinforcing_it():

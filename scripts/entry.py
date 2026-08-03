@@ -24,6 +24,8 @@ COMMANDS = {
     "init": "scripts.init:main",
     "cli": "scripts.cli:main",
     "mcp": "engraphis.mcp_cli:main",
+    "mcp-classic": "engraphis.mcp_classic_cli:main",
+    "mcp-http": "engraphis.mcp_http_cli:main",
     "server": "scripts.start_server:main",
     "dashboard": "scripts.start_dashboard:main",
     "inspector": "scripts.inspector:main",
@@ -40,6 +42,8 @@ commands:
   init           write a project .env and print agent setup snippets
   cli            store and recall memories from the terminal
   mcp            run the MCP server (Claude Code, Cursor, Cline, Zed)
+  mcp-classic    run the legacy MCP server with all direct tools
+  mcp-http       run a loopback-only MCP-over-HTTP server
   server         run the v2 REST server without opening a browser (compatibility alias)
   dashboard      run the product dashboard
   inspector      inspect the local database

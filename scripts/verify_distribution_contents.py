@@ -32,6 +32,7 @@ REQUIRED_COMMON = frozenset({
 })
 REQUIRED_SDIST = REQUIRED_COMMON | frozenset({
     "BENCHMARKS.md",
+    "docker-compose.lan.yml",
     "eval/BASELINES.md",
 })
 _PRIVATE_RESEARCH = (

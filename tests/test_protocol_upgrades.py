@@ -11,11 +11,17 @@ from engraphis.core.store import Store
 from engraphis.service import MemoryService
 
 
+def _approve(svc, pending):
+    return svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved fixture"
+    )
+
+
 def test_explicit_graph_layer_survives_database_reopen(tmp_path):
     db = tmp_path / "memory.db"
     svc = MemoryService.create(str(db), graph_extractor="none")
-    first = svc.remember("First fact", workspace="w", scope="workspace")
-    second = svc.remember("Second fact", workspace="w", scope="workspace")
+    first = _approve(svc, svc.remember("First fact", workspace="w", scope="workspace"))
+    second = _approve(svc, svc.remember("Second fact", workspace="w", scope="workspace"))
     svc.link(
         first["id"], second["id"], workspace="w",
         relation="related", layer="causal", reason="Second fact explains the first.",
@@ -44,9 +50,9 @@ def test_explicit_graph_layer_survives_database_reopen(tmp_path):
 
 def test_link_infers_layer_for_response_receipt_and_persistence():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    first = svc.remember("First fact", workspace="w", scope="workspace")
-    second = svc.remember("Second fact", workspace="w", scope="workspace")
-    third = svc.remember("Third fact", workspace="w", scope="workspace")
+    first = _approve(svc, svc.remember("First fact", workspace="w", scope="workspace"))
+    second = _approve(svc, svc.remember("Second fact", workspace="w", scope="workspace"))
+    third = _approve(svc, svc.remember("Third fact", workspace="w", scope="workspace"))
 
     inferred = svc.link(
         first["id"], second["id"], workspace="w", relation="causes",
@@ -112,10 +118,11 @@ def test_code_graph_links_memories_and_supports_unified_paths(tmp_path):
         "def deploy_release():\n    return True\n", encoding="utf-8"
     )
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    memory = svc.remember(
+    pending = svc.remember(
         "The deploy_release function must run after the approval gate.",
         workspace="w", repo="app",
     )
+    memory = _approve(svc, pending)
     report = svc.index_repo(
         workspace="w", repo="app", root_path=str(tmp_path),
     )
@@ -265,10 +272,10 @@ def test_code_graph_filters_layers_before_edge_cap():
 
 def test_repo_code_reads_exclude_session_scoped_linked_memories():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    repo_memory = svc.remember(
+    repo_memory = _approve(svc, svc.remember(
         "Repository guidance for deploy_release.",
         workspace="w", repo="app", scope="repo",
-    )
+    ))
     session = svc.start_session("w", repo="app")
     session_memory = svc.remember(
         "Temporary session note for deploy_release.",
@@ -304,7 +311,8 @@ def test_intent_recall_locate_code_returns_memory_and_symbol_results(tmp_path):
     (tmp_path / "auth.py").write_text("def rotate_key():\n    pass\n", encoding="utf-8")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.index_repo(workspace="w", repo="app", root_path=str(tmp_path))
-    svc.remember("rotate_key is used for key rotation.", workspace="w", repo="app")
+    pending = svc.remember("rotate_key is used for key rotation.", workspace="w", repo="app")
+    _approve(svc, pending)
     out = svc.intent_recall(
         "rotate_key", intent="locate code", workspace="w", repo="app",
     )

@@ -7,6 +7,7 @@ authoritative for entitlements and performs all paid computation.
 """
 from __future__ import annotations
 
+import http.client
 import hashlib
 import json
 import os
@@ -113,6 +114,13 @@ class CloudFeatureError(RuntimeError):
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+# Error bodies are untrusted diagnostic data and their best-effort drain must not replace
+# the stable status response.  In particular, a truncated chunked body raises
+# ``http.client.IncompleteRead`` (an ``HTTPException``, not an ``OSError``), which otherwise
+# escaped from this error path as a raw traceback.
+_DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
 
 
 def managed_compute_consent() -> bool:
@@ -489,13 +497,24 @@ class CloudFeatureClient:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             message, transient = _public_http_error(exc.code)
-            exc.close()
+            # Do not inspect or reflect provider diagnostics: they can contain internal
+            # details.  Drain only to release the connection, and guard the drain and close
+            # independently because both can fail for a malformed/truncated response.
+            try:
+                exc.read(MAX_RESPONSE_BYTES + 1)
+            except _DRAIN_FAILURES:
+                pass
+            finally:
+                try:
+                    exc.close()
+                except _DRAIN_FAILURES:
+                    pass
             raise CloudFeatureError(
                 message,
                 status=exc.code,
                 transient=transient,
             ) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise CloudFeatureError(
                 "Engraphis Cloud is temporarily unreachable.", transient=True,
             ) from exc

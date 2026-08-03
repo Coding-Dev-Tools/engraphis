@@ -1,0 +1,9 @@
+# Token-required LAN override for docker-compose.yml. Requires Docker Compose v2.24.4+
+# for the !override tag, which replaces (rather than appends to) the loopback port mapping.
+services:
+  engraphis:
+    ports: !override
+      - "0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"
+    environment:
+      # Fail Compose configuration before a LAN-published container starts without auth.
+      ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}

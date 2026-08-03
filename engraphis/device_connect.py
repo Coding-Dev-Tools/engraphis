@@ -635,9 +635,7 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
     return parsed
 
 
-#: Fields worth echoing back to the customer.  Deliberately excludes
-#: ``refresh_credential`` and ``access_token``: the summary is printed.
-_SUMMARY_FIELDS = (
+_SUMMARY_TEXT_FIELDS = (
     "organization_id",
     "installation_id",
     "device_id",
@@ -645,20 +643,77 @@ _SUMMARY_FIELDS = (
     "workspace_id",
     "token_subject",
     "plan",
-    "cloud_access_active",
-    "cloud_features",
-    "entitlement_version",
-    "expires_in_seconds",
 )
+_MAX_SUMMARY_TEXT_BYTES = 256
+_MAX_SUMMARY_FEATURES = 32
+_MAX_SUMMARY_FEATURE_BYTES = 64
+
+
+def _summary_text(value: object, *, max_bytes: int = _MAX_SUMMARY_TEXT_BYTES) -> str:
+    """Return a bounded, single-line provider value that is safe to print."""
+    if not isinstance(value, str):
+        return ""
+    if not value.isprintable():
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        return text if len(text.encode("utf-8")) <= max_bytes else ""
+    except UnicodeEncodeError:
+        return ""
+
+
+def _summary_features(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    features: list[str] = []
+    for item in value:
+        feature = _summary_text(item, max_bytes=_MAX_SUMMARY_FEATURE_BYTES)
+        if feature and feature not in features:
+            features.append(feature)
+        if len(features) == _MAX_SUMMARY_FEATURES:
+            break
+    return features
 
 
 def summarize(response: dict) -> dict:
-    """Return the non-secret fields of a registration response, for display."""
+    """Return bounded, non-secret registration metadata safe for display.
 
-    summary = {}
-    for key in _SUMMARY_FIELDS:
-        if key in response:
-            summary[key] = response[key]
+    The control-plane response is untrusted input at this boundary. Keep the output shape
+    scalar-only and reject terminal controls, nested objects, and unbounded values before either
+    CLI presentation mode can reflect them.
+    """
+    if not isinstance(response, dict):
+        return {}
+
+    summary: dict = {}
+    for key in _SUMMARY_TEXT_FIELDS:
+        value = _summary_text(response.get(key))
+        if value:
+            summary[key] = value
+
+    cloud_access_active = response.get("cloud_access_active")
+    if isinstance(cloud_access_active, bool):
+        summary["cloud_access_active"] = cloud_access_active
+
+    cloud_features = _summary_features(response.get("cloud_features"))
+    if cloud_features:
+        summary["cloud_features"] = cloud_features
+
+    entitlement_version = response.get("entitlement_version")
+    if isinstance(entitlement_version, int) and not isinstance(entitlement_version, bool):
+        if entitlement_version >= 0:
+            summary["entitlement_version"] = entitlement_version
+
+    expires_in_seconds = response.get("expires_in_seconds")
+    if isinstance(expires_in_seconds, (int, float)) and not isinstance(expires_in_seconds, bool):
+        try:
+            numeric_expiry = float(expires_in_seconds)
+        except (OverflowError, ValueError):
+            numeric_expiry = -1.0
+        if math.isfinite(numeric_expiry) and numeric_expiry >= 0:
+            summary["expires_in_seconds"] = expires_in_seconds
     return summary
 
 

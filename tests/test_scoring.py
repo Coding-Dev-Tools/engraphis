@@ -47,6 +47,25 @@ def test_score_rewards_semantic_penalizes_stale():
     assert scoring.score_memory(stale, now=now, weights=w, semantic=1.0) < hi
 
 
+def test_ordinary_recall_does_not_double_weight_fact_age():
+    """Validity/ingestion age is not a second decay curve in query recall."""
+    now = 1_000_000.0
+    w = scoring.weights_for(MemoryType.SEMANTIC)
+    shared = dict(
+        content="same evidence", mtype=MemoryType.SEMANTIC, last_access=now - 86_400,
+        stability=4.0, importance=0.4,
+    )
+    new = MemoryRecord(id="new", ingested_at=now, valid_from=now, **shared)
+    old = MemoryRecord(
+        id="old", ingested_at=now - 365 * 86_400,
+        valid_from=now - 365 * 86_400,
+        **shared,
+    )
+    assert scoring.score_memory(new, now=now, weights=w, semantic=0.7) == (
+        scoring.score_memory(old, now=now, weights=w, semantic=0.7)
+    )
+
+
 def test_per_type_weight_profiles_differ():
     assert scoring.weights_for(MemoryType.WORKING).c > scoring.weights_for(MemoryType.SEMANTIC).c
     assert scoring.weights_for(MemoryType.PROCEDURAL).i > scoring.weights_for(MemoryType.WORKING).i

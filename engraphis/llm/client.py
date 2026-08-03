@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -142,6 +143,7 @@ class LLMClient:
         system: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
         if not self.api_key:
@@ -150,10 +152,10 @@ class LLMClient:
                 "or pass api_key= when constructing LLMClient."
             )
         if self.provider == "anthropic":
-            return self._chat_anthropic(messages, system, temperature, max_tokens)
+            return self._chat_anthropic(messages, system, temperature, max_tokens, timeout)
         if self.provider == "google":
-            return self._chat_google(messages, system, temperature, max_tokens)
-        return self._chat_openai_compat(messages, system, temperature, max_tokens)
+            return self._chat_google(messages, system, temperature, max_tokens, timeout)
+        return self._chat_openai_compat(messages, system, temperature, max_tokens, timeout)
 
     def synthesize_thought(self, context: str, *, temperature: float = 0.3,
                            max_tokens: int = 512,
@@ -187,7 +189,13 @@ class LLMClient:
             max_tokens=max_tokens,
         )
 
-    def extract_json(self, prompt: str, schema: dict) -> Any:
+    def extract_json(
+        self,
+        prompt: str,
+        schema: dict,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Any:
         """Extract structured JSON from the LLM using a JSON schema constraint.
 
         Uses the provider's native structured output (OpenAI JSON schema, etc.)
@@ -200,7 +208,7 @@ class LLMClient:
             f"{json.dumps(schema)}"
         )
         raw = self.chat([{"role": "user", "content": prompt}], system=system,
-                        temperature=0.0, max_tokens=8192)
+                        temperature=0.0, max_tokens=8192, timeout=timeout)
         return _parse_json_response(raw)
 
     def ping(self) -> dict[str, Any]:
@@ -235,7 +243,9 @@ class LLMClient:
 
     # ── Provider implementations ────────────────────────────────────────────
 
-    def _chat_openai_compat(self, messages, system, temperature, max_tokens) -> str:
+    def _chat_openai_compat(
+        self, messages, system, temperature, max_tokens, timeout=None
+    ) -> str:
         """OpenAI / OpenRouter / custom OpenAI-compatible endpoints."""
         full_messages = []
         if system:
@@ -255,13 +265,15 @@ class LLMClient:
         # their query string.  Keep debug logging useful without ever emitting the
         # configured endpoint verbatim.
         logger.debug("LLM provider request started")
-        data = self._post_json(url, body, headers)
+        data = self._post_json(url, body, headers, timeout=timeout)
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             raise ValueError("Unexpected LLM response format") from None
 
-    def _chat_anthropic(self, messages, system, temperature, max_tokens) -> str:
+    def _chat_anthropic(
+        self, messages, system, temperature, max_tokens, timeout=None
+    ) -> str:
         """Anthropic Messages API."""
         body: dict[str, Any] = {
             "model": self.model,
@@ -282,13 +294,15 @@ class LLMClient:
 
         url = f"{self.base_url}/messages"
         logger.debug("LLM provider request started")
-        data = self._post_json(url, body, headers)
+        data = self._post_json(url, body, headers, timeout=timeout)
         try:
             return data["content"][0]["text"]
         except (KeyError, IndexError, TypeError):
             raise ValueError("Unexpected Anthropic response format") from None
 
-    def _chat_google(self, messages, system, temperature, max_tokens) -> str:
+    def _chat_google(
+        self, messages, system, temperature, max_tokens, timeout=None
+    ) -> str:
         """Google Gemini generateContent API."""
         contents = []
         for m in messages:
@@ -310,21 +324,35 @@ class LLMClient:
 
         url = f"{self.base_url}/models/{self.model}:generateContent"
         logger.debug("LLM provider request started")
-        data = self._post_json(url, body, headers)
+        data = self._post_json(url, body, headers, timeout=timeout)
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError):
             raise ValueError("Unexpected Google response format") from None
 
-    def _post_json(self, url: str, body: dict[str, Any], headers: dict[str, str]) -> Any:
+    def _post_json(
+        self,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Any:
         """POST with retry for transient provider errors (429, 502, 503, 504)."""
         import time as _time
         _RETRYABLE = {429, 502, 503, 504}
-        _MAX_RETRIES = 2
+        if timeout is not None:
+            if isinstance(timeout, bool) or not math.isfinite(float(timeout)) or timeout <= 0:
+                raise ValueError("timeout must be a finite positive number")
+            timeout = float(timeout)
+        # A planner deadline is a fail-open latency boundary. Do not add retry
+        # sleeps to it; ordinary LLM calls retain the established retry policy.
+        _MAX_RETRIES = 0 if timeout is not None else 2
         last_exc: Optional[Exception] = None
         for attempt in range(1 + _MAX_RETRIES):
             try:
-                resp = self._http.post(url, json=body, headers=headers)
+                request_kwargs = {"timeout": timeout} if timeout is not None else {}
+                resp = self._http.post(url, json=body, headers=headers, **request_kwargs)
                 resp.raise_for_status()
                 try:
                     return resp.json()
@@ -345,6 +373,8 @@ class LLMClient:
                     last_exc = exc
                     continue
                 raise _LLMProviderError(status=status) from None
+            except httpx.TimeoutException as exc:
+                raise TimeoutError("LLM request exceeded its deadline") from exc
             except httpx.RequestError:
                 if attempt < _MAX_RETRIES:
                     wait = 2.0 * (attempt + 1)

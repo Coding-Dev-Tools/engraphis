@@ -62,6 +62,13 @@ The `/data` volume contains the local memory database and customer state. A rede
 volume loses local data. Use Railway volume snapshots or an encrypted backup process and test
 restoration into a disposable customer node.
 
+The checked-in `railway.json` gives Uvicorn a 30-second SIGTERM-to-SIGKILL drain window so it can
+finish in-flight requests and close SQLite before Railway replaces the process. Railway volumes
+cannot be mounted by overlapping replicas, so volume-backed redeploys still have a short planned
+downtime even when a readiness check is configured. Do not enable replicas or multi-region
+deployment for this SQLite-backed node; restore a snapshot into a separate disposable service to
+test recovery instead.
+
 Before relying on the deployment, verify:
 
 - `/api/ready` returns 200 after a clean deploy;

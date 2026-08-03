@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("mcp", reason="optional 'mcp' extra not installed")
 
 import engraphis.mcp_server as srv
-from engraphis.core.interfaces import SchemaSnapshot
+from engraphis.core.interfaces import MemoryType, SchemaSnapshot, Scope
 from engraphis.service import MemoryService
 
 
@@ -21,8 +21,23 @@ def _memory_server(monkeypatch):
     return srv
 
 
+def _seed_approved_episode(server, content: str) -> str:
+    """Fixture setup uses the documented in-process trusted-code boundary.
+
+    The MCP write surface itself is deliberately pending-only, so it cannot seed
+    model-eligible inputs for a consolidation behavior test.
+    """
+    service = server.service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "api")
+    return service.engine.remember(
+        content, workspace_id=workspace_id, repo_id=repo_id,
+        mtype=MemoryType.EPISODIC, scope=Scope.REPO, resolve_conflicts=False,
+    )
+
+
 def _annotations(tool_name):
-    tools = {tool.name: tool for tool in asyncio.run(srv.mcp.list_tools())}
+    tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     return tools[tool_name].annotations
 
 
@@ -196,12 +211,8 @@ def test_forced_update_check_rewrites_persistent_cache(monkeypatch, tmp_path):
 def test_consolidate_dry_run_is_pure_and_default_live_retry_is_stable(monkeypatch):
     server = _memory_server(monkeypatch)
     for run in (101, 202, 303):
-        server.engraphis_remember(
-            content=f"Build failed on the flaky network integration test in CI run {run}.",
-            workspace="acme",
-            repo="api",
-            mtype="episodic",
-            dedupe=False,
+        _seed_approved_episode(
+            server, f"Build failed on the flaky network integration test in CI run {run}."
         )
 
     before_dry_run = _database_dump(server)
@@ -248,12 +259,8 @@ def test_structured_consolidate_can_process_remaining_sources_on_retry(monkeypat
     monkeypatch.setattr(llm_client, "LLMClient", _PartialStructuredLLM)
     server = _memory_server(monkeypatch)
     for run in (101, 202, 303, 404, 505, 606):
-        server.engraphis_remember(
-            content=f"Build failed on the flaky network integration test in CI run {run}.",
-            workspace="acme",
-            repo="api",
-            mtype="episodic",
-            dedupe=False,
+        _seed_approved_episode(
+            server, f"Build failed on the flaky network integration test in CI run {run}."
         )
 
     first = json.loads(server.engraphis_consolidate(

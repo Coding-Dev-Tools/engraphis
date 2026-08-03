@@ -108,6 +108,16 @@ def test_public_docs_state_the_license_and_lapse_boundaries():
     )
 
 
+def test_example_configuration_does_not_describe_hosted_grace_or_consent_as_local_access():
+    example = _text(".env.example")
+    plain_example = " ".join(example.replace("#", "").split())
+
+    assert "separate local-only write grace" not in example
+    assert "private control plane" in example
+    assert "never restricts the free local core" in example
+    assert "does not establish a cloud credential or authorize an upload" in plain_example
+
+
 def test_vendor_authority_is_not_shipped_in_the_public_tree():
     private_paths = (
         "engraphis/billing.py",
@@ -151,8 +161,8 @@ def test_container_examples_do_not_describe_private_license_or_relay_state_as_lo
     assert "Issuance, trial state, leases, and revocations stay private." in compose
 
 
-def test_readme_describes_only_customer_side_cloud_state_as_persisted():
-    """The Docker quickstart must not imply that the public image owns licenses.
+def test_docker_docs_describe_only_customer_side_cloud_state_as_persisted():
+    """Supporting Docker docs must not imply that the public image owns licenses.
 
     The mounted state directory holds a customer-side connection plus a display cache;
     issuance and entitlement authority stay in the private control plane.  Calling that
@@ -160,10 +170,16 @@ def test_readme_describes_only_customer_side_cloud_state_as_persisted():
     """
 
     readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
 
     assert "database plus license state" not in readme
-    assert "customer-side cloud session and non-authoritative entitlement display" in readme
+    assert "customer-side cloud session and non-authoritative entitlement display" not in readme
+    assert "customer-side cloud session and non-authoritative entitlement display" in docker_docs
     assert (
         "License issuance, trials, leases, and revocations remain on the private control plane."
-        in readme
+        not in readme
+    )
+    assert (
+        "License issuance, trials, leases, and revocations remain on the private control plane."
+        in docker_docs
     )

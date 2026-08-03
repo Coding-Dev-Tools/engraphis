@@ -36,6 +36,13 @@ from engraphis.private_state import (
 )
 
 _MAX_RESPONSE_BYTES = 64 * 1024
+# Cloud-session state is read through the same cap.  A syntactically valid provider response
+# can otherwise carry one oversized credential string, be written successfully, and make the
+# newly redeemed single-use connection permanently unreadable on the very next request.
+_MAX_SESSION_BYTES = 64 * 1024
+# Access and refresh credentials are sent in HTTP headers/bodies on later calls.  Bound each
+# provider-supplied string well below both the persisted-state cap and common header limits.
+_MAX_CREDENTIAL_BYTES = 8 * 1024
 _REFRESH_THREAD_LOCK = threading.RLock()
 _UNUSABLE_REFRESHES: set[tuple[str, str]] = set()
 
@@ -280,9 +287,12 @@ def _load() -> dict:
 def _save(value: dict) -> None:
     path = _session_path()
     ensure_private_dir(path.parent)
-    atomic_private_text(
-        path, json.dumps(value, sort_keys=True, separators=(",", ":")), harden_parent=True,
-    )
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > _MAX_SESSION_BYTES:
+        raise CloudSessionError(
+            "The cloud session response is too large to save safely.", status=409
+        )
+    atomic_private_text(path, payload, harden_parent=True)
 
 
 def preflight_save() -> Path:
@@ -569,7 +579,7 @@ def record_billing_denial() -> bool:
         return False
 
 
-def text_field(response: dict, key: str) -> str:
+def text_field(response: dict, key: str, *, max_bytes: int = _MAX_CREDENTIAL_BYTES) -> str:
     """Return ``response[key]`` when it is a string, else ``""``.  Never a ``repr``.
 
     ``str(response.get(key) or "")`` looks like a coercion but is not a validation: JSON
@@ -584,7 +594,13 @@ def text_field(response: dict, key: str) -> str:
     """
 
     value = response.get(key)
-    return value.strip() if isinstance(value, str) else ""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    try:
+        return value if len(value.encode("utf-8")) <= max_bytes else ""
+    except UnicodeEncodeError:
+        return ""
 
 
 def save_bootstrap(response: dict, *, control_url: str,
@@ -831,8 +847,21 @@ def access_for_workspace(
     # Do not create the owner-only state directory merely to report an unconnected
     # installation.  An absent session yields the normal structured "connect first"
     # response; a stale home-directory mount yields a structured, retryable error from
-    # ``_load`` rather than an unhandled filesystem exception.  The authoritative session
-    # record is still loaded again under the lock below before any credential is used.
+    # ``_load`` rather than an unhandled filesystem exception.  A known-spent refresh must
+    # stay distinguishable from no session: calling it a new-installation 401 lets the UI
+    # offer a trial even though retrying that credential would be a replay. The authoritative
+    # session record is still loaded again under the lock below before any credential is used.
+    preflight_saved = _load()
+    preflight_refresh = str(preflight_saved.get("refresh_credential") or "").strip()
+    preflight_refresh = preflight_refresh or os.environ.get(
+        "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""
+    ).strip()
+    if _refresh_is_unusable(preflight_saved, preflight_refresh):
+        raise CloudSessionError(
+            "The saved cloud refresh credential cannot be reused; connect this "
+            "installation again.",
+            status=409,
+        )
     if not configured(require_compute=require_compute):
         raise CloudSessionError(
             "Connect this installation to Engraphis Cloud first.", status=401
@@ -924,7 +953,7 @@ def access_for_workspace(
         updated.update(declared)
         try:
             _save(updated)
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, CloudSessionError) as exc:
             # The control plane has already consumed ``refresh``.  Leaving that stale
             # value usable after a local write fault makes the next request replay it,
             # which can revoke the credential family.  Retire it in memory first (so this
