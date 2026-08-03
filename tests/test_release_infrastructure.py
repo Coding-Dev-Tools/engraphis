@@ -83,6 +83,21 @@ def test_native_vector_backend_compatibility_stays_in_architecture_docs():
     assert guidance in architecture
 
 
+def test_pi_and_public_write_review_details_stay_in_supporting_docs():
+    readme = _text("README.md")
+    pi_guide = _text("integrations/pi/README.md")
+    review_guide = _text("docs/WRITE_REVIEW.md")
+
+    assert "[Pi extension guide](integrations/pi/README.md)" in readme
+    assert "pi install npm:@engraphis/pi" not in readme
+    assert "Every advanced state-changing action requires an explicit Pi confirmation dialog" in pi_guide
+
+    review_gate = "Every public write enters review as `pending`"
+    assert review_gate not in readme
+    assert review_gate in review_guide
+    assert "python -m scripts.rescan_poisoning --db engraphis.db --apply" in review_guide
+
+
 def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_override():
     """Generic desktop .env values must not break the published container contract."""
 

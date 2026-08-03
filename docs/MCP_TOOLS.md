@@ -46,6 +46,9 @@ redirected input and requires a typed confirmation. Hosted approval is an owner/
 the private hosted service. Direct in-process `MemoryEngine` use is a trusted-code boundary for
 code that already has local database authority, not a transport permission.
 
+For the full public-write review and existing-store migration procedure, see the
+[public write review gate](WRITE_REVIEW.md).
+
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |

@@ -339,55 +339,8 @@ including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOL
 
 ### Pi extension
 
-Pi users install the first-party extension from npm after installing Engraphis 1.4.x on
-Python 3.10 or later:
-
-```bash
-python -m pip install --upgrade "engraphis[mcp]>=1.4.0,<2"
-pi install npm:@engraphis/pi
-```
-
-The extension exposes the six Smart MCP tools as native Pi tools. It confirms every advanced
-state-changing action through Pi's UI and fails closed when the current Pi mode cannot present
-that approval. Package configuration, update/removal commands, and the local trust boundary are
-documented in [`integrations/pi/README.md`](integrations/pi/README.md).
-
-For unattended jobs, `engraphis_session`, `engraphis_remember`, and discovered actions use
-workspace `default` when `workspace` is omitted.
-
-### Review gate for MCP, REST, imports, and sync
-
-Every public write enters review as `pending`, regardless of a caller-supplied `source` or
-`trusted` label. That includes MCP, dashboard/REST intent writes, imports, sync, and extractor
-output. Detector matches are instead `quarantined` immediately. Pending and quarantined records
-remain inspectable and auditable, but cannot enter model-ready recall/context, resolution,
-links, graph/code backfill, derived prompt context, or public `why`/`timeline` history.
-Corrections, promotions, and merges fail closed unless every input is explicitly approved.
-
-Approval creates a fresh `approved` successor and preserves the reviewed source plus an audit
-link; it never relabels the source in place. There is deliberately no MCP tool or general REST
-approval endpoint. A local owner can approve through the dashboard's **Approve for prompt**
-action after configuring `ENGRAPHIS_API_TOKEN` (short-lived browser session plus CSRF confirmation),
-or from an interactive terminal:
-
-```bash
-python -m scripts.approve_memory mem_... --reason "verified against the owner runbook"
-```
-
-The command rejects redirected input and requires typing its displayed confirmation. Hosted
-owner/admin approval is performed by the hosted service, not this local package. The direct
-in-process `MemoryEngine` remains a documented trusted-code boundary for code that already has
-local database authority; do not expose it to untrusted transports. Existing stores can be
-inspected without writes, then migrated deliberately:
-
-```bash
-python -m scripts.rescan_poisoning --db engraphis.db
-python -m scripts.rescan_poisoning --db engraphis.db --apply
-```
-
-The dry run opens the database read-only. The applying pass demotes historical non-approved
-records to pending review, quarantines detected payloads, retires their derived bridges, and
-records an audit event.
+For installation, configuration, lifecycle commands, and the local trust boundary, see the
+[Pi extension guide](integrations/pi/README.md).
 
 ## Quickstart: repository graph
 
