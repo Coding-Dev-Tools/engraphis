@@ -52,6 +52,7 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
 def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
+    docker_docs = _text("docs/DOCKER.md")
     dockerfile = _text("Dockerfile")
     launcher = _text("scripts/start_server.py")
 
@@ -59,14 +60,15 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert "engraphis_v1.db" not in compose
     assert 'command: ["engraphis-dashboard", "--no-open"]' in compose
     assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
-    assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in readme
+    assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in docker_docs
     assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
-    assert "The Docker image includes the streamable HTTP MCP endpoint" in readme
-    assert "ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in readme
-    assert "docker-compose.lan.yml" in readme
-    assert "LAN overlay refuses to render" in readme
-    assert "ENGRAPHIS_DASHBOARD_URL" in readme
-    assert "ENGRAPHIS_COMPOSE_PORT" in readme
+    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert "The Docker image includes the streamable HTTP MCP endpoint" in docker_docs
+    assert "ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in docker_docs
+    assert "docker-compose.lan.yml" in docker_docs
+    assert "LAN overlay refuses to render" in docker_docs
+    assert "ENGRAPHIS_DASHBOARD_URL" in docker_docs
+    assert "ENGRAPHIS_COMPOSE_PORT" in docker_docs
     assert "start_dashboard.main(args)" in launcher
     assert "engraphis.app" not in launcher
     assert "same v2 service" in readme
