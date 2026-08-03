@@ -582,6 +582,9 @@ const GRAPH_PRESETS={
  custom:{label:'Custom tuning',curve:.1,particles:0}
 };
 window.GSET=window.GSET||{mode:'communities',font:12,size:3,repel:48,link:16,gravity:48,labels:false,linkw:.72,labelDensity:24,flow:true,frozen:false};
+// Freeze is session-only. Never let a pre-existing dashboard state make a newly opened graph
+// look broken: every Classic graph begins with physics live until its visible switch is clicked.
+window.GSET.frozen=false;
 /* Keep legacy Classic geometry in the same compact world-space range as Ledger. The old
    `size * sqrt(1 + degree)` rule let a highly connected entity become a giant disc, then
    zoom-to-fit magnified that disc again. Degree still adds a restrained emphasis, but it is
@@ -733,7 +736,7 @@ function graphRenderEngine(data,fit,reheat){
    engine.setLayers(layers);
    engine.setScope({showUnlinked,minDegree:showUnlinked?0:1});
    if(dataChanged)engine.setData(data);
-  },fit,reheat&&!prefersReducedMotion());
+  },fit,reheat);
   /* Mirror the engine's clustering back onto the dashboard's own node objects, or the
      cluster legend (which reads GACTIVE_DATA) reports one community for the whole store. */
   const communityMap=GRAPH_ENGINE.communityMap();
@@ -746,7 +749,7 @@ function graphRenderEngine(data,fit,reheat){
      null. Re-apply the parked state here so a renderer created against a hidden pane never
      starts a rAF that nothing will stop. */
   if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
-  graphSetSimulationStatus(prefersReducedMotion()?'Static layout':'Adaptive layout',false);
+  graphSetSimulationStatus(window.GSET.frozen?'Layout frozen':'Adaptive layout',false);
   return true;
  }catch(error){
   graphEngineFallback(error);

@@ -445,6 +445,25 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   expect(await positions()).not.toBe(settled);
 });
 
+test('reduced visual motion does not start the opt-in graph frozen', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
+    .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+
+  const positions = () => page.evaluate(() => window.__fg.graphData().nodes
+    .map(node => ({ x: node.x, y: node.y })));
+  const started = await positions();
+  await page.waitForTimeout(750);
+  const live = await positions();
+
+  const greatestMovement = Math.max(...live.map((node, index) => Math.hypot(
+    node.x - started[index].x, node.y - started[index].y,
+  )));
+  expect(greatestMovement).toBeGreaterThan(0.5);
+});
+
 test('the canonical engine limits CSP violations to vendor stylesheets', async ({ page }) => {
   /* Opening the graph is *not* CSP-clean and this PR does not make it so: force-graph injects
      a handful of `<style>` elements when it attaches, which `style-src 'self'` blocks.  The
