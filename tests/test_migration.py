@@ -1,10 +1,29 @@
+import io
 import sqlite3
+import sys
 
 import numpy as np
+import pytest
 
-from engraphis.core.interfaces import MemoryType
+from engraphis.core.interfaces import MemoryRecord, MemoryType
 from engraphis.core.store import Store
+from scripts import migrate_to_v2
 from scripts.migrate_to_v2 import migrate
+
+
+def test_migration_help_supports_windows_cp1252_console(monkeypatch):
+    """Console help must work with the encoding Windows assigns by default."""
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "argv", ["migrate_to_v2", "--help"])
+
+    with pytest.raises(SystemExit) as result:
+        migrate_to_v2.main()
+
+    stdout.flush()
+    assert result.value.code == 0
+    assert b"v1 engraphis_v1.db -> v2" in raw.getvalue()
 
 
 def _build_v1_db(path: str) -> None:
@@ -116,3 +135,42 @@ def test_migration_quarantines_instruction_shaped_v1_memories_and_thoughts(tmp_p
     assert len(audits) == 2
     assert all("instruction_override" in row["detail"] for row in audits)
     store.close()
+
+
+def test_migration_refuses_in_place_target_before_touching_the_v1_source(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    _build_v1_db(str(old))
+    with sqlite3.connect(old) as before:
+        before_tables = before.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+
+    with pytest.raises(ValueError, match="--new to differ from --old"):
+        migrate(str(old), str(old))
+
+    with sqlite3.connect(old) as after:
+        after_tables = after.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        assert after_tables == before_tables
+        assert after.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
+
+
+def test_migration_refuses_an_existing_target_without_modifying_it(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    target = tmp_path / "existing-v2.db"
+    _build_v1_db(str(old))
+    existing = Store(str(target))
+    workspace_id = existing.get_or_create_workspace("already-there")
+    existing.add_memory(MemoryRecord(
+        id="", content="existing v2 memory", workspace_id=workspace_id,
+    ))
+    existing.close()
+    before = target.read_bytes()
+
+    with pytest.raises(FileExistsError, match="fresh --new path"):
+        migrate(str(old), str(target))
+
+    assert target.read_bytes() == before
+    assert migrate(str(old), str(target), dry_run=True)["memories"] == 2
+    assert target.read_bytes() == before

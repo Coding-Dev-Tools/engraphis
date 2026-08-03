@@ -5,6 +5,7 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.config import settings  # noqa: E402
+from engraphis.core.interfaces import Scope  # noqa: E402
 from engraphis.inspector import create_app  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
@@ -13,10 +14,16 @@ from engraphis.service import MemoryService  # noqa: E402
 def client(monkeypatch):
     monkeypatch.setattr(settings, "api_token", "")
     svc = MemoryService.create(":memory:")
-    svc.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
-                 workspace="acme", repo="backend")
-    out = svc.remember("As of 2026-02 the rate limit was raised to 500 requests per minute "
-                       "per API key.", workspace="acme", repo="backend")
+    workspace_id = svc.store.get_or_create_workspace("acme")
+    repo_id = svc.store.get_or_create_repo(workspace_id, "backend")
+    svc.engine.remember(
+        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+    )
+    out = svc.engine.remember_with_resolution(
+        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+    )
     assert out["op"] == "invalidate"
     return TestClient(create_app(svc)), out
 
@@ -116,12 +123,14 @@ def test_why_supersedes_and_timeline_endpoints(client):
     assert len(tl["history"]) == 2
 
 
-def test_governance_endpoints_pin_and_forget(client):
+def test_governance_endpoints_pin_retire_and_legacy_forget_alias(client):
     c, out = client
     body = {"memory_id": out["id"], "workspace": "acme", "repo": "backend"}
     assert c.post("/api/pin", json=body).json()["pinned"] is True
-    r = c.post("/api/forget", json={**body, "reason": "test"}).json()
-    assert r["status"] == "forgotten"
+    r = c.post("/api/retire", json={**body, "reason": "test"}).json()
+    assert r["status"] == "retired"
+    alias = c.post("/api/forget", json={**body, "reason": "legacy"}).json()
+    assert alias["status"] == "forgotten" and alias["deprecated"] is True
     assert c.get("/api/stats", params={"workspace": "acme"}).json()["memories"] == 0
 
 

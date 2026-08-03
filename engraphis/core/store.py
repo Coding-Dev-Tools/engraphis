@@ -36,6 +36,7 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
+from engraphis.core.secrets import reject_secrets
 from engraphis.core.schema import (
     FTS_SQL_FALLBACK,
     FTS_SQL_FTS5,
@@ -49,8 +50,6 @@ VECTOR_SCAN_BATCH = 2000
 # Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
 IN_CLAUSE_CHUNK = 500
-
-
 def now_ts() -> float:
     return time.time()
 
@@ -78,6 +77,21 @@ def _loads(raw: Any, default: Any) -> Any:
         return json.loads(raw)
     except (TypeError, json.JSONDecodeError, RecursionError):
         return default
+
+
+def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
+    """Use the one trust predicate before exposing a derived bridge.
+
+    Store normally stays independent of policy, but code-memory links are a derived
+    index that otherwise outlives a source's review state.  Keep this tiny adapter
+    here so every store-level bridge read and prune operation applies exactly the
+    same predicate as prompt packing and write-time derivation.
+    """
+    from engraphis.core.poisoning import prompt_eligible
+
+    prov = provenance if isinstance(provenance, dict) else _loads(provenance, {})
+    meta = metadata if isinstance(metadata, dict) else _loads(metadata, {})
+    return prompt_eligible(prov, meta)
 
 
 def _provenance_memory_ids(provenance: Any) -> list[str]:
@@ -226,7 +240,7 @@ def _receipt_metadata(metadata: dict) -> dict:
         "entities_added", "relations_added",
         "retrieval_profile", "candidate_depth", "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
-        "adaptive_mode",
+        "adaptive_mode", "action_id", "schema_version", "result_mode",
     }
     def content_free_label(key: str, value: str) -> str:
         normalized = value.strip().casefold().replace(" ", "_")
@@ -287,11 +301,12 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
-    "token_usage", "adaptive_mode",
+    "token_usage", "adaptive_mode", "action_id", "schema_version", "result_mode",
 }
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
-    "graph_index", "grounded_recall", "adaptive_context", "consolidate", "sync",
+    "graph_index", "grounded_recall", "adaptive_context", "proactive_context", "smart_gateway",
+    "consolidate", "sync",
 }
 _PUBLIC_RECEIPT_STATUSES = {
     "ok", "add", "noop", "invalidate", "relate", "ingested",
@@ -691,10 +706,29 @@ class Store:
 
     def __init__(self, path: str = ":memory:", *,
                  allowed_workspaces: Optional[set] = None,
-                 connect: Optional[Callable[[str], Any]] = None) -> None:
+                 connect: Optional[Callable[[str], Any]] = None,
+                 read_only: bool = False) -> None:
+        """Open a store.
+
+        ``read_only`` is deliberately stronger than merely promising not to call a
+        writer: it opens a checkpointed SQLite file with ``mode=ro&immutable=1`` and
+        skips schema setup, migrations, backups, and the persistent WAL-mode pragma.
+        It is for inspection tools (notably security dry-runs) whose safety contract
+        includes leaving a database and its sidecar files untouched.  A non-empty WAL
+        is rejected rather than silently scanning an incomplete immutable snapshot.
+        """
         self.path = path
         self._connect = connect
-        if path != ":memory:":
+        self.read_only = bool(read_only)
+        if self.read_only and path == ":memory:":
+            raise ValueError("read-only Store requires an existing database file")
+        if self.read_only and self._connect is None:
+            wal_path = Path(f"{path}-wal")
+            if wal_path.is_file() and wal_path.stat().st_size:
+                raise RuntimeError(
+                    "read-only Store requires a checkpointed database; active WAL found"
+                )
+        if path != ":memory:" and not self.read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         raw_conn = self._open_connection(path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
@@ -702,17 +736,30 @@ class Store:
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.has_fts5 = False
         self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
         try:
-            self.init_schema()
-            # journal_mode is persistent state, so set it only after a required backup
-            # and the transactional migration have completed successfully.
-            self.conn.execute("PRAGMA journal_mode=WAL")
+            if self.read_only:
+                # ``query_only`` also protects injected connectors whose implementation
+                # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
+                # creating a temporary table here: a dry-run must not write anything.
+                self.conn.execute("PRAGMA query_only=ON")
+                row = self.conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
+                ).fetchone()
+                self.has_fts5 = bool(
+                    row and "virtual table" in str(row["sql"] or "").casefold()
+                    and "fts5" in str(row["sql"] or "").casefold()
+                )
+            else:
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+                self.init_schema()
+                # journal_mode is persistent state, so set it only after a required backup
+                # and the transactional migration have completed successfully.
+                self.conn.execute("PRAGMA journal_mode=WAL")
         except BaseException:
             try:
                 if self.conn.in_transaction:
@@ -727,7 +774,11 @@ class Store:
             # Injected factories own opening, keying, row_factory, and exception
             # translation (notably the SQLCipher backend).
             return self._connect(path)
-        conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        if self.read_only:
+            uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+        else:
+            conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1863,6 +1914,15 @@ class Store:
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
                    commit: bool = True) -> str:
+        # This is the last common write boundary.  Check every persisted text-bearing
+        # field *before* the main row, FTS mirror, or vector are written, including
+        # direct Store callers that do not go through MemoryEngine/MemoryService.
+        reject_secrets((
+            ("title", rec.title), ("content", rec.content), ("summary", rec.summary),
+            ("keywords", rec.keywords), ("metadata", rec.metadata),
+            ("provenance", rec.provenance), ("subject_key", rec.subject_key),
+            ("claim_kind", rec.claim_kind),
+        ))
         # ``Store`` is a local-programmatic capability.  Stamp direct new writes
         # explicitly so prompt-facing recall can fail closed for genuinely legacy
         # rows without making current low-level integrations silently disappear.
@@ -1972,16 +2032,37 @@ class Store:
         return out
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
-                      *, include_invalid: bool = False, limit: Optional[int] = None) -> list[MemoryRecord]:
+                      *, include_invalid: bool = False, limit: Optional[int] = None,
+                      prompt_only: bool = False) -> list[MemoryRecord]:
+        """List scoped records, optionally capping only prompt-eligible rows.
+
+        Public callers can opt into ``prompt_only`` when this bounded result will enter
+        model-adjacent output.  Eligibility is deliberately checked while streaming SQL
+        rows, before the result cap: a large pending import must not hide an older
+        approved record simply by consuming the raw ``LIMIT`` window.
+        """
+        if prompt_only and limit is not None and int(limit) <= 0:
+            return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"
-        if limit:
+        if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(r) for r in rows]
+        if not prompt_only:
+            rows = self.conn.execute(sql, params).fetchall()
+            return [_row_to_record(r) for r in rows]
+
+        eligible_limit = None if limit is None else int(limit)
+        out: list[MemoryRecord] = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append(_row_to_record(row))
+            if eligible_limit is not None and len(out) >= eligible_limit:
+                break
+        return out
 
     def count_memories(self, flt: Optional[SearchFilter] = None,
                        *, include_invalid: bool = False) -> int:
@@ -2118,6 +2199,28 @@ class Store:
             (memory_id, int(v.shape[0]), v.tobytes(), model),
         )
 
+    def get_vectors(self, memory_ids: Iterable[str]) -> dict[str, np.ndarray]:
+        """Return stored, normalized vectors for a bounded set of memory ids.
+
+        Recall uses this to calculate an original-query support score for a final
+        candidate introduced by a planner query but absent from the original vector
+        arm's bounded result set.  Reading the persisted vector preserves the exact
+        vector-space result used by every backend without a fresh embedding call.
+        """
+        unique = list(dict.fromkeys(str(memory_id) for memory_id in memory_ids if memory_id))
+        vectors: dict[str, np.ndarray] = {}
+        for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+            chunk = unique[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT id, vector FROM mem_vectors WHERE id IN ({marks})", chunk,
+            ).fetchall()
+            vectors.update({
+                row["id"]: np.frombuffer(row["vector"], dtype=np.float32)
+                for row in rows
+            })
+        return vectors
+
     def embedding_version(self, identity: str) -> Optional[str]:
         row = self.conn.execute(
             "SELECT version FROM embedding_state WHERE identity=?", (identity,)
@@ -2172,12 +2275,267 @@ class Store:
             (mid, title, content, keywords),
         )
 
+    # ── destructive, per-memory secure erasure ──────────────────────────────
+    @staticmethod
+    def _has_table(conn, name: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?", (name,)
+        ).fetchone() is not None
+
+    @classmethod
+    def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
+        """Remove a memory and all known local derivatives from one SQLite database.
+
+        This deliberately does *not* use temporal retirement. It is for accidentally
+        captured credentials and is intentionally lossy.  The helper also supports
+        recognised local SQLite recovery backups, some of which predate newer tables.
+        """
+        if not cls._has_table(conn, "memories"):
+            return {"present": False, "removed": False}
+        row = conn.execute("SELECT id FROM memories WHERE id=?", (memory_id,)).fetchone()
+        if row is None:
+            return {"present": False, "removed": False}
+
+        # Ask SQLite to overwrite deleted cells where the active VFS supports it. A
+        # later VACUUM rebuild removes free pages/FTS tombstones from the live database.
+        conn.execute("PRAGMA secure_delete=ON")
+        tables = {
+            name for name in (
+                "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
+                "memory_entities", "edge_supports", "edges", "entities", "mem_links",
+                "audit",
+            ) if cls._has_table(conn, name)
+        }
+        incident_entities: list[str] = []
+        if "memory_entities" in tables:
+            incident_entities = [str(item[0]) for item in conn.execute(
+                "SELECT DISTINCT entity_id FROM memory_entities WHERE memory_id=?", (memory_id,)
+            ).fetchall()]
+        supported_edges: list[str] = []
+        if "edge_supports" in tables:
+            supported_edges = [str(item[0]) for item in conn.execute(
+                "SELECT DISTINCT edge_id FROM edge_supports WHERE memory_id=?", (memory_id,)
+            ).fetchall()]
+
+        for table, column in (
+            ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
+            ("code_memory_links", "memory_id"), ("memory_entities", "memory_id"),
+            ("edge_supports", "memory_id"),
+        ):
+            if table in tables:
+                conn.execute(f"DELETE FROM {table} WHERE {column}=?", (memory_id,))
+        if "mem_links" in tables:
+            conn.execute("DELETE FROM mem_links WHERE a=? OR b=?", (memory_id, memory_id))
+
+        # A graph edge whose last provenance support was the erased memory is itself a
+        # derivative of that secret. Preserve shared graph facts with another support.
+        if supported_edges and "edges" in tables:
+            if "edge_supports" in tables:
+                for edge_id in supported_edges:
+                    remaining = conn.execute(
+                        "SELECT id, memory_id, valid_to, expired_at, provenance "
+                        "FROM edge_supports WHERE edge_id=? ORDER BY id",
+                        (edge_id,),
+                    ).fetchall()
+                    if not remaining:
+                        conn.execute("DELETE FROM edges WHERE id=?", (edge_id,))
+                        continue
+
+                    # Normalized support rows are authoritative. Rebuild every surviving
+                    # compatibility blob so the erased source cannot keep a shared edge
+                    # prompt-ineligible or remain falsely attributed in provenance.
+                    active_provenance = []
+                    active_memory_ids: list[str] = []
+                    historical_provenance = []
+                    historical_memory_ids: list[str] = []
+                    for support in remaining:
+                        support_memory_id = str(support["memory_id"] or "")
+                        if support_memory_id and support_memory_id not in historical_memory_ids:
+                            historical_memory_ids.append(support_memory_id)
+                        provenance = _loads(support["provenance"], {})
+                        provenance = dict(provenance) if isinstance(provenance, dict) else {}
+                        provenance["memory_id"] = support_memory_id
+                        provenance["memory_ids"] = (
+                            [support_memory_id] if support_memory_id else []
+                        )
+                        conn.execute(
+                            "UPDATE edge_supports SET provenance=? WHERE id=?",
+                            (_dumps(provenance), support["id"]),
+                        )
+                        historical_provenance.append(provenance)
+                        if support_memory_id and support["valid_to"] is None \
+                                and support["expired_at"] is None:
+                            if support_memory_id not in active_memory_ids:
+                                active_memory_ids.append(support_memory_id)
+                            active_provenance.append(provenance)
+                    memory_ids = active_memory_ids or historical_memory_ids
+                    if not memory_ids:
+                        conn.execute("DELETE FROM edges WHERE id=?", (edge_id,))
+                        continue
+                    if not active_memory_ids:
+                        closed_at = now_ts()
+                        conn.execute(
+                            "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+                            "WHERE id=? AND valid_to IS NULL",
+                            (closed_at, closed_at, edge_id),
+                        )
+                    rebuilt = _merge_edge_provenance(
+                        active_provenance or historical_provenance
+                    )
+                    rebuilt["memory_id"] = memory_ids[0]
+                    rebuilt["memory_ids"] = memory_ids
+                    conn.execute(
+                        "UPDATE edges SET provenance=? WHERE id=?",
+                        (_dumps(rebuilt), edge_id),
+                    )
+            else:
+                marks = ",".join("?" for _ in supported_edges)
+                conn.execute(f"DELETE FROM edges WHERE id IN ({marks})", supported_edges)
+
+        # An entity extracted only from this memory can itself contain credential text.
+        # Remove it only if it no longer has any memory or graph incidence.
+        if incident_entities and "entities" in tables:
+            marks = ",".join("?" for _ in incident_entities)
+            clauses = []
+            if "memory_entities" in tables:
+                clauses.append("NOT EXISTS (SELECT 1 FROM memory_entities me "
+                               "WHERE me.entity_id=entities.id)")
+            if "edges" in tables:
+                clauses.append("NOT EXISTS (SELECT 1 FROM edges e "
+                               "WHERE e.src=entities.id OR e.dst=entities.id)")
+            if clauses:
+                conn.execute(
+                    f"DELETE FROM entities WHERE id IN ({marks}) AND " + " AND ".join(clauses),
+                    incident_entities,
+                )
+
+        # Prior audit details are caller text and could itself contain the credential.
+        # Remove those entries, then add only a content-free erasure marker below.
+        if "audit" in tables:
+            conn.execute("DELETE FROM audit WHERE target=?", (memory_id,))
+        conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+        if "audit" in tables:
+            conn.execute(
+                "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
+                (ids.new_id("audit"), now_ts(), actor, "secure_erase", memory_id,
+                 "per-memory secure erasure completed; content intentionally omitted"),
+            )
+        return {
+            "present": True,
+            "removed": True,
+            "graph_edges_considered": len(supported_edges),
+            "entities_considered": len(incident_entities),
+        }
+
+    @staticmethod
+    def _checkpoint_and_vacuum(conn, *, durable: bool) -> dict:
+        """Best-effort physical cleanup after a destructive erase, without overclaiming."""
+        if not durable:
+            return {"secure_delete": True, "wal": "not_applicable", "vacuum": "not_applicable"}
+        result = {"secure_delete": True, "wal": "unavailable", "vacuum": "unavailable"}
+        try:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # SQLite returns (busy, log, checkpointed); never pretend busy means erased.
+            result["wal"] = "truncated" if checkpoint is not None and int(checkpoint[0]) == 0 else "busy"
+        except Exception:  # pragma: no cover - depends on VFS / external connection state
+            result["wal"] = "failed"
+        try:
+            conn.execute("VACUUM")
+            result["vacuum"] = "completed"
+        except Exception:  # pragma: no cover - depends on disk / external connection state
+            result["vacuum"] = "failed"
+        try:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is not None and int(checkpoint[0]) == 0:
+                result["wal"] = "truncated"
+            elif result["wal"] != "failed":
+                result["wal"] = "busy"
+        except Exception:  # pragma: no cover - see initial checkpoint
+            if result["wal"] != "truncated":
+                result["wal"] = "failed"
+        return result
+
+    def _recognised_local_backups(self) -> list[Path]:
+        """Return recovery artefacts this Store created and can safely identify.
+
+        We cannot discover filesystem snapshots, cloud backups, copied databases, or
+        another process's encrypted backup location. Those remain an explicit operator
+        obligation in the secure-erasure result and documentation.
+        """
+        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+            return []
+        primary = Path(self.path).resolve()
+        parent = primary.parent
+        patterns = (
+            f"{primary.name}.pre-migration-v*.bak",
+            f"{primary.name}.embed-repair-*.bak",
+            f"{primary.stem}.v1-backup-*.db",
+        )
+        found: list[Path] = []
+        for pattern in patterns:
+            for candidate in parent.glob(pattern):
+                try:
+                    if candidate.is_file() and candidate.resolve() != primary:
+                        found.append(candidate.resolve())
+                except OSError:
+                    continue
+        return sorted(set(found), key=lambda value: str(value))
+
+    def secure_erase_memory(self, memory_id: str, *, actor: str = "user") -> dict:
+        """Irreversibly erase one memory plus local index copies and known backups.
+
+        This is a breach-remediation operation, not the normal ``retire`` lifecycle.
+        It clears current SQLite rows, FTS/vector/ANN derivatives, related graph/link
+        state, audit details for that record, WAL contents when SQLite can checkpoint,
+        and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
+        peers, and a process that already read the secret cannot be recalled or erased.
+        """
+        current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
+        if not current["present"]:
+            raise KeyError(f"no memory with id '{memory_id}'")
+        self.conn.commit()
+        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
+        maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
+
+        backup_processed = 0
+        backup_failed = 0
+        for backup in self._recognised_local_backups():
+            conn = None
+            try:
+                conn = self._open_connection(str(backup))
+                erased = self._erase_memory_rows(conn, memory_id, actor="secure_erase")
+                conn.commit()
+                self._checkpoint_and_vacuum(conn, durable=True)
+                if erased["present"]:
+                    backup_processed += 1
+            except Exception:  # pragma: no cover - keyed/corrupt/locked backups vary by deployment
+                backup_failed += 1
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        return {
+            "id": memory_id,
+            "status": "securely_erased",
+            "maintenance": maintenance,
+            "recognised_backups_erased": backup_processed,
+            "recognised_backups_failed": backup_failed,
+            "backup_limitations": (
+                "Only recognised local SQLite recovery backups were scanned. Erase or rotate "
+                "filesystem snapshots, copied/exported databases, remote sync peers, and any "
+                "other backups separately; a running agent may already have read the secret."
+            ),
+        }
+
     def fts_search(self, query: str, k: int = 20,
                    *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
         """Lexical arm. Uses FTS5 BM25 when available, else a LIKE fallback."""
         q = (query or "").strip()
         if not q:
             return []
+        terms = _fts_terms(q)
         where, params = self._where(filter, include_invalid=False, alias="m")
         extra = (" AND " + " AND ".join(where)) if where else ""
         if self.has_fts5:
@@ -2194,14 +2552,41 @@ class Store:
                 pass
         # Escape LIKE wildcards: on a non-FTS5 build an unescaped '%'/'_' in the query
         # would be treated as a pattern and over-match (a bare "%" matching everything).
-        like = f"%{_escape_like(q)}%"
-        rows = self.conn.execute(
-            "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
-            "WHERE (f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')"
-            + extra + " LIMIT ?",
-            (like, like, *params, k),
-        ).fetchall()
-        return [(r["id"], 0.5) for r in rows]
+        # Use the same conservative inflection variants as FTS5 so lexical-only degraded
+        # mode remains useful on SQLite builds without FTS5.
+        # ``_fts_terms`` intentionally removes punctuation for FTS syntax.  In the
+        # LIKE fallback, retain the literal query first: C++ and v1.2 must not be
+        # reduced to broad C/v1/2 matches that consume the caller's result limit.
+        def search_like(
+            search_terms: list[str], limit: int, excluded: Optional[list[str]] = None
+        ) -> list[str]:
+            clauses = []
+            query_params: list[Any] = []
+            for term in search_terms:
+                like = f"%{_escape_like(term)}%"
+                clauses.append("(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
+                query_params.extend((like, like))
+            if not clauses or limit <= 0:
+                return []
+            exclusions = ""
+            if excluded:
+                marks = ",".join("?" for _ in excluded)
+                exclusions = f" AND f.id NOT IN ({marks})"
+            rows = self.conn.execute(
+                "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
+                "WHERE (" + " OR ".join(clauses) + ")" + extra + exclusions + " LIMIT ?",
+                (*query_params, *params, *(excluded or []), limit),
+            ).fetchall()
+            return [row["id"] for row in rows]
+
+        literal_ids = search_like([q], k)
+        if len(literal_ids) >= k:
+            return [(memory_id, 0.5) for memory_id in literal_ids]
+        # Add the ordinary token/inflection matches only after literal results, and
+        # avoid repeating a literal term for simple punctuation-free queries.
+        variants = [term for term in terms if term.casefold() != q.casefold()]
+        variant_ids = search_like(variants, k - len(literal_ids), literal_ids)
+        return [(memory_id, 0.5) for memory_id in [*literal_ids, *variant_ids]]
 
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
@@ -2403,8 +2788,14 @@ class Store:
     def list_memory_entities(self, flt: Optional[SearchFilter] = None, *,
                              entity_ids: Optional[list[str]] = None,
                              memory_ids: Optional[list[str]] = None,
-                             limit: Optional[int] = None) -> list[dict]:
-        """Return bounded scoped/temporal incidence rows for graph retrieval."""
+                             limit: Optional[int] = None,
+                             prompt_only: bool = False) -> list[dict]:
+        """Return bounded scoped/temporal incidence rows for graph retrieval.
+
+        ``prompt_only`` applies the canonical trust predicate before ``limit``.
+        Derived graph bridges otherwise let pending records exhaust a raw SQL
+        result window and hide lower-ranked approved evidence.
+        """
         # Consolidation scans up to 2,000 memories, while portable SQLite builds may
         # allow only 999 bind variables. Partition ID filters before building the SQL
         # predicate; each pair of chunks is disjoint, so merging preserves results.
@@ -2427,13 +2818,19 @@ class Store:
                 for memory_chunk in memory_chunks
                 for row in self.list_memory_entities(
                     flt, entity_ids=entity_chunk, memory_ids=memory_chunk,
+                    prompt_only=prompt_only,
                 )
             ]
             rows.sort(key=lambda row: (-float(row.get("confidence") or 0.0), row["id"]))
             return rows if limit is None else rows[:max(0, int(limit))]
+        if prompt_only and limit is not None and int(limit) <= 0:
+            return []
         valid_at, known_at = _temporal_anchors(flt)
         sql = (
-            "SELECT me.* FROM memory_entities me "
+            "SELECT me.*"
+            + (", m.provenance AS memory_provenance, m.metadata AS memory_metadata"
+               if prompt_only else "")
+            + " FROM memory_entities me "
             "JOIN memories m ON m.id=me.memory_id WHERE "
             "(me.valid_from IS NULL OR me.valid_from<=?) "
             "AND (me.valid_to IS NULL OR ?<me.valid_to "
@@ -2473,10 +2870,23 @@ class Store:
             sql += f" AND me.memory_id IN ({marks})"
             params.extend(memory_ids)
         sql += " ORDER BY me.confidence DESC, me.id"
-        if limit is not None:
+        if limit is not None and not prompt_only:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        if not prompt_only:
+            return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        eligible_limit = None if limit is None else max(0, int(limit))
+        rows: list[dict] = []
+        for row in self.conn.execute(sql, params):
+            item = dict(row)
+            if not _row_is_prompt_eligible(
+                item.pop("memory_provenance", None), item.pop("memory_metadata", None),
+            ):
+                continue
+            rows.append(item)
+            if eligible_limit is not None and len(rows) >= eligible_limit:
+                break
+        return rows
 
     def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")
@@ -3276,7 +3686,8 @@ class Store:
                        layers: Optional[list[GraphLayer]] = None,
                        flt: Optional[SearchFilter] = None,
                        include_invalid: bool = False,
-                       limit: Optional[int] = None) -> list[dict]:
+                       limit: Optional[int] = None,
+                       prompt_only: bool = False) -> list[dict]:
         """Return visible links with at least one endpoint in ``ids``.
 
         This bounded frontier expansion is distinct from :meth:`links_among`: graph
@@ -3316,8 +3727,16 @@ class Store:
                 sql += f" AND layer IN ({layer_marks})"
                 params.extend(_enum(layer) for layer in layers)
             sql += " ORDER BY a, b, relation, valid_from, ingested_at"
-            for row in self.conn.execute(sql, params).fetchall():
-                item = dict(row)
+            found = [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+            endpoint_ids = {endpoint for item in found for endpoint in (item["a"], item["b"])}
+            endpoint_records = self.get_memories(sorted(endpoint_ids)) if prompt_only else {}
+            for item in found:
+                if prompt_only and not all(
+                    (record := endpoint_records.get(endpoint))
+                    and _row_is_prompt_eligible(record.provenance, record.metadata)
+                    for endpoint in (item["a"], item["b"])
+                ):
+                    continue
                 key = (
                     item["a"], item["b"], item["relation"], item["layer"],
                     item["valid_from"], item["valid_to"], item["ingested_at"],
@@ -3333,7 +3752,8 @@ class Store:
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
                   layers: Optional[list[GraphLayer]] = None,
                   flt: Optional[SearchFilter] = None,
-                  limit: Optional[int] = None) -> list[Edge]:
+                  limit: Optional[int] = None,
+                  prompt_only: bool = False) -> list[Edge]:
         if not node_ids:
             return []
         valid_at, known_at = _temporal_anchors(flt, valid_at=at)
@@ -3376,12 +3796,49 @@ class Store:
             else:
                 sql += " AND repo_id=?"
             params.append(flt.repo_id)
+        row_cap = None if limit is None else max(0, int(limit))
+        if row_cap == 0:
+            return []
         sql += " ORDER BY id"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(max(0, int(limit)))
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_edge(r) for r in rows]
+        if not prompt_only:
+            if row_cap is not None:
+                sql += " LIMIT ?"
+                params.append(row_cap)
+            rows = self.conn.execute(sql, params).fetchall()
+            return [_row_to_edge(r) for r in rows]
+
+        # Prompt-facing graph traversal must not let unreviewed edge evidence use
+        # up the frontier before eligibility is checked. Page raw rows in stable
+        # order and count only prompt-safe edges toward the caller's cap.
+        selected: list[Edge] = []
+        offset = 0
+        page_size = min(1_000, row_cap or 1_000)
+        while row_cap is None or len(selected) < row_cap:
+            rows = self.conn.execute(
+                sql + " LIMIT ? OFFSET ?", (*params, page_size, offset)
+            ).fetchall()
+            if not rows:
+                break
+            edges = [_row_to_edge(row) for row in rows]
+            source_ids = set().union(*(
+                set(_provenance_memory_ids(edge.provenance)) for edge in edges
+            )) if edges else set()
+            memories = self.get_memories(sorted(source_ids))
+            for edge in edges:
+                sources = _provenance_memory_ids(edge.provenance)
+                if sources and not all(
+                    (memory := memories.get(memory_id))
+                    and _row_is_prompt_eligible(memory.provenance, memory.metadata)
+                    for memory_id in sources
+                ):
+                    continue
+                selected.append(edge)
+                if row_cap is not None and len(selected) >= row_cap:
+                    break
+            offset += len(rows)
+            if len(rows) < page_size:
+                break
+        return selected
 
     # ── code symbol graph ────────────────────────────────────────────────────────
     def clear_symbols_for_file(self, repo_id: str, file: str, *,
@@ -3738,7 +4195,7 @@ class Store:
             self.conn.commit()
 
     def prune_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
-        """Remove bridges whose repo-associated memory is no longer live."""
+        """Retire bridges whose source is not live and explicitly approved."""
         t = now_ts()
         self.conn.execute(
             "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
@@ -3750,6 +4207,23 @@ class Store:
             ")",
             (t, t, repo_id, repo_id, t, t),
         )
+        unapproved = self.conn.execute(
+            "SELECT l.id, m.provenance, m.metadata FROM code_memory_links l "
+            "JOIN memories m ON m.id=l.memory_id WHERE l.repo_id=? "
+            "AND l.valid_to IS NULL AND l.expired_at IS NULL",
+            (repo_id,),
+        ).fetchall()
+        retire_ids = [
+            row["id"] for row in unapproved
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"])
+        ]
+        if retire_ids:
+            marks = ",".join("?" for _ in retire_ids)
+            self.conn.execute(
+                f"UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+                f"WHERE id IN ({marks}) AND valid_to IS NULL AND expired_at IS NULL",
+                (t, t, *retire_ids),
+            )
         if commit:
             self.conn.commit()
 
@@ -3759,7 +4233,7 @@ class Store:
                                limit: Optional[int] = None) -> list[dict]:
         sql = (
             "SELECT l.*, s.name, s.fqname, s.file, s.kind AS symbol_kind, "
-            "m.title, m.mtype, m.valid_to AS memory_valid_to, "
+            "m.title, m.mtype, m.provenance, m.metadata, m.valid_to AS memory_valid_to, "
             "m.expired_at AS memory_expired_at "
             "FROM code_memory_links l "
             "JOIN symbols s ON s.id=l.symbol_id "
@@ -3778,18 +4252,29 @@ class Store:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
         sql += " ORDER BY l.created_at, l.id"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        if limit is not None and int(limit) <= 0:
+            return []
+        # This bridge feeds export/code-path/scene features. Filter each source before
+        # counting it, so pending links cannot exhaust the public result cap.
+        eligible_limit = None if limit is None else int(limit)
+        out = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append({
+                key: value for key, value in dict(row).items()
+                if key not in {"metadata", "provenance"}
+            })
+            if eligible_limit is not None and len(out) >= eligible_limit:
+                break
+        return out
 
     def memories_for_symbol(self, repo_id: str, symbol_id: str, *,
                             flt: Optional[SearchFilter] = None,
                             limit: int = 20) -> list[dict]:
         sql = (
             "SELECT m.id, m.title, m.content, m.mtype, m.scope, m.importance, "
-            "m.provenance, l.relation, l.confidence "
+            "m.provenance, m.metadata, l.relation, l.confidence "
             "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
             "WHERE l.repo_id=? AND l.symbol_id=?"
         )
@@ -3801,63 +4286,47 @@ class Store:
         if where:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
-        sql += (
-            " ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC LIMIT ?"
-        )
-        params.append(max(1, min(100, int(limit))))
-        rows = self.conn.execute(sql, params).fetchall()
+        sql += " ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC, l.id, m.id"
+        row_limit = max(1, min(100, int(limit)))
         out = []
-        for row in rows:
+        for row in self.conn.execute(sql, params):
             item = dict(row)
+            if not _row_is_prompt_eligible(item.get("provenance"), item.get("metadata")):
+                continue
             item["provenance"] = _loads(item.get("provenance"), {})
+            item.pop("metadata", None)
             out.append(item)
+            if len(out) >= row_limit:
+                break
         return out
 
     def memories_for_symbols(self, repo_id: str, symbol_ids: list[str], *,
                              flt: Optional[SearchFilter] = None,
                              limit: int = 20) -> dict[str, list[dict]]:
-        """Return a bounded memory ranking for many symbols in one SQL query."""
+        """Return bounded prompt-safe memory rankings with indexed per-symbol lookups.
+
+        A window-function query with an outer ``row_rank`` cap still makes SQLite
+        sort every matching partition before it can apply that cap.  Issuing one
+        indexed, limited lookup per requested symbol instead gives the prompt-facing
+        path a real physical bound even when an untrusted import owns many links.
+        """
         unique_ids = list(dict.fromkeys(
             str(symbol_id) for symbol_id in symbol_ids if str(symbol_id)
         ))[:500]
         if not unique_ids:
             return {}
-        per_symbol_limit = max(1, min(100, int(limit)))
-        placeholders = ",".join("?" for _ in unique_ids)
-        sql = (
-            "WITH ranked AS ("
-            "SELECT l.symbol_id, m.id, m.title, m.content, m.mtype, m.scope, "
-            "m.importance, m.provenance, l.relation, l.confidence, "
-            "ROW_NUMBER() OVER (PARTITION BY l.symbol_id "
-            "ORDER BY l.confidence DESC, m.importance DESC, "
-            "m.ingested_at DESC, l.id, m.id) AS row_rank "
-            "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
-            f"WHERE l.repo_id=? AND l.symbol_id IN ({placeholders})"
-        )
-        params: list[Any] = [repo_id, *unique_ids]
-        link_visibility, link_params = _temporal_visibility_sql("l", flt)
-        sql += " AND " + link_visibility
-        params.extend(link_params)
-        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
-        if where:
-            sql += " AND " + " AND ".join(where)
-            params.extend(visibility_params)
-        sql += (
-            ") SELECT symbol_id, id, title, content, mtype, scope, importance, "
-            "provenance, relation, confidence FROM ranked WHERE row_rank<=? "
-            "ORDER BY symbol_id, row_rank"
-        )
-        params.append(per_symbol_limit)
         grouped: dict[str, list[dict]] = {}
-        for row in self.conn.execute(sql, params).fetchall():
-            item = dict(row)
-            symbol_id = str(item.pop("symbol_id"))
-            item["provenance"] = _loads(item.get("provenance"), {})
-            grouped.setdefault(symbol_id, []).append(item)
+        for symbol_id in unique_ids:
+            rows = self.memories_for_symbol(repo_id, symbol_id, flt=flt, limit=limit)
+            if rows:
+                grouped[symbol_id] = rows
         return grouped
 
     def symbols_for_memory(self, repo_id: str, memory_id: str, *,
                            flt: Optional[SearchFilter] = None) -> list[dict]:
+        memory = self.get_memory(memory_id)
+        if memory is None or not _row_is_prompt_eligible(memory.provenance, memory.metadata):
+            return []
         link_visibility, link_params = _temporal_visibility_sql("l", flt)
         symbol_visibility, symbol_params = _temporal_visibility_sql("s", flt)
         rows = self.conn.execute(
@@ -3873,9 +4342,11 @@ class Store:
     def memories_mentioning(self, repo_id: str, text: str, *,
                             flt: Optional[SearchFilter] = None,
                             limit: int = 10) -> list[dict]:
+        if limit <= 0:
+            return []
         escaped = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         sql = (
-            "SELECT m.id, m.title, m.mtype FROM memories AS m "
+            "SELECT m.id, m.title, m.mtype, m.provenance, m.metadata FROM memories AS m "
             "WHERE m.repo_id=? AND (m.title LIKE ? ESCAPE '\\' "
             "OR m.content LIKE ? ESCAPE '\\')"
         )
@@ -3885,14 +4356,29 @@ class Store:
         if where:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
-        sql += " ORDER BY m.ingested_at DESC LIMIT ?"
-        params.append(max(0, int(limit)))
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        sql += " ORDER BY m.ingested_at DESC"
+        # This derived bridge feeds impact analysis. Filter sources before counting
+        # them, so a newer pending import cannot consume the bounded public window.
+        out = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append({
+                key: value for key, value in dict(row).items()
+                if key not in {"provenance", "metadata"}
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
                      interaction_level: str = "") -> str:
+        # Events are not memories, but are durable, searchable agent context too. Do
+        # not create a side channel that can retain a credential after memory capture is
+        # blocked.
+        reject_secrets((("event content", content), ("event refs", refs)))
         eid = ids.new_id("event")
         owns_session_transaction = False
         try:
@@ -4553,7 +5039,29 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
     )
 
 
-def _fts_query(q: str) -> str:
-    """Make a safe FTS5 MATCH query: OR the alphanumeric terms as prefixes."""
+def _fts_terms(q: str) -> list[str]:
+    """Return safe lexical terms plus conservative inflection variants."""
     terms = [t for t in "".join(c if c.isalnum() else " " for c in q).split() if t]
-    return " OR ".join(f'{t}*' for t in terms) if terms else '""'
+    expanded: list[str] = []
+    for term in terms:
+        expanded.append(term)
+        if len(term) > 5 and term.endswith("ies"):
+            expanded.append(term[:-3] + "y")
+        elif len(term) > 6 and term.endswith("ions"):
+            expanded.append(term[:-4])
+        elif len(term) > 5 and term.endswith("ion"):
+            expanded.append(term[:-3])
+        elif len(term) > 6 and term.endswith(("ised", "ized")):
+            expanded.append(term[:-1])
+        elif len(term) > 6 and term.endswith("ates"):
+            expanded.append(term[:-2])
+        elif len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
+            expanded.append(term[:-1])
+    # Keep the caller's term order while avoiding duplicate FTS clauses.
+    return list(dict.fromkeys(expanded))
+
+
+def _fts_query(q: str) -> str:
+    """Make a safe FTS5 MATCH query with conservative inflection prefixes."""
+    terms = _fts_terms(q)
+    return " OR ".join(f'{term}*' for term in terms) if terms else '""'

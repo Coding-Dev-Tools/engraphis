@@ -17,6 +17,7 @@ from fastapi import HTTPException  # noqa: E402
 from engraphis import cloud_features  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
+from engraphis.core.interfaces import MemoryType, Scope  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
@@ -29,16 +30,18 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setattr(settings, "api_token", "")
     seeded = MemoryService.create(db_path)
-    seeded.remember(
+    demo_id = seeded.store.get_or_create_workspace("demo")
+    beta_id = seeded.store.get_or_create_workspace("beta")
+    seeded.engine.remember(
         "Postgres 16 is the main database.",
-        workspace="demo",
-        scope="workspace",
+        workspace_id=demo_id,
+        scope=Scope.WORKSPACE,
         title="Database",
     )
-    seeded.remember(
+    seeded.engine.remember(
         "A second workspace must stay isolated.",
-        workspace="beta",
-        scope="workspace",
+        workspace_id=beta_id,
+        scope=Scope.WORKSPACE,
         title="Isolation",
     )
     seeded.store.close()
@@ -52,7 +55,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert page.status_code == 200
         assert "<title>Engraphis Ledger</title>" in page.text
         assert 'class="sidebar"' in page.text
-        for area in ("Today", "Ask", "Library", "Graph &amp; Relations", "Provenance", "Manage"):
+        for area in ("Today", "Ask", "Library", "Relationships", "Provenance", "Manage"):
             assert f">{area}<" in page.text
         assert 'value="matrix">Matrix' in page.text
         assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
@@ -173,6 +176,54 @@ def test_dashboard_keyword_fallback_reports_truthful_lexical_scores(monkeypatch,
         assert 0.0 < memory["absolute_support"] < 1.0
         assert memory["arm"] == "lexical"
         assert "content" not in memory
+
+
+def test_dashboard_keyword_fallback_applies_requested_memory_type_limits(
+    monkeypatch, tmp_path
+):
+    with _client(monkeypatch, tmp_path) as client:
+        workspace_id = client.app.state.service.store.get_or_create_workspace("demo")
+        client.app.state.service.engine.remember(
+            "Database upgrade procedure requires a verified backup.",
+            workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            mtype=MemoryType.PROCEDURAL,
+            title="Database procedure",
+        )
+
+        def mismatched_embedder(*_args, **_kwargs):
+            raise ValueError("shapes (1,256) and (384,1) not aligned")
+
+        monkeypatch.setattr(client.app.state.service, "recall", mismatched_embedder)
+        response = client.get(
+            "/api/recall",
+            params={
+                "q": "database",
+                "workspace": "demo",
+                "k": 3,
+                "mtype_limits": '{"semantic":0,"procedural":1}',
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mtype_limits"] == {"semantic": 0, "procedural": 1}
+        assert [memory["memory_type"] for memory in payload["memories"]] == [
+            "procedural"
+        ]
+
+
+@pytest.mark.parametrize("invalid_limit", [True, "2"])
+def test_dashboard_post_recall_surfaces_reject_coerced_memory_type_limits(
+    monkeypatch, tmp_path, invalid_limit
+):
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/api/intent/recall",
+            json={"query": "database", "mtype_limits": {"semantic": invalid_limit}},
+        )
+
+        assert response.status_code == 422
 
 
 def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch, tmp_path):
@@ -328,7 +379,9 @@ def test_dashboard_grounded_answer_route_cites_or_abstains(monkeypatch, tmp_path
         assert body["sources"] == body["citations"]
         assert "[1]" in body["answer"]
         assert body["candidate_depth"] == "adaptive"
-        assert body["candidate_k_used"] < body["candidate_k_requested"]
+        # ``candidate_k_used`` is the final page depth after prompt-safe
+        # overfetch/widening, rather than the adaptive policy's starting depth.
+        assert body["candidate_k_used"] >= body["candidate_k_requested"]
 
         abstained = client.post(
             "/api/answer",
@@ -369,7 +422,7 @@ def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path
         assert response.status_code == 200
 
 
-def test_http_memory_api_round_trips_world_time(monkeypatch, tmp_path):
+def test_http_memory_api_keeps_world_timed_writes_pending(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         old = client.post(
             "/api/remember",
@@ -411,23 +464,29 @@ def test_http_memory_api_round_trips_world_time(monkeypatch, tmp_path):
         )
 
         assert before.status_code == 200
-        assert [memory["id"] for memory in before.json()["memories"]] == [old["id"]]
+        assert before.json()["memories"] == []
         assert after.status_code == 200
-        assert [source["id"] for source in after.json()["sources"]] == [new["id"]]
+        assert after.json()["sources"] == []
+        service = client.app.state.service
+        assert service.store.get_memory(old["id"]).valid_from == 1_000.0
+        assert service.store.get_memory(new["id"]).valid_from == 2_000.0
+        assert service.store.get_memory(old["id"]).provenance["review_state"] == "pending"
+        assert service.store.get_memory(new["id"]).provenance["review_state"] == "pending"
 
 
 def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_path):
     """A semantic-backend failure must not leak current facts into historical views."""
     with _client(monkeypatch, tmp_path) as client:
         svc = v2_api.service()
-        old = svc.remember(
-            "The fallback retention setting was ten days.", workspace="demo",
-            valid_from=1_000.0,
-        )
-        new = svc.remember(
-            "The fallback retention setting was thirty days.", workspace="demo",
-            valid_from=2_000.0,
-        )
+        workspace_id = svc.store.get_or_create_workspace("demo")
+        old = {"id": svc.engine.remember(
+            "The fallback retention setting was ten days.", workspace_id=workspace_id,
+            scope=Scope.WORKSPACE, valid_from=1_000.0, resolve_conflicts=False,
+        )}
+        new = {"id": svc.engine.remember(
+            "The fallback retention setting was thirty days.", workspace_id=workspace_id,
+            scope=Scope.WORKSPACE, valid_from=2_000.0, resolve_conflicts=False,
+        )}
         # The writes happened during this test, but the fixture models facts learned
         # before the requested historical system-time anchors.
         svc.store.conn.execute(
@@ -437,7 +496,7 @@ def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_pa
             "UPDATE memories SET ingested_at=200 WHERE id=?", (new["id"],)
         )
         svc.store.conn.execute(
-            "UPDATE memories SET valid_to_recorded_at=200, "
+            "UPDATE memories SET valid_to=2000, valid_to_recorded_at=200, "
             "subject_key='retention.days', claim_kind='configured_value' "
             "WHERE id=?",
             (old["id"],),
@@ -499,12 +558,11 @@ def test_keyword_recall_fallback_excludes_untrusted_memories(monkeypatch, tmp_pa
     """A degraded HTTP recall must enforce the same prompt eligibility boundary."""
     with _client(monkeypatch, tmp_path) as client:
         svc = v2_api.service()
-        trusted = svc.remember(
+        workspace_id = svc.store.get_or_create_workspace("demo")
+        trusted = {"id": svc.engine.remember(
             "Fallback visibility trusted candidate.",
-            workspace="demo",
-            source="human",
-            trusted=True,
-        )
+            workspace_id=workspace_id, scope=Scope.WORKSPACE,
+        )}
         untrusted = svc.remember(
             "Fallback visibility untrusted candidate.",
             workspace="demo",
@@ -529,7 +587,7 @@ def test_keyword_recall_fallback_excludes_untrusted_memories(monkeypatch, tmp_pa
     assert "untrusted candidate" not in repr(payload)
 
 
-def test_http_memory_api_rejects_backdated_supersession_without_partial_write(
+def test_http_memory_api_keeps_backdated_claims_pending_without_supersession(
     monkeypatch, tmp_path
 ):
     with _client(monkeypatch, tmp_path) as client:
@@ -552,9 +610,10 @@ def test_http_memory_api_rejects_backdated_supersession_without_partial_write(
             },
         )
 
-        assert rejected.status_code == 400
+        assert rejected.status_code == 200
         assert service.store.get_memory(original["id"]).valid_to is None
-        assert len(service.store.list_memories(include_invalid=True)) == count_before
+        assert len(service.store.list_memories(include_invalid=True)) == count_before + 1
+        assert service.store.get_memory(rejected.json()["id"]).provenance["review_state"] == "pending"
 
 
 def test_manual_consolidation_stays_local_but_dreaming_is_cloud_only(
@@ -1049,6 +1108,44 @@ def test_managed_cloud_errors_forward_only_bounded_public_copy():
         "transient": False,
         "code": "cloud_unconfigured",
     }
+
+
+@pytest.mark.parametrize("status", (401, 402, 403))
+def test_managed_authorization_denial_settles_local_entitlement(monkeypatch, status):
+    """A live hosted denial must immediately retire stale paid presentation state."""
+
+    calls = []
+    monkeypatch.setattr(v2_api, "_record_authoritative_denial", lambda: calls.append(status))
+
+    def fail_with(exc):
+        raise exc
+
+    with pytest.raises(HTTPException) as caught:
+        v2_api._managed_call(
+            fail_with, CloudFeatureError("Engraphis Cloud authorization was rejected.",
+                                         status=status),
+        )
+
+    assert caught.value.status_code == status
+    assert calls == [status]
+
+
+@pytest.mark.parametrize("status", (409, 429, 503))
+def test_managed_non_authorization_failures_do_not_settle_entitlement(monkeypatch, status):
+    """Conflicts and outages do not prove that a subscription or membership changed."""
+
+    calls = []
+    monkeypatch.setattr(v2_api, "_record_authoritative_denial", lambda: calls.append(status))
+
+    def fail_with(exc):
+        raise exc
+
+    with pytest.raises(HTTPException):
+        v2_api._managed_call(
+            fail_with, CloudFeatureError("Engraphis Cloud temporarily failed.", status=status),
+        )
+
+    assert calls == []
 
 
 def _managed_http_failure(monkeypatch, status: int) -> HTTPException:

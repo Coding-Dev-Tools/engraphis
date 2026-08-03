@@ -246,7 +246,7 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   expect(await page.evaluate(() => window.__ledgerXss)).toBeUndefined();
   expect(requests).not.toContain('/graph');
 
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
   expect(requests).toContain('/graph');
 
@@ -302,7 +302,7 @@ test('memory listings open the editable Library detail from every dashboard view
   await page.locator('#proactive-list [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
   await expect(page.locator('#memory-detail').getByRole('button', { name: 'Edit' })).toBeVisible();
-  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Forget' })).toBeVisible();
+  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Retire' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Ask grounded answers' }).click();
   await page.getByRole('textbox', { name: 'Question' }).fill('Which database?');
@@ -379,14 +379,14 @@ test('Ask keeps the raw retrieval preview alongside its single grounded answer',
   expect(requests.filter(path => path === '/recall')).toHaveLength(1);
 });
 
-test('Graph & Relations uses the visual explorer controls and applies their state', async ({ page }) => {
+test('Relationships uses the visual explorer controls and applies their state', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
   const initialGraphRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph' && url.searchParams.get('connected_only') === 'true';
   });
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
   await initialGraphRequest;
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
 
@@ -496,7 +496,7 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
   await expect(page.locator('#graph-count')).toContainText('0 relations');
 
   await page.reload();
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.getByRole('button', { name: 'Galaxy' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
@@ -508,7 +508,7 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
 test('graph node connections expose linked memory evidence without leaving the graph', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
   await page.getByRole('tab', { name: 'Analyse' }).click();
   await expect(page.locator('#graph-top button')).toHaveCount(2);
 
@@ -541,7 +541,7 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
   await waitForInitial;
 
   await page.getByRole('tab', { name: 'Time' }).click();
@@ -582,7 +582,7 @@ test('a custom graph view restores every saved control and server filter', async
   });
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.locator('.nav-item[data-view="relations"]').click();
 
   const restored = page.waitForRequest(request => {
     const url = new URL(request.url());

@@ -132,6 +132,26 @@ def _rows(cursor, query: str, params: tuple = ()) -> list[tuple]:
     return list(cursor.fetchall())
 
 
+def _source_digest(dsn: str) -> str:
+    """Identify a database endpoint without turning its password into a verifier.
+
+    Hashing the complete DSN still preserves a stable, offline-testable oracle for a
+    low-entropy password. Userinfo, query parameters, and fragments are credentials or
+    connection policy, not source identity, so exclude them from provenance entirely.
+    """
+    try:
+        parsed = urlparse(dsn)
+        if parsed.scheme.casefold() not in {"postgres", "postgresql"} or not parsed.hostname:
+            raise ValueError("non-URL PostgreSQL DSN")
+        hostname = (parsed.hostname or "").casefold()
+        port = parsed.port or 5432
+        database = parsed.path.lstrip("/")
+        identity = f"{parsed.scheme.casefold()}|{hostname}|{port}|{database}"
+    except (TypeError, ValueError):
+        identity = "postgresql|unknown"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
 class PostgresSchemaIntrospector:
     def inspect(self, dsn: str, *, schemas: Optional[list[str]] = None) -> SchemaSnapshot:
         allow = {str(name).strip() for name in (schemas or []) if str(name).strip()}
@@ -321,7 +341,7 @@ class PostgresSchemaIntrospector:
         if len(relations) > _MAX_RELATIONS:
             relations = relations[:_MAX_RELATIONS]
             truncated = True
-        digest = hashlib.sha256(dsn.encode("utf-8")).hexdigest()[:24]
+        digest = _source_digest(dsn)
         return SchemaSnapshot(
             title=f"PostgreSQL schema: {database}",
             text="\n".join(lines).strip(),

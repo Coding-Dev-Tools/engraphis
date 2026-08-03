@@ -1,9 +1,27 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
-from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
-from engraphis.core.recall import RecallEngine
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.recall import RecallEngine, _absolute_retrieval_support, _mtype_limits_can_fill
 from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
+
+
+class _SemanticTestEmbedder(DeterministicEmbedder):
+    """Test double that opts into vector semantics without a model download."""
+
+    supports_semantic_search = True
+    embedding_mode = "semantic"
+
+
+def test_prompt_candidate_expansion_accounts_for_memory_type_caps():
+    semantic = MemoryRecord(id="mem_semantic", content="", mtype=MemoryType.SEMANTIC)
+    procedural = MemoryRecord(id="mem_procedural", content="", mtype=MemoryType.PROCEDURAL)
+    limits = {MemoryType.SEMANTIC: 0}
+
+    assert not _mtype_limits_can_fill({semantic.id: semantic}, limits, 1)
+    assert _mtype_limits_can_fill(
+        {semantic.id: semantic, procedural.id: procedural}, limits, 1,
+    )
 
 
 def _engine():
@@ -14,6 +32,14 @@ def _engine():
 
 
 def _add(store, emb, wid, rid, text, **kw):
+    # These direct Store fixtures model locally approved test data. Public ingress
+    # coverage uses MemoryService and must remain pending until review.
+    provenance = dict(kw.get("provenance") or {
+        "source": "test", "trusted": True, "review_state": "approved",
+    })
+    if provenance.get("trusted") is True:
+        provenance.setdefault("review_state", "approved")
+    kw["provenance"] = provenance
     return store.add_memory(MemoryRecord(id="", content=text, workspace_id=wid, repo_id=rid,
                                          embedding=emb.embed([text])[0], **kw))
 
@@ -41,6 +67,17 @@ class _RecordingOrderedIndex(_OrderedIndex):
         return super().search(query, k, filter=filter)
 
 
+class _FailingIndex:
+    """Proves degraded recall never reaches the semantic vector backend."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, query, k, *, filter=None):
+        self.calls += 1
+        raise AssertionError("degraded recall must not query the vector index")
+
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -52,7 +89,40 @@ def test_recall_returns_relevant_first():
     assert "pnpm" in res.context.lower()
 
 
-def test_lexical_absolute_support_includes_title_text():
+def test_degraded_recall_skips_vector_arm_and_uses_lexical_fallback():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    index = _FailingIndex()
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "pnpm is the package manager for frontend projects.")
+
+    result = eng.recall(
+        "package manager", SearchFilter(workspace_id=wid), k=1, diagnostics=True,
+    )
+
+    assert index.calls == 0
+    assert result.degraded_mode is True
+    assert result.semantic_support is False
+    assert result.chunks[0]["arm"] == "lexical"
+    assert result.retrieval_trace[0]["raw"]["semantic"] is None
+
+
+def test_degraded_recall_uses_inflection_aware_like_fallback_without_fts5():
+    store = Store(":memory:")
+    store.has_fts5 = False
+    emb = DeterministicEmbedder(256)
+    eng = RecallEngine(store, emb, _FailingIndex(), IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "The service authenticates API requests with PASETO.")
+
+    result = eng.recall("authentication", SearchFilter(workspace_id=wid), k=1)
+
+    assert result.count == 1
+    assert "paseto" in result.context.lower()
+
+
+def test_lexical_absolute_support_does_not_allow_title_only_evidence():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
@@ -73,12 +143,19 @@ def test_lexical_absolute_support_includes_title_text():
     )
 
     assert [chunk["id"] for chunk in result.chunks] == [memory_id]
-    assert result.chunks[0]["absolute_support"] > 0.0
+    assert result.chunks[0]["absolute_support"] == 0.0
+
+
+def test_absolute_support_treats_non_finite_cosine_as_no_evidence():
+    assert _absolute_retrieval_support(
+        "credential rotation", "unrelated prose", title="credential rotation",
+        semantic_cosine=float("nan"),
+    ) == 0.0
 
 
 def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     untrusted_ids = [
@@ -165,7 +242,12 @@ def test_graph_arm_pulls_related_via_entities():
                                         workspace_id=wid, repo_id=rid))
     store.upsert_edge(Edge(id="", src=redis, dst=checkout, relation="used_by",
                            workspace_id=wid, repo_id=rid))
-    _add(store, emb, wid, rid, "The checkout service had a race condition.")
+    checkout_memory = _add(store, emb, wid, rid, "The checkout service had a race condition.")
+    store.link_memory_entity(
+        memory_id=checkout_memory,
+        entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
     _add(store, emb, wid, rid, "Totally unrelated note about office plants.")
     # Query mentions Redis; graph arm should surface the checkout memory.
     res = eng.recall("how does Redis relate to things?", SearchFilter(workspace_id=wid), k=3)
@@ -229,7 +311,9 @@ def test_graph_arm_filters_incidence_to_ppr_frontier_before_cap(monkeypatch):
         for index in range(12_000)
     ]
 
-    def list_memory_entities(flt, *, entity_ids=None, memory_ids=None, limit=None):
+    def list_memory_entities(
+        flt, *, entity_ids=None, memory_ids=None, limit=None, prompt_only=False,
+    ):
         # This models a crowded global prefix which does not contain checkout's
         # incidence. The real target remains available when constrained first.
         if entity_ids is None:
@@ -294,6 +378,41 @@ def test_graph_arm_traverses_links_to_memories_without_entity_incidence():
     )
 
     assert linked_only in scores
+
+
+def test_graph_arm_excludes_pending_edge_support_bridges_before_ppr():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid,
+    ))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid,
+    ))
+    pending = _add(
+        store, emb, wid, rid, "Pending import says Redis reaches checkout.",
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    )
+    approved = _add(store, emb, wid, rid, "Checkout has approved deployment evidence.")
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by", workspace_id=wid,
+        repo_id=rid, provenance={"memory_id": pending},
+    ))
+    store.link_memory_entity(
+        memory_id=approved, entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+
+    scores = eng._graph_arm_ppr(
+        "What does Redis use?", SearchFilter(workspace_id=wid, repo_id=rid),
+        now=10**12, prompt_only=True,
+    )
+
+    assert pending not in scores
+    assert approved not in scores
 
 
 def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
@@ -393,7 +512,7 @@ def test_lexical_recall_is_filtered_before_candidate_limit():
 
 def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     index = NumpyVectorIndex(store)
     requested: list[int] = []
     original_search = index.search
@@ -412,13 +531,16 @@ def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     )
 
     assert result.candidate_k_requested == 500
-    assert result.candidate_k_used == 500
+    # Diagnostics expose the actual post-overfetch page depth, not the policy
+    # starting depth, so operators can distinguish an ordinary recall from one
+    # that searched further for approved evidence.
+    assert result.candidate_k_used == 750
     assert requested[0] == 750
 
 
 def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
     store = Store(":memory:")
-    emb = DeterministicEmbedder(256)
+    emb = _SemanticTestEmbedder(256)
     wid = store.get_or_create_workspace("w")
     untrusted_ids = [
         _add(
@@ -445,6 +567,7 @@ def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
 
     assert result.chunks == []
     assert index.requested == [4, 256]
+    assert result.candidate_k_used == 256
     assert max(index.requested) < len(untrusted_ids)
 
 

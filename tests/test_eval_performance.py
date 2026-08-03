@@ -40,7 +40,9 @@ def test_performance_report_covers_quality_context_and_latency():
     assert report["run"]["timed_recalls"] == 2
     assert report["run"]["candidate_k"] == 50
     assert report["run"]["candidate_depth"] == "fixed"
-    assert report["run"]["actual_candidate_k"] == {"min": 50, "max": 50, "mean": 50.0}
+    # Performance telemetry reports the actual prompt-safe arm page (the bounded
+    # 4x overfetch), not merely the requested policy depth.
+    assert report["run"]["actual_candidate_k"] == {"min": 200, "max": 200, "mean": 200.0}
     assert report["run"]["retrieval_profile"] == "balanced"
     assert report["quality"]["hit_at_k"] == 1.0
     assert report["context"]["mean_tokens"] > 0
@@ -81,7 +83,7 @@ def test_performance_report_records_adaptive_candidate_depth_used():
     )
 
     assert report["run"]["candidate_depth"] == "adaptive"
-    assert report["run"]["actual_candidate_k"] == {"min": 12, "max": 12, "mean": 12.0}
+    assert report["run"]["actual_candidate_k"] == {"min": 48, "max": 48, "mean": 48.0}
 
 
 def test_performance_run_rejects_unknown_candidate_depth():

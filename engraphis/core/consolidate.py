@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
-from engraphis.core.poisoning import provenance_is_trusted
+from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,10 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                        scopes=MAINTENANCE_SCOPES)
 
     episodic = store.list_memories(
-        _replace(flt, mtypes=[MemoryType.EPISODIC]), limit=DISTILL_SCAN_LIMIT)
+        _replace(flt, mtypes=[MemoryType.EPISODIC]),
+        limit=DISTILL_SCAN_LIMIT,
+        prompt_only=True,
+    )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
     # another repo's content (or mix scope visibility).
@@ -389,7 +392,8 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
         [record.sensitivity or "normal"] + [(m.sensitivity or "normal") for m in sources],
         key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
     )
-    trusted = provenance_is_trusted(record.provenance) and _sources_are_trusted(sources)
+    trusted = (prompt_eligible(record.provenance, record.metadata)
+               and _sources_are_trusted(sources))
     provenance = dict(record.provenance or {})
     provenance["trusted"] = trusted
     metadata = dict(record.metadata or {})
@@ -407,7 +411,7 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
 
 def _sources_are_trusted(sources: list[MemoryRecord]) -> bool:
     """Require every consolidated source to carry an explicit trust approval."""
-    return all(provenance_is_trusted(source.provenance) for source in sources)
+    return all(prompt_eligible(source.provenance, source.metadata) for source in sources)
 
 
 def _already_consolidated(store, memory_id: str) -> bool:
@@ -775,9 +779,15 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "entities_considered": 0, "profiles_created": [], "skipped_existing": 0}
 
-    live = [m for m in store.list_memories(_replace(flt, mtypes=DURABLE_TYPES),
-                                           limit=PROFILE_SCAN_LIMIT)
-            if m.metadata.get("provenance", {}).get("source") != "profile_consolidation"]
+    live = [
+        memory for memory in store.list_memories(
+            _replace(flt, mtypes=DURABLE_TYPES),
+            limit=PROFILE_SCAN_LIMIT,
+            prompt_only=True,
+        )
+        if memory.metadata.get("provenance", {}).get("source")
+        != "profile_consolidation"
+    ]
     p_before = p_after = 0
 
     for ent in store.list_entities(flt, limit=2000):

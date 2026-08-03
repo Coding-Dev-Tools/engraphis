@@ -14,6 +14,7 @@ import re
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
+from engraphis.core import scoring
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
 from engraphis.core.store import Store
@@ -111,6 +112,11 @@ def _score(
                         SearchFilter(workspace_id=wid),
                         k=k,
                         retrieval_profile=retrieval_profile,
+                        # Fixtures seed Store directly and therefore carry no
+                        # write-time prompt approval.  This is a retrieval-arm
+                        # ablation, so request inspection visibility explicitly
+                        # instead of accidentally measuring provenance gating.
+                        include_untrusted=True,
                     ).chunks
                 ]
             else:
@@ -168,12 +174,42 @@ def _arm_recall(dataset: list[dict], *, k: int, arm: str) -> float:
     return round(sum(per) / max(len(per), 1), 4)
 
 
+def _ordinary_recall_age_delta() -> float:
+    """Measure age-only bias in ordinary recall (must remain zero).
+
+    The two records have equal retrieval evidence and equal reinforcement history;
+    only their validity/ingestion time differs. A non-zero value would show that
+    query recall is applying fact age in addition to Ebbinghaus retention.
+    """
+    now = 1_000_000.0
+    common = dict(
+        content="same evidence", mtype=MemoryType.SEMANTIC,
+        stability=4.0, last_access=now - 86_400, importance=0.4,
+    )
+    recent = MemoryRecord(id="recent", ingested_at=now, valid_from=now, **common)
+    old = MemoryRecord(
+        id="old", ingested_at=now - 365 * 86_400,
+        valid_from=now - 365 * 86_400, **common,
+    )
+    weights = scoring.weights_for(MemoryType.SEMANTIC)
+    return round(
+        scoring.score_memory(recent, now=now, weights=weights, semantic=0.7)
+        - scoring.score_memory(old, now=now, weights=weights, semantic=0.7),
+        8,
+    )
+
+
 def main() -> None:
     ds = load_dataset(str(Path(__file__).resolve().parent / "datasets" / "sample.jsonl"))
     print("Engraphis ablation — recall@5")
     print(f"  vector-only  : {_score(ds, k=5, hybrid=False)}")
     print(f"  hybrid-1hop  : {_score(ds, k=5, hybrid=True, graph_mode='1hop')}")
     print(f"  hybrid-ppr   : {_score(ds, k=5, hybrid=True, graph_mode='ppr')}")
+    print("\nEngraphis ordinary-recall age ablation")
+    print(
+        "  equal-reinforcement score delta (recent - 1y old): "
+        f"{_ordinary_recall_age_delta():.8f}  (expected 0.00000000)"
+    )
 
     mh_path = Path(__file__).resolve().parent / "datasets" / "graph_multihop.jsonl"
     if mh_path.exists():

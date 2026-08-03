@@ -20,7 +20,7 @@ A convention is `mtype="semantic"` and probably `scope="repo"`. A user's editor 
 ```
 workspace            org or product        ("acme")          : always required on a write
   └─ repo            a repository          ("backend")       : omit only for workspace-wide facts
-       └─ session    one unit of work      (session_id)      : from engraphis_start_session
+       └─ session    one unit of work      (session_id)      : from engraphis_session(action="start")
             └─ memory                                         : the fact itself
 ```
 
@@ -54,14 +54,18 @@ Over-scoping (everything `workspace`) pollutes recall in unrelated repos. Under-
 
 ## Sessions and handoff
 
-A session groups a task's memories and enables resume:
+A session groups a task's memories and enables resume. On the default Smart MCP surface:
 
-1. `engraphis_start_session(workspace, repo, agent, goal)` → returns `session_id`, `reused`, and a
+1. `engraphis_session(action="start", workspace, repo, agent, goal)` returns `session_id`, `reused`, and a
    `bootstrap` carrying the previous same-user/agent session's `summary` + `open_threads` for this
    repo.
-2. Pass `session_id` to `engraphis_remember` / `engraphis_record_event` during the task.
-3. `engraphis_end_session(session_id, summary, outcome, open_threads)`: `open_threads` are the
+2. Pass `session_id` to direct `engraphis_remember` during the task. For an episodic event, first
+   discover the record-event capability and pass that same `session_id` to its returned executor.
+3. `engraphis_session(action="end", session_id, summary, outcome, open_threads)`: `open_threads` are the
    unresolved items; they auto-surface for the next same-user/agent session in this repo.
+
+`engraphis_start_session` and `engraphis_end_session` are the corresponding Classic-only names
+for pinned legacy integrations.
 
 Starting is idempotent per exact `(workspace, repo, authenticated user, agent, goal)` identity.
 Different users, agents, or goals automatically open separate sessions. `reused=true` therefore

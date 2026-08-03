@@ -1,5 +1,5 @@
 """One-time backfill: populate the knowledge graph (``entities``/``edges``) from
-memories already on disk, per workspace, using the dependency-free
+explicitly approved memories already on disk, per workspace, using the dependency-free
 ``RegexGraphExtractor``.
 
 Why this exists
@@ -30,11 +30,14 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import json
+import time
 from typing import Optional
 
 from engraphis.backends.graph_extractor import feed, get_graph_extractor
 from engraphis.config import settings
 from engraphis.core.store import Store
+from engraphis.core.poisoning import prompt_eligible
 
 
 def backfill(db_path: str, *, dry_run: bool = False,
@@ -50,9 +53,12 @@ def backfill(db_path: str, *, dry_run: bool = False,
     ws_names = {r["id"]: r["name"]
                 for r in conn.execute("SELECT id, name FROM workspaces").fetchall()}
 
-    sql = ("SELECT id, workspace_id, repo_id, title, content "
-           "FROM memories WHERE expired_at IS NULL")
-    params: list = []
+    now = time.time()
+    sql = ("SELECT id, workspace_id, repo_id, title, content, metadata, provenance, "
+           "valid_from, ingested_at FROM memories WHERE expired_at IS NULL "
+           "AND (valid_from IS NULL OR valid_from<=?) "
+           "AND (valid_to IS NULL OR ?<valid_to)")
+    params: list = [now, now]
     if only_workspace:
         row = conn.execute("SELECT id FROM workspaces WHERE name=?",
                            (only_workspace,)).fetchone()
@@ -68,6 +74,16 @@ def backfill(db_path: str, *, dry_run: bool = False,
     rel = defaultdict(int)
 
     for r in rows:
+        try:
+            metadata = json.loads(r["metadata"] or "{}")
+        except ValueError:
+            metadata = {}
+        try:
+            provenance = json.loads(r["provenance"] or "{}")
+        except ValueError:
+            provenance = metadata.get("provenance") if isinstance(metadata, dict) else {}
+        if not prompt_eligible(provenance, metadata):
+            continue
         wid = r["workspace_id"]
         mem[wid] += 1
         content, title = r["content"] or "", r["title"] or ""
@@ -78,7 +94,8 @@ def backfill(db_path: str, *, dry_run: bool = False,
         else:
             res = feed(store, content, workspace_id=wid, repo_id=r["repo_id"],
                        title=title, extractor=extractor,
-                       provenance={"source": "backfill_graph"})
+                       provenance={"source": "backfill_graph", "memory_id": r["id"]},
+                       valid_from=r["valid_from"], ingested_at=r["ingested_at"])
             ent[wid] += res["entities"]
             rel[wid] += res["relations"]
 

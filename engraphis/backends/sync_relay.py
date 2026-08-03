@@ -533,6 +533,15 @@ class RelayTransport:
             # Never propagate an untrusted relay response body or the HTTPError's
             # request URL. Either can contain PII, signed query data, or reflected
             # credentials and these errors are surfaced by sync APIs and CLIs.
+            # HTTPError owns the failing response stream but does not participate in
+            # the successful response context manager above. Close it without reading
+            # its untrusted body so repeated authorization/relay failures cannot leak
+            # sockets or file descriptors (and cannot allocate attacker-controlled
+            # error payloads merely for diagnostics).
+            try:
+                exc.close()
+            except Exception:  # noqa: BLE001 - error cleanup must not mask the status
+                pass
             if exc.code == 402:
                 raise RelayError(
                     "Cloud Sync entitlement is inactive (upgrade or renew required)",

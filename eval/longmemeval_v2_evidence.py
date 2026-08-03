@@ -8,6 +8,7 @@ then uses :mod:`eval.benchmark` to make an immutable public artifact.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -159,6 +160,11 @@ def build_evidence_report(
     reader_revision: str = PINNED_READER_REVISION,
     evaluator_model: Optional[str] = None,
     evaluator_revision: Optional[str] = None,
+    upstream_revision: Optional[str] = None,
+    matrix_manifest_path: Optional[str | Path] = None,
+    ablation: Optional[str] = None,
+    token_budget: Optional[int] = None,
+    seed: Optional[int] = None,
     command: Optional[Sequence[str]] = None,
 ) -> dict[str, Any]:
     """Build a public-safe artifact from one completed official V2 run.
@@ -175,12 +181,72 @@ def build_evidence_report(
         raise ValueError("evaluator_model and evaluator_revision must be used together")
     if evaluator_revision and re.fullmatch(r"[0-9a-f]{40}", evaluator_revision) is None:
         raise ValueError("evaluator_revision must be an immutable lowercase 40-character commit")
+    binding_values = (upstream_revision, matrix_manifest_path, ablation, token_budget, seed)
+    if any(value is not None for value in binding_values) and not all(
+        value is not None for value in binding_values
+    ):
+        raise ValueError(
+            "upstream_revision, matrix_manifest_path, ablation, token_budget, and seed "
+            "must be supplied together"
+        )
+    if upstream_revision and re.fullmatch(r"[0-9a-f]{40}", upstream_revision) is None:
+        raise ValueError("upstream_revision must be an immutable lowercase 40-character commit")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
+        raise ValueError("seed must be a non-negative integer")
+    memory_config_file = Path(memory_config_path)
+    memory_config_bytes = memory_config_file.read_bytes()
+    memory_config = json.loads(memory_config_bytes)
+    if not isinstance(memory_config, dict):
+        raise ValueError("memory config must be an object")
+    memory_params = memory_config.get("memory_params")
+    memory_params = memory_params if isinstance(memory_params, dict) else {}
+    if (
+        memory_params.get("reader_tokenizer_model") not in (None, reader_model)
+        or memory_params.get("reader_tokenizer_revision") not in (None, reader_revision)
+    ):
+        raise ValueError("memory config does not match the pinned reader")
+    config_sha256 = hashlib.sha256(memory_config_bytes).hexdigest()
+    matrix_binding = {
+        "verified": False,
+        "blocker": "no exact matrix manifest cell was supplied",
+    }
+    manifest_file: Optional[Path] = None
+    if matrix_manifest_path is not None:
+        manifest_file = Path(matrix_manifest_path)
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("runs"), list):
+            raise ValueError("matrix manifest must contain a runs list")
+        if (
+            manifest.get("reader_model") != reader_model
+            or manifest.get("reader_revision") != reader_revision
+        ):
+            raise ValueError("matrix manifest does not match the pinned reader")
+        matches = [
+            row for row in manifest["runs"]
+            if isinstance(row, dict)
+            and row.get("ablation") == ablation
+            and row.get("token_budget") == token_budget
+        ]
+        if len(matches) != 1 or matches[0].get("sha256") != config_sha256:
+            raise ValueError("memory config does not match the requested matrix manifest cell")
+        if memory_params.get("max_context_tokens") != token_budget:
+            raise ValueError("memory config token budget does not match the matrix cell")
+        matrix_binding = {
+            "verified": True,
+            "manifest_name": str(manifest.get("name") or ""),
+            "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
+            "ablation": ablation,
+            "token_budget": token_budget,
+            "config_sha256": config_sha256,
+        }
     source_paths = [
         per_question,
         Path(haystack_path),
         Path(trajectories_path),
-        Path(memory_config_path),
+        memory_config_file,
     ]
+    if manifest_file is not None:
+        source_paths.append(manifest_file)
     private_rows = _load_jsonl(per_question)
     tokenizer_identity = f"{reader_model}@{reader_revision}"
     records = [
@@ -197,6 +263,19 @@ def build_evidence_report(
             "reader_revision": reader_revision,
             "evaluator_model": evaluator_model,
             "evaluator_revision": evaluator_revision,
+            "upstream_revision": upstream_revision,
+            "seed": seed,
+            "matrix_binding": matrix_binding,
+            "memory_config": {
+                "sha256": config_sha256,
+                "memory_type": memory_config.get("memory_type"),
+                "planning": memory_params.get("planning", "off"),
+                "mtype_limits": memory_params.get("mtype_limits"),
+                "max_context_tokens": memory_params.get("max_context_tokens"),
+                "embed_model": memory_params.get("embed_model"),
+                "embed_revision": memory_params.get("embed_revision"),
+                "vector_backend": memory_params.get("vector_backend"),
+            },
             "per_question_schema": "official_harness/per_question.jsonl",
         },
         command=command or ("python", "-m", "eval.run_longmemeval_v2", "<official_args_redacted>"),
@@ -208,6 +287,10 @@ def build_evidence_report(
         },
         models={
             "reader": {"model_id": reader_model, "revision": reader_revision},
+            "embedder": {
+                "model_id": memory_params.get("embed_model") or "not_recorded",
+                "revision": memory_params.get("embed_revision"),
+            },
             "evaluator": {
                 "model_id": evaluator_model or "not_recorded",
                 "revision": evaluator_revision,
@@ -232,6 +315,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--reader-revision", default=PINNED_READER_REVISION)
     parser.add_argument("--evaluator-model", default=None)
     parser.add_argument("--evaluator-revision", default=None)
+    parser.add_argument("--upstream-revision", required=True)
+    parser.add_argument("--matrix-manifest", required=True)
+    parser.add_argument("--ablation", required=True)
+    parser.add_argument("--token-budget", required=True, type=int)
+    parser.add_argument("--seed", required=True, type=int)
     args = parser.parse_args(argv)
     try:
         report = build_evidence_report(
@@ -244,6 +332,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             reader_revision=args.reader_revision,
             evaluator_model=args.evaluator_model,
             evaluator_revision=args.evaluator_revision,
+            upstream_revision=args.upstream_revision,
+            matrix_manifest_path=args.matrix_manifest,
+            ablation=args.ablation,
+            token_budget=args.token_budget,
+            seed=args.seed,
         )
         result = write_canonical_artifact(report, args.output)
     except (OSError, ValueError, json.JSONDecodeError) as exc:

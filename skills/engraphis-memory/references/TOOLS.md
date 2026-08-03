@@ -1,8 +1,8 @@
 # Engraphis MCP tools: reference
 
-All 31 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
+All 33 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
-Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
+Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
 
@@ -200,14 +200,31 @@ as a new memory that records what it corrected, so the audit trail and `engraphi
 
 - `memory_id (str)`, `new_content (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
 
-Returns `{id, superseded:[old_id], reason}`. Prefer this over forget-then-remember.
+Returns `{id, superseded:[old_id], reason}`. Prefer this over retire-then-remember.
 
-### `engraphis_forget`
+### `engraphis_retire`
 Retire a memory: it stops appearing in recall, history preserved.
 
 - `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
 
-Returns `{id, status:"forgotten", reason}`. Use `correct` instead when you have replacement content.
+Returns `{id, status:"retired", reason}`. Use `correct` instead when you have replacement content.
+
+### `engraphis_secure_erase`
+Irreversibly remove one accidentally stored credential from local persistence. It deletes the
+memory plus its local FTS/vector/ANN and derived graph/link rows, performs SQLite secure-delete,
+WAL checkpoint, and VACUUM, and scans recognised local SQLite recovery backups. It cannot erase
+exports, snapshots, remote peers, unknown backups, or content already read by an agent; rotate the
+credential. This is destructive and intentionally does not preserve history.
+
+- `memory_id (str)`, `workspace (str)`, `repo (str, None)`.
+
+Returns `{id, status:"securely_erased", maintenance, recognised_backups_erased,
+backup_limitations}`. The `vector_index_cleanup` result must be `deleted` before an injected
+external vector backend can be considered remediated.
+
+### `engraphis_forget` *(deprecated)*
+Compatibility alias for `engraphis_retire`. It retains the old `status:"forgotten"` result for
+existing clients, but new integrations must use `engraphis_retire`.
 
 ### `engraphis_promote`
 Widen a live memory's visibility without editing it in place. The wider record is stored first;
@@ -424,7 +441,7 @@ Returns `{enabled, current, latest, update_available, url, notice}`.
   `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet →
   `proactive_context`.
 - "Why?" / "since when?" → `why` / `timeline`, not `recall`, which only sees the live view.
-- Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
+- Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `retire`.
 - Fact applies more broadly than first believed → `promote` (widens without duplicate recall).
 - Must never fade → `pin`. Two facts belong together → `link`.
 - Working in code → `index_repo`, then `search_code`; use `code_path`/`code_impact` for structural

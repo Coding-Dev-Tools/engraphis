@@ -229,7 +229,7 @@ def test_cli_embed_model_uses_factory_without_downloading(tmp_path, capsys, monk
     assert output["benchmark"]["embedder"]["dimension"] == 80
 
 
-def test_codemem_public_no_break_even_boundary_is_reproducible() -> None:
+def test_codemem_public_break_even_baseline_is_reproducible() -> None:
     dataset = load_dataset(str(ROOT / "eval" / "datasets" / "codemem.jsonl"))
 
     tight = run(dataset, token_budget=64, k=5)
@@ -243,8 +243,8 @@ def test_codemem_public_no_break_even_boundary_is_reproducible() -> None:
     }
     assert tight["methods"]["full_history"]["cumulative_query_context_tokens"] == 1180
     assert tight["methods"]["recency_window"]["cumulative_query_context_tokens"] == 1180
-    assert tight["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1375
-    assert roomy["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1377
+    assert tight["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1064
+    assert roomy["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1066
     for report in (tight, roomy):
         for method in report["methods"].values():
             assert method["quality"] == {
@@ -252,4 +252,5 @@ def test_codemem_public_no_break_even_boundary_is_reproducible() -> None:
                 "retrieval_hit_rate": 1.0,
                 "answer_token_recall": 1.0,
             }
-        assert report["engraphis_vs_full_history"]["break_even_query_count"] is None
+    assert tight["engraphis_vs_full_history"]["break_even_query_count"] == 142
+    assert roomy["engraphis_vs_full_history"]["break_even_query_count"] == 144
