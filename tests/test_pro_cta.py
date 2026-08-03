@@ -46,7 +46,6 @@ def test_public_pro_ctas_use_documentation_attribution():
 
     for heading in (
         "## What Engraphis gives an agent",
-        "### See the behavior in reproducible fixtures",
         "## Free forever vs. hosted plans",
     ):
         assert heading in readme
