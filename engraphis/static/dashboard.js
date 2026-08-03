@@ -516,7 +516,7 @@ function licStateBanner(state,plan,ends,status){
  if(state==='lapsed'){const note=LIC_STATUS_NOTE[status];return `<div class="lic-banner lic-banner-warn"><strong>Your ${esc(plan||'hosted')} subscription is no longer active</strong>${note?esc(note.charAt(0).toUpperCase()+note.slice(1))+', so hosted':'Hosted'} features are locked until billing is up to date. Your local memories are unaffected. Open the account portal to restore access.</div>`}
  if(state==='inactive')return `<div class="lic-banner"><strong>No hosted plan on this installation</strong>The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation, and Team administration run in Engraphis Cloud.</div>`;
  return ''}
-function licActionsHtml(state){if(state!=='active'&&state!=='lapsed'&&state!=='trial')return '';const pro=hostedCta('pro','license');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`}
+function licActionsHtml(state){if(state!=='active'&&state!=='lapsed'&&state!=='trial'&&state!=='inactive'&&state!=='trial_expired')return '';const pro=hostedCta('pro','license');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();
