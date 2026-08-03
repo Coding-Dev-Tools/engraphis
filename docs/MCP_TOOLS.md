@@ -1,8 +1,26 @@
 # MCP tool reference
 
-Engraphis exposes MCP tools for writing and recalling memory, managing history, indexing code, and
-checking the local store. Start with `engraphis_recall_context` when an agent needs prompt-ready
-context, and use `engraphis_remember` when it learns a durable fact.
+`engraphis-mcp` is the zero-configuration Smart MCP gateway. It initially exposes six concise
+tools: `engraphis_session`, `engraphis_recall_context`, `engraphis_remember`,
+`engraphis_discover_actions`, `engraphis_execute_read`, and `engraphis_execute_action`. Agents use
+the routine tools directly; for any advanced capability, they discover the best action and execute
+the returned, version-bound capability ID. Discovery returns the precise schema and side-effect
+class, and execution revalidates availability, scope, authorization, and arguments.
+
+No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
+`engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
+`engraphis-mcp-http --classic`) preserves the 33 direct tools below for integrations that pin
+their historical names and response shapes.
+
+Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
+The gateway works in general MCP clients without native deferred tool search; clients that
+explicitly support OpenAI's deferred `tool_search` can apply it as an optional host optimization.
+
+## Classic direct-tool inventory
+
+The following inventory applies to the Classic compatibility server. Start with
+`engraphis_recall_context` when an agent needs prompt-ready context, and use
+`engraphis_remember` when it learns a durable fact.
 
 Retrieval responses (`engraphis_recall`, `engraphis_recall_context`,
 `engraphis_recall_grounded`, and `engraphis_answer`) always declare

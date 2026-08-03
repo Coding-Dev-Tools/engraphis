@@ -12,6 +12,7 @@ Voyage / OpenAI) behind the same ``Embedder`` interface; swap via config.
 from __future__ import annotations
 
 import hashlib
+from numbers import Integral
 import re
 from typing import Literal
 
@@ -20,6 +21,7 @@ import numpy as np
 
 DETERMINISTIC_EMBEDDING_IDENTITY = "deterministic_hashing"
 DETERMINISTIC_EMBEDDING_VERSION = "v2_aliases_measurements"
+MAX_EMBEDDING_DIM = 65_536
 
 
 class DeterministicEmbedder:
@@ -38,7 +40,14 @@ class DeterministicEmbedder:
     )
 
     def __init__(self, dim: int = 384) -> None:
-        self._dim = dim
+        if isinstance(dim, bool) or not isinstance(dim, Integral):
+            raise ValueError("embedding dimension must be a positive integer")
+        dimension = int(dim)
+        if not 1 <= dimension <= MAX_EMBEDDING_DIM:
+            raise ValueError(
+                f"embedding dimension must be between 1 and {MAX_EMBEDDING_DIM}"
+            )
+        self._dim = dimension
 
     @property
     def dim(self) -> int:

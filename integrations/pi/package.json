@@ -1,0 +1,73 @@
+{
+  "name": "@engraphis/pi",
+  "version": "0.1.0",
+  "description": "First-party Pi extension for Engraphis durable memory",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Coding-Dev-Tools/engraphis.git",
+    "directory": "integrations/pi"
+  },
+  "bugs": {
+    "url": "https://github.com/Coding-Dev-Tools/engraphis/issues"
+  },
+  "homepage": "https://github.com/Coding-Dev-Tools/engraphis/tree/main/integrations/pi",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "engraphis",
+    "memory",
+    "mcp",
+    "agent-memory"
+  ],
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "npm-shrinkwrap.json",
+    "index.ts",
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:integration": "node --import tsx --test test/*.integration.ts",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "verify": "npm run typecheck && npm test && npm run pack:check",
+    "prepublishOnly": "npm run verify"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "typebox": "1.3.7"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

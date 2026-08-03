@@ -1,0 +1,104 @@
+name: Publish Pi extension to npm
+
+on:
+  push:
+    tags:
+      - "pi-v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Verify and pack Pi extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: integrations/pi/npm-shrinkwrap.json
+          registry-url: https://registry.npmjs.org
+
+      - name: Require Pi tag and npm package version to match
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#pi-v}"
+          actual="$(node -p 'require("./integrations/pi/package.json").version')"
+          test "$GITHUB_REF_NAME" = "pi-v$actual"
+          test "$expected" = "$actual"
+
+      - name: Require release tag commit to be on protected main
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Install the current Smart MCP server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Verify package, live MCP bridge, and production dependencies
+        working-directory: integrations/pi
+        env:
+          ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
+        run: |
+          npm ci --ignore-scripts
+          npm run verify
+          npm run test:integration
+          npm audit --omit=dev
+
+      - name: Build npm tarball
+        working-directory: integrations/pi
+        run: npm pack --ignore-scripts
+
+      - name: Store npm tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pi-npm-package
+          path: integrations/pi/engraphis-pi-*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish @engraphis/pi
+    needs: build
+    # A manual dispatch is intentionally verification-only. Publishing requires a
+    # protected pi-v* tag and npm Trusted Publishing configured for this workflow.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/pi-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pi-npm-package
+          path: dist
+      - name: Publish with npm provenance
+        run: npm publish dist/engraphis-pi-*.tgz --access public --provenance
+      - name: Verify the published version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#pi-v}"
+          for attempt in $(seq 1 12); do
+            if [ "$(npm view "@engraphis/pi@$version" version 2>/dev/null)" = "$version" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "@engraphis/pi@$version did not become visible on npm"
+          exit 1

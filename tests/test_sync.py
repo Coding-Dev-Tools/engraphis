@@ -91,6 +91,12 @@ def test_serialization_roundtrip_preserves_signature():
     assert _signature(r2) == _signature(rec)
 
 
+def test_untrusted_record_uses_strict_boolean_pinning():
+    assert dict_to_record({"id": "mem_false", "content": "x", "pinned": "false"}).pinned is False
+    assert dict_to_record({"id": "mem_one", "content": "x", "pinned": 1}).pinned is False
+    assert dict_to_record({"id": "mem_true", "content": "x", "pinned": True}).pinned is True
+
+
 def test_sync_roundtrip_preserves_claim_identity_and_closure_knowledge_time():
     rec = MemoryRecord(
         id="mem_claim",

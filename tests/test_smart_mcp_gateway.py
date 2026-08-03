@@ -1,0 +1,406 @@
+"""Contract coverage for the zero-configuration Smart MCP gateway.
+
+The normal server intentionally exposes a tiny, discoverable surface.  The
+legacy named-tool contract remains available separately for clients that pin
+tool names, so gateway calls must retain the service semantics of those tools.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+import json
+import re
+
+import pytest
+
+
+pytest.importorskip("mcp", reason="optional 'mcp' extra not installed")
+
+
+SMART_TOOL_NAMES = {
+    "engraphis_session",
+    "engraphis_recall_context",
+    "engraphis_remember",
+    "engraphis_discover_actions",
+    "engraphis_execute_read",
+    "engraphis_execute_action",
+}
+
+# This is deliberately an exact snapshot, rather than a count-only check: a
+# legacy client may depend on either deprecated alias retaining its behavior.
+CLASSIC_TOOL_NAMES = {
+    "engraphis_remember", "engraphis_recall", "engraphis_recall_context",
+    "engraphis_why", "engraphis_timeline", "engraphis_recall_proactive",
+    "engraphis_retire", "engraphis_forget", "engraphis_secure_erase",
+    "engraphis_pin", "engraphis_correct", "engraphis_promote", "engraphis_link",
+    "engraphis_record_event", "engraphis_index_repo", "engraphis_search_code",
+    "engraphis_code_path", "engraphis_code_impact", "engraphis_export_code_graph",
+    "engraphis_start_session", "engraphis_end_session", "engraphis_stats",
+    "engraphis_proactive_context", "engraphis_recall_grounded", "engraphis_answer",
+    "engraphis_ingest", "engraphis_consolidate", "engraphis_ingest_postgres_schema",
+    "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
+    "engraphis_export_receipts", "engraphis_check_update",
+}
+
+
+def _memory_server(monkeypatch):
+    import engraphis.mcp_server as srv
+    from engraphis.service import MemoryService
+
+    monkeypatch.setattr(srv, "_service", MemoryService.create(":memory:"))
+    return srv
+
+
+def _tools(server, attr):
+    return {tool.name: tool for tool in asyncio.run(getattr(server, attr).list_tools())}
+
+
+def _payload(value):
+    assert not value.startswith("Error:"), value
+    return json.loads(value)
+
+
+def _jsonable(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "dict"):
+        return value.dict()
+    return value
+
+
+def test_normal_mcp_exposes_only_the_six_smart_gateway_tools(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    tools = _tools(server, "mcp")
+    assert set(tools) == SMART_TOOL_NAMES
+    assert len(tools) == 6
+    assert len(server.mcp.instructions) <= 512
+
+
+def test_classic_mcp_retains_the_33_named_tool_compatibility_surface(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    classic = _tools(server, "classic_mcp")
+    assert set(classic) == CLASSIC_TOOL_NAMES
+    assert len(classic) == 33
+    # These aliases carry distinct historical defaults and must not disappear.
+    assert {"engraphis_answer", "engraphis_forget"} <= set(classic)
+
+
+def test_smart_gateway_initial_payload_fits_context_budget(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    tools = [_jsonable(tool) for tool in _tools(server, "mcp").values()]
+    initial_payload = server.mcp.instructions.encode("utf-8") + json.dumps(
+        {"tools": tools}, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    assert len(initial_payload) <= 12 * 1024
+    # Stable project-local approximation: the six-tool surface must stay well under
+    # the release gate and at least 80% below the previous 64.6 KB direct catalog.
+    assert len(initial_payload) <= int(64_600 * 0.20)
+    assert len(re.findall(rb"\w+|[^\s\w]", initial_payload)) <= 4_500
+
+
+def test_discovery_returns_bound_capability_schema_and_safe_metadata(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    discovered = _payload(server.engraphis_discover_actions(
+        task="Show the history of the API rate limit in the acme workspace.",
+    ))
+    actions = discovered["actions"]
+    assert 1 <= len(actions) <= 3
+    action = actions[0]
+    assert action["capability_id"]
+    assert action["schema_version"] == "smart-mcp/1"
+    assert action["schema_digest"]
+    assert action["purpose"]
+    assert action["input_schema"]["type"] == "object"
+    assert action["side_effect"] in {"read", "write", "admin", "destructive"}
+    assert isinstance(action["prerequisite"], (str, type(None)))
+    assert action["result_budget"] > 0
+    assert isinstance(action["example"], dict)
+    assert "task" not in json.dumps(discovered)  # do not echo potentially private task text
+
+
+def test_discovery_abstains_for_an_unknown_or_ambiguous_request(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    discovered = _payload(server.engraphis_discover_actions(
+        task="Please handle the thing mentioned earlier.",
+    ))
+
+    assert discovered["actions"] == []
+
+
+def test_discovery_does_not_treat_a_category_as_mutation_intent(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    discovered = _payload(server.engraphis_discover_actions(
+        task="Please handle the thing mentioned earlier.", category="governance",
+    ))
+
+    assert discovered["actions"] == []
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_action"),
+    [
+        ("Search stored memories for complete memory bodies.", "recall"),
+        ("Explain why this decision changed.", "why"),
+        ("Show the history of this fact.", "timeline"),
+        ("What should I know right now?", "recall_proactive"),
+        ("Retire an outdated memory.", "retire"),
+        ("Forget this legacy memory.", "forget"),
+        ("Irreversibly erase a leaked secret.", "secure_erase"),
+        ("Pin this memory.", "pin"),
+        ("Correct this memory with new content.", "correct"),
+        ("Promote this memory to workspace scope.", "promote"),
+        ("Link two related memories.", "link"),
+        ("Record a deployment event.", "record_event"),
+        ("Index this repository.", "index_repo"),
+        ("Find symbol callers in code.", "search_code"),
+        ("Trace the code path between functions.", "code_path"),
+        ("Analyze impact of changed files.", "code_impact"),
+        ("Export the code graph.", "export_code_graph"),
+        ("Start a project work session.", "start_session"),
+        ("End the active work session with a handoff.", "end_session"),
+        ("Check memory store health statistics.", "stats"),
+        ("Prepare proactive context for current work.", "proactive_context"),
+        ("Give a grounded cited answer.", "recall_grounded"),
+        ("Answer this question from memory.", "answer"),
+        ("Ingest raw document text.", "ingest"),
+        ("Consolidate duplicate memories.", "consolidate"),
+        ("Ingest a PostgreSQL schema.", "ingest_postgres_schema"),
+        ("List audit receipts.", "receipts"),
+        ("Show context token savings.", "context_savings"),
+        ("Verify the receipt chain.", "verify_receipts"),
+        ("Export a receipt audit bundle.", "export_receipts"),
+        ("Check for updates.", "check_update"),
+    ],
+)
+def test_discovery_routes_unambiguous_advanced_intents(monkeypatch, task, expected_action):
+    server = _memory_server(monkeypatch)
+
+    action = _payload(server.engraphis_discover_actions(task=task))["actions"][0]
+
+    assert action["canonical_action"] == expected_action
+
+
+def test_execute_read_revalidates_discovered_capability_and_dispatches(monkeypatch):
+    server = _memory_server(monkeypatch)
+    # Stats on a nonexistent workspace rightly performs no write. Seed the scope and
+    # prove that the read executor itself does not append supplementary telemetry.
+    _payload(server.engraphis_remember(content="Gateway telemetry fixture.", workspace="acme"))
+    before = server._service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM operation_receipts WHERE operation='smart_gateway'"
+    ).fetchone()["n"]
+
+    discovery = _payload(server.engraphis_discover_actions(
+        task="Show memory store statistics for workspace acme.",
+    ))["actions"][0]
+    result = _payload(server.engraphis_execute_read(
+        capability_id=discovery["capability_id"],
+        schema_digest=discovery["schema_digest"],
+        arguments={"workspace": "acme"},
+    ))
+    assert result["capability_id"] == discovery["capability_id"]
+    assert result["schema_digest"] == discovery["schema_digest"]
+    assert result["result"]["workspace"] == "acme"
+
+    after = server._service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM operation_receipts WHERE operation='smart_gateway'"
+    ).fetchone()["n"]
+    assert after == before
+
+    forged = server.engraphis_execute_read(
+        capability_id="forged-capability", schema_digest=discovery["schema_digest"],
+        arguments={"workspace": "acme"},
+    )
+    assert forged.startswith("Error:")
+
+    stale = server.engraphis_execute_read(
+        capability_id=discovery["capability_id"], schema_digest="stale-schema",
+        arguments={"workspace": "acme"},
+    )
+    assert stale.startswith("Error: invalid_or_stale_capability")
+
+
+def test_capability_becomes_stale_when_deployment_policy_changes(monkeypatch):
+    server = _memory_server(monkeypatch)
+    action = _payload(server.engraphis_discover_actions(
+        task="Show memory store statistics.",
+    ))["actions"][0]
+
+    monkeypatch.setattr(server, "_DEPLOYMENT_POLICY", "changed-policy")
+    response = server.engraphis_execute_read(
+        capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+        arguments={},
+    )
+
+    assert response == "Error: invalid_or_stale_capability"
+
+
+def test_discovery_omits_an_unavailable_action(monkeypatch):
+    server = _memory_server(monkeypatch)
+    original = server.ACTION_SPECS["stats"]
+    monkeypatch.setitem(
+        server.ACTION_SPECS, "stats", replace(original, availability_predicate=lambda: False),
+    )
+
+    discovered = _payload(server.engraphis_discover_actions(
+        task="Show memory store statistics.",
+    ))
+
+    assert discovered["actions"] == []
+
+
+def test_stateful_executor_records_only_content_free_gateway_telemetry(monkeypatch):
+    server = _memory_server(monkeypatch)
+    _payload(server.engraphis_remember(content="Gateway telemetry fixture.", workspace="acme"))
+    action = _payload(server.engraphis_discover_actions(
+        task="Record a deployment event in workspace acme.",
+    ))["actions"][0]
+
+    result = _payload(server.engraphis_execute_action(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={"kind": "deployment", "content": "Deployment completed.",
+                   "workspace": "acme"},
+    ))
+    assert result["canonical_action"] == "record_event"
+
+    receipt = server._service.store.conn.execute(
+        "SELECT payload FROM operation_receipts WHERE operation='smart_gateway' "
+        "ORDER BY sequence DESC LIMIT 1"
+    ).fetchone()
+    telemetry = json.loads(receipt["payload"])
+    assert telemetry["metadata"]["action_id"].startswith("sha256:")
+    assert telemetry["metadata"]["schema_version"].startswith("sha256:")
+    assert "acme" not in json.dumps(telemetry)
+
+
+@pytest.mark.parametrize(("tool_name", "required_role"), [
+    ("engraphis_discover_actions", "viewer"),
+    ("engraphis_execute_read", "viewer"),
+    ("engraphis_execute_action", "admin"),
+    ("engraphis_remember", "member"),
+    ("engraphis_consolidate", "admin"),
+])
+def test_smart_gateway_roles_fail_closed_at_the_outer_auth_boundary(
+    monkeypatch, tool_name, required_role,
+):
+    server = _memory_server(monkeypatch)
+
+    assert server.minimum_role(tool_name) == required_role
+
+
+@pytest.mark.parametrize(("task", "executor_name"), [
+    ("Show memory store statistics.", "engraphis_execute_read"),
+    ("Record a deployment event.", "engraphis_execute_action"),
+])
+def test_oversized_results_return_success_without_retry_ambiguity(
+    monkeypatch, task, executor_name,
+):
+    server = _memory_server(monkeypatch)
+    action = _payload(server.engraphis_discover_actions(task=task))["actions"][0]
+    oversized = {"items": ["result"] * (action["result_budget"] + 1)}
+    executions = []
+
+    def run_once(spec, arguments):
+        executions.append((spec.canonical_id, arguments))
+        return True, oversized, {}
+
+    monkeypatch.setattr(server, "_run_action", run_once)
+
+    response = getattr(server, executor_name)(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={},
+    )
+    payload = _payload(response)
+
+    assert payload["executed"] is True
+    assert payload["execution_status"] == "succeeded"
+    assert payload["result_omitted"] is True
+    assert payload["reason"] == "result_budget_exceeded"
+    assert payload["retry_recommended"] is False
+    assert "result" not in payload
+    assert executions == [(action["canonical_action"], {})]
+    assert server._GATEWAY_RESULT_COUNTER(response) <= action["result_budget"]
+
+
+def test_executor_refuses_wrong_side_effect_class(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    action = _payload(server.engraphis_discover_actions(
+        task="Record a deployment event in workspace acme.",
+    ))["actions"][0]
+    response = server.engraphis_execute_read(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments=action["example"],
+    )
+    assert response.startswith("Error:")
+
+
+def test_gateway_preserves_safe_classic_handler_errors(monkeypatch):
+    server = _memory_server(monkeypatch)
+    _payload(server.engraphis_remember(content="Gateway error fixture.", workspace="acme"))
+    action = _payload(server.engraphis_discover_actions(
+        task="Retire a stale memory in workspace acme.",
+    ))["actions"][0]
+
+    arguments = {"memory_id": "mem_missing", "workspace": "acme"}
+    direct = server.engraphis_retire(**arguments)
+    gateway = server.engraphis_execute_action(
+        capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+        arguments=arguments,
+    )
+
+    assert direct.startswith("Error:")
+    assert gateway == direct
+
+
+def test_discovered_proactive_context_supports_bounded_compact_mode(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    action = _payload(server.engraphis_discover_actions(
+        task="Prepare a compact proactive context packet for the current work.",
+    ))["actions"][0]
+
+    assert action["canonical_action"] == "proactive_context"
+    assert {"token_budget", "response_mode"} <= set(action["input_schema"]["properties"])
+
+
+def test_smart_session_start_and_end_preserve_handoff_contract(monkeypatch):
+    server = _memory_server(monkeypatch)
+
+    started = _payload(server.engraphis_session(
+        action="start", workspace="acme", repo="api", agent="test-agent",
+        goal="Investigate deployment failures.",
+    ))
+    assert started["status"] == "active"
+    assert started["session_id"]
+    # Optional context must not make session creation fail and must always say what happened.
+    assert started["context_status"] in {"not_requested", "available", "unavailable"}
+
+    reused = _payload(server.engraphis_session(
+        action="start", workspace="acme", repo="api", agent="test-agent",
+        goal="Investigate deployment failures.",
+    ))
+    assert reused["session_id"] == started["session_id"]
+    assert reused["reused"] is True
+
+    branched = _payload(server.engraphis_session(
+        action="start", workspace="acme", repo="api", agent="test-agent",
+        goal="Investigate deployment failures.", force_new=True,
+    ))
+    assert branched["session_id"] != started["session_id"]
+    assert branched["reused"] is False
+
+    ended = _payload(server.engraphis_session(
+        action="end", session_id=started["session_id"], summary="Investigated failures.",
+        outcome="shipped", open_threads=[],
+    ))
+    assert ended["session_id"] == started["session_id"]
+    assert ended["status"] == "summarized"

@@ -79,6 +79,14 @@ def main(argv=None) -> None:
         default=os.environ.get("ENGRAPHIS_HTTP_TRANSPORT", "streamable-http"),
         help="MCP transport (default: ENGRAPHIS_HTTP_TRANSPORT or streamable-http)",
     )
+    ap.add_argument(
+        "--classic",
+        action="store_true",
+        help=(
+            "serve the legacy 33 direct-tool surface; normal use defaults to the compact "
+            "Smart gateway"
+        ),
+    )
     args = ap.parse_args(argv)
     if args.transport not in _TRANSPORTS:
         ap.error("ENGRAPHIS_HTTP_TRANSPORT must be streamable-http or sse")
@@ -91,9 +99,14 @@ def main(argv=None) -> None:
     # module import time, so importing it eagerly would make even help unusable.
     from engraphis.mcp_server import mcp
 
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
-    mcp.run(transport=args.transport)
+    server = mcp
+    if args.classic:
+        from engraphis.mcp_server import classic_mcp
+
+        server = classic_mcp
+    server.settings.host = args.host
+    server.settings.port = args.port
+    server.run(transport=args.transport)
 
 
 if __name__ == "__main__":

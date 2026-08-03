@@ -509,7 +509,9 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         valid_to_recorded_at=_clamp_ts(d.get("valid_to_recorded_at"), now),
         ingested_at=_clamp_ts(d.get("ingested_at"), now),
         expired_at=_clamp_ts(d.get("expired_at"), now),
-        pinned=bool(d.get("pinned")), sensitivity=sens,
+        # Authority-bearing booleans are strict. In particular ``"false"`` must
+        # not become truthy and then remain permanently pinned through the CRDT OR.
+        pinned=d.get("pinned") is True, sensitivity=sens,
         subject_key=_clamp_str(d.get("subject_key"), 512),
         claim_kind=_clamp_str(d.get("claim_kind"), 256),
         provenance=_safe_json_obj(d.get("provenance")),

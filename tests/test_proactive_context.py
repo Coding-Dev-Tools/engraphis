@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -102,3 +104,71 @@ def test_api_proactive_context_round_trip():
     assert data["grounded"] is True
     assert "context_summary" in data and "[1]" in data["context_summary"]
     assert data["citations"][0]["title"] == "Auth convention"
+
+
+def test_compact_proactive_context_is_bounded_and_does_not_repeat_source_bodies():
+    svc = MemoryService.create(":memory:", embed_model="")
+    pending = svc.remember(
+        "The authorization middleware uses PASETO tokens with a 15 minute lifetime.",
+        workspace="acme", scope="workspace", title="Auth convention", importance=0.9,
+    )
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
+
+    out = svc.proactive_context(
+        workspace="acme", task="update authorization middleware", k=5,
+        response_mode="compact", token_budget=32,
+    )
+
+    counter = svc.engine.recall_engine.context_packer.count_tokens
+    assert set(out) == {"workspace", "repo", "context", "sources", "usage", "grounded", "reason"}
+    assert counter(out["context"]) <= 32
+    assert out["sources"][0]["id"].startswith("mem_")
+    assert "content" not in out["sources"][0]
+    assert "suggested_memories" not in out
+    assert out["usage"]["budget_tokens"] == 32
+    receipt = next(item for item in svc.receipt_log(workspace="acme")["entries"]
+                   if item["operation"] == "proactive_context")
+    assert receipt["metadata"]["response_mode"] == "compact"
+    assert "PASETO" not in str(receipt)
+
+
+@pytest.mark.parametrize("budget", range(8, 13))
+def test_compact_proactive_context_never_emits_partial_citations(budget):
+    svc = MemoryService.create(":memory:", embed_model="")
+    pending = svc.remember(
+        "The authorization middleware uses PASETO tokens with a 15 minute lifetime.",
+        workspace="acme", scope="workspace", title="Auth convention", importance=0.9,
+    )
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
+
+    out = svc.proactive_context(
+        workspace="acme", task="update authorization middleware", k=5,
+        response_mode="compact", token_budget=budget,
+    )
+
+    cited_numbers = {int(number) for number in re.findall(r"\[(\d+)\]", out["context"])}
+    assert not re.search(r"\[(?:\d*)$", out["context"])
+    assert {source["n"] for source in out["sources"]} == cited_numbers
+    assert out["grounded"] is bool(cited_numbers)
+
+
+def test_api_adaptive_context_routes_host_owned_history():
+    svc = MemoryService.create(":memory:", embed_model="")
+    svc.remember("The release manager approves deployment.", workspace="acme")
+    v2_api.set_service(svc)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    client = TestClient(app)
+
+    response = client.post("/api/adaptive-context", json={
+        "workspace": "acme",
+        "query": "Who approves deployment?",
+        "history": "The release manager approves deployment.",
+        "max_context_tokens": 32,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context"] == "The release manager approves deployment."
+    assert body["decision"]["mode"] == "history_bypass"
+    assert body["sources"] == []

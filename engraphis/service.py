@@ -40,6 +40,7 @@ from engraphis.core.graph_scene import (
     strongest_path,
 )
 from engraphis.core.graph_layers import normalize_graph_layer
+from engraphis.core.context import RegexTokenCounter
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import (
     Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter, embedder_capabilities,
@@ -369,6 +370,55 @@ def _clean_text(value: Any, *, field: str, max_chars: int, required: bool = True
     if len(cleaned) > max_chars:
         raise ValidationError(f"{field} exceeds {max_chars} characters (got {len(cleaned)})")
     return cleaned
+
+
+def _fit_context_tokens(text: str, budget: int, counter) -> str:
+    """Return a deterministic prefix that satisfies the active token counter.
+
+    Proactive context predates the recall packer, so its compact projection must
+    enforce the same hard budget itself. Keep source text intact when it fits;
+    otherwise trim at the regex-token boundary used by the offline default.
+    """
+    text = str(text or "")
+    if budget <= 0 or not text:
+        return ""
+    if int(counter(text)) <= budget:
+        return text
+    tokens = list(re.finditer(r"\w+|[^\w\s]", text, re.UNICODE))
+    if not tokens:
+        return ""
+    end = tokens[min(budget, len(tokens)) - 1].end()
+    fitted = text[:end].rstrip()
+    # Custom counters are allowed at composition time. Be conservative if one
+    # tokenizes differently from the deterministic boundary above.
+    while fitted and int(counter(fitted)) > budget:
+        tokens = list(re.finditer(r"\w+|[^\w\s]", fitted, re.UNICODE))
+        if not tokens:
+            return ""
+        fitted = fitted[:tokens[-1].start()].rstrip()
+    return fitted
+
+
+def _fit_context_lines(text: str, budget: int, counter) -> str:
+    """Pack a whole-line prefix without splitting citation markers or bodies.
+
+    Proactive summaries use one source per line.  A token-level prefix can end
+    in ``[`` or ``[1``, falsely making a truncated source appear grounded.
+    Compact responses therefore trade a partial final line for a complete,
+    independently verifiable cited line.
+    """
+    text = str(text or "")
+    if budget <= 0 or not text:
+        return ""
+    if int(counter(text)) <= budget:
+        return text
+    packed: list[str] = []
+    for line in text.splitlines():
+        candidate = "\n".join([*packed, line])
+        if int(counter(candidate)) > budget:
+            break
+        packed.append(line)
+    return "\n".join(packed)
 
 
 def _strict_bool(value: Any, *, field: str) -> bool:
@@ -2623,7 +2673,9 @@ class MemoryService:
 
     def proactive_context(self, *, workspace: str, repo: Optional[str] = None,
                           task: str = "", agent_state: str = "", k: int = 10,
-                          synthesize: bool = False) -> dict:
+                          synthesize: bool = False,
+                          token_budget: Optional[int] = None,
+                          response_mode: str = "full") -> dict:
         """Agent-ready proactive context packet.
 
         Combines queryless proactive recall, optional task-specific recall, and the
@@ -2631,11 +2683,25 @@ class MemoryService:
         when ``synthesize`` is true and an LLM is configured, the model may rewrite the
         summary, but only if it cites retrieved memories with ``[n]`` markers.
         """
+        if response_mode not in RESPONSE_MODES:
+            raise ValidationError("response_mode must be 'full' or 'compact'")
+        if token_budget is not None:
+            if isinstance(token_budget, bool):
+                raise ValidationError("token_budget must be an integer")
+            try:
+                token_budget = int(token_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("token_budget must be an integer") from exc
+            if not 0 <= token_budget <= MAX_TOKEN_BUDGET:
+                raise ValidationError(
+                    f"token_budget must be between 0 and {MAX_TOKEN_BUDGET}"
+                )
         task = _clean_text(task, field="task", max_chars=MAX_CONTEXT_TASK_CHARS,
                            required=False)
         agent_state = _clean_text(agent_state, field="agent_state",
                                   max_chars=MAX_AGENT_STATE_CHARS, required=False)
         k = max(1, min(MAX_K, int(k)))
+        wid, rid = self._require_scope(workspace, repo)
         proactive = self.recall_proactive(workspace=workspace, repo=repo, k=k)
         memories = list(proactive.get("memories") or [])
         query = "\n".join(x for x in (task, agent_state) if x).strip()
@@ -2679,7 +2745,76 @@ class MemoryService:
                     llm.close()
                 except Exception:
                     pass
-        return {"workspace": self._clean_ws(workspace), "repo": repo, **out}
+        workspace_name = self._clean_ws(workspace)
+        legacy = {"workspace": workspace_name, "repo": repo, **out}
+        if response_mode == "full":
+            # The default remains byte-for-byte the established proactive response
+            # contract.  Compact mode is deliberately opt-in for new hosts.
+            return legacy
+
+        budget = (
+            self.engine.recall_engine.token_budget
+            if token_budget is None else token_budget
+        )
+        counter = getattr(self.engine.recall_engine.context_packer, "count_tokens", None)
+        if not callable(counter):
+            counter = RegexTokenCounter()
+        full_context = str(out.get("context_summary") or "")
+        context = _fit_context_lines(full_context, budget, counter)
+        source_tokens = int(counter(full_context))
+        context_tokens = int(counter(context))
+        citations = list(out.get("citations") or [])
+        cited_numbers = {int(number) for number in re.findall(r"\[(\d+)\]", context)}
+        sources = [
+            {
+                "id": citation.get("id"),
+                "n": citation.get("n"),
+                "title": citation.get("title"),
+                "mtype": citation.get("mtype"),
+                "provenance": _compact_provenance(citation.get("provenance")),
+            }
+            for citation in citations
+            if citation.get("n") in cited_numbers
+        ]
+        grounded = bool(sources)
+        usage = {
+            "budget_tokens": budget,
+            "context_tokens": context_tokens,
+            "source_tokens": source_tokens,
+            "saved_tokens": max(0, source_tokens - context_tokens),
+            "savings_ratio": (
+                max(0, source_tokens - context_tokens) / source_tokens
+                if source_tokens else 0.0
+            ),
+            "packed_count": len(sources),
+            "token_counter": getattr(
+                self.engine.recall_engine.context_packer,
+                "token_counter_identity",
+                getattr(counter, "identity", type(counter).__name__),
+            ),
+        }
+        self.store.record_receipt(
+            "proactive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
+            target_count=len(sources), status="ok",
+            metadata={
+                "response_mode": "compact",
+                "grounded": grounded,
+                "synthesized": bool(out.get("synthesized")),
+                "token_usage": usage,
+            },
+        )
+        return {
+            "workspace": workspace_name,
+            "repo": repo,
+            "context": context,
+            "sources": sources,
+            "usage": usage,
+            "grounded": grounded,
+            "reason": (
+                out.get("reason") or "deterministic fallback"
+                if grounded else "context budget omitted cited sources"
+            ),
+        }
 
     # ── linking & events (A-MEM-style) ───────────────────────────────────────────
     def record_event(self, kind: str, content: str, *, workspace: str,

@@ -41,7 +41,9 @@ Everything runs on your machine. The whole store is a single SQLite file. Local 
 You interact with Engraphis through three surfaces, all backed by the *same* engine (`MemoryService`), so they can never drift apart:
 
 - **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`): a visual product to see, search, and curate memory.
-- **The MCP server** (`engraphis-mcp`): the 33 tools your coding agent calls. **This is the surface Kilo Code uses.**
+- **The MCP server** (`engraphis-mcp`): a six-tool Smart gateway for routine memory work plus
+  automatic discovery and validated execution of advanced capabilities. **This is the surface
+  Kilo Code uses.**
 - **The Python library** (`from engraphis.service import MemoryService`): for direct programmatic use.
 
 ### 2.1 The five ideas that make it more than a vector store
@@ -88,7 +90,10 @@ Then run the one-time initializer, which writes an `.env` with an absolute DB pa
 engraphis-init
 ```
 
-This gives you a console command, `engraphis-mcp`, which is the actual MCP server (it speaks stdio, exactly the transport Kilo Code's "Local (STDIO)" type expects). You can sanity-check that it's on your PATH:
+This gives you a console command, `engraphis-mcp`, which is the zero-configuration Smart MCP
+server (it speaks stdio, exactly the transport Kilo Code's "Local (STDIO)" type expects). It starts
+with six compact tools; the agent discovers and executes code, governance, audit, and other
+advanced actions as needed. You can sanity-check that it's on your PATH:
 
 ```bash
 engraphis-mcp --help    # or just confirm the command resolves
@@ -152,41 +157,58 @@ Notes on the fields:
 
 ### 3.3 Verify the pipe is connected
 
-Reload Kilo Code (or toggle the server off/on in **Settings → MCP**). You should now see the `engraphis_*` tools available. The fastest end-to-end check is to ask Kilo Code to call the health tool:
+Reload Kilo Code (or toggle the server off/on in **Settings → MCP**). You should now see the six
+`engraphis_*` Smart tools. The fastest end-to-end check is to ask Kilo Code to discover the health
+capability, then run the returned read executor:
 
-> "Call `engraphis_stats` and show me the result."
+> "Use Engraphis to check the local memory-store health and show me the result."
 
 A JSON response with memory counts means the transport layer is fully working. If it errors, jump to Section 7 (Troubleshooting).
 
-### 3.4 (Optional) Auto-approve the truly read-only tools
+### 3.4 (Optional) Auto-approve the Smart read executor
 
-Kilo Code gates each MCP tool call behind an approval prompt. The permission key is the namespaced name `{server}_{tool}`. For a smooth loop, auto-approve tools whose MCP annotations are genuinely read-only and idempotent while keeping stateful retrieval, writes, and governance manual until you trust the flow. In `kilo.jsonc`:
+Kilo Code gates each MCP tool call behind an approval prompt. The permission key is the namespaced
+name `{server}_{tool}`. For a smooth loop, you may auto-approve `engraphis_execute_read`: the
+gateway accepts only a discovered capability that is still classified read-only/idempotent, and
+revalidates it before dispatch. Keep session changes, memory writes, and
+`engraphis_execute_action` manual until you trust the flow. In `kilo.jsonc`:
 
 ```jsonc
 {
   "permission": {
-    "engraphis_recall_proactive": "allow",
-    "engraphis_why": "allow",
-    "engraphis_timeline": "allow",
-    "engraphis_search_code": "allow",
-    "engraphis_stats": "allow"
+    "engraphis_execute_read": "allow"
   }
 }
 ```
 
-Query-based `engraphis_recall`, `engraphis_recall_grounded`, and `engraphis_answer`
-are deliberately absent: they update reinforcement metadata and/or append a privacy-safe
-operation receipt. `engraphis_proactive_context` is also conservatively stateful because a
-non-empty task or agent state runs receipt-recording recall. The queryless
-`engraphis_recall_proactive` path does neither, so it remains safe to auto-approve.
+`engraphis_recall_context` remains stateful because it can append a privacy-safe receipt. The
+write/action executor is intentionally absent: discovery does not grant mutation authority, and
+the gateway maintains the action's side-effect class on every call.
 
 You can also click **Approve Always** on any tool at runtime to write the same rule. A blanket `"engraphis_*": "allow"` works too, but auto-approving *writes* means the agent can reshape your memory without you seeing it; approve those consciously at first.
 
 ---
 
-## 4. The 33 tools: the orchestration surface
+## 4. Smart tools and the Classic compatibility surface
 
-Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall` exist. The value is in the rest. This is the full surface, grouped by what question each one answers.
+Normal `engraphis-mcp` setup exposes exactly these six Smart tools. Routine memory work stays
+compact; for everything else, discovery returns the exact schema, capability ID, and side-effect
+class, and the appropriate executor revalidates all of it before running.
+
+| Smart tool | Use |
+|---|---|
+| `engraphis_session` | Start or end a work session and receive the handoff. |
+| `engraphis_recall_context` | Fetch a hard-budget, prompt-ready context packet. |
+| `engraphis_remember` | Store a durable memory. |
+| `engraphis_discover_actions` | Find the best advanced capability and its exact schema. |
+| `engraphis_execute_read` | Run a discovered read-only/idempotent capability. |
+| `engraphis_execute_action` | Run a discovered stateful, administrative, or destructive-capable action. |
+
+`engraphis-mcp-classic` is only for an existing configuration that pins direct tool names. It
+preserves the former 33-tool surface below; new Kilo Code installations should keep the zero-config
+Smart command shown above.
+
+### Classic 33-tool inventory
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -233,12 +255,17 @@ This is how to make the connection actually pay off. The discipline fits on a ca
 
 ### 5.1 The core loop for a coding task
 
-1. **Starting work in a repo** → `engraphis_recall_proactive` (loads high-signal context with no query) and, for multi-step work, `engraphis_start_session` (its `bootstrap` hands back the last same-user/agent summary and unresolved `open_threads`, so the agent resumes without crossing an identity boundary).
+1. **Starting work in a repo** → for multi-step work, `engraphis_session(action="start", ...)`.
+   Its bootstrap returns the last handoff and, when given a goal, bounded relevant context.
 2. **Before answering or acting**, when prior context would help → `engraphis_recall_context`. It
-   supplies one hard-budget prompt packet; retain `engraphis_recall` for full-body compatibility.
-   Do this *before* asking you something you may have already said.
+   supplies one hard-budget prompt packet. Do this *before* asking you something you may have
+   already said.
 3. **The moment it learns something durable** → `engraphis_remember` (a convention, a decision *with its rationale*, a bug's cause→fix, a preference, a reusable procedure).
-4. **Finishing the task** → `engraphis_end_session` with a `summary` and `open_threads` for the next session in that repo.
+4. **For code, governance, audit, or any non-routine work** → use
+   `engraphis_discover_actions`, then the returned read/action executor with its capability ID and
+   exact schema. Do not invent IDs or arguments.
+5. **Finishing the task** → `engraphis_session(action="end", ...)` with a `summary` and
+   `open_threads` for the next session in that repo.
 
 `engraphis_recall_context` returns `usage` fields for the declared token counter: `budget_tokens`,
 `context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`, `packed_count`,
@@ -288,8 +315,8 @@ On a schedule (or at session end), run `engraphis_consolidate`: it distills recu
 
 ```text
 # Resuming work on acme/backend
-engraphis_start_session(workspace="acme", repo="backend", agent="kilo-code",
-                        goal="fix flaky auth tests")
+engraphis_session(action="start", workspace="acme", repo="backend", agent="kilo-code",
+                  goal="fix flaky auth tests")
   → bootstrap.open_threads: ["tests 3-5 still failing after token refactor"]
 
 engraphis_recall_context(query="how do we handle auth token expiry?",
@@ -302,9 +329,9 @@ engraphis_remember("Flaky auth tests were caused by a fixed clock in the test ha
                    workspace="acme", repo="backend", mtype="episodic", importance=0.6)
   → op: "add"
 
-engraphis_end_session(session_id=..., outcome="shipped",
-                      summary="Fixed auth test flake (clock/TTL). Tests green.",
-                      open_threads=[])
+engraphis_session(action="end", session_id=..., outcome="shipped",
+                  summary="Fixed auth test flake (clock/TTL). Tests green.",
+                  open_threads=[])
 ```
 
 ---
@@ -341,10 +368,10 @@ Kilo Code is an MCP client; Engraphis ships an MCP server (`engraphis-mcp`, loca
 `engraphis-init`, then add a `local` server named `engraphis` under the `mcp` key in
 `kilo.jsonc` (`["cmd","/c","engraphis-mcp"]` on Windows, `["engraphis-mcp"]` on
 macOS/Linux), pin `ENGRAPHIS_DB_PATH`, bump `timeout` to 15000, and verify with
-`engraphis_stats`. That gets the pipes connected. The *value* is the orchestration layer
-above it: 30 scoped, typed, bi-temporal memory, code, audit, and maintenance tools plus the
-discipline of "recall before you ask, remember before you move on," with
-`workspace → repo → session` scoping and periodic `engraphis_consolidate` to keep it clean.
+Engraphis action discovery. That gets the pipes connected. The *value* is the Smart gateway: six
+compact routine tools plus automatic access to scoped, typed, bi-temporal memory, code, audit, and
+maintenance capabilities. It preserves the discipline of "recall before you ask, remember before
+you move on," with `workspace → repo → session` scoping and periodic consolidation when needed.
 
 ---
 

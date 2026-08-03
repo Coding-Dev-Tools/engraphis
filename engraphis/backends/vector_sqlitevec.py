@@ -12,10 +12,12 @@ MATCH directly, so ``search`` expands the ANN window until it has enough visible
 from __future__ import annotations
 
 import sys
+from numbers import Integral
 from typing import Optional
 
 import numpy as np
 
+from engraphis.backends.embedder_deterministic import MAX_EMBEDDING_DIM
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import SearchFilter
 from engraphis.core.store import Store, memory_matches_filter
@@ -30,10 +32,23 @@ def _cosine_from_l2(distance: float) -> float:
     return max(-1.0, min(1.0, 1.0 - (float(distance) ** 2) / 2.0))
 
 
+def _validated_dimension(dim: int) -> int:
+    """Return a bounded integer safe to interpolate into sqlite-vec DDL."""
+    if isinstance(dim, bool) or not isinstance(dim, Integral):
+        raise ValueError("embedding dimension must be a positive integer")
+    dimension = int(dim)
+    if not 1 <= dimension <= MAX_EMBEDDING_DIM:
+        raise ValueError(
+            f"embedding dimension must be between 1 and {MAX_EMBEDDING_DIM}"
+        )
+    return dimension
+
+
 class SqliteVecVectorIndex:
     """ANN over embeddings using the sqlite-vec extension."""
 
     def __init__(self, store: Store, dim: int) -> None:
+        dimension = _validated_dimension(dim)
         # sqlite-vec is a loadable SQLite extension.  SQLCipher ships a different
         # SQLite build, and loading both native libraries into one interpreter has
         # caused hard crashes rather than a normal Python exception.  An `auto`
@@ -47,14 +62,14 @@ class SqliteVecVectorIndex:
             )
         import sqlite_vec  # lazy: optional dependency / native extension
         self.store = store
-        self.dim = dim
+        self.dim = dimension
         conn = store.conn
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec_ann USING vec0("
-            f"id TEXT PRIMARY KEY, embedding FLOAT[{dim}])"
+            f"id TEXT PRIMARY KEY, embedding FLOAT[{dimension}])"
         )
         conn.commit()
 
@@ -131,10 +146,11 @@ def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):
     prefer: "auto" (try sqlite-vec, fall back), "sqlite-vec" (require it),
             or "numpy" (force the reference index).
     """
+    dimension = _validated_dimension(dim)
     if prefer == "numpy":
         return NumpyVectorIndex(store)
     try:
-        return SqliteVecVectorIndex(store, dim)
+        return SqliteVecVectorIndex(store, dimension)
     except Exception:
         if prefer == "sqlite-vec":
             raise

@@ -53,6 +53,22 @@ def test_read_only_api_requires_token_and_does_not_reinforce():
     ).status_code == 404
 
 
+def test_tokenless_read_only_factory_rejects_remote_peers():
+    """The ASGI factory must retain the launcher's token-or-loopback boundary."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    client = TestClient(
+        create_read_only_app(svc),
+        client=("192.0.2.10", 50000),
+    )
+
+    # Health/schema probes remain safe for orchestration and discovery, but workspace
+    # reads fail closed even if an operator bypasses scripts.graph_server.
+    assert client.get("/health").status_code == 200
+    response = client.get("/recall", params={"query": "database", "workspace": "w"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "remote access requires a bearer token"}
+
+
 def test_read_only_api_serves_graph_and_intent_recall():
     svc = MemoryService.create(":memory:", graph_extractor="regex")
     pending = svc.remember(

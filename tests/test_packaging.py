@@ -280,6 +280,20 @@ def test_source_tree_version_matches_pyproject():
     assert declared.group(1) == fallback.group(1)
 
 
+def test_release_version_has_a_dated_changelog_section():
+    """A tagged package must not ship its release notes only as ``Unreleased``."""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert declared, "project version declaration moved — update this test"
+
+    heading = re.compile(
+        rf"^## \[{re.escape(declared.group(1))}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+        re.M,
+    )
+    assert len(heading.findall(changelog)) == 1
+
+
 def test_extras_stay_resolvable_on_the_lowest_supported_python():
     """A 3.10-only floor must carry a 3.10 marker, or its extra cannot install on 3.9.
 

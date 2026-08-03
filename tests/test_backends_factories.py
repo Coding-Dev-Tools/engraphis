@@ -181,6 +181,16 @@ def test_vector_index_avoids_sqlitevec_after_sqlcipher_load(monkeypatch):
     store.close()
 
 
+@pytest.mark.parametrize("dimension", [True, 0, -1, 1.5, "384", 65_537])
+def test_vector_index_rejects_an_invalid_ddl_dimension_before_backend_fallback(dimension):
+    store = Store(":memory:")
+    try:
+        with pytest.raises(ValueError, match="embedding dimension"):
+            get_vector_index(store, dim=dimension, prefer="auto")
+    finally:
+        store.close()
+
+
 def test_reranker_factory_falls_back_offline(monkeypatch):
     import engraphis.backends.reranker as reranker
 

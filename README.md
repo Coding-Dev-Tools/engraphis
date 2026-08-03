@@ -1,12 +1,13 @@
 # Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
+[![CI](https://github.com/Coding-Dev-Tools/engraphis/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Dev-Tools/engraphis/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/pypi/pyversions/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
+[![Support](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
-https://engraphis.com/
-
-https://discord.com/invite/Wfr2ejBmY
+[Website](https://engraphis.com/) · [Documentation](docs/) · [MCP tools](docs/MCP_TOOLS.md) ·
+[Security](SECURITY.md) · [Discord](https://discord.com/invite/Wfr2ejBmY)
 
 **Give coding agents durable project memory so the next session can retrieve the current decision, its evidence, and its history.**
 
@@ -21,6 +22,28 @@ https://discord.com/invite/Wfr2ejBmY
 > **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
+
+## Start in 60 seconds
+
+Choose the smallest surface that matches your use case. Python 3.10+ is recommended and is
+required for the dashboard, MCP, documents, Cloud Sync, and `all` extras; the NumPy-only core
+continues to support Python 3.9+.
+
+| Goal | Install | Start |
+|---|---|---|
+| Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
+| Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
+| Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
+| Full cross-platform feature set | `pip install "engraphis[all]"` | `engraphis-dashboard` |
+
+The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local memory needs no
+account or API key. For MCP clients other than Codex, configure a stdio server whose command is
+`engraphis-mcp`; see the [agent connection guide](docs/AGENT_CONNECT.md).
+
+> **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
+> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> remains version 7, so this MCP surface change does not require a data migration. See the
+> [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
 
 ## Measured token and context savings
 
@@ -131,9 +154,9 @@ Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce th
 the former measures evidence retrieval and context size, while the latter measures the
 answer-versus-abstain decision.
 
-## Full Engraphis install: pip install "engraphis[all]"
+## Dashboard and local UI
 
-Engraphis-Dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
+The Engraphis dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
 signup, or API key and stays in a SQLite file on your machine.
 
 **Ledger** is the primary local interface for recall, memories, graph exploration, provenance,
@@ -252,7 +275,7 @@ key. Plaintext SQLite remains the explicit default on every platform.
 
 ---
 
-## Quickstart: dashboard (the headline)
+## Quickstart: dashboard
 
 ```bash
 pip install "engraphis[server]"
@@ -338,12 +361,34 @@ cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 For Command Code scopes, verification, and its optional Provider API setup, see the
 [Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
 
-Your agent now has 33 tools for memory, recall, grounded answers, timelines, consolidation, code
-graph work, and privacy-safe receipts. The full inventory, including `engraphis_check_update`, is
-in the [MCP tool reference](docs/MCP_TOOLS.md).
+`engraphis-mcp` is zero-configuration Smart MCP: agents begin with six compact tools for sessions,
+prompt-ready recall, durable memory, action discovery, and safe execution. For code graphs,
+governance, audit, or other advanced work, the agent calls `engraphis_discover_actions` and then
+the indicated read or action executor; no profile selection is required. The gateway validates
+the discovered capability again before it runs it, and clients remain responsible for their
+normal destructive-action approval boundary.
 
-For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
-`engraphis_record_event` use workspace `default` when `workspace` is omitted.
+Existing clients that pin the historical 33 named tools can use
+`engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
+including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOLS.md).
+
+### Pi extension
+
+Pi users install the first-party extension from npm after installing Engraphis 1.4.x on
+Python 3.10 or later:
+
+```bash
+python -m pip install --upgrade "engraphis[mcp]>=1.4.0,<2"
+pi install npm:@engraphis/pi
+```
+
+The extension exposes the six Smart MCP tools as native Pi tools. It confirms every advanced
+state-changing action through Pi's UI and fails closed when the current Pi mode cannot present
+that approval. Package configuration, update/removal commands, and the local trust boundary are
+documented in [`integrations/pi/README.md`](integrations/pi/README.md).
+
+For unattended jobs, `engraphis_session`, `engraphis_remember`, and discovered actions use
+workspace `default` when `workspace` is omitted.
 
 ### Review gate for MCP, REST, imports, and sync
 
@@ -561,7 +606,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 33 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 33-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -579,8 +624,9 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes 33 MCP tools across memory, recall, code graphs, governance, sessions, and
-privacy-safe audit receipts. The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 33-tool Classic compatibility
+server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
+The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
 
 ---
@@ -620,8 +666,9 @@ pip install "engraphis[encryption]"
 
 The entire main memory database file is transparently encrypted with AES-256 via SQLCipher;
 full-text search, the graph, and every query keep working unchanged. Customer authentication
-and managed-service state use their respective deployment protections. When a key is set for the main database, Engraphis
-**fails loud** rather than silently falling back to plaintext. Generate a strong key:
+and managed-service state use their respective deployment protections. When a key is set for the
+main database, Engraphis **fails closed with an error** rather than silently falling back to
+plaintext. Generate a strong key:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -707,7 +754,7 @@ engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server: 33 tools
+│   ├── mcp_server.py        # Smart MCP gateway + 33-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
@@ -719,7 +766,7 @@ engraphis/
 │   ├── config.py / app.py   # env settings / REST server
 │   └── static/              # compatibility dashboard asset paths
 ├── eval/                    # offline retrieval eval harness + datasets
-├── tests/                   # pytest suite (300+ tests, offline numpy-only core)
+├── tests/                   # offline-first pytest suite and release/security contracts
 ├── scripts/                 # dashboard, server, graph, CLI, connect, update, consolidation, sync
 ├── docs/                    # product, API, hosting, sync, and provider guides
 ├── Dockerfile / docker-compose.yml

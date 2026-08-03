@@ -1,11 +1,14 @@
 """Evidence-harness contracts for planned-recall release gates."""
 from pathlib import Path
 
+import pytest
+
 from eval.harness import load_dataset
 from eval.planned_recall import (
     ABLATIONS,
     TOKEN_BUDGETS,
     _evidence_retention_quality,
+    _validate_dataset,
     run,
 )
 
@@ -62,3 +65,11 @@ def test_quality_requires_answer_bearing_excerpt_content_not_only_supporting_id(
     )
 
     assert quality < 1.0
+
+
+def test_dataset_validation_rejects_unknown_support_instead_of_awarding_perfect_quality():
+    cases = load_dataset(str(DATASET))
+    cases[0]["questions"][0]["supporting"] = ["missing-tag"]
+
+    with pytest.raises(ValueError, match="unknown supporting memory tags"):
+        _validate_dataset(cases)

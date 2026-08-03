@@ -77,47 +77,59 @@ _ALL_TOOLS = {
     "engraphis_check_update",
 }
 
+_SMART_TOOLS = {
+    "engraphis_session",
+    "engraphis_recall_context",
+    "engraphis_remember",
+    "engraphis_discover_actions",
+    "engraphis_execute_read",
+    "engraphis_execute_action",
+}
+
 
 def test_server_identity_and_tools_registered():
     import asyncio
 
     import engraphis.mcp_server as srv
     assert srv.mcp.name == "engraphis_mcp"
-    assert srv.mcp.instructions == srv._SESSION_PROTOCOL
-    assert "engraphis_recall_proactive" in srv.mcp.instructions
-    assert "operator-configured\nworkspace" in srv.mcp.instructions
-    assert "engraphis_start_session" in srv.mcp.instructions
-    assert "engraphis_end_session" in srv.mcp.instructions
-    assert "open_threads=[]" in srv.mcp.instructions
+    assert srv.mcp.instructions == srv._SMART_SESSION_PROTOCOL
+    assert len(srv.mcp.instructions) <= 512
+    assert "engraphis_session" in srv.mcp.instructions
+    assert "discover_actions" in srv.mcp.instructions
+    assert "engraphis_recall_proactive" not in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    assert set(tools) == _SMART_TOOLS
+
+    classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
+    assert srv.classic_mcp.name == "engraphis_mcp"
     assert len(_ALL_TOOLS) == 33
-    assert set(tools) == _ALL_TOOLS
+    assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("## 4. The 33 tools", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 33-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
-    props = tools["engraphis_remember"].inputSchema.get("properties", {})
+    props = classic["engraphis_remember"].inputSchema.get("properties", {})
     assert "content" in props and "workspace" in props and "params" not in props
     assert {"valid_from", "subject_key", "claim_kind"} <= set(props)
-    assert "as_of" in tools["engraphis_recall"].inputSchema.get("properties", {})
+    assert "as_of" in classic["engraphis_recall"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
             "response_mode", "diagnostics", "planning", "mtype_limits"} <= set(
-        tools["engraphis_recall"].inputSchema.get("properties", {})
+        classic["engraphis_recall"].inputSchema.get("properties", {})
     )
-    assert tools["engraphis_recall_context"].inputSchema["properties"][
+    assert classic["engraphis_recall_context"].inputSchema["properties"][
         "token_budget"
     ]["default"] == 1024
     assert {"planning", "mtype_limits"} <= set(
-        tools["engraphis_recall_context"].inputSchema.get("properties", {})
+        classic["engraphis_recall_context"].inputSchema.get("properties", {})
     )
-    assert "as_of" in tools["engraphis_recall_grounded"].inputSchema.get("properties", {})
+    assert "as_of" in classic["engraphis_recall_grounded"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
             "response_mode", "planning", "mtype_limits"} <= set(
-        tools["engraphis_answer"].inputSchema.get("properties", {})
+        classic["engraphis_answer"].inputSchema.get("properties", {})
     )
     assert {"as_of", "valid_at", "known_at"} <= set(
-        tools["engraphis_export_code_graph"].inputSchema.get("properties", {})
+        classic["engraphis_export_code_graph"].inputSchema.get("properties", {})
     )
 
 
@@ -135,6 +147,34 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
 
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["id"] == 1
+    assert response["result"]["serverInfo"]["name"] == "engraphis_mcp"
+
+
+def test_classic_mcp_entrypoint_preserves_historical_server_identity():
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "classic-entrypoint-test", "version": "1"},
+        },
+    }) + "\n"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "engraphis.mcp_classic_cli"],
         cwd=ROOT,
         input=payload,
         text=True,
@@ -234,7 +274,7 @@ def test_retrieval_annotations_match_observed_state_mutation(
     }
     observed_mutation = any(observed_changes.values())
 
-    tools = {tool.name: tool for tool in asyncio.run(srv.mcp.list_tools())}
+    tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     annotations = tools[tool_name].annotations
     assert annotations.readOnlyHint is (not observed_mutation)
     assert annotations.idempotentHint is (not observed_mutation)

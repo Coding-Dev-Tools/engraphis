@@ -15,6 +15,9 @@ claude mcp add engraphis -- engraphis-mcp
 ```
 
 The local server exposes the same memory semantics while keeping the database on your machine.
+It is Smart MCP by default: agents use the six compact routine tools and discover/execute advanced
+capabilities automatically when needed. There is no profile choice or manual escalation. If a
+legacy client pins direct tool names, configure `engraphis-mcp-classic` instead.
 Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or
 seat credential.
 
@@ -25,7 +28,7 @@ the packaged loopback server:
 
 ```bash
 pip install "engraphis[mcp]"
-engraphis-mcp-http                 # streamable HTTP at http://127.0.0.1:8711/mcp
+engraphis-mcp-http                 # Smart MCP at http://127.0.0.1:8711/mcp
 # equivalent: engraphis mcp-http
 ```
 
@@ -35,8 +38,20 @@ middleware. Do not expose it through a LAN address or proxy. For a remote deploy
 `engraphis[all]`, set a strong `ENGRAPHIS_API_TOKEN`, terminate TLS, and use the dashboard's
 authenticated `/mcp` endpoint instead.
 
+Use `engraphis-mcp-http --classic` only for an existing integration that requires the former 33
+direct tool names. New integrations should keep the Smart default.
+
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support
 unless that client has a maintained setup guide and integration test.
+
+## Host-owned conversation history
+
+An SDK or HTTP host that already owns the conversation transcript can call
+`POST /api/adaptive-context`. It accepts `query`, `history`, scope, and token-budget fields and
+returns either a bounded history slice or grounded retrieved context. This is deliberately an
+HTTP API, not an MCP tool: models should not receive or call it. Smart MCP does not require native
+deferred `tool_search`; a client that explicitly supports that OpenAI feature may use it as an
+additional optimization, never as a requirement.
 
 ## Connect through Team Cloud
 

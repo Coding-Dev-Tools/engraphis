@@ -1298,8 +1298,10 @@ class _ProactiveContextReq(BaseModel):
     repo: Optional[str] = None
     task: str = ""
     agent_state: str = ""
-    k: int = 10
+    k: StrictInt = Field(default=10, ge=1, le=50)
     synthesize: bool = False
+    token_budget: Optional[StrictInt] = Field(default=None, ge=0, le=32_768)
+    response_mode: str = "full"
 
 
 @router.post("/proactive-context")
@@ -1307,7 +1309,58 @@ def proactive_context(req: _ProactiveContextReq):
     ws = req.workspace or _default_ws()
     return _run(service().proactive_context, workspace=ws, repo=req.repo,
                 task=req.task, agent_state=req.agent_state, k=req.k,
-                synthesize=req.synthesize)
+                synthesize=req.synthesize, token_budget=req.token_budget,
+                response_mode=req.response_mode)
+
+
+class _AdaptiveContextReq(BaseModel):
+    """Host-owned history routing request; intentionally not an MCP tool model."""
+
+    query: str = Field(min_length=1, max_length=100_000)
+    history: str = Field(default="", max_length=100_000)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    session_id: Optional[str] = Field(default=None, max_length=200)
+    mtypes: Optional[list[str]] = None
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
+    k: StrictInt = Field(default=8, ge=1, le=50)
+    max_context_tokens: StrictInt = Field(default=4096, ge=0, le=32_768)
+    retrieval_token_budget: Optional[StrictInt] = Field(default=None, ge=0, le=32_768)
+    confidence_floor: float = Field(default=0.25, ge=0.0, le=1.0)
+    retrieval_profile: str = "balanced"
+    candidate_depth: str = "adaptive"
+    diagnostics: bool = False
+    planning: str = "off"
+    mtype_limits: Optional[dict[str, StrictInt]] = None
+
+
+@router.post("/adaptive-context")
+def adaptive_context(req: _AdaptiveContextReq):
+    """Choose bounded context for a host that already owns its conversation history."""
+    ws = req.workspace or _default_ws()
+    return _run(
+        service().adaptive_context,
+        req.query,
+        req.history,
+        workspace=ws,
+        repo=req.repo,
+        session_id=req.session_id,
+        mtypes=req.mtypes,
+        as_of=req.as_of,
+        valid_at=req.valid_at,
+        known_at=req.known_at,
+        k=req.k,
+        max_context_tokens=req.max_context_tokens,
+        retrieval_token_budget=req.retrieval_token_budget,
+        confidence_floor=req.confidence_floor,
+        retrieval_profile=req.retrieval_profile,
+        candidate_depth=req.candidate_depth,
+        diagnostics=req.diagnostics,
+        planning=req.planning,
+        mtype_limits=req.mtype_limits,
+    )
 
 
 @router.get("/audit")

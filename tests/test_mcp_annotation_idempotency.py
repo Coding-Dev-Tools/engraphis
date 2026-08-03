@@ -37,7 +37,7 @@ def _seed_approved_episode(server, content: str) -> str:
 
 
 def _annotations(tool_name):
-    tools = {tool.name: tool for tool in asyncio.run(srv.mcp.list_tools())}
+    tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     return tools[tool_name].annotations
 
 

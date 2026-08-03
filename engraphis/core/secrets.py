@@ -81,11 +81,28 @@ def _text(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     except (TypeError, ValueError, RecursionError):
-        return str(value)
+        try:
+            return str(value)
+        except Exception:
+            return ""
 
 
-def _mapping_secret_kind(value: Any) -> str | None:
+def _mapping_secret_kind(
+    value: Any,
+    *,
+    _seen: set[int] | None = None,
+    _depth: int = 0,
+) -> str | None:
     """Catch environment/config mappings before JSON rendering obscures their keys."""
+    if not isinstance(value, (dict, list, tuple, set)):
+        return None
+    if _depth >= 64:
+        return None
+    seen = _seen if _seen is not None else set()
+    marker = id(value)
+    if marker in seen:
+        return None
+    seen.add(marker)
     if isinstance(value, dict):
         for key, child in value.items():
             key_text = str(key)
@@ -93,12 +110,12 @@ def _mapping_secret_kind(value: Any) -> str | None:
             if (_SENSITIVE_MAPPING_KEY.fullmatch(key_text) and len(child_text) >= 8
                     and not _REDACTION.fullmatch(child_text)):
                 return "credential assignment"
-            nested = _mapping_secret_kind(child)
+            nested = _mapping_secret_kind(child, _seen=seen, _depth=_depth + 1)
             if nested:
                 return nested
     elif isinstance(value, (list, tuple, set)):
         for child in value:
-            nested = _mapping_secret_kind(child)
+            nested = _mapping_secret_kind(child, _seen=seen, _depth=_depth + 1)
             if nested:
                 return nested
     return None

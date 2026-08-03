@@ -163,6 +163,36 @@ jobs:
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npm run test:e2e
 
+  pi-extension:
+    name: Pi extension release gate
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: integrations/pi/npm-shrinkwrap.json
+      - name: Install the tagged Smart MCP server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: Verify the publishable Pi package and live bridge
+        working-directory: integrations/pi
+        env:
+          ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
+        run: |
+          npm ci --ignore-scripts
+          npm run verify
+          npm run test:integration
+          npm audit --omit=dev
+
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
@@ -229,7 +259,7 @@ jobs:
 
   release-evidence:
     name: Generate public release evidence
-    needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]
+    needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

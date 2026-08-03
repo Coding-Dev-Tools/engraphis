@@ -5,8 +5,34 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-02
+
+Engraphis 1.4 makes the compact Smart MCP gateway the default agent interface while preserving
+the complete Classic surface for existing integrations. It also strengthens review-gated writes,
+bounded context delivery, secure erasure, and release/runtime hardening without changing the v2
+database schema.
+
+### Upgrade notes
+
+- `engraphis-mcp` now exposes six Smart tools instead of 33 direct tools. Clients that depend on
+  the former names should switch their server command to `engraphis-mcp-classic`; HTTP clients can
+  use `engraphis-mcp-http --classic`.
+- Existing v2 databases remain on schema 7 and require no migration for this release.
+- The NumPy-only core supports Python 3.9+. Dashboard, MCP, documents, Cloud Sync, and `all`
+  installations require Python 3.10+ because their supported dependency versions require it.
+
 ### Added
 
+- Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes six compact tools
+  for sessions, prompt-ready recall, durable memory, discovery, and validated read/action
+  execution. `engraphis-mcp-classic` preserves the former 33 direct tool names and legacy alias
+  response shapes for pinned integrations.
+- The first-party `@engraphis/pi` package under `integrations/pi` exposes that Smart MCP surface
+  as native Pi tools, verifies the Engraphis 1.4.x handshake, and ships with independent npm
+  packaging and release gates.
+- Hosts that retain their own conversation history can call the non-MCP
+  `POST /api/adaptive-context` endpoint. Advanced proactive context also supports a bounded,
+  content-lean compact response while Classic keeps its full response by default.
 - Opt-in planned recall adds a bounded deterministic planner, an injectable planner protocol and
   optional LLM backend, priority-weighted multi-query RRF, post-rerank memory-type maxima, stable
   context revisions, and diagnostics-only planner traces across Python, service, REST, and MCP
@@ -18,20 +44,37 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Security
 
+- The Pi extension preserves the Smart gateway's destructive boundary: every discovered
+  state-changing action requires an explicit Pi confirmation, fails closed without a dialog,
+  and consumes its capability after one approval attempt so unknown outcomes are not retried.
 - Public writes now enter an explicit review gate: MCP, REST/dashboard-intent, import, sync, and
   extractor ingress are pending regardless of a caller-supplied trust label; detector matches are
   quarantined before they can contribute to prompt context or derived state. Human approval creates
   a fresh audited successor only through the CSRF-bound dashboard action or an interactive TTY
   command, never through MCP or a general REST endpoint. Historical rescans demote non-approved
-  records and retire their derived bridges. Public history, graph and code retrieval, and graph
-  indexing, and consolidation apply prompt eligibility before ranking or capacity decisions, so
-  pending or quarantined records cannot influence prompt-visible results through derived bridges.
+  records and retire their derived bridges. Public history, graph/code retrieval and indexing, and
+  consolidation apply prompt eligibility before ranking or capacity decisions, so pending or
+  quarantined records cannot influence prompt-visible results through derived bridges.
+- Smart MCP authorization now fails closed: discovery and read execution require viewer access,
+  state-changing execution requires admin access remotely, and pure reads do not emit write-side
+  telemetry receipts. Executor output is bounded without retrying or double-running handlers.
+- Tokenless remote requests to the read-only recall and repository-graph API now fail closed;
+  health and OpenAPI discovery remain public.
 - The deterministic detector now uses a pinned Unicode TR39 15.1.0 ASCII projection rather than
   a short hand-picked table, covering additional Latin, Cyrillic, Greek, mathematical, and legacy
   glyph substitutions without an online lookup or runtime dependency.
+- Secret scanning is cycle-safe and depth-bounded, and PostgreSQL source identities are reduced to
+  credential-free digests for both URI and libpq keyword DSNs.
 
 ### Fixed
 
+- Secure erase now rebuilds shared-edge provenance from surviving support rows. Historical-only
+  support remains available to time-travel reads while the edge is closed in the current graph.
+- API embedding backends now validate dimensions, response cardinality, item indices, finite
+  values, and normalization before accepting provider output, with consistent bounded fallback.
+- Planned-recall datasets reject dangling references, vector dimensions are bounded across local
+  and SQLite backends, and sync imports accept pinned state only when it is the literal boolean
+  `true`.
 - The production image now removes build-only pip and its vendored dependency snapshot after
   installation, eliminating unreachable vulnerable packages from the runtime attack surface.
 - Automatic LLM retention supervision now discards proposed retention values when it
@@ -42,7 +85,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
   printable registration metadata is rendered, preventing malformed control-plane values from
   being reflected into CLI or JSON output.
-
 - Explicit local `engraphis-cli ingest` commands now record local-owner-approved provenance,
   allowing their memories to appear in ordinary subsequent CLI recall. HTTP, MCP, import, and
   file-ingestion boundaries remain pending review.
@@ -78,6 +120,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - MCP-over-HTTP has a packaged `engraphis-mcp-http` command and a generic local setup guide. The
   project makes no client-specific integration claim without a maintained guide and integration
   test.
+- `.env.example` now mirrors runtime defaults for decay, context packing, loop cadence, and recall
+  depth so copied configurations do not silently override the documented behavior.
+
 ## [1.3.0] - 2026-08-01
 
 ### Added

@@ -132,7 +132,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert 'docker create --name "$container" engraphis:release' in release_docker
     assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in release_docker
     assert 'python -m pip_audit --path "$audit_dir"' in release_docker
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release_evidence
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release_evidence
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
@@ -173,7 +173,7 @@ def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
         assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
 
     release = _text(".github/workflows/release.yml")
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -196,7 +196,7 @@ def test_release_builds_one_portable_open_core_wheel():
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
     assert "  release-evidence:\n" in release
     assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release
@@ -321,8 +321,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "33 MCP tools" in architecture
-    assert "(33 of them)" in skill
+    assert "Smart MCP (6 tools)" in architecture
+    assert "Classic MCP (33 tools)" in architecture
+    assert "default Smart MCP surface has six" in skill
+    assert "Classic direct-tool guide" in skill
+    assert "engraphis-mcp-classic" in skill
     assert "recall_context (compact)" in architecture
     assert "engraphis_recall_context" in readme
     assert "`engraphis_check_update`" in readme

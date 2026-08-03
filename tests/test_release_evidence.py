@@ -208,7 +208,10 @@ def test_release_workflow_publishes_evidence_separately_from_package_artifacts()
         "dependency-audit", "container-smoke",
     ):
         assert "--verified-check " + check_id in evidence_job
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in evidence_job
+    assert (
+        "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]"
+        in evidence_job
+    )
     assert "--verified-check encryption-at-rest" in evidence_job
     assert "name: Download distributions" in evidence_job
     assert "npm run test:e2e" in browser_job

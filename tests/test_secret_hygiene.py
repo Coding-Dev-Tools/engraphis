@@ -6,7 +6,7 @@ import json
 import pytest
 
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import ExtractedFact, MemoryRecord, MemoryType, Scope
+from engraphis.core.interfaces import Edge, ExtractedFact, MemoryRecord, MemoryType, Scope
 from engraphis.core.secrets import SecretDetectedError, secret_kind
 from engraphis.core.store import Store
 from engraphis.service import MemoryService, ValidationError
@@ -134,6 +134,89 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     # The physical result is explicit; a busy WAL/VACUUM must never be reported as success.
     assert erased["maintenance"]["wal"] in {"truncated", "busy", "failed"}
     assert erased["maintenance"]["vacuum"] in {"completed", "failed"}
+
+
+def test_secure_erase_rebuilds_shared_edge_provenance_from_remaining_support():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    erased_id = engine.remember("Erased graph source.", workspace_id=workspace)
+    retained_id = engine.remember("Retained graph source.", workspace_id=workspace)
+    edge_id = engine.store.upsert_edge(Edge(
+        id="edg_shared", src="ent_alpha", dst="ent_beta", relation="uses",
+        workspace_id=workspace,
+        provenance={"source": "structured", "memory_id": erased_id},
+    ))
+    engine.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": retained_id}
+    )
+
+    engine.secure_erase(erased_id)
+
+    edge = engine.store.conn.execute(
+        "SELECT provenance FROM edges WHERE id=?", (edge_id,)
+    ).fetchone()
+    assert edge is not None
+    provenance = json.loads(edge["provenance"])
+    assert provenance["memory_id"] == retained_id
+    assert provenance["memory_ids"] == [retained_id]
+    assert erased_id not in edge["provenance"]
+    supports = engine.store.conn.execute(
+        "SELECT memory_id, provenance FROM edge_supports WHERE edge_id=?",
+        (edge_id,),
+    ).fetchall()
+    assert [row["memory_id"] for row in supports] == [retained_id]
+    assert erased_id not in supports[0]["provenance"]
+
+    neighbors = engine.store.neighbors(["ent_alpha"])
+    assert [edge.id for edge in engine.recall_engine._prompt_eligible_edges(neighbors)] == [
+        edge_id
+    ]
+
+
+def test_secure_erase_preserves_shared_edge_history_from_retired_support():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    erased_id = engine.remember("Erased current source.", workspace_id=workspace)
+    historical_id = engine.remember("Historical safe source.", workspace_id=workspace)
+    edge_id = engine.store.upsert_edge(Edge(
+        id="edg_historical", src="ent_alpha", dst="ent_beta", relation="uses",
+        workspace_id=workspace,
+        provenance={"source": "structured", "memory_id": erased_id},
+    ))
+    engine.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": historical_id}
+    )
+    historical_at = engine.store.conn.execute(
+        "SELECT MAX(valid_from) FROM edge_supports WHERE edge_id=?", (edge_id,)
+    ).fetchone()[0]
+    engine.retire(historical_id, reason="historical evidence")
+
+    engine.secure_erase(erased_id)
+
+    edge = engine.store.conn.execute(
+        "SELECT valid_to, valid_to_recorded_at, provenance FROM edges WHERE id=?",
+        (edge_id,),
+    ).fetchone()
+    assert edge is not None
+    assert edge["valid_to"] is not None
+    assert edge["valid_to_recorded_at"] is not None
+    provenance = json.loads(edge["provenance"])
+    assert provenance["memory_id"] == historical_id
+    assert provenance["memory_ids"] == [historical_id]
+    assert erased_id not in edge["provenance"]
+    assert engine.store.neighbors(["ent_alpha"]) == []
+    historical = engine.store.neighbors(["ent_alpha"], at=historical_at)
+    assert [item.id for item in historical] == [edge_id]
+    assert [
+        item.id for item in engine.recall_engine._prompt_eligible_edges(historical)
+    ] == [edge_id]
+    supports = engine.store.conn.execute(
+        "SELECT memory_id, valid_to, provenance FROM edge_supports WHERE edge_id=?",
+        (edge_id,),
+    ).fetchall()
+    assert [row["memory_id"] for row in supports] == [historical_id]
+    assert supports[0]["valid_to"] is not None
+    assert erased_id not in supports[0]["provenance"]
 
 
 def test_sync_drops_secret_bearing_rows_before_store_upsert():

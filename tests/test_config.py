@@ -68,6 +68,27 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=0" in example
     assert "| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` |" in readme
 
+    for name in (
+        "ENGRAPHIS_DECAY_HALFLIFE_DAYS",
+        "ENGRAPHIS_LOOP_INTERVAL",
+        "ENGRAPHIS_LOOP_TOP_K",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    configured = Settings()
+    assert f"# ENGRAPHIS_DECAY_HALFLIFE_DAYS={configured.decay_halflife_days:g}" in example
+    assert f"# ENGRAPHIS_LOOP_INTERVAL={configured.loop_interval}" in example
+    assert f"# ENGRAPHIS_LOOP_TOP_K={configured.loop_top_k}" in example
+
+    from engraphis.backends.extractor import (
+        CHUNK_MAX,
+        CHUNK_OVERLAP_TOKENS,
+        CHUNK_TARGET_TOKENS,
+    )
+
+    assert f"# ENGRAPHIS_CHUNK_TOKENS={CHUNK_TARGET_TOKENS}" in example
+    assert f"# ENGRAPHIS_CHUNK_MAX={CHUNK_MAX}" in example
+    assert f"# ENGRAPHIS_CHUNK_OVERLAP={CHUNK_OVERLAP_TOKENS}" in example
+
 
 def test_rerank_model_read_from_env(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")

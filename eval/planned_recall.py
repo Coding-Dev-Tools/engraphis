@@ -155,6 +155,30 @@ def _validate_dataset(dataset: list[dict]) -> None:
             "context-routing stress dataset is missing categories: "
             + ", ".join(sorted(missing))
         )
+    case_ids: set[str] = set()
+    task_ids: set[str] = set()
+    for case in dataset:
+        case_id = str(case.get("id") or "").strip()
+        if not case_id or case_id in case_ids:
+            raise ValueError("context-routing cases require unique non-empty ids")
+        case_ids.add(case_id)
+        tags = [str(memory.get("tag") or "").strip() for memory in case.get("memories", [])]
+        if any(not tag for tag in tags) or len(tags) != len(set(tags)):
+            raise ValueError(f"{case_id}: memory tags must be unique and non-empty")
+        known_tags = set(tags)
+        for question in case.get("questions", []):
+            task_id = str(question.get("id") or "").strip()
+            if not task_id or task_id in task_ids:
+                raise ValueError("context-routing questions require unique non-empty ids")
+            task_ids.add(task_id)
+            supporting = [str(tag) for tag in question.get("supporting", [])]
+            if not supporting:
+                raise ValueError(f"{task_id}: at least one supporting memory is required")
+            unknown = sorted(set(supporting) - known_tags)
+            if unknown:
+                raise ValueError(
+                    f"{task_id}: unknown supporting memory tags: {', '.join(unknown)}"
+                )
 
 
 def _summarize(rows: list[dict]) -> dict:

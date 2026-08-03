@@ -240,7 +240,7 @@ def _receipt_metadata(metadata: dict) -> dict:
         "entities_added", "relations_added",
         "retrieval_profile", "candidate_depth", "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
-        "adaptive_mode",
+        "adaptive_mode", "action_id", "schema_version", "result_mode",
     }
     def content_free_label(key: str, value: str) -> str:
         normalized = value.strip().casefold().replace(" ", "_")
@@ -301,11 +301,12 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
-    "token_usage", "adaptive_mode",
+    "token_usage", "adaptive_mode", "action_id", "schema_version", "result_mode",
 }
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
-    "graph_index", "grounded_recall", "adaptive_context", "consolidate", "sync",
+    "graph_index", "grounded_recall", "adaptive_context", "proactive_context", "smart_gateway",
+    "consolidate", "sync",
 }
 _PUBLIC_RECEIPT_STATUSES = {
     "ok", "add", "noop", "invalidate", "relate", "ingested",
@@ -2329,14 +2330,66 @@ class Store:
         # A graph edge whose last provenance support was the erased memory is itself a
         # derivative of that secret. Preserve shared graph facts with another support.
         if supported_edges and "edges" in tables:
-            marks = ",".join("?" for _ in supported_edges)
             if "edge_supports" in tables:
-                conn.execute(
-                    f"DELETE FROM edges WHERE id IN ({marks}) AND NOT EXISTS "
-                    "(SELECT 1 FROM edge_supports s WHERE s.edge_id=edges.id)",
-                    supported_edges,
-                )
+                for edge_id in supported_edges:
+                    remaining = conn.execute(
+                        "SELECT id, memory_id, valid_to, expired_at, provenance "
+                        "FROM edge_supports WHERE edge_id=? ORDER BY id",
+                        (edge_id,),
+                    ).fetchall()
+                    if not remaining:
+                        conn.execute("DELETE FROM edges WHERE id=?", (edge_id,))
+                        continue
+
+                    # Normalized support rows are authoritative. Rebuild every surviving
+                    # compatibility blob so the erased source cannot keep a shared edge
+                    # prompt-ineligible or remain falsely attributed in provenance.
+                    active_provenance = []
+                    active_memory_ids: list[str] = []
+                    historical_provenance = []
+                    historical_memory_ids: list[str] = []
+                    for support in remaining:
+                        support_memory_id = str(support["memory_id"] or "")
+                        if support_memory_id and support_memory_id not in historical_memory_ids:
+                            historical_memory_ids.append(support_memory_id)
+                        provenance = _loads(support["provenance"], {})
+                        provenance = dict(provenance) if isinstance(provenance, dict) else {}
+                        provenance["memory_id"] = support_memory_id
+                        provenance["memory_ids"] = (
+                            [support_memory_id] if support_memory_id else []
+                        )
+                        conn.execute(
+                            "UPDATE edge_supports SET provenance=? WHERE id=?",
+                            (_dumps(provenance), support["id"]),
+                        )
+                        historical_provenance.append(provenance)
+                        if support_memory_id and support["valid_to"] is None \
+                                and support["expired_at"] is None:
+                            if support_memory_id not in active_memory_ids:
+                                active_memory_ids.append(support_memory_id)
+                            active_provenance.append(provenance)
+                    memory_ids = active_memory_ids or historical_memory_ids
+                    if not memory_ids:
+                        conn.execute("DELETE FROM edges WHERE id=?", (edge_id,))
+                        continue
+                    if not active_memory_ids:
+                        closed_at = now_ts()
+                        conn.execute(
+                            "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+                            "WHERE id=? AND valid_to IS NULL",
+                            (closed_at, closed_at, edge_id),
+                        )
+                    rebuilt = _merge_edge_provenance(
+                        active_provenance or historical_provenance
+                    )
+                    rebuilt["memory_id"] = memory_ids[0]
+                    rebuilt["memory_ids"] = memory_ids
+                    conn.execute(
+                        "UPDATE edges SET provenance=? WHERE id=?",
+                        (_dumps(rebuilt), edge_id),
+                    )
             else:
+                marks = ",".join("?" for _ in supported_edges)
                 conn.execute(f"DELETE FROM edges WHERE id IN ({marks})", supported_edges)
 
         # An entity extracted only from this memory can itself contain credential text.
