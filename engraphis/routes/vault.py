@@ -333,6 +333,7 @@ async def import_folder(req: FolderImportReq):
                 content=content, source_type="folder_import",
                 metadata={"original_path": rel, "filename": f.name},
                 memory_type=req.memory_type,
+                trusted=False,
             )
             results["imported"] += 1
             results["files"].append({"path": rel, "title": title, "status": "ok"})
@@ -382,6 +383,7 @@ async def upload_folder(
                 content=content, source_type="folder_upload",
                 metadata={"filename": f.filename},
                 memory_type=memory_type,
+                trusted=False,
             )
             results["imported"] += 1
             results["files"].append({"path": f.filename, "title": title, "status": "ok"})
@@ -483,6 +485,7 @@ async def upload_folder_smart(
                             metadata={"filename": fd["filename"], "parent": fd["doc_id"]},
                             memory_type=split_type,
                             vector=split_vec,
+                            trusted=False,
                         )
                         results["split"] += 1
                     # Store the original too
@@ -491,6 +494,7 @@ async def upload_folder_smart(
                         content=fd["content"], source_type="smart_import",
                         metadata={"filename": fd["filename"]},
                         memory_type=mem_type, vector=vecs[i],
+                        trusted=False,
                     )
                     results["imported"] += 1
                     results["files"].append({"path": fd["filename"], "title": fd["title"],
@@ -503,6 +507,7 @@ async def upload_folder_smart(
                 content=fd["content"], source_type="smart_import",
                 metadata={"filename": fd["filename"]},
                 memory_type=mem_type, vector=vecs[i],
+                trusted=False,
             )
             results["imported"] += 1
             results["files"].append({

@@ -1,11 +1,29 @@
 # MCP tool reference
 
-`engraphis-mcp` is the zero-configuration Smart MCP gateway. It initially exposes six concise
+`engraphis-mcp` is the zero-configuration Smart MCP gateway. It initially exposes nine concise
 tools: `engraphis_session`, `engraphis_recall_context`, `engraphis_remember`,
-`engraphis_discover_actions`, `engraphis_execute_read`, and `engraphis_execute_action`. Agents use
+`engraphis_discover_actions`, `engraphis_execute_read`, `engraphis_execute_action`,
+`engraphis_get_memory`, `engraphis_update_memory`, and `engraphis_conflict_review`. Agents use
 the routine tools directly; for any advanced capability, they discover the best action and execute
 the returned, version-bound capability ID. Discovery returns the precise schema and side-effect
 class, and execution revalidates availability, scope, authorization, and arguments.
+
+### Smart tool inventory
+
+| Tool | What it does |
+|---|---|
+| `engraphis_session` | Starts or resumes a session, or ends it with a next-session handoff. |
+| `engraphis_recall_context` | Returns one compact, bounded context packet for routine agent work. |
+| `engraphis_remember` | Stores a routine durable memory with safe default provenance and deduplication. |
+| `engraphis_discover_actions` | Returns exact schemas for a small set of matching advanced actions. |
+| `engraphis_execute_read` | Executes only a discovered action that is read-only and idempotent. |
+| `engraphis_execute_action` | Executes a discovered write, admin, or destructive-capable action. |
+| `engraphis_get_memory` | Returns one governed memory record, excluding non-prompt-eligible content. |
+| `engraphis_update_memory` | Edits memory metadata; content changes use the governed correction path. |
+| `engraphis_conflict_review` | Lists pending, quarantined, or conflicting memories for review. |
+
+The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
+discovery and the validated executors.
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
@@ -30,24 +48,26 @@ is feature hashing with lexical overlap). In that mode vector retrieval and sema
 evidence are disabled; recall remains lexical/graph/code based and grounded answers use
 lexical support only.
 
-Trust boundary: every MCP write is `pending` review, regardless of a caller-supplied `source` or
-`trusted` label. The same rule applies to REST/dashboard-intent, import, sync, and extractor
-ingress; detector matches are `quarantined` immediately. Pending and quarantined records are
-available only to explicit inspection workflows and never appear in prompt-ready MCP recall or
-context, `engraphis_why`, or `engraphis_timeline`, nor can they feed resolution, links,
-graph/code backfill, or derived prompt context. `include_untrusted=True` is inspection-only and
-must never be copied into a model prompt.
+Trust boundary: normal local-agent memory creation is prompt-visible immediately after validation;
+it does not require owner approval. The default `agent` source covers `engraphis_remember`,
+`engraphis_ingest`, and dashboard intent writes. External sources remain `pending` regardless of
+a caller-supplied `trusted` label, and detector matches are `quarantined` immediately. Pending
+and quarantined records are available only to explicit inspection workflows and never appear in
+prompt-ready MCP recall or context, `engraphis_why`, or `engraphis_timeline`, nor can they feed
+resolution, links, graph/code backfill, or derived prompt context. `include_untrusted=True` is
+inspection-only and must never be copied into a model prompt.
 
-MCP deliberately has no approval tool. Approval creates a fresh, audited `approved` successor
-while retaining the reviewed source and its provenance. In the local product it is available only
-through the CSRF-bound dashboard review action (with `ENGRAPHIS_API_TOKEN`) or the interactive
-TTY command `python -m scripts.approve_memory MEM_ID --reason "..."`; the command rejects
-redirected input and requires a typed confirmation. Hosted approval is an owner/admin action of
-the private hosted service. Direct in-process `MemoryEngine` use is a trusted-code boundary for
-code that already has local database authority, not a transport permission.
+MCP deliberately has no approval tool. Approval is only for external or quarantined evidence: it
+creates a fresh, audited `approved` successor while retaining the reviewed source and its
+provenance. In the local product it is available only through the CSRF-bound dashboard review
+action (with `ENGRAPHIS_API_TOKEN`) or the interactive TTY command
+`python -m scripts.approve_memory MEM_ID --reason "..."`; the command rejects redirected input
+and requires a typed confirmation. Hosted approval is an owner/admin action of the private hosted
+service. Direct in-process `MemoryEngine` use is a trusted-code boundary for code that already has
+local database authority, not a transport permission.
 
-For the full public-write review and existing-store migration procedure, see the
-[public write review gate](WRITE_REVIEW.md).
+For the full memory trust model and existing-store migration procedure, see the
+[memory write trust model](WRITE_REVIEW.md).
 
 | Category | Tool | What it does |
 |---|---|---|

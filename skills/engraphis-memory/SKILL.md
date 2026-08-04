@@ -7,10 +7,29 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
-question. It assumes the Engraphis MCP server is connected. The default Smart MCP surface has six
-`engraphis_*` tools and automatically exposes advanced capabilities through discovery and a
-validated executor. If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc
-notes.
+question. It assumes the Engraphis MCP server is connected. The default Smart MCP surface has nine
+`engraphis_*` tools (`engraphis_session`, `engraphis_recall_context`, `engraphis_remember`,
+`engraphis_discover_actions`, `engraphis_execute_read`, `engraphis_execute_action`,
+`engraphis_get_memory`, `engraphis_update_memory`, `engraphis_conflict_review`) and automatically
+exposes advanced capabilities through discovery and a validated executor. If those tools are
+absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
+
+### Smart tool inventory
+
+| Tool | What it does |
+|---|---|
+| `engraphis_session` | Starts or resumes a session, or ends it with a next-session handoff. |
+| `engraphis_recall_context` | Returns one compact, bounded context packet for routine agent work. |
+| `engraphis_remember` | Stores a routine durable memory with safe default provenance and deduplication. |
+| `engraphis_discover_actions` | Returns exact schemas for a small set of matching advanced actions. |
+| `engraphis_execute_read` | Executes only a discovered action that is read-only and idempotent. |
+| `engraphis_execute_action` | Executes a discovered write, admin, or destructive-capable action. |
+| `engraphis_get_memory` | Returns one governed memory record, excluding non-prompt-eligible content. |
+| `engraphis_update_memory` | Edits memory metadata; content changes use the governed correction path. |
+| `engraphis_conflict_review` | Lists pending, quarantined, or conflicting memories for review. |
+
+The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
+discovery and the validated executors.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of

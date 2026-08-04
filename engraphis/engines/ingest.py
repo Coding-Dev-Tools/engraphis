@@ -6,11 +6,15 @@ a state-transition event, and stores everything in the memory layer.
 """
 from __future__ import annotations
 
+import json
+import math
 import re
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import numpy as np
 
+from engraphis.core.secrets import reject_secrets
 from engraphis.engines import embedder
 from engraphis.stores import now_ts
 from engraphis.stores import graph as graph_store
@@ -58,6 +62,50 @@ _STOPWORDS = {
     "Through", "During", "After", "Above", "Below", "Under", "Over",
 }
 
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MAX_CONTENT_CHARS = 100_000
+_MAX_TITLE_CHARS = 1_000
+_MAX_NAME_CHARS = 200
+
+
+def _normalize_text(value: Any, *, field: str, max_chars: int, required: bool = True) -> str:
+    """Validate and defang text before any detector, embedder, or store sees it."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    cleaned = _CONTROL_RE.sub("", value)
+    if required and not cleaned.strip():
+        raise ValueError(f"{field} must not be empty")
+    if len(cleaned) > max_chars:
+        raise ValueError(f"{field} exceeds {max_chars} characters")
+    return cleaned
+
+
+def _normalize_optional_text(value: Any, *, field: str, max_chars: int) -> Optional[str]:
+    if value is None:
+        return None
+    return _normalize_text(value, field=field, max_chars=max_chars, required=False)
+
+
+def _normalize_timestamp(value: Any, *, field: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be a finite number")
+    return result
+
+
+def _normalize_vector(value: Any) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("vector must be a finite one-dimensional array") from None
+    if result.ndim != 1 or result.size == 0 or not np.isfinite(result).all():
+        raise ValueError("vector must be a finite one-dimensional array")
+    return np.ascontiguousarray(result)
+
 
 def _iter_emails(text: str):
     """Yield email-like spans in one pass without regex backtracking."""
@@ -103,21 +151,79 @@ def ingest_document(
     updated_at: Optional[float] = None,
     memory_type: str = "semantic",
     vector: Optional[np.ndarray] = None,
+    trusted: bool = True,
 ) -> dict[str, Any]:
-    """Full ingestion pipeline: embed (or use provided vector) → store → extract entities → append event."""
-    ts = now_ts()
-    created_at = created_at or ts
-    updated_at = updated_at or ts
+    """Full ingestion pipeline: embed (or use provided vector) → store → extract entities → append event.
 
+    ``trusted`` defaults to True because the legacy v1 routes write the user's OWN
+    local documents (memory files, manual entries) — those are the user's trusted
+    notes and must remain recall-visible. External file ingestion (folder/upload
+    imports of web/PDF content) passes ``trusted=False`` so recall filters it out,
+    mirroring the v2 poisoning gate without breaking the primary v1 UX.
+    """
+    namespace = _normalize_text(
+        namespace, field="namespace", max_chars=_MAX_NAME_CHARS
+    )
+    document_id = _normalize_text(
+        document_id, field="document_id", max_chars=_MAX_NAME_CHARS
+    )
+    title = _normalize_text(
+        title, field="title", max_chars=_MAX_TITLE_CHARS, required=False
+    )
+    content = _normalize_text(
+        content, field="content", max_chars=_MAX_CONTENT_CHARS
+    )
+    source_type = _normalize_optional_text(
+        source_type, field="source_type", max_chars=_MAX_NAME_CHARS
+    )
+    priority = _normalize_optional_text(
+        priority, field="priority", max_chars=_MAX_NAME_CHARS
+    )
+    memory_type = _normalize_text(
+        memory_type, field="memory_type", max_chars=_MAX_NAME_CHARS
+    )
+    created_at = _normalize_timestamp(created_at, field="created_at")
+    updated_at = _normalize_timestamp(updated_at, field="updated_at")
+    if not isinstance(trusted, bool):
+        raise ValueError("trusted must be a boolean")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        raise ValueError("metadata must be an object")
+    clean_metadata = dict(metadata or {})
+
+    # Reject credentials after control-character removal so an attacker cannot
+    # hide a token behind terminal controls. The detector's error is content-free.
+    reject_secrets((
+        ("title", title), ("content", content), ("metadata", clean_metadata),
+        ("source_type", source_type), ("priority", priority),
+    ))
+    raw_provenance = clean_metadata.get("provenance")
+    provenance = dict(raw_provenance) if isinstance(raw_provenance, Mapping) else {}
+    # Caller metadata may describe origin, but it cannot grant authority. The explicit
+    # route-level trust decision owns every authority-bearing field.
+    provenance["trusted"] = trusted
+    provenance["trust_origin"] = "legacy_ingest"
+    provenance.setdefault("source", "document")
+    provenance["review_state"] = "approved" if trusted else "pending"
+    stamped_metadata = {**clean_metadata, "provenance": provenance}
+    try:
+        json.dumps(stamped_metadata, ensure_ascii=False)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise ValueError("metadata must be JSON-serializable") from None
+
+    ts = now_ts()
+    created_at = ts if created_at is None else created_at
+    updated_at = ts if updated_at is None else updated_at
     full_text = f"{title}\n\n{content}" if title else content
-    vec = vector if vector is not None else embedder.embed(full_text)
+    vec = _normalize_vector(vector) if vector is not None else _normalize_vector(
+        embedder.embed(full_text)
+    )
 
     mem = mem_store.upsert_memory(
         namespace=namespace,
         document_id=document_id,
         title=title,
         content=content,
-        metadata=metadata,
+        metadata=stamped_metadata,
         source_type=source_type,
         priority=priority,
         vector=vec,
@@ -158,20 +264,28 @@ def ingest_document(
 
 
 def ingest_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Ingest multiple documents. Each item must have title, content, namespace, document_id."""
+    """Ingest multiple documents, preserving each item's trust decision."""
+    if not isinstance(items, list):
+        raise ValueError("items must be a list")
     results = []
     for item in items:
+        if not isinstance(item, Mapping):
+            raise ValueError("each item must be an object")
         results.append(ingest_document(
-            namespace=item["namespace"],
-            document_id=item.get("documentId", item.get("document_id")),
+            namespace=item.get("namespace"),
+            document_id=item.get("documentId") or item.get("document_id"),
             title=item.get("title", ""),
-            content=item["content"],
+            content=item.get("content"),
             metadata=item.get("metadata"),
-            source_type=item.get("sourceType", item.get("source_type")),
+            source_type=item.get("sourceType") or item.get("source_type"),
             priority=item.get("priority"),
-            created_at=item.get("createdAt", item.get("created_at")),
-            updated_at=item.get("updatedAt", item.get("updated_at")),
-            memory_type=item.get("memory_type", item.get("memoryType", "semantic")),
+            created_at=item.get("createdAt") if item.get("createdAt") is not None
+            else item.get("created_at"),
+            updated_at=item.get("updatedAt") if item.get("updatedAt") is not None
+            else item.get("updated_at"),
+            memory_type=item.get("memory_type") or item.get("memoryType") or "semantic",
+            vector=item.get("vector"),
+            trusted=item.get("trusted", True),
         ))
     job = ledger_store.create_job(
         namespace=None,

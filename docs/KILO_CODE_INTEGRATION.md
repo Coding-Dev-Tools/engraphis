@@ -41,7 +41,7 @@ Everything runs on your machine. The whole store is a single SQLite file. Local 
 You interact with Engraphis through three surfaces, all backed by the *same* engine (`MemoryService`), so they can never drift apart:
 
 - **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`): a visual product to see, search, and curate memory.
-- **The MCP server** (`engraphis-mcp`): a six-tool Smart gateway for routine memory work plus
+- **The MCP server** (`engraphis-mcp`): a nine-tool Smart gateway for routine memory work plus
   automatic discovery and validated execution of advanced capabilities. **This is the surface
   Kilo Code uses.**
 - **The Python library** (`from engraphis.service import MemoryService`): for direct programmatic use.
@@ -92,7 +92,7 @@ engraphis-init
 
 This gives you a console command, `engraphis-mcp`, which is the zero-configuration Smart MCP
 server (it speaks stdio, exactly the transport Kilo Code's "Local (STDIO)" type expects). It starts
-with six compact tools; the agent discovers and executes code, governance, audit, and other
+with nine compact tools; the agent discovers and executes code, governance, audit, and other
 advanced actions as needed. You can sanity-check that it's on your PATH:
 
 ```bash
@@ -191,7 +191,7 @@ You can also click **Approve Always** on any tool at runtime to write the same r
 
 ## 4. Smart tools and the Classic compatibility surface
 
-Normal `engraphis-mcp` setup exposes exactly these six Smart tools. Routine memory work stays
+Normal `engraphis-mcp` setup exposes exactly these nine Smart tools. Routine memory work stays
 compact; for everything else, discovery returns the exact schema, capability ID, and side-effect
 class, and the appropriate executor revalidates all of it before running.
 
@@ -203,6 +203,9 @@ class, and the appropriate executor revalidates all of it before running.
 | `engraphis_discover_actions` | Find the best advanced capability and its exact schema. |
 | `engraphis_execute_read` | Run a discovered read-only/idempotent capability. |
 | `engraphis_execute_action` | Run a discovered stateful, administrative, or destructive-capable action. |
+| `engraphis_get_memory` | Read one memory's governed record (content, provenance, scope, temporal fields). |
+| `engraphis_update_memory` | Edit a memory's metadata fields (title, type, importance). |
+| `engraphis_conflict_review` | List pending/quarantined/conflicted records for review (read-only inbox). |
 
 `engraphis-mcp-classic` is only for an existing configuration that pins direct tool names. It
 preserves the former 33-tool surface below; new Kilo Code installations should keep the zero-config

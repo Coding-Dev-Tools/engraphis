@@ -73,12 +73,71 @@ def test_pypi_version_pin_is_applied_to_the_install_target(monkeypatch):
     monkeypatch.setattr(update.subprocess, "Popen",
                         _spawner(lambda _cmd: _FakeProcess(), calls))
     monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[server]")
     update._pip_update("pypi")
     assert [command for command, _kwargs, _proc in calls] == [[
         update.sys.executable, "-m", "pip", "install", "--upgrade",
         "engraphis[server]==1.2.3",
     ]]
 
+
+def test_pypi_update_replays_installed_extras(monkeypatch):
+    """An update must not silently narrow ``[all]`` (or another extra) to ``[server]``."""
+    calls = []
+    monkeypatch.setattr(update.subprocess, "Popen",
+                        _spawner(lambda _cmd: _FakeProcess(), calls))
+    monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[all]")
+    update._pip_update("pypi")
+    assert [command for command, _kwargs, _proc in calls] == [[
+        update.sys.executable, "-m", "pip", "install", "--upgrade",
+        "engraphis[all]==1.2.3",
+    ]]
+
+
+def test_pipx_update_replays_installed_extras(monkeypatch):
+    calls = []
+    monkeypatch.setattr(update.subprocess, "Popen",
+                        _spawner(lambda _cmd: _FakeProcess(), calls))
+    monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[all]")
+    update._pipx_update()
+    assert [command for command, _kwargs, _proc in calls] == [[
+        "pipx", "install", "--force", "engraphis[all]==1.2.3",
+    ]]
+
+
+def test_pipx_update_without_tag_preserves_safe_extras(monkeypatch):
+    calls = []
+    monkeypatch.setattr(update.subprocess, "Popen",
+                        _spawner(lambda _cmd: _FakeProcess(), calls))
+    monkeypatch.setattr(update, "LATEST_TAG", "")
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[all]")
+    update._pipx_update()
+    assert [command for command, _kwargs, _proc in calls] == [[
+        "pipx", "install", "--force", "engraphis[all]",
+    ]]
+
+
+def test_installed_extras_uses_explicit_override(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", "server,code,server")
+    assert update._installed_extras() == "[code,server]"
+
+
+def test_installed_extras_defaults_to_safe_superset(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_EXTRAS", raising=False)
+    assert update._installed_extras() == "[all]"
+
+
+def test_installed_extras_allows_deliberate_base_update(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", "none")
+    assert update._installed_extras() == ""
+
+
+def test_installed_extras_rejects_invalid_override(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", "server;--index-url=secret")
+    with pytest.raises(ValueError, match="ENGRAPHIS_UPDATE_EXTRAS"):
+        update._installed_extras()
 
 def test_detects_noneditable_git_install_from_pep610_metadata(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_DOCKER", raising=False)
@@ -98,6 +157,7 @@ def test_detects_noneditable_git_install_from_pep610_metadata(monkeypatch):
 
 def test_noneditable_git_update_preserves_recorded_fork(monkeypatch):
     calls = []
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", "none")
     fork = "https://github.com/example/private-engraphis.git"
     monkeypatch.setattr(update, "_installed_git_url", lambda: fork)
     monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
@@ -161,6 +221,42 @@ def test_failed_editable_reinstall_restores_original_branch(monkeypatch, tmp_pat
     assert ["git", "-C", str(project), "checkout", "main"] in [c for c, _k, _p in calls]
     assert install_attempts == 2
 
+
+
+def test_rollback_instructions_quote_checkout_paths(monkeypatch, tmp_path, capsys):
+    project = tmp_path / "clone with spaces"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.setattr(update.shutil, "which", lambda _name: "git")
+    monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
+    calls = []
+    install_attempts = 0
+
+    def handler(command):
+        nonlocal install_attempts
+        if command[:4] == [update.sys.executable, "-m", "pip", "show"]:
+            return _FakeProcess(stdout=f"Editable project location: {project}\n")
+        if "rev-parse" in command:
+            return _FakeProcess(stdout="old-sha\n")
+        if "symbolic-ref" in command:
+            return _FakeProcess(stdout="main\n")
+        if "rev-list" in command:
+            return _FakeProcess(stdout="new-sha\n")
+        if "status" in command:
+            return _FakeProcess(stdout="")
+        if command[:4] == [update.sys.executable, "-m", "pip", "install"]:
+            install_attempts += 1
+            return _FakeProcess(returncode=1)
+        if command[-2:] == ["checkout", "main"]:
+            return _FakeProcess(returncode=1)
+        return _FakeProcess()
+
+    monkeypatch.setattr(update.subprocess, "Popen", _spawner(handler, calls))
+    with pytest.raises(update.subprocess.CalledProcessError):
+        update._git_update()
+
+    captured = capsys.readouterr().err
+    assert f'"{project}"' in captured
+    assert install_attempts == 1
 
 def test_main_reports_update_failure_without_traceback(monkeypatch, capsys):
     monkeypatch.setattr(update, "_detect_install", lambda: "pypi")

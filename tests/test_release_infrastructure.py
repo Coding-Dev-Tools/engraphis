@@ -103,7 +103,7 @@ def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     assert "pi install npm:@engraphis/pi" not in readme
     assert "Every advanced state-changing action requires an explicit Pi confirmation dialog" in pi_guide
 
-    review_gate = "Every public write enters review as `pending`"
+    review_gate = "Normal local-agent memory creation is immediate"
     assert review_gate not in readme
     assert review_gate in review_guide
     assert "python -m scripts.rescan_poisoning --db engraphis.db --apply" in review_guide
@@ -360,9 +360,9 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "Smart MCP (6 tools)" in architecture
+    assert "Smart MCP (9 tools)" in architecture
     assert "Classic MCP (33 tools)" in architecture
-    assert "default Smart MCP surface has six" in skill
+    assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
     assert "recall_context (compact)" in architecture

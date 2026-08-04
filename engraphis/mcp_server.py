@@ -28,6 +28,8 @@ import hmac
 import json
 import logging
 import secrets
+import math
+
 from dataclasses import dataclass
 from typing import Any, Annotated, Callable, List, Optional
 
@@ -35,6 +37,7 @@ from pydantic import Field, StrictBool, StrictInt
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import CallToolResult, TextContent
 except ImportError:  # pragma: no cover - exercised only without the optional dep
     raise SystemExit(
         "The 'mcp' package is required to run the Engraphis MCP server.\n"
@@ -43,6 +46,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
 
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
+from engraphis.core.poisoning import prompt_eligible
 from engraphis.service import MemoryService, ValidationError
 
 logger = logging.getLogger("engraphis.mcp")
@@ -98,6 +102,7 @@ def service() -> MemoryService:
             settings.db_path,
             embed_model=settings.embed_model or None,
             allowed_workspaces=settings.allowed_workspaces,
+            vector_backend=settings.vector_backend,
             extractor=settings.extractor,
         )
     return _service
@@ -105,6 +110,7 @@ def service() -> MemoryService:
 
 def _ok(payload: dict) -> str:
     return json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
 
 
 def _err(exc: Exception) -> str:
@@ -1440,7 +1446,10 @@ def engraphis_ingest(
     try:
         return _ok(service().ingest(
             content, workspace=workspace, repo=repo, session_id=session_id,
-            mtype=mtype, scope=scope, source="mcp", trusted=False,
+            # MCP's normal ingest path is an agent-authored memory write.  The
+            # service gives this local-agent source immediate prompt eligibility;
+            # explicitly external sources and detector matches remain contained.
+            mtype=mtype, scope=scope, source="agent", trusted=False,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1857,8 +1866,107 @@ def _action_payload(spec: ActionSpec) -> dict[str, Any]:
     }
 
 
-def _gateway_error(kind: str) -> str:
-    return f"Error: {kind}"
+# Machine-readable error semantics for the Smart gateway.  Every failure on this
+# surface is a JSON error envelope with a stable code so generic agent loops can
+# branch on *why* a call failed instead of pattern-matching prose, plus an explicit
+# ``retryable`` signal.  The Classic surface keeps its pinned ``"Error: …"`` string
+# contract (tests in test_mcp_server.py / test_smart_mcp_gateway.py enforce it).
+_SMART_ERROR_CODES = frozenset({
+    "E_VALIDATION",
+    "E_NOT_FOUND",
+    "E_SCOPE",
+    "E_RETRYABLE",
+    "E_INTERNAL",
+})
+
+
+def _smart_error(code: str, message: str, *, retryable: bool) -> CallToolResult:
+    """Build an ``isError`` MCP result carrying a stable error envelope."""
+    assert code in _SMART_ERROR_CODES, f"unknown Smart error code {code!r}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps({
+            "error": {"code": code, "message": message, "retryable": retryable},
+        }, indent=2, default=str, ensure_ascii=False))],
+        isError=True,
+    )
+
+
+def _smart_error_from_string(error_string: str) -> CallToolResult:
+    """Lift a classic handler's safe ``"Error: …"`` string into the Smart envelope.
+
+    Validation errors (any ``"Error: <reason>"`` string a classic tool returned through
+    its ``except ValidationError`` path) keep their actionable message and are never
+    retryable.  The exact generic internal message is re-tagged ``E_INTERNAL``; any
+    other literal ``"Error: …"`` return is a known content-free token and is treated as
+    a caller error, matching the pre-existing gateway semantics.
+    """
+    if error_string == "Error: operation failed. Check the Engraphis server logs for details.":
+        return _smart_error("E_INTERNAL", error_string, retryable=False)
+    if error_string.startswith("Error: no memory with id "):
+        return _smart_error("E_NOT_FOUND", error_string, retryable=False)
+    return _smart_error("E_VALIDATION", error_string, retryable=False)
+
+
+def _gateway_error(kind: str) -> CallToolResult:
+    """Render a Smart gateway failure with a stable machine-readable code.
+
+    ``kind`` is the existing content-free failure token (``invalid_or_stale_capability``,
+    ``action_requires_execute_action``, …).  Precondition/argument failures are the
+    caller's fault and are never retryable; the message stays safe to surface.
+    """
+    kind = str(kind)
+    code = "E_NOT_FOUND" if kind.endswith("_not_found") else "E_VALIDATION"
+    return _smart_error(code, kind, retryable=False)
+
+
+def _classify_gateway_exception(exc: Exception) -> CallToolResult:
+    """Map a raised classic handler exception to a stable Smart error code.
+
+    ``ValidationError`` keeps its safe, actionable message. Unknown failures never
+    leak internals: transient timeouts/lock contention are ``E_RETRYABLE``; all other
+    failures are ``E_INTERNAL``.
+    """
+    if isinstance(exc, ValidationError):
+        message = f"Error: {exc}"
+        code = "E_NOT_FOUND" if str(exc).startswith("no memory with id ") else "E_VALIDATION"
+        return _smart_error(code, message, retryable=False)
+    message = str(exc)
+    lowered = message.lower()
+    retryable = (
+        isinstance(exc, TimeoutError)
+        or "timed out" in lowered
+        or "timeout" in lowered
+        or "database is locked" in lowered
+        or "locked" in lowered
+    )
+    if retryable:
+        return _smart_error("E_RETRYABLE", "Error: operation timed out or the store "
+                            "is temporarily locked; retry the request.",
+                            retryable=True)
+    return _smart_error("E_INTERNAL",
+                        "Error: operation failed. Check the Engraphis server logs for details.",
+                        retryable=False)
+
+
+def _gateway_classify_result(result: Any) -> CallToolResult:
+    """Map a failed classic action result to the Smart error envelope.
+
+    A raised handler exception arrives as ``("execution_failed", exc)`` and is
+    classified by type: transient conditions become ``E_RETRYABLE``, everything else
+    ``E_INTERNAL``.  A literal ``"Error: …"`` string is lifted by
+    :func:`_smart_error_from_string` (validation semantics preserved).  The
+    ``invalid_arguments`` token is a caller-input failure (``E_VALIDATION``); any other
+    content-free token (``execution_failed``) is a generic no-leak internal failure.
+    """
+    if isinstance(result, tuple) and len(result) == 2 and result[0] == "execution_failed":
+        return _classify_gateway_exception(result[1])
+    if isinstance(result, str) and result.startswith("Error:"):
+        return _smart_error_from_string(result)
+    if result == "invalid_arguments":
+        return _smart_error("E_VALIDATION", "invalid_arguments", retryable=False)
+    return _smart_error("E_INTERNAL",
+                        "Error: operation failed. Check the Engraphis server logs for details.",
+                        retryable=False)
 
 
 def _bounded_gateway_success(spec: ActionSpec, payload: dict[str, Any]) -> str:
@@ -1911,23 +2019,67 @@ def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[Acti
     return spec
 
 
+_MAX_GATEWAY_ARGUMENT_BYTES = 256 * 1024
+_MAX_GATEWAY_COLLECTION_ITEMS = 2_048
+_MAX_GATEWAY_ARGUMENT_DEPTH = 16
+
+
+def _gateway_arguments_are_json_safe(value: Any, *, depth: int = 0) -> bool:
+    """Reject non-JSON values and pathological nesting before Pydantic validation."""
+    if depth > _MAX_GATEWAY_ARGUMENT_DEPTH:
+        return False
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return (
+            len(value) <= _MAX_GATEWAY_COLLECTION_ITEMS
+            and all(_gateway_arguments_are_json_safe(item, depth=depth + 1) for item in value)
+        )
+    if isinstance(value, dict):
+        return (
+            len(value) <= _MAX_GATEWAY_COLLECTION_ITEMS
+            and all(
+                isinstance(key, str)
+                and _gateway_arguments_are_json_safe(item, depth=depth + 1)
+                for key, item in value.items()
+            )
+        )
+    return False
+
+
 def _run_action(spec: ActionSpec, arguments: dict[str, Any]) -> tuple[bool, Any, dict[str, Any]]:
     """Run the existing typed classic handler without serializing a nested JSON string."""
-    if not isinstance(arguments, dict):
+    if not isinstance(arguments, dict) or not _gateway_arguments_are_json_safe(arguments):
         return False, "invalid_arguments", {}
-    tool = classic_mcp._tool_manager.get_tool(spec.tool_name)
-    properties = set((tool.parameters or {}).get("properties", {}))
+    try:
+        encoded_arguments = json.dumps(
+            arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        return False, "invalid_arguments", {}
+    if len(encoded_arguments) > _MAX_GATEWAY_ARGUMENT_BYTES:
+        return False, "invalid_arguments", {}
+    try:
+        tool = classic_mcp._tool_manager.get_tool(spec.tool_name)
+        properties = set((tool.parameters or {}).get("properties", {}))
+    except Exception as exc:  # noqa: BLE001 - registry failures stay content-free
+        return False, ("execution_failed", exc), {}
     if set(arguments) - properties:
         return False, "invalid_arguments", {}
     try:
-        model = tool.fn_metadata.arg_model.model_validate(arguments)
+        model = tool.fn_metadata.arg_model.model_validate(arguments, strict=True)
         validated_arguments = model.model_dump()
     except Exception:  # noqa: BLE001 - validation errors stay content-free
         return False, "invalid_arguments", {}
     try:
         raw = tool.fn(**validated_arguments)
-    except Exception:  # noqa: BLE001 - handler errors stay content-free
-        return False, "execution_failed", {}
+    except Exception as exc:  # noqa: BLE001 - handler errors stay content-free
+        # Surface the exception object (never its internals) so the Smart gateway can
+        # tag timeouts / locked-store contention as E_RETRYABLE while keeping the
+        # Classic surface's content-free string behavior untouched.
+        return False, ("execution_failed", exc), {}
     if isinstance(raw, str):
         if raw.startswith("Error:"):
             # Classic tools already return a deliberately safe public error envelope.
@@ -1996,6 +2148,7 @@ smart_mcp = FastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
     name="engraphis_session",
     annotations={"title": "Start or end a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    structured_output=False,
 )
 def engraphis_session(
     action: Annotated[str, Field(description="start to resume work, or end to save its handoff.",
@@ -2020,16 +2173,19 @@ def engraphis_session(
     if action == "end":
         if not session_id:
             return _gateway_error("session_id_required")
-        return engraphis_end_session(
+        ended = engraphis_end_session(
             session_id=session_id, summary=summary, outcome=outcome, open_threads=open_threads,
         )
+        if isinstance(ended, str) and ended.startswith("Error:"):
+            return _smart_error_from_string(ended)
+        return ended
     if action != "start":
         return _gateway_error("invalid_session_action")
     started = engraphis_start_session(
         workspace=workspace, repo=repo, agent=agent, goal=goal, force_new=force_new,
     )
     if started.startswith("Error:"):
-        return started
+        return _smart_error_from_string(started)
     payload = json.loads(started)
     payload["context_status"] = "not_requested"
     if not goal:
@@ -2053,6 +2209,7 @@ def engraphis_session(
     name="engraphis_recall_context",
     annotations={"title": "Recall compact project context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    structured_output=False,
 )
 def smart_recall_context(
     query: Annotated[str, Field(description="Question or task needing prior context.", min_length=1,
@@ -2065,16 +2222,20 @@ def smart_recall_context(
                                       le=32_768)] = 1024,
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
-    return engraphis_recall_context(
+    result = engraphis_recall_context(
         query=query, workspace=workspace, repo=repo, session_id=session_id, k=k,
         token_budget=token_budget,
     )
+    if isinstance(result, str) and result.startswith("Error:"):
+        return _smart_error_from_string(result)
+    return result
 
 
 @smart_mcp.tool(
     name="engraphis_remember",
     annotations={"title": "Remember a durable fact", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    structured_output=False,
 )
 def smart_remember(
     content: Annotated[str, Field(description="Durable fact, decision, preference, or procedure.",
@@ -2087,16 +2248,20 @@ def smart_remember(
                                        le=1.0)] = 0.0,
 ) -> str:
     """Store a routine durable memory with safe default provenance and deduplication."""
-    return engraphis_remember(
+    result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,
     )
+    if isinstance(result, str) and result.startswith("Error:"):
+        return _smart_error_from_string(result)
+    return result
 
 
 @smart_mcp.tool(
     name="engraphis_discover_actions",
     annotations={"title": "Discover an advanced Engraphis capability", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    structured_output=False,
 )
 def engraphis_discover_actions(
     task: Annotated[str, Field(description="Describe the capability needed, without pasting memory content.",
@@ -2126,9 +2291,7 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
         return _gateway_error("read_action_requires_execute_read")
     ok, result, validated_arguments = _run_action(spec, arguments)
     if not ok:
-        if isinstance(result, str) and result.startswith("Error:"):
-            return result
-        return _gateway_error(str(result))
+        return _gateway_classify_result(result)
     if spec.side_effect != "read":
         _record_gateway_execution(spec, validated_arguments, result)
     return _bounded_gateway_success(spec, {
@@ -2143,6 +2306,7 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
     name="engraphis_execute_read",
     annotations={"title": "Execute a discovered read action", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    structured_output=False,
 )
 def engraphis_execute_read(
     capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
@@ -2159,6 +2323,7 @@ def engraphis_execute_read(
     name="engraphis_execute_action",
     annotations={"title": "Execute a discovered stateful action", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    structured_output=False,
 )
 def engraphis_execute_action(
     capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
@@ -2169,6 +2334,158 @@ def engraphis_execute_action(
 ) -> str:
     """Execute a discovered write, admin, or destructive-capable action safely."""
     return _execute_gateway(capability_id, schema_digest, arguments, expected="action")
+
+
+@smart_mcp.tool(
+    name="engraphis_get_memory",
+    annotations={"title": "Read one memory's governed record", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    structured_output=False,
+)
+def engraphis_get_memory(
+    memory_id: Annotated[str, Field(description="Memory id to read.", min_length=1,
+                                    max_length=200)],
+    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+                                    max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+                                         max_length=200)] = None,
+) -> str:
+    """Return one memory's governed record (content, provenance, scope, temporal fields).
+
+    Read-only and never reinforces. Pending/quarantined content is NOT returned to an
+    agent — the tool answers ``not_prompt_eligible`` instead, so untrusted content never
+    reaches model context through this surface.
+    """
+    try:
+        record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
+    except Exception as exc:  # noqa: BLE001 — Smart gateway classification
+        return _classify_gateway_exception(exc)
+    mem = record.get("memory") or {}
+    if not mem.get("id"):
+        return _gateway_error("memory_not_found")
+    svc = service()
+    target = svc.store.get_memory(mem["id"])
+    if target is None:
+        return _gateway_error("memory_not_found")
+    provenance = target.provenance
+    metadata = target.metadata
+    if not prompt_eligible(provenance, metadata):
+        return _gateway_error("memory_not_prompt_eligible")
+    # ``inspect`` serializes the governed record, but the store object is the
+    # authoritative source for fields that must not be lost in projection.
+    confidence = mem.get("confidence")
+    if confidence is None:
+        confidence = target.confidence
+    # ``inspect`` authorizes the target against the requested scope, while related
+    # records are intentionally returned as a bounded projection.  Keep the same
+    # hierarchy for that projection: an explicit repo request includes that repo and
+    # workspace-level records, whereas omitting repo retains the workspace-wide behavior.
+    requested_repo_id = None
+    if repo:
+        try:
+            _, requested_repo_id = svc._require_scope(workspace, repo)
+        except Exception as exc:  # noqa: BLE001 — inspect already validated the request
+            return _classify_gateway_exception(exc)
+    safe_links = []
+    for link in svc.store.get_links(mem["id"]):
+        other_id = (
+            link.get("b") if link.get("a") == mem["id"] else link.get("a")
+        )
+        other = svc.store.get_memory(other_id) if other_id else None
+        if (other is None or other.workspace_id != target.workspace_id
+                or not prompt_eligible(other.provenance, other.metadata)
+                or not svc._memory_visible_to_caller(other)):
+            continue
+        if (requested_repo_id is not None
+                and other.repo_id not in (None, requested_repo_id)):
+            continue
+        safe_links.append({
+            "id": other.id,
+            "relation": link.get("relation") or "related",
+            "layer": link.get("layer") or "semantic",
+            "reason": link.get("reason") or "",
+            "title": other.title or other.content[:80],
+            "live": bool(other.expired_at is None and other.valid_to is None),
+        })
+    safe_chain = []
+    for entry in record.get("chain") or []:
+        other = svc.store.get_memory(entry.get("id")) if entry.get("id") else None
+        if (other is not None and other.workspace_id == target.workspace_id
+                and prompt_eligible(other.provenance, other.metadata)
+                and svc._memory_visible_to_caller(other)
+                and (requested_repo_id is None
+                     or other.repo_id in (None, requested_repo_id))):
+            safe_chain.append(entry)
+    return _ok({
+        "id": mem.get("id"), "content": mem.get("content"), "title": mem.get("title"),
+        "mtype": mem.get("mtype"), "scope": mem.get("scope"),
+        "importance": mem.get("importance"), "confidence": confidence,
+        "valid_from": mem.get("valid_from"), "valid_to": mem.get("valid_to"),
+        "ingested_at": mem.get("ingested_at"),
+        "provenance": {k: provenance.get(k) for k in ("source", "trusted", "review_state")},
+        "links": safe_links, "chain": safe_chain,
+    })
+
+
+@smart_mcp.tool(
+    name="engraphis_update_memory",
+    annotations={"title": "Edit a memory's metadata fields", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    structured_output=False,
+)
+def engraphis_update_memory(
+    memory_id: Annotated[str, Field(description="Memory id to update.", min_length=1,
+                                    max_length=200)],
+    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+                                    max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+                                         max_length=200)] = None,
+    title: Annotated[Optional[str], Field(description="Optional new title.",
+                                          max_length=500)] = None,
+    mtype: Annotated[Optional[str], Field(description="Optional memory type (working|episodic|semantic|procedural).",
+                                          max_length=50)] = None,
+    importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
+                                                 le=1.0)] = None,
+    actor: Annotated[str, Field(description="Optional actor label.", max_length=200)] = "user",
+) -> str:
+    """Edit a memory's metadata fields (title/type/importance). Content edits must go
+    through the governed correction path so bi-temporal history is preserved. Secret
+    capture is rejected; provenance/trust/sensitivity are never editable here."""
+    if title is None and mtype is None and importance is None:
+        return _gateway_error("nothing_to_update")
+    try:
+        return _ok(service().update_memory(
+            memory_id, workspace=workspace, repo=repo,
+            title=title, mtype=mtype, importance=importance, actor=actor,
+        ))
+    except Exception as exc:  # noqa: BLE001 — Smart gateway classification
+        return _classify_gateway_exception(exc)
+
+
+@smart_mcp.tool(
+    name="engraphis_conflict_review",
+    annotations={"title": "List pending/quarantined/conflicting memories", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    structured_output=False,
+)
+def engraphis_conflict_review(
+    workspace: Annotated[str, Field(description="Workspace to review.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+                                         max_length=200)] = None,
+    limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
+) -> str:
+    """Read-only inbox of pending/quarantined/conflicting memories for a reviewer.
+
+    Scope and personal-folder authorization are enforced by ``MemoryService``. Pending
+    and quarantined bodies are never returned to an agent; only approved conflict
+    records may include a short excerpt.
+    """
+    try:
+        return _ok(service().conflict_review(
+            workspace=workspace, repo=repo, limit=limit,
+        ))
+    except Exception as exc:  # noqa: BLE001 — Smart gateway classification
+        return _classify_gateway_exception(exc)
 
 
 # The standard module export and dashboard mount are the zero-configuration Smart surface.

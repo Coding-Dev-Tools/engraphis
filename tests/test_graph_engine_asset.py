@@ -815,6 +815,28 @@ def test_unfreezing_reapplies_enabled_relation_flow_after_a_frozen_render() -> N
 
 
 @requires_node
+def test_a_dashboard_sync_that_turns_freeze_off_reheats_the_renderer() -> None:
+    """Classic redraws send the full settings object, so ``frozen:false`` must be actionable."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        api.freeze(true);
+        const before = invocations.d3ReheatSimulation || 0;
+        api.setSettings({ frozen: false });
+        emit({
+          state: api.state().settings.frozen,
+          alpha: store.d3AlphaDecay,
+          reheats: (invocations.d3ReheatSimulation || 0) - before,
+          cooldown: store.cooldownTime,
+        });
+        """
+    )
+    assert report == {"state": False, "alpha": 0.035, "reheats": 1, "cooldown": 2200}
+
+
+@requires_node
 def test_reduced_motion_keeps_auto_fit_instant_while_physics_stays_live() -> None:
     """OS visual-motion preferences suppress camera animation, not layout physics."""
 
@@ -1185,6 +1207,13 @@ def test_classic_graph_starts_live_even_when_the_os_prefers_reduced_motion() -> 
     assert "reheat&&!prefersReducedMotion()" not in engine
 
 
+def test_classic_freeze_switch_keeps_the_status_readout_in_sync() -> None:
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    start = source.index("function graphToggleFreeze(")
+    handler = source[start:source.index("\nfunction graphToggleLabels", start)]
+    assert "GRAPH_ENGINE.freeze(control.checked);graphSetSimulationStatus(control.checked?'Layout frozen':'Adaptive layout',false);return" in handler
+
+
 def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in source
@@ -1344,17 +1373,77 @@ def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
         """
         const api = G.create(el, { reducedMotion: () => false });
         api.setData(chain(2));
+        api.freeze(true);
         const node = store.graphData.nodes[0];
         node.x = 17; node.y = 23;
         store.onNodeDragEnd(node);
         const pinned = { fx: node.fx, fy: node.fy };
-        api.freeze(true);
         api.freeze(false);
         emit({ pinned, released: { fx: node.fx, fy: node.fy } });
         """
     )
     assert report["pinned"] == {"fx": 17, "fy": 23}
     assert report["released"] == {}, "unfreezing left a dragged node immovable"
+
+
+@requires_node
+def test_dragging_a_live_node_releases_the_temporary_anchor_and_reheats() -> None:
+    """Drag placement must not make one node behave frozen while the switch is off."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData(chain(2));
+        const node = store.graphData.nodes[0];
+        node.x = 17; node.y = 23;
+        const before = invocations.d3ReheatSimulation || 0;
+        store.onNodeDragEnd(node);
+        emit({
+          released: { fx: node.fx, fy: node.fy },
+          reheats: (invocations.d3ReheatSimulation || 0) - before,
+        });
+        """
+    )
+    assert report == {"released": {}, "reheats": 1}
+
+
+@requires_node
+def test_drag_follow_force_pulls_direct_neighbors_towards_the_active_node() -> None:
+    """The drag interaction must pull linked neighbors, not only recenter the whole graph."""
+
+    report = _run_engine(
+        """
+        const bodyForce = () => ({ strength() { return this; } });
+        globalThis.d3 = {
+          forceManyBody: bodyForce,
+          forceLink: () => ({ id() { return this; }, distance() { return this; } }),
+          forceX: () => ({ strength() { return this; } }),
+          forceY: () => ({ strength() { return this; } }),
+          forceCollide: () => ({ iterations() { return this; } }),
+        };
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        const nodes = store.graphData.nodes;
+        nodes[0].x = 120; nodes[0].y = 0;
+        nodes[1].x = 0; nodes[1].y = 0;
+        nodes[2].x = -120; nodes[2].y = 0;
+        nodes.forEach(node => { node.vx = 0; node.vy = 0; });
+        store.onNodeDragStart(nodes[0]);
+        store.d3Forces.dragFollow(1);
+        emit({
+          linkedMovesRight: nodes[1].vx > 0,
+          unlinkedStaysStill: nodes[2].vx === 0,
+          alphaDecay: store.d3AlphaDecay,
+          cooldownInfinite: !Number.isFinite(store.cooldownTime),
+        });
+        """
+    )
+    assert report == {
+        "linkedMovesRight": True,
+        "unlinkedStaysStill": True,
+        "alphaDecay": 0,
+        "cooldownInfinite": True,
+    }
 
 
 @requires_node
@@ -1449,7 +1538,7 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
     ``graphFocus`` treats ``false`` as "offer the recovery path" — tick *Show unlinked*, retry,
     and otherwise say *Entity not in view*.  The engine answered from ``raw.nodes``, which keeps
     the coordinates force-graph left on a node from an earlier render, so a node hidden by the
-    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.55) or by a scope
+    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.42) or by a scope
     filter still reported success — the camera moved to nothing and the user got no explanation.
     """
     report = _run_engine(
@@ -1705,7 +1794,8 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
         const nodes = store.graphData.nodes;
         emit({
           mode: api.state().renderMode,
-          x: axes.x.at(-1), y: axes.y.at(-1),
+          x: { target: typeof axes.x.at(-1).target === 'function' ? axes.x.at(-1).target(nodes[0]) : axes.x.at(-1).target, value: axes.x.at(-1).value },
+          y: { target: typeof axes.y.at(-1).target === 'function' ? axes.y.at(-1).target(nodes[0]) : axes.y.at(-1).target, value: axes.y.at(-1).value },
           reheat: (invocations.d3ReheatSimulation || 0) - before,
           cooldown: store.cooldownTime,
           pinned: nodes.filter(node => node.fx !== undefined || node.fy !== undefined).length,
@@ -1811,36 +1901,70 @@ globalThis.d3 = {
 
 
 @requires_node
-def test_default_community_layout_uses_one_shared_gravity_center() -> None:
-    """The default must not put each detected community in a separate orbit.
+def test_layout_presets_use_distinct_force_geometry() -> None:
+    """Each layout button must install a visibly different arrangement strategy."""
 
-    The old community target function placed groups on a broad ring, leaving the centre empty
-    and stretching cross-community relations across the whole canvas.  Both dashboard renderers
-    now use the origin as their default force target; charge and links are sufficient to retain
-    readable local separation.
-    """
-
-    classic = DASHBOARD.read_text(encoding="utf-8")
-    classic_forces = classic[classic.index("function graphApplyForces()") : classic.index("function graphSetHighlight(")]
-    assert "if(mode==='communities')" not in classic_forces
-    assert "FG.d3Force('x',d3.forceX(0).strength(centering));" in classic_forces
-    assert "FG.d3Force('y',d3.forceY(0).strength(centering));" in classic_forces
+    for dashboard in (DASHBOARD, CLASSIC_DASHBOARD):
+        classic_forces = dashboard.read_text(encoding="utf-8")
+        forces = classic_forces[classic_forces.index("function graphApplyForces()") : classic_forces.index("function graphSetHighlight(")]
+        assert "if(mode==='communities')" in forces
+        assert "else if(mode==='radial'&&d3.forceRadial)" in forces
+        assert "else if(mode==='constellation')" in forces
 
     report = _run_engine(
         """
-        const targets = { x: [], y: [] };
+        const targets = { x: [], y: [], radial: [] };
+        const force = target => ({ target, strengthValue: null, strength(value) {
+          if (arguments.length) { this.strengthValue = value; return this; }
+          return this.strengthValue;
+        } });
         globalThis.d3 = {
-          forceX: target => { targets.x.push(target); return { strength: () => ({}) }; },
-          forceY: target => { targets.y.push(target); return { strength: () => ({}) }; },
-          forceRadial: () => ({ strength: () => ({}) }),
+          forceX: target => { targets.x.push(target); return force(target); },
+          forceY: target => { targets.y.push(target); return force(target); },
+          forceRadial: target => { targets.radial.push(target); return force(target); },
           forceCollide: () => ({ iterations: () => ({}) }),
         };
         const api = G.create(el, { reducedMotion: () => true });
-        api.setData(chain(8));
-        emit({ x: targets.x, y: targets.y });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' }, { id: 'f' }],
+          links: [
+            { source: 'a', target: 'b' }, { source: 'a', target: 'c' }, { source: 'a', target: 'd' },
+            { source: 'e', target: 'f' },
+          ],
+        });
+        const read = mode => {
+          targets.x = []; targets.y = []; targets.radial = [];
+          api.setPreset(mode);
+          const xForce = store.d3Forces.x, radialForce = store.d3Forces.radial;
+          const nodes = store.graphData.nodes;
+          const point = node => typeof xForce.target === 'function' ? xForce.target(node) : xForce.target;
+          return {
+            xKind: typeof xForce.target,
+            xStrength: xForce.strengthValue,
+            first: point(nodes[0]),
+            second: point(nodes[nodes.length - 1]),
+            radial: radialForce ? radialForce.target(nodes[0]) : null,
+            radialOuter: radialForce ? radialForce.target(nodes[nodes.length - 1]) : null,
+          };
+        };
+        emit({
+          compact: read('compact'), original: read('original'), communities: read('communities'),
+          radial: read('radial'), constellation: read('constellation'),
+        });
         """
     )
-    assert report == {"x": [0], "y": [0]}
+    assert report["compact"]["first"] == 0
+    assert report["original"]["first"] == 0
+    assert report["compact"]["xStrength"] > report["original"]["xStrength"]
+    # Communities mode keeps a gentle origin-based centering: a function target at a
+    # distant grid slot would fight an explicit drag (the e2e drag-release contract),
+    # so the mode's visible grouping comes from the charge/repel geometry instead.
+    assert report["communities"]["xKind"] == "number"
+    assert report["communities"]["first"] == 0
+    assert report["radial"]["radial"] is not None
+    assert report["radial"]["radial"] < report["radial"]["radialOuter"]
+    assert report["constellation"]["xKind"] == "function"
+    assert report["constellation"]["first"] != 0
 
 
 @requires_node
@@ -2302,6 +2426,14 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     move = move[:move.index("      const beginManualDrag", 1)]
     assert "if (!manualDrag.dragged)" in move
     assert move.index("if (Math.hypot(dx, dy) < 3)") < move.index("const node = manualDrag.node;")
+    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "if (started) {" in move
+    assert "setActiveDragNode(node);" in move
+    assert "reheatLiveLayout(true);" in move
+    assert "function makeDragFollowForce()" in source
+    assert "onNodeDragStart" in source
+    assert "fg.cooldownTime(Infinity)" in source
+    assert "fg.cooldownTicks(Infinity)" in source
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 

@@ -316,6 +316,7 @@ def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sour
     assert digest.mtype == MemoryType.SEMANTIC
     assert digest.metadata["provenance"]["source"] == "structured_consolidation"
     assert digest.metadata["structured_consolidation"]["confidence"] == 0.91
+    assert digest.confidence == 0.91      # promoted from metadata to the first-class field
     assert digest.metadata["entities"] == ["Acme API", "PASETO", "JWT"]
     assert digest.metadata["relations"][0]["relation"] == "uses"
     assert "source_ids" in digest.metadata["provenance"]
@@ -534,6 +535,102 @@ def test_profiles_pass_rolls_entity_memories_into_one_digest():
     assert report["compaction"]["tokens_before"] > report["compaction"]["tokens_after"] > 0
 
 
+def test_profiles_batch_all_eligible_memories(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+
+    monkeypatch.setattr(consolidate_module, "PROFILE_SCAN_LIMIT", 2)
+    eng, wid, rid, name = _engine_with_entity_mentions()
+
+    report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert report["errors"] == []
+    assert len(report["profiles_created"]) == 1
+    assert report["profiles_created"][0]["entity"] == name
+    assert report["profiles_created"][0]["mentions"] == 8
+
+def test_profiles_rotate_bounded_memory_window(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+    from engraphis.core.interfaces import Node
+
+    monkeypatch.setattr(consolidate_module, "PROFILE_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "PROFILE_MEMORY_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for index in range(6):
+        eng.remember(
+            f"Maintenance note placeholder {index}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
+            resolve_conflicts=False,
+        )
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    first_page = eng.store.list_memories_page(flt, after_id="", limit=3)
+    second_page = eng.store.list_memories_page(
+        flt, after_id=first_page[-1].id, limit=3,
+    )
+    assert len(first_page) == len(second_page) == 3
+    for memory in first_page:
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            ("Unrelated maintenance note.", memory.id),
+        )
+    for index, memory in enumerate(second_page):
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            (f"Aurora owns the deployment runbook section {index}.", memory.id),
+        )
+    eng.store.conn.commit()
+    eng.store.upsert_entity(
+        Node(id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid)
+    )
+
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert first["profiles_created"] == []
+    assert eng.store.get_maintenance_cursor(
+        wid, rid, consolidate_module.PROFILE_CURSOR_NAME,
+    )
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert len(second["profiles_created"]) == 1
+    profile_id = second["profiles_created"][0]["id"]
+    assert sum(
+        link["relation"] == "profiles"
+        for link in eng.store.get_links(profile_id)
+    ) == 3
+
+def test_profile_retry_completes_an_interrupted_link_set(monkeypatch):
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, _ = _engine_with_entity_mentions()
+    original_add_link = eng.store.add_link
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("link store unavailable")
+        return original_add_link(*args, **kwargs)
+
+    monkeypatch.setattr(eng.store, "add_link", fail_once)
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    assert len(first["profiles_created"]) == 0
+    assert len(first["errors"]) == 1
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    profiles = [
+        memory for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC])
+        )
+        if memory.metadata.get("provenance", {}).get("source") == "profile_consolidation"
+    ]
+    assert len(profiles) == 1
+    assert sum(link["relation"] == "profiles"
+               for link in eng.store.get_links(profiles[0].id)) == 8
+
 def test_profiles_pass_via_consolidate_flag_and_is_idempotent():
     eng, wid, rid, _ = _engine_with_entity_mentions()
     first = consolidate(eng, workspace_id=wid, repo_id=rid, profiles=True)
@@ -737,6 +834,417 @@ def test_distill_pass_sees_episodics_behind_newer_semantic_rows(monkeypatch):
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
 
     assert len(report["digests_created"]) == 1, "old code truncated to 6 semantic rows"
+
+def test_distill_batches_all_eligible_episodes(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 2)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source_ids = [
+        eng.remember(
+            f"Recurring deploy failure on the flaky integration test, run {index}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            resolve_conflicts=False,
+        )
+        for index in range(6)
+    ]
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(report["digests_created"]) == 1
+    assert set(report["digests_created"][0]["consolidates"]) == set(source_ids)
+    assert report["errors"] == []
+
+def test_distill_cursor_rotates_past_unclusterable_window(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "DISTILL_CLUSTER_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for content in (
+        "Amber protocol observation.",
+        "Cobalt ledger anomaly.",
+        "Violet queue measurement.",
+    ):
+        eng.remember(
+            content, workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert first["clusters_found"] == 0
+    assert eng.store.get_maintenance_cursor(
+        wid, rid, consolidate_module.DISTILL_CURSOR_NAME,
+    )
+
+    source_ids = [
+        eng.remember(
+            f"Recurring deploy failure during run {index}.",
+            workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(3)
+    ]
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(second["digests_created"]) == 1
+    assert set(second["digests_created"][0]["consolidates"]) == set(source_ids)
+
+
+def test_scan_advances_past_a_fully_excluded_page():
+    from engraphis.core import consolidate as consolidate_module
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source_ids = [
+        eng.remember(
+            f"Recurring maintenance event {index}.", workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(4)
+    ]
+    flt = SearchFilter(
+        workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC],
+    )
+    first_page = eng.store.list_memories_page(flt, limit=2)
+    assert len(first_page) == 2
+    for memory in first_page:
+        eng.store.add_link("derived-row", memory.id, "consolidates")
+
+    scanned = consolidate_module._scan_memories(
+        eng.store, flt, mtypes=[MemoryType.EPISODIC], batch_size=2,
+        exclude_relation="consolidates",
+    )
+
+    assert {memory.id for memory in scanned} == set(source_ids) - {
+        memory.id for memory in first_page
+    }
+
+
+def test_linked_memory_ids_respects_sqlite_bind_limit():
+    from engraphis.core import consolidate as consolidate_module
+
+    eng = MemoryEngine.create(":memory:")
+    source_ids = [f"source-{index}" for index in range(500)]
+    for source_id in source_ids:
+        eng.store.add_link("derived-row", source_id, "consolidates")
+
+    linked = consolidate_module._linked_memory_ids(
+        eng.store, source_ids, relation="consolidates",
+    )
+
+    assert linked == set(source_ids)
+
+
+def test_archive_batches_all_eligible_transients(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 2)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale_ids = [
+        eng.remember(
+            f"Old scratch note {index}.", workspace_id=wid,
+            mtype=MemoryType.WORKING, resolve_conflicts=False,
+        )
+        for index in range(5)
+    ]
+    old = time.time() - 86_400
+    eng.store.conn.executemany(
+        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
+        [(old, memory_id) for memory_id in stale_ids],
+    )
+    eng.store.conn.commit()
+
+    report = consolidate(eng, workspace_id=wid, now=time.time())
+
+    assert {row["id"] for row in report["archived"]} == set(stale_ids)
+    assert report["errors"] == []
+
+
+def test_digest_retry_completes_an_interrupted_link_set(monkeypatch):
+    eng, wid, rid = _engine_with_repeats()
+    original_add_link = eng.store.add_link
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("link store unavailable")
+        return original_add_link(*args, **kwargs)
+
+    monkeypatch.setattr(eng.store, "add_link", fail_once)
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert len(first["digests_created"]) == 0
+    assert len(first["errors"]) == 1
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert len(second["digests_created"]) == 0
+    semantic = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC])
+    )
+    digest = [memory for memory in semantic
+              if memory.metadata.get("provenance", {}).get("source") == "consolidation"]
+    assert len(digest) == 1
+    assert sum(link["relation"] == "consolidates" for link in eng.store.get_links(digest[0].id)) == 3
+
+
+
+def test_digest_resume_reapplies_source_safety_after_partial_write(monkeypatch):
+    """A retry must repair safety metadata on a derived row committed before failure."""
+    from engraphis.core import consolidate as consolidate_module
+
+    eng, wid, rid = _engine_with_repeats()
+    source = next(
+        memory for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC]),
+            limit=10,
+        )
+        if "flaky network" in memory.content
+    )
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source.id,)
+    )
+    eng.store.conn.commit()
+
+    original_inherit = consolidate_module._inherit_safety
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise RuntimeError("safety patch interrupted")
+        return original_inherit(*args, **kwargs)
+
+    monkeypatch.setattr(consolidate_module, "_inherit_safety", fail_once)
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert first["digests_created"] == []
+    assert len(first["errors"]) == 1
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert second["errors"] == []
+    assert second["digests_created"] == []
+    assert second["skipped_already_consolidated"] == 1
+    semantic = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC]),
+        limit=20,
+    )
+    digests = [
+        memory for memory in semantic
+        if memory.metadata.get("provenance", {}).get("source") == "consolidation"
+    ]
+    assert len(digests) == 1
+    digest = digests[0]
+    assert digest.sensitivity == "secret"
+    assert digest.provenance["trusted"] is True
+    assert sum(
+        link["relation"] == "consolidates"
+        for link in eng.store.get_links(digest.id)
+    ) == 3
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE actor='consolidation' AND action='distill'"
+    ).fetchone()[0] == 1
+    consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE actor='consolidation' AND action='distill'"
+    ).fetchone()[0] == 1
+
+
+def test_completed_digest_safety_is_repaired_after_source_tightening():
+    eng, wid, rid = _engine_with_repeats()
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    digest_id = first["digests_created"][0]["id"]
+    source_id = first["digests_created"][0]["consolidates"][0]
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source_id,)
+    )
+    eng.store.conn.commit()
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert eng.store.get_memory(digest_id).sensitivity == "secret"
+
+
+def test_completed_profile_safety_is_repaired_after_source_tightening():
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, _name = _engine_with_entity_mentions()
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    profile_id = first["profiles_created"][0]["id"]
+    source_id = next(
+        link["b"] if link["a"] == profile_id else link["a"]
+        for link in eng.store.get_links(profile_id)
+        if link["relation"] == "profiles"
+    )
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source_id,)
+    )
+    eng.store.conn.commit()
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert eng.store.get_memory(profile_id).sensitivity == "secret"
+
+def test_profile_resume_reapplies_source_safety_after_partial_write(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, _name = _engine_with_entity_mentions()
+    source = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC]),
+        limit=20,
+    )[0]
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source.id,)
+    )
+    eng.store.conn.commit()
+
+    original_inherit = consolidate_module._inherit_safety
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise RuntimeError("safety patch interrupted")
+        return original_inherit(*args, **kwargs)
+
+    monkeypatch.setattr(consolidate_module, "_inherit_safety", fail_once)
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    assert first["profiles_created"] == []
+    assert len(first["errors"]) == 1
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    assert second["errors"] == []
+    assert second["profiles_created"] == []
+    assert second["skipped_existing"] == 1
+    semantic = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC]),
+        limit=30,
+    )
+    profiles = [
+        memory for memory in semantic
+        if memory.metadata.get("provenance", {}).get("source")
+        == "profile_consolidation"
+    ]
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile.sensitivity == "secret"
+    assert profile.provenance["trusted"] is True
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE actor='consolidation' AND action='profile'"
+    ).fetchone()[0] == 1
+    consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE actor='consolidation' AND action='profile'"
+    ).fetchone()[0] == 1
+    assert sum(
+        link["relation"] == "profiles"
+        for link in eng.store.get_links(profile.id)
+    ) == 8
+
+def test_structured_resume_repairs_each_partial_fact_once(monkeypatch):
+    pytest.importorskip("pydantic")
+    from engraphis.core import consolidate as consolidate_module
+
+    eng, wid, rid = _engine_with_auth_repeats()
+    source_ids = [
+        memory.id for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC]),
+            limit=10,
+        )
+    ]
+    facts = [
+        {
+            "content": "The first structured fact.",
+            "title": "First fact",
+            "confidence": 0.8,
+            "importance": 0.5,
+            "keywords": ["first"],
+            "entities": [],
+            "relations": [],
+            "source_ids": [source_ids[0]],
+        },
+        {
+            "content": "The second structured fact.",
+            "title": "Second fact",
+            "confidence": 0.7,
+            "importance": 0.5,
+            "keywords": ["second"],
+            "entities": [],
+            "relations": [],
+            "source_ids": source_ids[1:],
+        },
+    ]
+
+    def fake_facts(_cluster, *, llm, subject_hint):
+        return facts
+
+    monkeypatch.setattr(consolidate_module, "_structured_cluster_facts", fake_facts)
+    original_add_link = eng.store.add_link
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("link store unavailable")
+        return original_add_link(*args, **kwargs)
+
+    monkeypatch.setattr(eng.store, "add_link", fail_once)
+    first = consolidate(
+        eng, workspace_id=wid, repo_id=rid, structured=True, llm=object(),
+    )
+    assert first["digests_created"] == []
+    assert len(first["errors"]) == 1
+
+    second = consolidate(
+        eng, workspace_id=wid, repo_id=rid, structured=True, llm=object(),
+    )
+    assert second["errors"] == []
+    assert second["digests_created"] == []
+    semantic = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC]),
+        limit=20,
+    )
+    facts_written = [
+        memory for memory in semantic
+        if memory.metadata.get("provenance", {}).get("source")
+        == "structured_consolidation"
+    ]
+    assert len(facts_written) == 2
+    assert sorted(
+        sum(link["relation"] == "consolidates"
+            for link in eng.store.get_links(memory.id))
+        for memory in facts_written
+    ) == [1, 2]
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit "
+        "WHERE actor='consolidation' AND action='distill_structured'"
+    ).fetchone()[0] == 2
+    consolidate(
+        eng, workspace_id=wid, repo_id=rid, structured=True, llm=object(),
+    )
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit "
+        "WHERE actor='consolidation' AND action='distill_structured'"
+    ).fetchone()[0] == 2
+
+def test_derived_digest_uses_sweep_timestamp():
+    eng, wid, rid = _engine_with_repeats()
+    sweep_time = time.time() - 10
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, now=sweep_time)
+
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    assert digest.valid_from == sweep_time
 
 
 def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):

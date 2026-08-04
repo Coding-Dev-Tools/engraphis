@@ -1,8 +1,8 @@
 """Provenance trust flags + artifact kinds (agentic-upgrade handoff §3.3).
 
 `remember` accepts `source`, `trusted`, and `kind`; all three land in
-`metadata.provenance` and surface through explicit inspection recall. Prompt-ready
-recall, why, and timeline must not expose unapproved records to an agent transcript.
+`metadata.provenance` and surface through explicit inspection recall. Normal local-agent
+writes are prompt-ready immediately; external or quarantined records remain excluded.
 """
 import pytest
 
@@ -20,14 +20,14 @@ def _first_provenance(svc, query, **scope):
     return recs[0]["provenance"]
 
 
-def test_public_agent_write_is_pending_review():
+def test_public_agent_write_is_immediately_approved():
     s = _svc()
     s.remember("Default provenance fact about zebras.", workspace="acme")
     prov = _first_provenance(s, "zebras", workspace="acme")
     assert prov["source"] == "agent"
-    assert prov["trusted"] is False
-    assert prov["review_state"] == "pending"
-    assert prov["trust_origin"] == "service_review_gate"
+    assert prov["trusted"] is True
+    assert prov["review_state"] == "approved"
+    assert prov["trust_origin"] == "local_agent"
     assert "kind" not in prov
 
 
