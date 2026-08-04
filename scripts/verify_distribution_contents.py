@@ -49,18 +49,29 @@ _PRIVATE_RESEARCH = (
 def _archive_names(path: Path) -> set[str]:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            return {name.replace("\\", "/").lstrip("/") for name in archive.namelist()}
+            names = set()
+            for name in archive.namelist():
+                folded = name.replace("\\", "/")
+                if folded.startswith("/") or ".." in folded.split("/"):
+                    raise ValueError(f"{path.name}: wheel member has unsafe path: {name!r}")
+                names.add(folded.lstrip("/"))
+            return names
     if path.name.endswith(".tar.gz"):
         with tarfile.open(path, "r:gz") as archive:
-            raw = {
-                member.name.replace("\\", "/").lstrip("/")
-                for member in archive.getmembers()
-                if member.name
-            }
+            raw = set()
+            for member in archive.getmembers():
+                folded = member.name.replace("\\", "/")
+                # Validate before stripping anything: an absolute path such as
+                # "/engraphis-1.0.0/file" must not become apparently relative.
+                if folded.startswith("/") or ".." in folded.split("/"):
+                    raise ValueError(f"{path.name}: source member has unsafe path: {member.name!r}")
+                raw.add(folded)
         roots = {name.partition("/")[0] for name in raw}
         if len(roots) != 1:
             raise ValueError(f"{path.name}: source archive must have one root directory")
         root = next(iter(roots))
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", root):
+            raise ValueError(f"{path.name}: source archive root is unsafe: {root!r}")
         return {
             name[len(root) + 1:] if name.startswith(f"{root}/") else ""
             for name in raw

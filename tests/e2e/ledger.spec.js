@@ -43,6 +43,7 @@ function license() {
 async function mockApi(page, options = {}) {
   const requests = [];
   requests.automationPolicies = [];
+  requests.details = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
@@ -73,6 +74,7 @@ async function mockApi(page, options = {}) {
     const requestUrl = new URL(request.url());
     const path = requestUrl.pathname.replace(/^\/api/, '');
     requests.push(path);
+    requests.details.push({ path, method: request.method() });
     const ok = body => route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -163,7 +165,7 @@ async function mockApi(page, options = {}) {
         memory_id: memories[0].id,
         title: memories[0].title,
         excerpt: memories[0].content,
-        memory_type: memories[0].mtype,
+        memory_type: memories[0].memory_type,
         valid_from: 100,
       }],
       totals: { evidence: 1 },
@@ -379,7 +381,7 @@ test('Ask keeps the raw retrieval preview alongside its single grounded answer',
   expect(requests.filter(path => path === '/recall')).toHaveLength(1);
 });
 
-test('Relationships uses the visual explorer controls and applies their state', async ({ page }) => {
+test('Graph & Relationships uses the visual explorer controls and applies their state', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
   const initialGraphRequest = page.waitForRequest(request => {
@@ -626,10 +628,10 @@ test('themes persist and both visible interface selectors round-trip', async ({ 
   const analyzeUnderStrictCsp = async builder => {
     const start = errors.length;
     const result = await builder.analyze();
-    await page.waitForTimeout(25);
     // axe-core probes colour/visibility with temporary inline style nodes. The product CSP
-    // correctly blocks those probes and Chromium reports them as console errors; isolate only
-    // that analyzer-owned interval so real application errors before or after it still fail.
+    // correctly blocks those probes and Chromium reports them as console errors. Playwright
+    // delivers console events emitted by the completed analysis before its promise resolves,
+    // so no fixed delay is needed here; real application errors remain in the same interval.
     const analyzerErrors = errors.splice(start);
     expect(analyzerErrors.filter(message => !isAxeStyleProbe(message))).toEqual([]);
     return result;
@@ -697,7 +699,7 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
 });
 
 test('Ledger applies the configured LLM extraction toggle', async ({ page }) => {
-  await mockApi(page, { llmStatus: {
+  const requests = await mockApi(page, { llmStatus: {
     configured: true,
     key_set: true,
     provider: 'openai',
@@ -728,6 +730,9 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
   await expect(page.getByText('OFF', { exact: true })).toBeVisible();
   await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(turnOn).toBeEnabled();
+  expect(requests.details.filter(({ path, method }) => (
+    path === '/llm/extractor' && method === 'POST'
+  ))).toHaveLength(2);
 });
 
 test('Ledger gives active Pro members direct Cloud access and saves hosted policy changes', async ({ page }) => {
@@ -790,6 +795,9 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   });
   await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
   await expect.poll(() => requests.automationPolicies.length).toBe(1);
+  expect(requests.details.filter(({ path, method }) => (
+    path === '/automation' && method === 'POST'
+  ))).toHaveLength(1);
   expect(requests.automationPolicies[0]).toEqual({
     enabled: true,
     cadence_hours: 12,

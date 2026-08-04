@@ -55,7 +55,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert page.status_code == 200
         assert "<title>Engraphis Ledger</title>" in page.text
         assert 'class="sidebar"' in page.text
-        for area in ("Today", "Ask", "Library", "Relationships", "Provenance", "Manage"):
+        for area in ("Today", "Ask", "Library", "Graph &amp; Relationships", "Provenance", "Manage"):
             assert f">{area}<" in page.text
         assert 'value="matrix">Matrix' in page.text
         assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
@@ -288,7 +288,8 @@ def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
         ledger = client.get("/v2-assets/ledger.js")
         assert engine.status_code == 200
         assert "function selectedPalette()" in engine.text
-        assert "function commPal() { return selectedPalette()" in engine.text
+        assert "function commPal() {" in engine.text
+        assert "return selectedPalette() ||" in engine.text
         assert "const colors = selectedPalette() || GRAPH_HEAT;" in engine.text
         # Palettes still recolor every identity mode, but material families stay stable:
         # semantic color belongs to the slim identity ring rather than rotating the whole
@@ -422,7 +423,7 @@ def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path
         assert response.status_code == 200
 
 
-def test_http_memory_api_keeps_world_timed_writes_pending(monkeypatch, tmp_path):
+def test_http_memory_api_exposes_world_timed_agent_writes_immediately(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         old = client.post(
             "/api/remember",
@@ -464,14 +465,14 @@ def test_http_memory_api_keeps_world_timed_writes_pending(monkeypatch, tmp_path)
         )
 
         assert before.status_code == 200
-        assert before.json()["memories"] == []
+        assert [memory["id"] for memory in before.json()["memories"]] == [old["id"]]
         assert after.status_code == 200
-        assert after.json()["sources"] == []
+        assert after.json()["sources"]
         service = client.app.state.service
         assert service.store.get_memory(old["id"]).valid_from == 1_000.0
         assert service.store.get_memory(new["id"]).valid_from == 2_000.0
-        assert service.store.get_memory(old["id"]).provenance["review_state"] == "pending"
-        assert service.store.get_memory(new["id"]).provenance["review_state"] == "pending"
+        assert service.store.get_memory(old["id"]).provenance["review_state"] == "approved"
+        assert service.store.get_memory(new["id"]).provenance["review_state"] == "approved"
 
 
 def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_path):
@@ -587,7 +588,7 @@ def test_keyword_recall_fallback_excludes_untrusted_memories(monkeypatch, tmp_pa
     assert "untrusted candidate" not in repr(payload)
 
 
-def test_http_memory_api_keeps_backdated_claims_pending_without_supersession(
+def test_http_memory_api_rejects_backdated_agent_claim_supersession(
     monkeypatch, tmp_path
 ):
     with _client(monkeypatch, tmp_path) as client:
@@ -610,10 +611,9 @@ def test_http_memory_api_keeps_backdated_claims_pending_without_supersession(
             },
         )
 
-        assert rejected.status_code == 200
+        assert rejected.status_code == 400
         assert service.store.get_memory(original["id"]).valid_to is None
-        assert len(service.store.list_memories(include_invalid=True)) == count_before + 1
-        assert service.store.get_memory(rejected.json()["id"]).provenance["review_state"] == "pending"
+        assert len(service.store.list_memories(include_invalid=True)) == count_before
 
 
 def test_manual_consolidation_stays_local_but_dreaming_is_cloud_only(
@@ -1050,9 +1050,26 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
 
     with pytest.raises(HTTPException) as ordinary_value_error:
         v2_api._run(fail_with, ValueError(secret))
-    assert ordinary_value_error.value.status_code == 500
-    assert ordinary_value_error.value.detail == {"error": "internal server error"}
+    assert ordinary_value_error.value.status_code == 400
+    assert ordinary_value_error.value.detail == {"error": "invalid request"}
     assert secret not in repr(ordinary_value_error.value.detail)
+
+
+def test_dashboard_engine_value_error_is_a_sanitized_client_error(monkeypatch, tmp_path):
+    secret = "malformed document details must stay private"
+    with _client(monkeypatch, tmp_path) as client:
+        def reject_document(*_args, **_kwargs):
+            raise ValueError(secret)
+
+        monkeypatch.setattr(client.app.state.service, "remember", reject_document)
+        response = client.post(
+            "/api/remember",
+            json={"content": "client document", "workspace": "demo"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": {"error": "invalid request"}}
+    assert secret not in response.text
 
 
 def test_managed_cloud_errors_forward_only_bounded_public_copy():

@@ -31,7 +31,7 @@ test("discovers and calls the installed Engraphis MCP server", { timeout: 30_000
 	try {
 		const status = await client.status();
 		assert.equal(status.connected, true);
-		assert.equal(Number(status.toolCount), 6);
+		assert.equal(Number(status.toolCount), 9);
 
 		const tools = (await client.searchTools("")).tools as Array<{ name: string }>;
 		const names = new Set(tools.map((tool) => tool.name));
@@ -42,6 +42,9 @@ test("discovers and calls the installed Engraphis MCP server", { timeout: 30_000
 			"engraphis_discover_actions",
 			"engraphis_execute_read",
 			"engraphis_execute_action",
+			"engraphis_get_memory",
+			"engraphis_update_memory",
+			"engraphis_conflict_review",
 		]) {
 			assert.ok(names.has(required), `expected ${required} in the MCP tool catalog`);
 		}

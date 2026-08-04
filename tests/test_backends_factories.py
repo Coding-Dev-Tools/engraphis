@@ -65,6 +65,46 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
     assert captured == {"model_name": "Qwen/example", "revision": "a" * 40}
 
 
+def test_embedder_factory_local_selector_requires_only_local_model_files(monkeypatch):
+    """The local selector is a semantic-capable path that cannot fetch a model."""
+    import engraphis.backends.embedder_st as embedder_st
+
+    captured = {}
+
+    class _LocalEmbedder:
+        dim = 128
+        supports_semantic_search = True
+        embedding_mode = "semantic"
+
+        def __init__(self, model_name, *, revision=None, local_files_only=False):
+            captured.update(
+                model_name=model_name,
+                revision=revision,
+                local_files_only=local_files_only,
+            )
+
+    monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _LocalEmbedder)
+    result = get_embedder("local:C:/models/bge-small", 128, revision="b" * 40)
+
+    assert isinstance(result, _LocalEmbedder)
+    assert captured == {
+        "model_name": "C:/models/bge-small",
+        "revision": "b" * 40,
+        "local_files_only": True,
+    }
+
+
+def test_missing_local_semantic_model_reports_lexical_degradation(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
+    _force_load_failure(monkeypatch, embedder_st, "SentenceTransformerEmbedder")
+    result = get_embedder("local:C:/models/missing", 128)
+
+    assert isinstance(result, DeterministicEmbedder)
+    assert result.supports_semantic_search is False
+    assert "requested local semantic model is unavailable" in result.semantic_support_reason
+
+
 def test_deterministic_embedder_preserves_legacy_feature_hash_mapping():
     """Changing the feature-hash algorithm would invalidate existing local vectors."""
     vectors = DeterministicEmbedder(dim=64).embed(["alpha beta graph", "offline mapping 123"])

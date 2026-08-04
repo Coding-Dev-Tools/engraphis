@@ -171,10 +171,11 @@ def test_service_exposes_claim_identity_for_safe_supersession():
         claim_kind="configured_value",
     )
 
-    # Public callers cannot use resolution to mutate existing facts before review.
-    assert second["op"] == "add"
-    assert "superseded" not in second
-    assert service.store.get_memory(first["id"]).provenance["review_state"] == "pending"
+    # Local-agent callers may resolve a claim immediately; owner approval is not
+    # required for normal memory creation.
+    assert second["op"] == "invalidate"
+    assert second["superseded"] == [first["id"]]
+    assert service.store.get_memory(second["id"]).provenance["review_state"] == "approved"
 
 
 def test_compact_grounded_response_does_not_repeat_cited_bodies():

@@ -1,7 +1,12 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
-from engraphis.core.recall import RecallEngine, _absolute_retrieval_support, _mtype_limits_can_fill
+from engraphis.core.recall import (
+    RecallEngine,
+    _absolute_retrieval_support,
+    _mtype_limits_can_fill,
+    _ranked,
+)
 from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
@@ -78,6 +83,16 @@ class _FailingIndex:
         raise AssertionError("degraded recall must not query the vector index")
 
 
+def test_ranked_drops_nonfinite_and_malformed_arm_evidence():
+    recs = {memory_id: object() for memory_id in ("good", "nan", "inf", "bad")}
+    assert _ranked({
+        "nan": float("nan"),
+        "inf": float("inf"),
+        "bad": "not-a-score",
+        "good": 0.5,
+    }, recs) == ["good"]
+    assert _ranked({"nan": float("-inf"), "bad": None}, recs) == []
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -150,6 +165,10 @@ def test_absolute_support_treats_non_finite_cosine_as_no_evidence():
     assert _absolute_retrieval_support(
         "credential rotation", "unrelated prose", title="credential rotation",
         semantic_cosine=float("nan"),
+    ) == 0.0
+    assert _absolute_retrieval_support(
+        "credential rotation", "unrelated prose", title="credential rotation",
+        semantic_cosine=10 ** 1000,
     ) == 0.0
 
 

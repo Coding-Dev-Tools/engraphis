@@ -91,6 +91,34 @@ def test_serialization_roundtrip_preserves_signature():
     assert _signature(r2) == _signature(rec)
 
 
+def test_sync_whitelist_includes_confidence_and_roundtrips_it():
+    """``confidence`` is a first-class sync field: it is emitted, clamped, and
+    re-read, and it participates in the last-writer-wins label/hash."""
+    from engraphis.core.sync import _LWW_FIELDS
+
+    assert "confidence" in _LWW_FIELDS
+
+    rec = MemoryRecord(id="mem_conf", content="c", confidence=0.5,
+                       last_access=1.0, ingested_at=1.0)
+    restored = dict_to_record(record_to_dict(rec))
+    assert restored is not None
+    assert restored.confidence == 0.5
+    assert _signature(restored) == _signature(rec)
+
+    # A hostile bundle value is clamped to [0, 1], never trusted.
+    hostile = dict_to_record({
+        "id": "mem_hostile", "content": "c", "confidence": 99.0,
+    })
+    assert hostile is not None and hostile.confidence == 1.0
+    absent = dict_to_record({"id": "mem_absent", "content": "c"})
+    assert absent is not None and absent.confidence == 1.0   # default
+
+    # merge_record carries the LWW winner's confidence.
+    local = MemoryRecord(id="mem_conf", content="c", confidence=0.5, last_access=1.0)
+    incoming = MemoryRecord(id="mem_conf", content="c", confidence=0.9, last_access=2.0)
+    assert merge_record(local, incoming).confidence == 0.9
+
+
 def test_untrusted_record_uses_strict_boolean_pinning():
     assert dict_to_record({"id": "mem_false", "content": "x", "pinned": "false"}).pinned is False
     assert dict_to_record({"id": "mem_one", "content": "x", "pinned": 1}).pinned is False
@@ -595,6 +623,23 @@ def test_dry_run_resolves_remote_repo_by_name_without_mutating():
 
     assert report["added"] == 1 and report["rejected"] == 0
     assert store.get_memory("mem_a") is None
+
+
+def test_dry_run_simulates_missing_workspace_and_repo_without_mutating():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "new-workspace",
+        "repos": {"remote_repo": "new-repo"},
+        "memories": [{"id": "mem_a", "content": "one", "repo_id": "remote_repo"}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle, dry_run=True)
+
+    assert report["added"] == 1 and report["rejected"] == 0
+    assert store.get_memory("mem_a") is None
+    assert store.conn.execute("SELECT COUNT(*) c FROM workspaces").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM repos").fetchone()["c"] == 0
 
 
 def test_bundle_links_must_reference_accepted_bundle_memories():
@@ -1741,6 +1786,8 @@ def test_apply_bundle_failure_keeps_committed_batches_and_frees_the_connection(m
     assert store.get_memory("mem_1") is not None
     assert store.get_memory("mem_5") is None          # never reached
     assert store.conn.in_transaction is False         # no dangling pinned transaction
+    assert store.get_memory("mem_2") is not None
+    assert store.get_memory("mem_3") is not None
     store.create_workspace("still-usable")            # the connection is not deadlocked
 
 
@@ -1863,3 +1910,43 @@ def test_sync_round_is_complete_when_every_bundle_applies():
     assert result["errors"] == []
     assert result["peers_applied"] == 2
     assert result["totals"]["added"] == 2
+
+
+def test_apply_converges_independent_of_bundle_arrival_order():
+    """Concurrent equal-clock edits choose the same winner in either arrival order."""
+    bundles = [
+        {
+            "format": SYNC_FORMAT, "version": 2, "device_id": "peer-a",
+            "workspace_name": "w", "repos": {},
+            "memories": [{
+                "id": "same-id", "content": "alpha", "scope": "workspace",
+                "valid_from": 1.0, "last_access": 100.0, "ingested_at": 10.0,
+            }],
+            "mem_links": [],
+        },
+        {
+            "format": SYNC_FORMAT, "version": 2, "device_id": "peer-b",
+            "workspace_name": "w", "repos": {},
+            "memories": [{
+                "id": "same-id", "content": "bravo", "scope": "workspace",
+                "valid_from": 1.0, "last_access": 100.0, "ingested_at": 10.0,
+            }],
+            "mem_links": [],
+        },
+    ]
+
+    signatures = []
+    contents = []
+    for order in (bundles, list(reversed(bundles))):
+        store = Store(":memory:")
+        store.get_or_create_workspace("w")
+        syncer = SyncEngine(store)
+        for bundle in order:
+            syncer.apply_bundle(bundle, into_workspace="w")
+        result = store.get_memory("same-id")
+        assert result is not None
+        signatures.append(_signature(result))
+        contents.append(result.content)
+
+    assert signatures[0] == signatures[1]
+    assert contents[0] == contents[1]

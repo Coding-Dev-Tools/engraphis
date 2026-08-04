@@ -70,8 +70,8 @@ def test_llm_base_url_normalizes_a_path_without_disclosing_it():
     assert validate_llm_base_url("https://provider.example/custom/v1/") == (
         "https://provider.example/custom/v1"
     )
-    assert validate_llm_base_url("http://[::1]:11434/v1/") == (
-        "http://[::1]:11434/v1"
+    assert validate_llm_base_url("http://[::1]:9001/v1/") == (
+        "http://[::1]:9001/v1"
     )
 
 

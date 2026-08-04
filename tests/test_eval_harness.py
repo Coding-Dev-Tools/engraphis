@@ -60,7 +60,8 @@ def test_harness_seeds_declared_fixture_graph_before_memory_ingestion():
 
 def test_metrics_edges():
     from eval import metrics
-    assert metrics.recall_at_k([], []) == 1.0
+    assert metrics.recall_at_k([], []) == 0.0
+    assert metrics.ndcg_at_k([], [], 5) == 0.0
     assert metrics.recall_at_k(["a", "b"], ["b"]) == 1.0
     assert metrics.hit_at_k(["a"], ["b"]) == 0.0
     assert metrics.answer_token_recall(["redis lock around stock decrement"],
@@ -427,3 +428,52 @@ def test_harness_v2_grounded_and_abstention_metrics_are_available_or_explicitly_
     assert available["metrics"]["abstention"]["available"] is True
     assert available["metrics"]["grounded"]["n"] == 2
     assert available["metrics"]["abstention"]["n"] == 2
+
+
+def test_harness_rejects_answerable_question_without_gold_evidence():
+    data = [{
+        "id": "broken",
+        "memories": [{"tag": "fact", "text": "The release train leaves on Tuesday."}],
+        "questions": [{"id": "no-gold", "q": "when does the release train leave",
+                       "supporting": []}],
+    }]
+    with pytest.raises(ValueError, match="no supporting evidence"):
+        run(data, v2=True, dataset_path=str(DATASET), bootstrap_iterations=2)
+
+
+
+def test_retrieval_metrics_are_duplicate_safe_and_fail_closed():
+    from eval import metrics
+
+    assert metrics.recall_at_k(["gold", "gold"], ["gold", "gold"]) == 1.0
+    assert metrics.ndcg_at_k(["gold", "gold"], ["gold"], 2) == 1.0
+    assert metrics.reciprocal_rank(["noise", "gold", "gold"], ["gold"]) == pytest.approx(0.5)
+    assert metrics.answer_token_recall([], "") == 0.0
+    with pytest.raises(ValueError, match="positive integers"):
+        metrics.retrieval_metrics_at_depths(["gold"], ["gold"], depths=(0,))
+    with pytest.raises(ValueError, match="strings"):
+        metrics.recall_at_k(["gold"], [None])
+
+
+def test_dataset_loader_reports_malformed_json_and_partial_records(tmp_path):
+    malformed = tmp_path / "malformed.jsonl"
+    malformed.write_text('{"id": "ok", "questions": []}\nnot-json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"line 2"):
+        load_dataset(str(malformed))
+
+    partial = tmp_path / "partial.jsonl"
+    partial.write_text(
+        '{"id": "broken", "memories": [{"tag": "fact"}], "questions": []}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="requires non-empty text"):
+        load_dataset(str(partial))
+
+
+def test_empty_dataset_is_a_valid_zero_sized_evaluation():
+    report = run([], k=1)
+    assert report["questions"] == 0
+    assert report["scored_questions"] == 0
+    assert report["recall_at_k"] == 0.0
+    assert report["hit_at_k"] == 0.0
+    assert report["detail"] == []
