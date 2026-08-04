@@ -610,19 +610,29 @@ def test_profiles_overlap_entity_boundary(monkeypatch):
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     rid = eng.store.get_or_create_repo(wid, "r")
-    texts = [
-        "Unrelated deployment note one.",
-        "Unrelated deployment note two.",
-        "Unrelated deployment note three.",
-        "Aurora owns the deployment runbook section one.",
-        "Aurora owns the deployment runbook section two.",
-        "Aurora owns the deployment runbook section three.",
-    ]
-    for text in texts:
+    for index in range(6):
         eng.remember(
-            text, workspace_id=wid, repo_id=rid,
+            f"marker{index} value{index} signal{index}.",
+            workspace_id=wid, repo_id=rid,
             mtype=MemoryType.SEMANTIC, resolve_conflicts=False,
         )
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    first_page = eng.store.list_memories_page(flt, after_id="", limit=3)
+    second_page = eng.store.list_memories_page(
+        flt, after_id=first_page[-1].id, limit=3,
+    )
+    assert len(first_page) == len(second_page) == 3
+    for memory in first_page:
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            ("Unrelated deployment note.", memory.id),
+        )
+    for index, memory in enumerate(second_page):
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            (f"Aurora owns the deployment runbook section {index}.", memory.id),
+        )
+    eng.store.conn.commit()
     eng.store.upsert_entity(
         Node(id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid)
     )
