@@ -60,6 +60,10 @@ DISTILL_SCAN_LIMIT = 2000
 # Bound the population that reaches the quadratic fallback clustering pass while
 # allowing the storage scan to page in smaller batches and skip pending rows.
 DISTILL_CLUSTER_LIMIT = 2000
+# Carry a small, bounded set of incomplete clusters into the next sweep.  This keeps
+# interleaved subjects from being permanently split across rotating windows without
+# turning a maintenance pass into an unbounded full-table scan.
+DISTILL_PENDING_LIMIT = 512
 # Cursor name for the bounded episodic sweep; the value is scoped by workspace/repo.
 DISTILL_CURSOR_NAME = "episodic-consolidation"
 
@@ -283,6 +287,85 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         reverse=True,
     )
     return records[:cap] if cap is not None else records, next_cursor
+
+
+def _decode_distill_cursor(value: str) -> tuple[str, list[str]]:
+    """Read a legacy keyset cursor or the current cursor-plus-candidates state."""
+    raw = str(value or "")
+    if not raw.startswith("{"):
+        return raw, []
+    try:
+        state = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw, []
+    if not isinstance(state, dict):
+        return raw, []
+    cursor = state.get("cursor")
+    pending = state.get("pending")
+    if not isinstance(cursor, str) or not isinstance(pending, list):
+        return raw, []
+    ids = list(dict.fromkeys(
+        str(memory_id) for memory_id in pending if str(memory_id or "")
+    ))
+    return cursor, ids[:DISTILL_PENDING_LIMIT]
+
+
+def _encode_distill_cursor(cursor: str, pending_ids: list[str]) -> str:
+    """Persist bounded partial-cluster candidates alongside the scan cursor."""
+    normalized = list(dict.fromkeys(
+        str(memory_id) for memory_id in pending_ids if str(memory_id or "")
+    ))[:DISTILL_PENDING_LIMIT]
+    if not normalized:
+        return str(cursor or "")
+    return json.dumps(
+        {"cursor": str(cursor or ""), "pending": normalized},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _load_distill_candidates(store, pending_ids: list[str]) -> list[MemoryRecord]:
+    """Reload prior partial-cluster sources, dropping deleted or ineligible rows."""
+    if not pending_ids:
+        return []
+    records: list[MemoryRecord] = []
+    for memory_id in dict.fromkeys(pending_ids):
+        memory = store.get_memory(memory_id)
+        if (
+            memory is not None
+            and memory.mtype == MemoryType.EPISODIC
+            and prompt_eligible(memory.provenance, memory.metadata)
+        ):
+            records.append(memory)
+    if not records:
+        return []
+    linked = _linked_memory_ids(
+        store, [memory.id for memory in records], relation="consolidates",
+    )
+    return [memory for memory in records if memory.id not in linked]
+
+
+def _pending_distill_ids(clusters: list[list[MemoryRecord]], *, min_cluster: int) -> list[str]:
+    """Select bounded candidates whose cluster needs a later sweep to complete.
+
+    Multi-record partial clusters are preferred because they carry positive evidence
+    that a subject is recurring.  Singleton records with an explicit subject key are
+    retained too; unrelated singleton noise is intentionally not allowed to consume
+    the whole carry-over budget.
+    """
+    incomplete = [cluster for cluster in clusters if 0 < len(cluster) < min_cluster]
+    prioritized = [
+        cluster for cluster in incomplete
+        if len(cluster) > 1 or any(memory.subject_key for memory in cluster)
+    ]
+    selected: list[str] = []
+    for cluster in prioritized:
+        for memory in cluster[-max(1, min_cluster - 1):]:
+            if memory.id not in selected:
+                selected.append(memory.id)
+            if len(selected) >= DISTILL_PENDING_LIMIT:
+                return selected
+    return selected
 
 
 def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
@@ -716,9 +799,10 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 except Exception as exc:
                     report["errors"].append(_error_entry(retry_cluster, exc))
 
-    distill_cursor = store.get_maintenance_cursor(
+    distill_state = store.get_maintenance_cursor(
         workspace_id, repo_id, DISTILL_CURSOR_NAME,
     )
+    distill_cursor, pending_ids = _decode_distill_cursor(distill_state)
     distill_overlap = max(0, int(min_cluster) - 1)
     episodic, next_distill_cursor = _scan_memory_window(
         store, flt, mtypes=[MemoryType.EPISODIC],
@@ -729,9 +813,16 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         overlap=distill_overlap,
         advance_records=DISTILL_CLUSTER_LIMIT,
     )
-    if not dry_run:
-        store.set_maintenance_cursor(
-            workspace_id, repo_id, DISTILL_CURSOR_NAME, next_distill_cursor,
+    prior_candidates = _load_distill_candidates(store, pending_ids)
+    if prior_candidates:
+        by_id = {memory.id: memory for memory in [*prior_candidates, *episodic]}
+        episodic = sorted(
+            by_id.values(),
+            key=lambda memory: (
+                memory.ingested_at if memory.ingested_at is not None else float("-inf"),
+                memory.id,
+            ),
+            reverse=True,
         )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
@@ -743,6 +834,14 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
             owner_memories, threshold=subject_jaccard, store=store, flt=flt,
         )
     ]
+    if not dry_run:
+        store.set_maintenance_cursor(
+            workspace_id, repo_id, DISTILL_CURSOR_NAME,
+            _encode_distill_cursor(
+                next_distill_cursor,
+                _pending_distill_ids(clusters, min_cluster=min_cluster),
+            ),
+        )
 
     if structured:
         report["structured"] = {"enabled": True, "attempted": 0, "succeeded": 0,

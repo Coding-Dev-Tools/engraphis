@@ -120,6 +120,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         context_ids[tag] = engine.remember(
             str(item["text"]), workspace_id=workspace_id, repo_id=repo_id,
             mtype=_memory_type(item.get("mtype"), MemoryType.SEMANTIC),
+            importance=float(item.get("importance", 0.0)),
             resolve_conflicts=False,
         )
     report = consolidate(engine, workspace_id=workspace_id, repo_id=repo_id)
