@@ -324,8 +324,12 @@ def _encode_distill_cursor(cursor: str, pending_ids: list[str]) -> str:
     )
 
 
-def _load_distill_candidates(store, pending_ids: list[str]) -> list[MemoryRecord]:
+def _load_distill_candidates(
+    store, flt: SearchFilter, pending_ids: list[str], *, now: float,
+) -> list[MemoryRecord]:
     """Reload prior partial-cluster sources, dropping deleted or ineligible rows."""
+    from engraphis.core.store import memory_matches_filter
+
     if not pending_ids:
         return []
     records: list[MemoryRecord] = []
@@ -334,6 +338,7 @@ def _load_distill_candidates(store, pending_ids: list[str]) -> list[MemoryRecord
         if (
             memory is not None
             and memory.mtype == MemoryType.EPISODIC
+            and memory_matches_filter(memory, flt, at=now)
             and prompt_eligible(memory.provenance, memory.metadata)
         ):
             records.append(memory)
@@ -813,7 +818,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         overlap=distill_overlap,
         advance_records=DISTILL_CLUSTER_LIMIT,
     )
-    prior_candidates = _load_distill_candidates(store, pending_ids)
+    prior_candidates = _load_distill_candidates(store, flt, pending_ids, now=now)
     if prior_candidates:
         by_id = {memory.id: memory for memory in [*prior_candidates, *episodic]}
         episodic = sorted(

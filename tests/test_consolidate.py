@@ -1036,6 +1036,38 @@ def test_distill_cursor_carries_interleaved_partial_cluster(monkeypatch):
     assert set(second["digests_created"][0]["consolidates"]) == set(recurring)
 
 
+def test_distill_cursor_drops_closed_partial_cluster_sources(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "DISTILL_CLUSTER_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source_ids = [
+        eng.remember(
+            f"marker{index} value{index} signal{index}.",
+            workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(9)
+    ]
+    for index in (0, 3, 6):
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            (f"Recurring deploy failure during run {index}.", source_ids[index]),
+        )
+    eng.store.conn.commit()
+
+    first = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
+    assert first["digests_created"] == []
+    eng.store.close_validity(source_ids[0], at=time.time())
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
+
+    assert second["digests_created"] == []
+
+
 def test_scan_advances_past_a_fully_excluded_page():
     from engraphis.core import consolidate as consolidate_module
 
