@@ -269,8 +269,8 @@ def _require_ws(workspace: Optional[str] = None) -> str:
             raise _invalid_request() from None
         except HTTPException as exc:
             raise _sanitized_http_exception(exc.status_code) from None
-        except Exception as exc:  # noqa: BLE001
-            logger.error("workspace validation failed (%s)", type(exc).__name__)
+        except Exception:  # noqa: BLE001 — never carry internal details into the response
+            logger.error("workspace validation failed")
             raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
     ws = _default_ws()
     if not ws:

@@ -1190,11 +1190,12 @@ class Store:
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
         # backfills before creating representative-only uniqueness indexes so exact
         # normalized aliases can safely converge onto one deterministic canonical id.
-        # This is a v4 migration transform, not startup maintenance: re-running the
-        # token-overlap pass on every open scans the entire entity table O(n²) even
-        # when nothing changed, so gate it like the other versioned transforms.
-        if previous_version < 4:
-            self._backfill_entity_canonicalization()
+        # This is a live maintenance transform, not a one-shot migration: fresh
+        # databases run it before any entities exist, and upgraded databases must
+        # also canonicalize entities written before the pass existed. The pass is
+        # idempotent (it only issues UPDATEs when a row actually changes), and the
+        # token-overlap loop is bounded per workspace/etype bucket.
+        self._backfill_entity_canonicalization()
         self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
             "ON entities(workspace_id, normalized_name, etype) "
@@ -2813,9 +2814,65 @@ class Store:
         self._backfill_entity_text_mentions(
             nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
         )
+        self._live_canonicalize_entity(
+            nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
+        )
         if commit:
             self.conn.commit()
         return nid
+
+    def _live_canonicalize_entity(self, entity_id: str, *, name: str,
+                                  workspace_id: Optional[str],
+                                  repo_id: Optional[str]) -> None:
+        """Merge a freshly-written entity into a token-overlap alias group.
+
+        The on-open canonicalization pass keeps pre-existing databases coherent, but
+        entities written after open only ever matched exact-normalized names.  This
+        bounded, per-scope check gives the new entity the same canonical-group
+        treatment the pass applies: if its name shares most tokens (or the compact
+        spelling) with an existing same-scope/etype entity, both join the same
+        canonical representative.  Conservative (>= 0.6 Jaccard) so distinct
+        identities like "C++" and "C#" never merge.
+        """
+        name = (name or "").strip()
+        if len(name) < 2 or not workspace_id:
+            return
+        token_set = {t for t in re.split(r"[^a-z0-9]+", name.casefold()) if len(t) >= 2}
+        compact = "".join(re.split(r"[^a-z0-9]+", name.casefold()))
+        if not token_set and not compact:
+            return
+        peers = self.conn.execute(
+            "SELECT id, name, canonical_id, canonical_method FROM entities "
+            "WHERE workspace_id=? AND etype=(SELECT etype FROM entities WHERE id=?) "
+            "AND id<>? ORDER BY id LIMIT 500",
+            (workspace_id, entity_id, entity_id),
+        ).fetchall()
+        best: Optional[dict] = None
+        best_overlap = 0.0
+        for peer in peers:
+            peer_name = (peer["name"] or "").strip()
+            if not peer_name:
+                continue
+            pt = {t for t in re.split(r"[^a-z0-9]+", peer_name.casefold()) if len(t) >= 2}
+            pc = "".join(re.split(r"[^a-z0-9]+", peer_name.casefold()))
+            if not pt:
+                continue
+            if compact and pc and compact == pc:
+                overlap = 1.0
+            elif token_set and pt:
+                overlap = len(token_set & pt) / max(len(token_set), len(pt))
+            else:
+                continue
+            if overlap >= 0.6 and overlap > best_overlap:
+                best_overlap = overlap
+                best = peer
+        if best is None:
+            return
+        peer_canonical = best["canonical_id"] or best["id"]
+        self.conn.execute(
+            "UPDATE entities SET canonical_id=?, canonical_method=? WHERE id=?",
+            (peer_canonical, "token_overlap", entity_id),
+        )
 
     def _backfill_entity_text_mentions(self, entity_id: str, *, name: str,
                                        workspace_id: Optional[str],

@@ -7,10 +7,12 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
-question. It assumes the Engraphis MCP server is connected. The default Smart MCP surface has six
-`engraphis_*` tools and automatically exposes advanced capabilities through discovery and a
-validated executor. If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc
-notes.
+question. It assumes the Engraphis MCP server is connected. The default Smart MCP surface has nine
+`engraphis_*` tools (`engraphis_session`, `engraphis_recall_context`, `engraphis_remember`,
+`engraphis_discover_actions`, `engraphis_execute_read`, `engraphis_execute_action`,
+`engraphis_get_memory`, `engraphis_update_memory`, `engraphis_conflict_review`) and automatically
+exposes advanced capabilities through discovery and a validated executor. If those tools are
+absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of

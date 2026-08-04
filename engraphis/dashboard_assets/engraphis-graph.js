@@ -1190,7 +1190,7 @@
         link = d3.forceLink().id(node => node.id);
         fg.d3Force('link', link);
       }
-      if (charge && charge.strength) charge.strength(-s.repel);
+      if (charge && charge.strength) charge.strength(-(mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel));
       if (link && link.distance) link.distance(s.link);
       if (typeof d3 === 'undefined') return;
       if (!dragFollowForce) {
@@ -1198,15 +1198,64 @@
         fg.d3Force('dragFollow', dragFollowForce);
       }
       fg.d3Force('radial', null);
-      /* Community detection still controls colour and link structure, but it must not give
-         each community a separate orbit target. The default used those scattered targets and
-         made a connected graph settle as a giant ring around empty space. Every standard
-         layout now shares the origin as its gravitational centre; repulsion and link distance
-         retain the useful local separation without sacrificing a coherent overview. */
-      const centering = mode === 'radial' ? Math.max(0.04, s.gravity / 300) : s.gravity / 100;
-      fg.d3Force('x', d3.forceX(0).strength(centering));
-      fg.d3Force('y', d3.forceY(0).strength(centering));
-      if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
+      const layoutNodes = fg.graphData().nodes || [];
+      /* The layout buttons are arrangements, not just five nearby slider presets. Keep the
+         ordinary force settings as the local texture, then give each named mode its own
+         geometry so switching modes is visible even when the graph has only one component.
+         Centering must stay gentle and origin-based: a function target at a distant grid
+         slot would fight an explicit drag, and a released node must stay where the user
+         dropped it (the e2e drag-release contract). */
+      if (mode === 'communities') {
+        const communityKeys = [], seenCommunities = new Set();
+        layoutNodes.forEach(node => {
+          const key = Number.isFinite(node.community) ? node.community : 0;
+          if (!seenCommunities.has(key)) { seenCommunities.add(key); communityKeys.push(key); }
+        });
+        communityKeys.sort((a, b) => a - b);
+        const columns = Math.max(1, Math.ceil(Math.sqrt(communityKeys.length)));
+        const rows = Math.max(1, Math.ceil(communityKeys.length / columns));
+        const gap = Math.max(180, (Number(s.link) || 16) * 10);
+        const targets = new Map();
+        communityKeys.forEach((key, index) => {
+          const column = index % columns, row = Math.floor(index / columns);
+          targets.set(key, {
+            x: (column - (columns - 1) / 2) * gap,
+            y: (row - (rows - 1) / 2) * gap * 0.72,
+          });
+        });
+        /* A gentle origin-based centering keeps the layout coherent without fighting a
+           drag; the community grid is still visible through the charge/repel and link
+           structure installed above. */
+        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100);
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
+      } else if (mode === 'radial' && d3.forceRadial) {
+        const outerRadius = Math.max(180, Math.min(360, Math.sqrt(Math.max(1, layoutNodes.length)) * 18 + (Number(s.link) || 16) * 4));
+        const degreeScale = Math.max(1, maxOf(layoutNodes.map(node => node.degree || 0), 1));
+        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
+        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
+        fg.d3Force('radial', d3.forceRadial(node => {
+          const hubness = Math.max(0, Math.min(1, (node.degree || 0) / degreeScale));
+          return 34 + (outerRadius - 34) * (1 - hubness);
+        }).strength(0.72));
+      } else if (mode === 'constellation') {
+        const positions = new Map(), total = Math.max(1, layoutNodes.length - 1);
+        const reach = Math.max(160, Math.min(330, 80 + Math.sqrt(Math.max(1, layoutNodes.length)) * 10));
+        layoutNodes.forEach((node, index) => {
+          const rank = Number.isFinite(node.rank) ? node.rank : index;
+          const fraction = Math.max(0, Math.min(1, rank / total));
+          const angle = index * 2.399963229728653;
+          const radius = 48 + fraction * reach;
+          positions.set(node.id, { x: Math.cos(angle) * radius * 1.18, y: Math.sin(angle) * radius * 0.76 });
+        });
+        const target = node => positions.get(node.id) || { x: 0, y: 0 };
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18));
+      } else {
+        const centering = mode === 'compact' ? Math.max(0.24, (Number(s.gravity) || 0) / 100) : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
+      }
       /* One collision pass on a large graph, two otherwise — the classic path's
          `.iterations(GPERF.large?1:2)`. The second pass costs another full quadtree traversal
          per node on every tick, and a large store pays that on the initial layout and on every
@@ -1689,7 +1738,12 @@
       .onZoom(z => {
         zoom = z.k || 1;
         if (state.collapse !== 'auto') return;
-        const next = zoom < 0.55;
+        /* Layout presets can legitimately occupy more of the canvas than the compact default.
+           Keep auto-collapse for true zoom-out, but do not hide a freshly selected arrangement
+           merely because its fit scale is below the old, overly eager threshold. */
+        const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
+        const canAutoCollapse = raw.nodes.length > 500;
+        const next = canAutoCollapse && zoom < collapseThreshold;
         if (next !== collapsed) {
           collapsed = next;
           render(false, true);
@@ -2138,7 +2192,9 @@
     api.setSuggestions = on => { state.suggestions = on; render(false, true); };
     api.setCollapse = mode => {
       state.collapse = state.renderMode === 'full' ? false : mode;
-      const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && zoom < 0.55));
+      const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
+      const canAutoCollapse = raw.nodes.length > 500;
+      const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && canAutoCollapse && zoom < collapseThreshold));
       collapsed = next;
       render(true, true);
     };

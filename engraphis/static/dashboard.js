@@ -1106,18 +1106,30 @@ function graphSetColorBy(mode){
 function graphApplyForces(){
  if(!FG)return;
  const settings=window.GSET,mode=settings.mode||'compact';
- FG.d3Force('charge').strength(-settings.repel);
+ FG.d3Force('charge').strength(-(mode==='communities'?Math.max(10,settings.repel*.68):settings.repel));
  FG.d3Force('link').distance(settings.link);
  if(typeof d3==='undefined')return;
  FG.d3Force('radial',null);
-  /* Communities remain a colour/relationship grouping, not separate gravity wells. Giving
-     every cluster its own off-centre target was what made the default view form a hollow ring.
-     Pull every standard layout toward one shared origin; charge and link forces preserve the
-     readable local clusters inside that coherent overall shape. */
-  const centering=mode==='radial'?Math.max(.04,settings.gravity/300):settings.gravity/100;
-  FG.d3Force('x',d3.forceX(0).strength(centering));
-  FG.d3Force('y',d3.forceY(0).strength(centering));
-  if(mode==='radial'&&d3.forceRadial)FG.d3Force('radial',d3.forceRadial(node=>Math.max(0,5-Math.min(5,node.degree||0))*Math.max(8,settings.link*.72)).strength(.32));
+  const layoutNodes=GACTIVE_DATA&&GACTIVE_DATA.nodes||[];
+  /* Each named mode owns a different target geometry. Slider values still control local
+     spacing, but switching buttons must visibly change the arrangement even for one component. */
+  if(mode==='communities'){
+   const keys=[],seen=new Set();layoutNodes.forEach(node=>{const key=Number.isFinite(node.community)?node.community:0;if(!seen.has(key)){seen.add(key);keys.push(key)}});keys.sort((a,b)=>a-b);
+   const cols=Math.max(1,Math.ceil(Math.sqrt(keys.length))),rows=Math.max(1,Math.ceil(keys.length/cols)),gap=Math.max(180,(Number(settings.link)||16)*10),targets=new Map();
+   keys.forEach((key,index)=>{const col=index%cols,row=Math.floor(index/cols);targets.set(key,{x:(col-(cols-1)/2)*gap,y:(row-(rows-1)/2)*gap*.72})});
+   const centering=Math.max(.04,(Number(settings.gravity)||0)/100);FG.d3Force('x',d3.forceX(0).strength(centering));FG.d3Force('y',d3.forceY(0).strength(centering));
+  }else if(mode==='radial'&&d3.forceRadial){
+   const outer=Math.max(180,Math.min(360,Math.sqrt(Math.max(1,layoutNodes.length))*18+(Number(settings.link)||16)*4)),maxDegree=Math.max(1,layoutNodes.reduce((max,node)=>Math.max(max,node.degree||0),1));
+   FG.d3Force('x',d3.forceX(0).strength(Math.max(.05,(Number(settings.gravity)||0)/500)));FG.d3Force('y',d3.forceY(0).strength(Math.max(.05,(Number(settings.gravity)||0)/500)));
+   FG.d3Force('radial',d3.forceRadial(node=>{const hubness=Math.max(0,Math.min(1,(node.degree||0)/maxDegree));return 34+(outer-34)*(1-hubness)}).strength(.72));
+  }else if(mode==='constellation'){
+   const positions=new Map(),total=Math.max(1,layoutNodes.length-1),reach=Math.max(160,Math.min(330,80+Math.sqrt(Math.max(1,layoutNodes.length))*10));
+   layoutNodes.forEach((node,index)=>{const rank=Number.isFinite(node.rank)?node.rank:index,fraction=Math.max(0,Math.min(1,rank/total)),angle=index*2.399963229728653,radius=48+fraction*reach;positions.set(node.id,{x:Math.cos(angle)*radius*1.18,y:Math.sin(angle)*radius*.76})});
+   const target=node=>positions.get(node.id)||{x:0,y:0};FG.d3Force('x',d3.forceX(node=>target(node).x).strength(.18));FG.d3Force('y',d3.forceY(node=>target(node).y).strength(.18));
+  }else{
+   const centering=mode==='compact'?Math.max(.24,(Number(settings.gravity)||0)/100):Math.max(.06,(Number(settings.gravity)||0)/100);
+   FG.d3Force('x',d3.forceX(0).strength(centering));FG.d3Force('y',d3.forceY(0).strength(centering));
+  }
  FG.d3Force('collide',d3.forceCollide(node=>node.radius+1.5).iterations(GPERF.large?1:2));
 }
 function graphSetHighlight(id){

@@ -360,9 +360,9 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "Smart MCP (6 tools)" in architecture
+    assert "Smart MCP (9 tools)" in architecture
     assert "Classic MCP (33 tools)" in architecture
-    assert "default Smart MCP surface has six" in skill
+    assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
     assert "recall_context (compact)" in architecture

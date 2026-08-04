@@ -34,9 +34,13 @@ def test_normalize():
 
 def test_scoring_edge_inputs_stay_finite_and_bounded():
     now = 1_000_000.0
+    # Non-finite values are missing evidence: they are dropped, not kept as 0.0.
+    # A single surviving finite value is a flat input and maps to 1.0.
     normalized = scoring.normalize({"nan": float("nan"), "inf": float("inf"), "ok": 2.0})
-    assert set(normalized) == {"nan", "inf", "ok"}
+    assert set(normalized) == {"ok"}
     assert all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in normalized.values())
+    # All-non-finite input contributes no evidence at all, never a max score.
+    assert scoring.normalize({"nan": float("nan"), "inf": float("inf")}) == {}
     assert 0.0 <= scoring.retention("bad", "bad", now) <= 1.0
     assert 0.0 <= scoring.retention(1.0, now, float("nan")) <= 1.0
     assert 0.0 <= scoring.recency("bad", now, tau_days=0) <= 1.0

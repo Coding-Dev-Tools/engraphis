@@ -1538,7 +1538,7 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
     ``graphFocus`` treats ``false`` as "offer the recovery path" — tick *Show unlinked*, retry,
     and otherwise say *Entity not in view*.  The engine answered from ``raw.nodes``, which keeps
     the coordinates force-graph left on a node from an earlier render, so a node hidden by the
-    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.55) or by a scope
+    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.42) or by a scope
     filter still reported success — the camera moved to nothing and the user got no explanation.
     """
     report = _run_engine(
@@ -1794,7 +1794,8 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
         const nodes = store.graphData.nodes;
         emit({
           mode: api.state().renderMode,
-          x: axes.x.at(-1), y: axes.y.at(-1),
+          x: { target: typeof axes.x.at(-1).target === 'function' ? axes.x.at(-1).target(nodes[0]) : axes.x.at(-1).target, value: axes.x.at(-1).value },
+          y: { target: typeof axes.y.at(-1).target === 'function' ? axes.y.at(-1).target(nodes[0]) : axes.y.at(-1).target, value: axes.y.at(-1).value },
           reheat: (invocations.d3ReheatSimulation || 0) - before,
           cooldown: store.cooldownTime,
           pinned: nodes.filter(node => node.fx !== undefined || node.fy !== undefined).length,
@@ -1900,36 +1901,70 @@ globalThis.d3 = {
 
 
 @requires_node
-def test_default_community_layout_uses_one_shared_gravity_center() -> None:
-    """The default must not put each detected community in a separate orbit.
+def test_layout_presets_use_distinct_force_geometry() -> None:
+    """Each layout button must install a visibly different arrangement strategy."""
 
-    The old community target function placed groups on a broad ring, leaving the centre empty
-    and stretching cross-community relations across the whole canvas.  Both dashboard renderers
-    now use the origin as their default force target; charge and links are sufficient to retain
-    readable local separation.
-    """
-
-    classic = DASHBOARD.read_text(encoding="utf-8")
-    classic_forces = classic[classic.index("function graphApplyForces()") : classic.index("function graphSetHighlight(")]
-    assert "if(mode==='communities')" not in classic_forces
-    assert "FG.d3Force('x',d3.forceX(0).strength(centering));" in classic_forces
-    assert "FG.d3Force('y',d3.forceY(0).strength(centering));" in classic_forces
+    for dashboard in (DASHBOARD, CLASSIC_DASHBOARD):
+        classic_forces = dashboard.read_text(encoding="utf-8")
+        forces = classic_forces[classic_forces.index("function graphApplyForces()") : classic_forces.index("function graphSetHighlight(")]
+        assert "if(mode==='communities')" in forces
+        assert "else if(mode==='radial'&&d3.forceRadial)" in forces
+        assert "else if(mode==='constellation')" in forces
 
     report = _run_engine(
         """
-        const targets = { x: [], y: [] };
+        const targets = { x: [], y: [], radial: [] };
+        const force = target => ({ target, strengthValue: null, strength(value) {
+          if (arguments.length) { this.strengthValue = value; return this; }
+          return this.strengthValue;
+        } });
         globalThis.d3 = {
-          forceX: target => { targets.x.push(target); return { strength: () => ({}) }; },
-          forceY: target => { targets.y.push(target); return { strength: () => ({}) }; },
-          forceRadial: () => ({ strength: () => ({}) }),
+          forceX: target => { targets.x.push(target); return force(target); },
+          forceY: target => { targets.y.push(target); return force(target); },
+          forceRadial: target => { targets.radial.push(target); return force(target); },
           forceCollide: () => ({ iterations: () => ({}) }),
         };
         const api = G.create(el, { reducedMotion: () => true });
-        api.setData(chain(8));
-        emit({ x: targets.x, y: targets.y });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' }, { id: 'f' }],
+          links: [
+            { source: 'a', target: 'b' }, { source: 'a', target: 'c' }, { source: 'a', target: 'd' },
+            { source: 'e', target: 'f' },
+          ],
+        });
+        const read = mode => {
+          targets.x = []; targets.y = []; targets.radial = [];
+          api.setPreset(mode);
+          const xForce = store.d3Forces.x, radialForce = store.d3Forces.radial;
+          const nodes = store.graphData.nodes;
+          const point = node => typeof xForce.target === 'function' ? xForce.target(node) : xForce.target;
+          return {
+            xKind: typeof xForce.target,
+            xStrength: xForce.strengthValue,
+            first: point(nodes[0]),
+            second: point(nodes[nodes.length - 1]),
+            radial: radialForce ? radialForce.target(nodes[0]) : null,
+            radialOuter: radialForce ? radialForce.target(nodes[nodes.length - 1]) : null,
+          };
+        };
+        emit({
+          compact: read('compact'), original: read('original'), communities: read('communities'),
+          radial: read('radial'), constellation: read('constellation'),
+        });
         """
     )
-    assert report == {"x": [0], "y": [0]}
+    assert report["compact"]["first"] == 0
+    assert report["original"]["first"] == 0
+    assert report["compact"]["xStrength"] > report["original"]["xStrength"]
+    # Communities mode keeps a gentle origin-based centering: a function target at a
+    # distant grid slot would fight an explicit drag (the e2e drag-release contract),
+    # so the mode's visible grouping comes from the charge/repel geometry instead.
+    assert report["communities"]["xKind"] == "number"
+    assert report["communities"]["first"] == 0
+    assert report["radial"]["radial"] is not None
+    assert report["radial"]["radial"] < report["radial"]["radialOuter"]
+    assert report["constellation"]["xKind"] == "function"
+    assert report["constellation"]["first"] != 0
 
 
 @requires_node

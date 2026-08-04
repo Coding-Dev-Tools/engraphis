@@ -138,11 +138,22 @@ def normalize(scores: dict[str, float]) -> dict[str, float]:
 
     Retrieval adapters are external inputs in practice.  Non-finite values are
     treated as missing evidence instead of allowing NaN/Infinity to poison the
-    fused ranking or its deterministic sort.
+    fused ranking or its deterministic sort.  When every value is non-finite the
+    arm contributes no evidence at all (empty result) rather than granting every
+    key the maximum score.
     """
     if not scores:
         return {}
-    finite = {key: _finite_number(value) for key, value in scores.items()}
+    finite: dict[str, float] = {}
+    for key, value in scores.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue  # unparseable evidence is missing evidence
+        if math.isfinite(number):
+            finite[key] = number
+    if not finite:
+        return {}
     lo, hi = min(finite.values()), max(finite.values())
     if hi - lo < 1e-12:
         return {key: 1.0 for key in finite}

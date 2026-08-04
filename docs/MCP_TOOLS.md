@@ -1,8 +1,9 @@
 # MCP tool reference
 
-`engraphis-mcp` is the zero-configuration Smart MCP gateway. It initially exposes six concise
+`engraphis-mcp` is the zero-configuration Smart MCP gateway. It initially exposes nine concise
 tools: `engraphis_session`, `engraphis_recall_context`, `engraphis_remember`,
-`engraphis_discover_actions`, `engraphis_execute_read`, and `engraphis_execute_action`. Agents use
+`engraphis_discover_actions`, `engraphis_execute_read`, `engraphis_execute_action`,
+`engraphis_get_memory`, `engraphis_update_memory`, and `engraphis_conflict_review`. Agents use
 the routine tools directly; for any advanced capability, they discover the best action and execute
 the returned, version-bound capability ID. Discovery returns the precise schema and side-effect
 class, and execution revalidates availability, scope, authorization, and arguments.
