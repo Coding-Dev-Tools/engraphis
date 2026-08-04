@@ -1098,6 +1098,50 @@ def test_scan_advances_past_a_fully_excluded_page():
         memory.id for memory in first_page
     }
 
+def test_scan_enforces_raw_advance_cap_when_rows_are_excluded(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for index in range(20):
+        eng.remember(
+            f"Excluded maintenance event {index}.",
+            workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+    flt = SearchFilter(
+        workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC],
+    )
+    calls = []
+    original_page = eng.store.list_memories_page
+
+    def record_page(page_filter, *, after_id="", limit=500, include_invalid=False):
+        calls.append((after_id, limit))
+        return original_page(
+            page_filter, after_id=after_id, limit=limit,
+            include_invalid=include_invalid,
+        )
+
+    monkeypatch.setattr(eng.store, "list_memories_page", record_page)
+    scanned_ids = []
+
+    def exclude_page(_store, memory_ids, *, relation):
+        scanned_ids.extend(memory_ids)
+        return set(memory_ids)
+
+    monkeypatch.setattr(consolidate_module, "_linked_memory_ids", exclude_page)
+    records, next_cursor = consolidate_module._scan_memory_window(
+        eng.store, flt, mtypes=[MemoryType.EPISODIC], batch_size=2,
+        max_records=5, exclude_relation="consolidates",
+        overlap=2, advance_records=5,
+    )
+
+    assert records == []
+    assert len(scanned_ids) == 5
+    assert [limit for _after_id, limit in calls] == [2, 2, 1]
+    assert next_cursor == scanned_ids[2]
+
 
 def test_linked_memory_ids_respects_sqlite_bind_limit():
     from engraphis.core import consolidate as consolidate_module

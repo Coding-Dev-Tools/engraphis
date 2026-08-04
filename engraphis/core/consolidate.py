@@ -226,16 +226,26 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
     advance_cap = (
         None if advance_records is None else max(0, int(advance_records))
     )
-    if cap == 0:
+    if cap == 0 or advance_cap == 0:
         return [], str(start_after_id or "")
     after_id = str(start_after_id or "")
     records: list[MemoryRecord] = []
     window_ids: list[str] = []
     scoped = _replace(flt, mtypes=mtypes)
     next_cursor = ""
+
+    def cursor_for_window() -> str:
+        retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
+        return window_ids[len(window_ids) - retained - 1]
+
     while True:
+        if advance_cap is not None and len(window_ids) >= advance_cap:
+            next_cursor = cursor_for_window()
+            break
         remaining = None if cap is None else max(1, cap - len(records))
         page_limit = size if remaining is None else min(size, remaining)
+        if advance_cap is not None:
+            page_limit = min(page_limit, advance_cap - len(window_ids))
         page = store.list_memories_page(
             scoped, after_id=after_id, limit=page_limit,
         )
@@ -259,11 +269,10 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         else:
             records.extend(page)
         if cap is not None and len(records) >= cap:
-            retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
-            next_cursor = (
-                window_ids[len(window_ids) - retained - 1]
-                if retained else next_after
-            )
+            next_cursor = cursor_for_window()
+            break
+        if advance_cap is not None and len(window_ids) >= advance_cap:
+            next_cursor = cursor_for_window()
             break
         if next_after == after_id or page_size < page_limit:
             # End-of-keyspace: clear the cursor for the next invocation.
@@ -272,13 +281,10 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
     if (
         not next_cursor
         and advance_cap is not None
+        and window_ids
         and len(window_ids) >= advance_cap
     ):
-        retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
-        next_cursor = (
-            window_ids[len(window_ids) - retained - 1]
-            if retained else window_ids[advance_cap - 1]
-        )
+        next_cursor = cursor_for_window()
     records.sort(
         key=lambda memory: (
             memory.ingested_at if memory.ingested_at is not None else float("-inf"),
@@ -816,7 +822,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         exclude_relation="consolidates",
         start_after_id=distill_cursor,
         overlap=distill_overlap,
-        advance_records=DISTILL_CLUSTER_LIMIT,
+        advance_records=DISTILL_CLUSTER_LIMIT + distill_overlap,
     )
     prior_candidates = _load_distill_candidates(store, flt, pending_ids, now=now)
     if prior_candidates:
@@ -1568,7 +1574,7 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
         exclude_relation=PROFILE_RELATION,
         start_after_id=profile_cursor,
         overlap=profile_overlap,
-        advance_records=PROFILE_MEMORY_LIMIT,
+        advance_records=PROFILE_MEMORY_LIMIT + profile_overlap,
     )
     if not dry_run:
         store.set_maintenance_cursor(
