@@ -326,17 +326,15 @@ def test_graph_index_excludes_session_scoped_memories():
         set_current_user(None)
 
 
-def test_approved_extractor_content_does_not_launder_structured_graph_hints():
-    """Approval releases reviewed text, not caller/extractor-supplied graph metadata."""
+def test_local_agent_extractor_graph_hints_are_available_immediately():
+    """Local-agent extraction may populate its validated structured graph metadata."""
     pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
-    ingested = svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
-    for fact in ingested["facts"]:
-        _approve(svc, {"id": fact["id"]})
-
+    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
     graph = svc.graph(workspace="acme")
-    assert graph["nodes"] == [] and graph["edges"] == []
+    assert {node["label"] for node in graph["nodes"]} >= {"Engraphis", "SQLite"}
+    assert any(edge["label"] == "stores_in" for edge in graph["edges"])
 
 
 def test_graph_hides_edges_from_forgotten_memory():

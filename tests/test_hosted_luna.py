@@ -19,8 +19,8 @@ from eval.productivity import AgentTurn, run
 
 
 def _data():
-    return [{"id": "case", "memories": [{"text": "The owner is Ada."}], "questions": [
-        {"id": "secret-task", "q": "Who is the owner?", "answer": "Ada"},
+    return [{"id": "case", "memories": [{"tag": "owner", "text": "The owner is Ada."}], "questions": [
+        {"id": "secret-task", "q": "Who is the owner?", "answer": "Ada", "supporting": ["owner"]},
     ]}]
 
 

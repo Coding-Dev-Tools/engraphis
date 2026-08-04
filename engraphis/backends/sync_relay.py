@@ -80,14 +80,19 @@ def decode_sync_e2ee_key(value: object) -> bytes:
     each authorized device through their own trusted channel.
     """
     raw = str(value or "").strip()
-    if re.fullmatch(r"[A-Za-z0-9_-]{43}", raw) is None:
+    # Accept both the documented unpadded form (43 chars) and a conventionally
+    # padded 44-char base64 (one trailing '='), so operators who paste a standard
+    # padded base64 from a key generator are not surprised by a 409.
+    if re.fullmatch(r"[A-Za-z0-9_-]{43}={0,1}", raw) is None:
         raise RelayError(
             "Cloud Sync needs a 32-byte end-to-end encryption key in "
             + SYNC_E2EE_KEY_ENV,
             status=409,
         )
+    # ``b64decode`` needs the padding explicit: 43 chars = 32 bytes + one pad.
+    padded = raw if raw.endswith("=") else raw + "="
     try:
-        key = base64.b64decode(raw + "=", altchars=b"-_", validate=True)
+        key = base64.b64decode(padded, altchars=b"-_", validate=True)
     except (ValueError, binascii.Error):
         raise RelayError("Cloud Sync end-to-end encryption key is malformed", status=409) from None
     if len(key) != SYNC_E2EE_KEY_BYTES:
@@ -551,6 +556,11 @@ class RelayTransport:
                              status=exc.code) from None
         except urllib.error.URLError:
             raise RelayUnreachable("could not reach the relay") from None
+        except (TimeoutError, OSError):
+            # urllib can surface socket timeouts and low-level TLS/socket failures
+            # directly rather than wrapping them in URLError. Normalize them to the
+            # sanitized transport class so callers never expose provider text.
+            raise RelayUnreachable("could not reach the relay") from None
 
     # ── SyncTransport protocol ───────────────────────────────────────────────────────
     def push(self, name: str, data: bytes) -> None:
@@ -589,7 +599,17 @@ class RelayTransport:
         which exposed only the base64 bulk endpoint.
         """
         failures: List[str] = []
-        for index, name in enumerate(self.list_names()):
+        try:
+            names = self.list_names()
+        except RelayError as exc:
+            # The first relay generation exposed only the bulk endpoint and returned
+            # 404 for the newer names route. Fall back before iterating so that a
+            # missing capability is not mistaken for an empty workspace.
+            if exc.status == 404:
+                yield from self._pull_legacy()
+                return
+            raise
+        for index, name in enumerate(names):
             try:
                 data = self._request(
                     self._url("bundles/%s" % quote(name, safe="")),
@@ -631,8 +651,11 @@ class RelayTransport:
                 raise ValueError("bundles is not a bounded list")
         except (
             UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError,
-        ) as exc:
-            raise RelayError("relay returned an invalid legacy bundle response") from exc
+        ):
+            # The relay controls both bytes and JSON structure. Suppress exception
+            # chaining so an invalid remote response cannot retain payload fragments
+            # in a traceback or error object's ``__cause__``.
+            raise RelayError("relay returned an invalid legacy bundle response") from None
 
         out: List[Tuple[str, bytes]] = []
         seen = set()
@@ -684,5 +707,5 @@ class RelayTransport:
             return safe_names
         except (
             UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError
-        ) as exc:
-            raise RelayError("relay returned an invalid name response") from exc
+        ):
+            raise RelayError("relay returned an invalid name response") from None

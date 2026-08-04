@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -22,7 +23,7 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 7
+    assert store.schema_version == 9
 
 
 def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
@@ -75,6 +76,75 @@ def test_entity_normalization_preserves_meaningful_punctuation():
     assert normalize_entity_name("AT&T") != normalize_entity_name("ATT")
 
 
+def test_live_canonicalization_preserves_punctuation_with_shared_tokens(store):
+    wid = store.get_or_create_workspace("w")
+    cpp = store.upsert_entity(Node(
+        id="ent_cpp_language", name="C++ language", ntype="topic", workspace_id=wid,
+    ))
+    csharp = store.upsert_entity(Node(
+        id="ent_csharp_language", name="C# language", ntype="topic", workspace_id=wid,
+    ))
+    rows = store.conn.execute(
+        "SELECT id, canonical_id FROM entities WHERE id IN (?, ?) ORDER BY id",
+        (cpp, csharp),
+    ).fetchall()
+    assert [row["canonical_id"] for row in rows] == [cpp, csharp]
+
+def test_live_entity_canonicalization_searches_beyond_arbitrary_peer_cap(store):
+    wid = store.get_or_create_workspace("w")
+    canonical = store.upsert_entity(Node(
+        id="ent_openai", name="OpenAI", ntype="org", workspace_id=wid,
+    ))
+    for index in range(500):
+        store.upsert_entity(Node(
+            id=f"ent_filler_{index}", name=f"Filler Company {index}",
+            ntype="org", workspace_id=wid,
+        ))
+    alias = store.upsert_entity(Node(
+        id="ent_open_ai", name="Open AI", ntype="org", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id, canonical_method FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert row["canonical_id"] == canonical
+    assert row["canonical_method"] == "token_overlap"
+
+def test_entity_blocking_chunks_long_token_names(store):
+    wid = store.get_or_create_workspace("w")
+    tokens = " ".join(f"tok{index}x" for index in range(600))
+    canonical = store.upsert_entity(Node(
+        id="ent_long_canonical", name=tokens, ntype="topic", workspace_id=wid,
+    ))
+    alias = store.upsert_entity(Node(
+        id="ent_long_alias", name=tokens + " alias", ntype="topic", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id, canonical_method FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert canonical != alias
+    assert row["canonical_id"] == canonical
+    assert row["canonical_method"] == "token_overlap"
+
+def test_entity_blocking_skips_broad_token_buckets(store, monkeypatch):
+    from engraphis.core import store as store_module
+
+    monkeypatch.setattr(store_module, "ENTITY_BLOCK_BUCKET_LIMIT", 2)
+    wid = store.get_or_create_workspace("w")
+    for index in range(3):
+        store.upsert_entity(Node(
+            id=f"ent_shared_{index}", name=f"Shared Entity {index}",
+            ntype="topic", workspace_id=wid,
+        ))
+    alias = store.upsert_entity(Node(
+        id="ent_shared_alias", name="Shared Entity Alias",
+        ntype="topic", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert row["canonical_id"] == alias
+
+
 def test_replacing_edge_closes_removed_normalized_support(store):
     wid = store.get_or_create_workspace("w")
     first = store.add_memory(MemoryRecord(id="mem_first", content="first",
@@ -112,6 +182,174 @@ def test_edge_provenance_preserves_declared_primary_memory_order(store):
     assert provenance["memory_id"] == "mem_z"
     assert provenance["memory_ids"] == ["mem_z", "mem_a"]
 
+def test_upsert_edge_support_failure_rolls_back_edge_and_releases_lock(store, monkeypatch):
+    edge = Edge(
+        id="edge-support-failure", src="source", dst="target", relation="related",
+        provenance={"memory_id": "mem-support"},
+    )
+
+    def fail_support(*args, **kwargs):
+        raise RuntimeError("support unavailable")
+
+    monkeypatch.setattr(store, "_write_edge_supports", fail_support)
+    with pytest.raises(RuntimeError, match="support unavailable"):
+        store.upsert_edge(edge)
+    assert store.conn.execute(
+        "SELECT 1 FROM edges WHERE id=?", (edge.id,)
+    ).fetchone() is None
+
+    monkeypatch.undo()
+    assert store.upsert_edge(edge) == edge.id
+    assert store.conn.execute(
+        "SELECT 1 FROM edge_supports WHERE edge_id=?", (edge.id,)
+    ).fetchone() is not None
+
+
+def test_upsert_entity_backfill_failure_rolls_back_entity(store, monkeypatch):
+    wid = store.get_or_create_workspace("w")
+    node = Node(id="entity-backfill-failure", name="Failure Entity",
+                ntype="person", workspace_id=wid)
+
+    def fail_backfill(*args, **kwargs):
+        raise RuntimeError("incidence unavailable")
+
+    monkeypatch.setattr(store, "_backfill_entity_text_mentions", fail_backfill)
+    with pytest.raises(RuntimeError, match="incidence unavailable"):
+        store.upsert_entity(node)
+    assert store.conn.execute(
+        "SELECT 1 FROM entities WHERE id=?", (node.id,)
+    ).fetchone() is None
+
+    monkeypatch.undo()
+    assert store.upsert_entity(node) == node.id
+
+
+def test_upsert_entity_failure_after_waiting_for_other_transaction_releases_lock(
+    store, monkeypatch,
+):
+    wid = store.get_or_create_workspace("w")
+    node = Node(
+        id="entity-waiting-failure", name="Waiting Failure",
+        ntype="person", workspace_id=wid,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    outcome = []
+
+    def hold_transaction():
+        store.conn.execute("BEGIN IMMEDIATE")
+        entered.set()
+        release.wait(timeout=5)
+        store.conn.rollback()
+
+    holder = threading.Thread(target=hold_transaction)
+    holder.start()
+    assert entered.wait(timeout=5)
+
+    def fail_backfill(*args, **kwargs):
+        raise RuntimeError("incidence unavailable")
+
+    monkeypatch.setattr(store, "_backfill_entity_text_mentions", fail_backfill)
+
+    def attempt_upsert():
+        try:
+            store.upsert_entity(node)
+        except BaseException as exc:  # communicate the worker failure to the test thread
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt_upsert)
+    worker.start()
+    assert not release.wait(timeout=0.05)
+    release.set()
+    holder.join(timeout=5)
+    worker.join(timeout=5)
+
+    assert not holder.is_alive()
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], RuntimeError)
+    assert store.conn.in_transaction is False
+    assert store.conn.transaction_owned_by_current_thread() is False
+    assert store.conn.execute(
+        "SELECT 1 FROM entities WHERE id=?", (node.id,)
+    ).fetchone() is None
+
+@pytest.mark.parametrize("method_name", ("add_link", "add_link_version"))
+def test_link_writes_release_transaction_after_waiting_for_other_thread(
+    store, monkeypatch, method_name,
+):
+    entered = threading.Event()
+    release = threading.Event()
+    outcome = []
+
+    def hold_transaction():
+        store.conn.execute("BEGIN IMMEDIATE")
+        entered.set()
+        release.wait(timeout=5)
+        store.conn.rollback()
+
+    holder = threading.Thread(target=hold_transaction)
+    holder.start()
+    assert entered.wait(timeout=5)
+
+    def fail_commit(_connection):
+        raise RuntimeError("commit unavailable")
+
+    monkeypatch.setattr(type(store.conn), "commit", fail_commit)
+
+    def attempt_link():
+        try:
+            getattr(store, method_name)("link-a", "link-b", relation="related")
+        except BaseException as exc:  # communicate the worker failure to the test thread
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt_link)
+    worker.start()
+    assert not release.wait(timeout=0.05)
+    release.set()
+    holder.join(timeout=5)
+    worker.join(timeout=5)
+    monkeypatch.undo()
+
+    assert not holder.is_alive()
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], RuntimeError)
+    assert store.conn.in_transaction is False
+    assert store.conn.transaction_owned_by_current_thread() is False
+    assert store.conn.execute(
+        "SELECT 1 FROM mem_links WHERE a=? AND b=?",
+        ("link-a", "link-b"),
+    ).fetchone() is None
+
+    if method_name == "add_link_version":
+        assert store.add_link_version("link-a", "link-b", relation="related") is True
+    else:
+        store.add_link("link-a", "link-b", relation="related")
+    assert store.get_links("link-a")
+
+
+def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch):
+    edge = Edge(id="edge-existing", src="source", dst="target", relation="related")
+    store.upsert_edge(edge)
+
+    def fail_support(*args, **kwargs):
+        raise RuntimeError("support unavailable")
+
+    monkeypatch.setattr(store, "_write_edge_supports", fail_support)
+    with pytest.raises(RuntimeError, match="support unavailable"):
+        store.add_edge_support(edge.id, {"memory_id": "mem-support"})
+    row = store.conn.execute(
+        "SELECT provenance FROM edges WHERE id=?", (edge.id,)
+    ).fetchone()
+    assert json.loads(row["provenance"]) == {}
+
+    monkeypatch.undo()
+    store.add_edge_support(edge.id, {"memory_id": "mem-support"})
+    assert store.conn.execute(
+        "SELECT 1 FROM edge_supports WHERE edge_id=? AND memory_id=?",
+        (edge.id, "mem-support"),
+    ).fetchone() is not None
 
 def test_concurrent_writes_do_not_corrupt_or_lose_data(tmp_path):
     # The shared connection is serialized (_SerializedConnection): concurrent threadpool
@@ -193,7 +431,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 9
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"
@@ -232,6 +470,77 @@ def test_memory_roundtrip(store):
     assert rec.ingested_at is not None and rec.valid_from is not None
 
 
+def test_memory_confidence_roundtrip_and_default(store):
+    wid = store.get_or_create_workspace("w")
+    # Default writes carry confidence 1.0 (existing behavior unchanged).
+    default_id = store.add_memory(MemoryRecord(
+        id="", content="A default-confidence memory.", workspace_id=wid,
+    ))
+    assert store.get_memory(default_id).confidence == 1.0
+    # An explicit confidence value persists and survives a reload.
+    confident_id = store.add_memory(MemoryRecord(
+        id="", content="A 0.5-confidence memory.", workspace_id=wid, confidence=0.5,
+    ))
+    rec = store.get_memory(confident_id)
+    assert rec is not None and rec.confidence == 0.5
+    # Batched reads agree with the single-row read.
+    assert store.get_memories([confident_id])[confident_id].confidence == 0.5
+    # The raw column agrees too.
+    row = store.conn.execute(
+        "SELECT confidence FROM memories WHERE id=?", (confident_id,)
+    ).fetchone()
+    assert float(row["confidence"]) == 0.5
+    # ON CONFLICT overwrite also persists the field.
+    store.add_memory(MemoryRecord(
+        id=confident_id, content="Rewritten memory.", workspace_id=wid, confidence=0.75,
+    ))
+    assert store.get_memory(confident_id).confidence == 0.75
+
+def test_pin_transitions_record_latest_effective_marker(store, monkeypatch):
+    from engraphis.core import store as store_mod
+
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="A pin-lattice memory.", workspace_id=wid,
+    ))
+    clock = iter((100.0, 200.0, 300.0, 400.0))
+    monkeypatch.setattr(store_mod, "now_ts", lambda: next(clock))
+
+    store.set_pinned(mid, True)
+    store.set_pinned(mid, False)
+    store.set_pinned(mid, True)
+    row = store.conn.execute(
+        "SELECT pinned, pinned_at, unpinned_at FROM memories WHERE id=?", (mid,)
+    ).fetchone()
+    assert (row["pinned"], row["pinned_at"], row["unpinned_at"]) == (1, 300.0, 200.0)
+
+    # Repeating an already-effective state is idempotent and does not move its marker.
+    store.set_pinned(mid, True)
+    row = store.conn.execute(
+        "SELECT pinned_at, unpinned_at FROM memories WHERE id=?", (mid,)
+    ).fetchone()
+    assert (row["pinned_at"], row["unpinned_at"]) == (300.0, 200.0)
+
+
+def test_add_memory_mirror_failure_rolls_back_row_and_releases_lock(store, monkeypatch):
+    wid = store.get_or_create_workspace("w")
+    rec = MemoryRecord(id="mirror-failure", content="mirror failure", workspace_id=wid)
+
+    def fail_mirror(*args, **kwargs):
+        raise RuntimeError("FTS unavailable")
+
+    monkeypatch.setattr(store, "_fts_upsert", fail_mirror)
+    with pytest.raises(RuntimeError, match="FTS unavailable"):
+        store.add_memory(rec)
+    assert store.get_memory(rec.id) is None
+
+    monkeypatch.undo()
+    replacement = store.add_memory(
+        MemoryRecord(id=rec.id, content="retry succeeds", workspace_id=wid)
+    )
+    assert replacement == rec.id
+    assert store.get_memory(rec.id).content == "retry succeeds"
+
 def test_bitemporal_visibility(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
@@ -247,6 +556,30 @@ def test_bitemporal_visibility(store):
     assert mid in [m.id for m in store.list_memories(flt, include_invalid=True)]
     # Time-travel to when it was valid: visible.
     assert mid in [m.id for m in store.list_memories(SearchFilter(workspace_id=wid, as_of=1500.0))]
+
+
+def test_add_memory_rejects_inverted_validity_interval(store):
+    wid = store.get_or_create_workspace("w")
+    with pytest.raises(ValueError, match="validity interval would be empty"):
+        store.add_memory(MemoryRecord(
+            id="", content="A fact with an impossible window.",
+            workspace_id=wid, valid_from=2000.0, valid_to=1000.0,
+        ))
+    # The invalid row must not have been persisted.
+    assert store.list_memories(SearchFilter(workspace_id=wid), include_invalid=True) == []
+
+
+def test_add_memory_accepts_closed_history_with_defaulted_valid_from(store):
+    """A past-only ``valid_to`` with no explicit ``valid_from`` is the accepted
+    closed-history/backfill convention, not an inverted interval."""
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="historical fact", workspace_id=wid, valid_to=1.0,
+    ))
+    rec = store.get_memory(mid)
+    assert rec is not None
+    assert rec.valid_to == 1.0
+    assert rec.valid_from is not None and rec.valid_from > rec.valid_to
 
 
 def test_close_validity(store):

@@ -15,7 +15,7 @@ claude mcp add engraphis -- engraphis-mcp
 ```
 
 The local server exposes the same memory semantics while keeping the database on your machine.
-It is Smart MCP by default: agents use the six compact routine tools and discover/execute advanced
+It is Smart MCP by default: agents use the nine compact routine tools and discover/execute advanced
 capabilities automatically when needed. There is no profile choice or manual escalation. If a
 legacy client pins direct tool names, configure `engraphis-mcp-classic` instead.
 Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or

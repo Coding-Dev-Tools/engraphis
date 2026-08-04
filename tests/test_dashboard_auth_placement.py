@@ -557,7 +557,10 @@ def test_each_access_state_offers_the_one_action_that_can_succeed(
                           "available": state == "inactive", "ends_at": 0}},
     }])[state]["html"]
 
-    assert expected in html
+    if expected:
+        assert expected in html
+    else:
+        assert html == ""
     assert absent not in html
 
 

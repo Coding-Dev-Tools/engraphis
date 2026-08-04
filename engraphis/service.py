@@ -25,6 +25,7 @@ import math
 import copy
 import time
 import threading
+import numpy as np
 from collections import Counter, OrderedDict
 from dataclasses import asdict
 from functools import wraps
@@ -48,6 +49,7 @@ from engraphis.core.interfaces import (
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
     REVIEW_PENDING,
+    inspection_eligible,
     prompt_eligible,
     source_is_external,
 )
@@ -74,6 +76,11 @@ MAX_METADATA_BYTES = 16_384
 MAX_K = 50
 MAX_TOKEN_BUDGET = 32_768
 RESPONSE_MODES = frozenset({"full", "compact"})
+# These are the transport-neutral producers used by the local agent protocol.  They
+# are allowed to create prompt-visible memories immediately; external source labels
+# remain review-gated below.  Keep this allow-list narrow so arbitrary caller-supplied
+# provenance cannot self-approve a memory.
+LOCAL_AGENT_SOURCES = frozenset({"agent", "intent_api"})
 # Recall's fused rank is min-max normalized inside each query.  Keep this contract in
 # every response mode so API/MCP clients do not treat a high rank as calibrated truth.
 RECALL_SCORE_SEMANTICS = {
@@ -149,6 +156,7 @@ GRAPH_ENTITY_RELATION_LIMIT = 200
 GRAPH_ENTITY_EVIDENCE_LIMIT = 100
 GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT = 400
 GRAPH_ENTITY_HISTORY_LIMIT = 50
+CONFLICT_REVIEW_SCAN_LIMIT = 10_000
 
 
 def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -> str:
@@ -285,26 +293,29 @@ class GraphSceneCapacityExceeded(ValidationError):
 
 
 def _rollback_service_transaction(method):
-    """Roll back a failed multi-statement service mutation on the shared connection.
+    """Run a service mutation in an owned transaction and release it on failure.
 
-    The serialized SQLite wrapper pins its write lock until commit or rollback. Workspace
-    lifecycle operations contain many dependent statements, so an unexpected storage or
-    constraint failure must release both the partial transaction and that lock.
+    ``sqlite3.Connection.in_transaction`` is connection-global, while the store
+    serializes transactions with thread-local ownership.  Checking the former can
+    make a request roll back another thread's transaction or leave its own
+    transaction open after waiting for that thread.  Use the store's ownership
+    primitive so lifecycle mutations are atomic without stealing concurrent work.
     """
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        started = not self.store.conn.in_transaction
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
         try:
-            if started:
-                self.store.conn.execute("BEGIN IMMEDIATE")
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             result = method(self, *args, **kwargs)
-            if started and self.store.conn.in_transaction:
-                self.store.conn.commit()
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
             return result
         except BaseException:
-            if self.store.conn.in_transaction:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
                 try:
-                    self.store.conn.rollback()
+                    conn.rollback()
                 except Exception:  # noqa: BLE001 - preserve the original failure
                     pass
             raise
@@ -436,23 +447,31 @@ def _strict_bool(value: Any, *, field: str) -> bool:
 def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) -> dict:
     """Create provenance at the service boundary, never from caller metadata.
 
-    The service is a transport boundary: callers may describe an origin but cannot
-    grant model-context authority.  Every service write is held for review, including
-    an asserted local-agent write.  In-process callers that are intentionally trusted
-    use ``MemoryEngine`` directly; that is an explicit local-code capability.
+    Normal local-agent memory creation is intentionally immediate: agents should not
+    need an owner ceremony for every fact they learn.  The service still owns the
+    approval decision, and only the narrow local-agent source allow-list receives
+    prompt eligibility here.  External/imported sources remain pending, while the
+    deterministic poisoning guard can quarantine any payload before it is surfaced.
+    In-process callers that are intentionally trusted may still use ``MemoryEngine``
+    directly; that is an explicit local-code capability.
     """
     source_name = _clean_text(
         source, field="source", max_chars=MAX_NAME_CHARS, required=False
     ) or "agent"
     requested = _strict_bool(trusted, field="trusted")
-    external = raw_ingest or source_is_external(source_name)
+    external = source_is_external(source_name)
+    local_agent = source_name.casefold() in LOCAL_AGENT_SOURCES
     provenance = {
         "source": source_name,
-        "trusted": False,
-        "review_state": REVIEW_PENDING,
-        "trust_origin": "external_ingress" if external else "service_review_gate",
+        "trusted": local_agent,
+        "review_state": REVIEW_APPROVED if local_agent else REVIEW_PENDING,
+        "trust_origin": (
+            "local_agent"
+            if local_agent else
+            "external_ingress" if (external or raw_ingest) else "service_review_gate"
+        ),
     }
-    if requested:
+    if requested and not local_agent:
         # An auditable code, not a copy of source content or a caller-controlled
         # trust assertion.  Operators can see that a downgrade happened without
         # turning it into prompt-visible metadata.
@@ -1278,9 +1297,9 @@ class MemoryService:
                kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
         the text is first distilled into discrete typed facts; without one this behaves
-        exactly like ``remember``. Raw ingest is always untrusted at this boundary;
-        every retained fact stays passive until an approved local write records the
-        corresponding trusted claim."""
+        exactly like ``remember``. Normal local-agent ingest is prompt-visible after
+        validation; explicitly external sources remain pending, and detector matches
+        are quarantined before they can surface."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         _reject_secret_capture((("content", content), ("metadata", metadata)))
         provenance = _canonical_write_provenance(source, trusted, raw_ingest=True)
@@ -1355,8 +1374,9 @@ class MemoryService:
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
-            # Dashboard intent is still a public service ingress.  It can describe
-            # its source but cannot self-approve model-visible memory.
+            # Dashboard intent is a local agent-protocol write.  It may create a
+            # prompt-visible memory immediately; external/imported sources still
+            # remain review-gated by the canonical service boundary.
             valid_from=valid_from, subject_key=subject_key, claim_kind=claim_kind,
             source="intent_api", trusted=False,
         )
@@ -1522,6 +1542,7 @@ class MemoryService:
             return created, "configured extractor produced no new discrete facts"
         return created, ""
 
+    @_rollback_service_transaction
     def import_folder(self, *, workspace: str, path: str, file_pattern: str = "*.md",
                       memory_type: str = "semantic", actor: str = "user",
                       derive_facts: bool = False) -> dict:
@@ -1620,6 +1641,7 @@ class MemoryService:
                 "derived_facts": derived_facts, "details": details[:50],
                 "warnings": warnings[:50]}
 
+    @_rollback_service_transaction
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
                      actor: str = "user", derive_facts: bool = False) -> dict:
         """Drag-and-drop / picked-file counterpart to ``import_folder``: ingest
@@ -3070,6 +3092,7 @@ class MemoryService:
         return {"workspaces": out}
 
     # ── workspace curation (create / rename / describe / delete) ─────────────────
+    @_rollback_service_transaction
     def create_workspace(self, name: str, description: str = "", *,
                          visibility: str = "personal", confirmed: bool = False,
                          actor: str = "user") -> dict:
@@ -3118,6 +3141,7 @@ class MemoryService:
                 "visibility": visibility,
                 "owner": owner if visibility == "personal" else "", "created": True}
 
+    @_rollback_service_transaction
     def set_workspace_visibility(self, workspace: str, visibility: str, *,
                                  confirmed: bool = False, actor: str = "user") -> dict:
         """Explicitly share or unshare a team folder after user confirmation."""
@@ -3171,6 +3195,7 @@ class MemoryService:
         return {"workspace": ws, "visibility": target,
                 "owner": owner if target == "personal" else "", "changed": previous != target}
 
+    @_rollback_service_transaction
     def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
         relabel — all data stays attached. Same binding + uniqueness the create path enforces."""
@@ -3188,6 +3213,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"old": old, "new": new, "id": wid}
 
+    @_rollback_service_transaction
     def set_workspace_description(self, workspace: str, description: str,
                                  *, actor: str = "user") -> dict:
         """Store a human description in the workspace's ``settings`` JSON (no schema change)."""
@@ -3864,14 +3890,15 @@ class MemoryService:
             c.execute(
                 "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
                 "title, content, summary, keywords, metadata, importance, surprise, stability, "
-                "access_count, last_access, valid_from, valid_to, valid_to_recorded_at, "
+                "confidence, access_count, last_access, valid_from, valid_to, "
+                "valid_to_recorded_at, "
                 "ingested_at, expired_at, subject_key, claim_kind, pinned, sensitivity, "
                 "provenance, sort_order) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (nmid, wid_dst, _new_repo(m["repo_id"]), session_remap.get(m["session_id"]),
                  m["scope"], m["mtype"], m["title"], m["content"], m["summary"], m["keywords"],
                  _remap_json_memory_ids(m["metadata"]), m["importance"],
-                 m["surprise"], m["stability"],
+                 m["surprise"], m["stability"], m["confidence"],
                  m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
                  m["valid_to_recorded_at"], m["ingested_at"], m["expired_at"],
                  m["subject_key"], m["claim_kind"], m["pinned"], m["sensitivity"],
@@ -4035,6 +4062,7 @@ class MemoryService:
         return {"source": src, "workspace": dst, "id": wid_dst,
                "memories_copied": len(memory_remap)}
 
+    @_rollback_service_transaction
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
@@ -4045,10 +4073,14 @@ class MemoryService:
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
+        existing = self.store.get_memory(mid)
+        old_title = existing.title if existing is not None else ""
         sets, params, changes = [], [], []
+        title_changed = False
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
             _reject_secret_capture((("title", title),))
+            title_changed = title != old_title
             sets.append("title=?")
             params.append(title)
             changes.append("title")
@@ -4080,11 +4112,80 @@ class MemoryService:
                 kw = " ".join(json.loads(kw)) if kw.strip().startswith("[") else kw
             except Exception:
                 pass
-            self.store._fts_upsert(mid, row["title"], row["content"], kw)
+            if title_changed:
+                text = f"{row['title']}\n{row['content']}" if row["title"] else row["content"]
+                vector_row = self.store.conn.execute(
+                    "SELECT model FROM mem_vectors WHERE id=?", (mid,)
+                ).fetchone()
+                # Quarantined records and explicitly secret records are retained for
+                # local governance only. A metadata edit must not turn either into a
+                # semantic candidate or send its payload to an embedder.
+                if (
+                    existing.sensitivity == "secret"
+                    or not inspection_eligible(existing.provenance, existing.metadata)
+                ):
+                    self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
+                    self.engine.index.delete([mid], commit=False)
+                else:
+                    # Existing rows may predate the write-path secret guard.  Do not send
+                    # such content to a remote embedder while changing unrelated metadata.
+                    _reject_secret_capture((("content", row["content"]),))
+                    try:
+                        vectors = np.asarray(
+                            self.engine.embedder.embed([text]), dtype=np.float32,
+                        )
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValidationError("embedder returned an invalid vector") from exc
+                    expected_dim = int(
+                        getattr(self.engine.embedder, "dim",
+                                getattr(self.engine.index, "dim", 0)) or 0
+                    )
+                    if (
+                        vectors.ndim != 2
+                        or vectors.shape != (1, expected_dim)
+                        or not np.isfinite(vectors).all()
+                    ):
+                        raise ValidationError("embedder returned an invalid vector")
+                    try:
+                        self.engine.index.upsert([mid], vectors, commit=False)
+                    except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
+                        logger.warning("vector-index upsert failed for title update %s (%s)",
+                                       mid, type(exc).__name__)
+                        try:
+                            self.store.audit(
+                                "engine", "index_upsert_failed", mid,
+                                "failure_type=%s" % type(exc).__name__, commit=False,
+                            )
+                        except Exception:
+                            pass
+                        raise
+                    old_model = (
+                        vector_row["model"] if vector_row is not None else ""
+                    )
+                    current_model = getattr(self.engine.embedder, "model_name", None)
+                    if not isinstance(current_model, str) or not current_model:
+                        current_model = getattr(self.engine.embedder, "model", "")
+                    if not isinstance(current_model, str):
+                        current_model = ""
+                    model = current_model or str(old_model or "")
+                    # NumPy's index writes the portable row itself; write it once more
+                    # with the current model identity so both backend paths preserve the
+                    # same normalized vector and model/dimension metadata.
+                    self.store.put_vector(mid, vectors[0], model=model)
+                self.store._fts_upsert(
+                    mid, row["title"] or "", row["content"] or "", kw,
+                )
+            else:
+                # Re-apply the title even when its value is unchanged: older databases
+                # may be missing the lexical mirror, and title edits must restore it.
+                self.store._fts_upsert(
+                    mid, row["title"] or "", row["content"] or "", kw,
+                )
+
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
         return {"id": mid, "updated": changes}
-
+    @_rollback_service_transaction
     def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
                          actor: str = "user") -> dict:
         """Persist a manual display order for the Memories tab's drag-to-reorder UI.
@@ -4123,7 +4224,9 @@ class MemoryService:
         for link in self.store.get_links(mid):
             other_id = link["b"] if link["a"] == mid else link["a"]
             other = self.store.get_memory(other_id)
-            if other is not None and not self._memory_visible_to_caller(other):
+            if (other is None or other.workspace_id != wid
+                    or (rid is not None and other.repo_id != rid)
+                    or not self._memory_visible_to_caller(other)):
                 continue
             links.append({"id": other_id, "relation": link["relation"],
                           "layer": link.get("layer") or "semantic",
@@ -4136,6 +4239,118 @@ class MemoryService:
         chain = [self._chain_entry(r, wid) for r in self._chain_for(rec, wid)]
         return {"memory": _mem_to_dict(rec), "links": links, "audit": audit,
                 "chain": chain}
+
+    def conflict_review(self, *, workspace: str, repo: Optional[str] = None,
+                        limit: int = 50) -> dict:
+        """Return a scope-authorized review inbox without exposing untrusted bodies."""
+        wid, rid = self._require_scope(workspace, repo)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ValidationError("limit must be an integer") from None
+        limit = max(1, min(100, limit))
+        params: list[Any] = [wid]
+        sql = (
+            "SELECT id, title, content, metadata, provenance, workspace_id, repo_id, "
+            "scope, session_id, ingested_at FROM memories WHERE workspace_id=? "
+        )
+        if rid is not None:
+            sql += "AND repo_id=? "
+            params.append(rid)
+        items = []
+        batch_size = max(100, limit * 4)
+        scanned = 0
+        truncated = False
+        cursor_id = None
+        cursor_ingested = None
+        session_visibility: dict[tuple[str, Optional[str]], bool] = {}
+        while len(items) < limit and scanned < CONFLICT_REVIEW_SCAN_LIMIT:
+            batch_params = [*params]
+            if cursor_id is None:
+                batch_sql = sql
+            elif cursor_ingested is None:
+                batch_sql = sql + "AND ingested_at IS NULL AND id < ? "
+                batch_params.append(cursor_id)
+            else:
+                batch_sql = sql + (
+                    "AND (ingested_at IS NULL OR ingested_at < ? "
+                    "OR (ingested_at = ? AND id < ?)) "
+                )
+                batch_params.extend([cursor_ingested, cursor_ingested, cursor_id])
+            requested_batch_size = min(batch_size, CONFLICT_REVIEW_SCAN_LIMIT - scanned)
+            batch_sql += (
+                "ORDER BY CASE WHEN ingested_at IS NULL THEN 1 ELSE 0 END, "
+                "ingested_at DESC, id DESC LIMIT ?"
+            )
+            rows = self.store.conn.execute(
+                batch_sql, [*batch_params, requested_batch_size]).fetchall()
+            if not rows:
+                break
+            scanned += len(rows)
+            last = rows[-1]
+            cursor_id = last["id"]
+            cursor_ingested = last["ingested_at"]
+            for row in rows:
+                # The raw SQL scope is not enough for session records: an inbox is a
+                # shared workspace surface, so enforce the same caller/session
+                # authorization used by recall and inspection before exposing even an
+                # id, state, or metadata-derived conflict marker. Cache the decision
+                # because many memories can belong to one session.
+                row_scope = str(row["scope"] or Scope.WORKSPACE.value)
+                if row_scope not in (
+                        Scope.SESSION.value, Scope.REPO.value,
+                        Scope.WORKSPACE.value, Scope.USER.value):
+                    continue
+                if row_scope == Scope.SESSION.value:
+                    sid = str(row["session_id"] or "")
+                    if not sid:
+                        continue
+                    visibility_key = (sid, row["repo_id"])
+                    visible = session_visibility.get(visibility_key)
+                    if visible is None:
+                        session = self.store.get_session(sid)
+                        visible = bool(
+                            session
+                            and session.get("workspace_id") == wid
+                            and session.get("repo_id") == row["repo_id"]
+                        )
+                        if visible:
+                            try:
+                                self._authorize_session(session)
+                            except ValidationError:
+                                visible = False
+                        session_visibility[visibility_key] = visible
+                    if not visible:
+                        continue
+                provenance = _loads(row["provenance"], {})
+                provenance = provenance if isinstance(provenance, dict) else {}
+                metadata = _loads(row["metadata"], {})
+                metadata = metadata if isinstance(metadata, dict) else {}
+                review_state = provenance.get("review_state") or ""
+                quarantined = bool(metadata.get("quarantine") or provenance.get("quarantined"))
+                conflicted = bool(metadata.get("conflict_with"))
+                if not (quarantined or review_state == REVIEW_PENDING or conflicted):
+                    continue
+                # Pending/quarantined content is evidence for a human reviewer, not model
+                # context. Return only an excerpt for already-approved conflict records.
+                excerpt = ""
+                if prompt_eligible(provenance, metadata):
+                    excerpt = (row["content"] or row["title"] or "")[:200]
+                items.append({
+                    "id": row["id"],
+                    "review_state": review_state,
+                    "quarantined": quarantined,
+                    "conflict_with": metadata.get("conflict_with") if conflicted else None,
+                    "excerpt": excerpt,
+                })
+                if len(items) >= limit:
+                    break
+            if len(rows) < requested_batch_size:
+                break
+        if len(items) < limit and scanned >= CONFLICT_REVIEW_SCAN_LIMIT:
+            truncated = True
+        return {"workspace": workspace, "items": items, "count": len(items),
+                "truncated": truncated}
 
     def _chain_entry(self, rec, wid: str) -> dict:
         d = _mem_to_dict(rec)
@@ -7804,8 +8019,10 @@ def _mem_to_dict(rec: Any) -> dict:
     responses — mirrors the fields ``RecallEngine`` already exposes in recall chunks."""
     return {
         "id": rec.id, "title": rec.title, "content": rec.content, "summary": rec.summary,
-        "scope": rec.scope.value, "mtype": rec.mtype.value, "repo_id": rec.repo_id,
+        "scope": rec.scope.value, "mtype": rec.mtype.value,
+        "workspace_id": rec.workspace_id, "repo_id": rec.repo_id,
         "importance": rec.importance, "pinned": rec.pinned,
+        "confidence": rec.confidence,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,

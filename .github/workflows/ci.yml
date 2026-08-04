@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install (core + server/mcp/code extras; no torch or SQLCipher)
         run: |
           python -m pip install --upgrade pip
@@ -54,6 +56,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install encryption integration gate
         run: |
           python -m pip install --upgrade pip
@@ -72,6 +76,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install (numpy-only core — the minimum supported runtime)
         run: |
           python -m pip install --upgrade pip
@@ -82,6 +88,37 @@ jobs:
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Ablation
         run: python -m eval.ablation
+
+  coverage:
+    name: coverage gate (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" pytest-cov
+      - name: Coverage run (all extras-gated tests, tracked modules)
+        run: python -m pytest -o addopts="" tests/ -q -rs --cov=engraphis --cov-report=term-missing --cov-fail-under=60
+
+  hygiene:
+    name: repo hygiene gate (no stray DBs/logs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Reject stray runtime artifacts at repo root
+        run: |
+          stray=$(find . -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \
+            -o -name '*.bak' -o -name '*.log' \) -print)
+          if [ -n "$stray" ]; then
+            echo "Refusing to commit stray runtime artifacts:"; echo "$stray"; exit 1
+          fi
+          echo "repo root clean"
 
   pi-extension:
     name: Pi extension (${{ matrix.os }}, Python ${{ matrix.python-version }}, Node ${{ matrix.node-version }})

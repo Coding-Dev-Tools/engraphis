@@ -288,12 +288,141 @@ def _recall_for_baseline(
 
 
 def load_dataset(path: str) -> list[dict]:
+    """Load and validate JSONL, reporting the source line for malformed input."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"could not read dataset {path!r}: {exc}") from exc
     items = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(lines, start=1):
         line = line.strip()
-        if line and not line.startswith("#"):
-            items.append(json.loads(line))
+        if not line or line.startswith("#"):
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid JSON in dataset {path!r} at line {line_number}: {exc.msg}") from exc
+        if not isinstance(item, dict):
+            raise ValueError(f"dataset {path!r} line {line_number} must contain a JSON object")
+        items.append(item)
+    _validate_dataset(items)
     return items
+
+
+def _validate_dataset(dataset: list[dict]) -> None:
+    """Reject malformed or ambiguous JSONL before creating any stores."""
+    if not isinstance(dataset, list):
+        raise ValueError("dataset must be a list of case objects")
+    case_ids: set[str] = set()
+    question_ids: set[str] = set()
+    for case_number, case in enumerate(dataset, start=1):
+        if not isinstance(case, dict):
+            raise ValueError(f"dataset case {case_number} must be a JSON object")
+        case_id = case.get("id")
+        if (
+            not isinstance(case_id, str)
+            or not case_id.strip()
+            or case_id != case_id.strip()
+        ):
+            raise ValueError(f"dataset case {case_number} requires a non-empty string id")
+        case_id = case_id.strip()
+        if case_id in case_ids:
+            raise ValueError(f"dataset case ids must be unique: {case_id!r}")
+        case_ids.add(case_id)
+        memories = case.get("memories", [])
+        if not isinstance(memories, list):
+            raise ValueError(f"{case_id}: memories must be a list")
+        tags: set[str] = set()
+        for memory_number, memory in enumerate(memories, start=1):
+            if not isinstance(memory, dict):
+                raise ValueError(f"{case_id}: memory {memory_number} must be an object")
+            tag = memory.get("tag")
+            text = memory.get("text")
+            if (
+                not isinstance(tag, str)
+                or not tag.strip()
+                or tag != tag.strip()
+            ):
+                raise ValueError(f"{case_id}: memory tags must be non-empty strings")
+            if tag in tags:
+                raise ValueError(f"{case_id}: memory tags must be unique")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"{case_id}: memory {tag!r} requires non-empty text")
+            tags.add(tag)
+        questions = case.get("questions", [])
+        if not isinstance(questions, list):
+            raise ValueError(f"{case_id}: questions must be a list")
+        if "document" in case and (
+            not isinstance(case["document"], str) or not case["document"].strip()
+        ):
+            raise ValueError(f"{case_id}: document must be a non-empty string when supplied")
+        entities = case.get("entities", [])
+        if not isinstance(entities, list):
+            raise ValueError(f"{case_id}: entities must be a list")
+        entity_names: set[str] = set()
+        for entity in entities:
+            if not isinstance(entity, (list, tuple)) or not entity:
+                raise ValueError(f"{case_id}: each entity must contain a non-empty name")
+            name = str(entity[0]).strip()
+            if not name or name in entity_names:
+                raise ValueError(f"{case_id}: entity names must be unique and non-empty")
+            entity_names.add(name)
+        edges = case.get("edges", [])
+        if not isinstance(edges, list):
+            raise ValueError(f"{case_id}: edges must be a list")
+        for edge in edges:
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                raise ValueError(f"{case_id}: each edge requires source and target entities")
+            if str(edge[0]) not in entity_names or str(edge[1]) not in entity_names:
+                raise ValueError(
+                    f"{case_id}: edge references an unknown entity: {edge[0]!r} -> {edge[1]!r}"
+                )
+        for question_number, question in enumerate(questions, start=1):
+            if not isinstance(question, dict):
+                raise ValueError(f"{case_id}: question {question_number} must be an object")
+            query = question.get("q")
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError(f"{case_id}: question {question_number} requires non-empty q")
+            question_id = question.get("id") or f"{case_id}:{question_number - 1}"
+            if (
+                not isinstance(question_id, str)
+                or not question_id.strip()
+                or question_id != question_id.strip()
+            ):
+                raise ValueError(f"{case_id}: question ids must be non-empty strings")
+            if question_id in question_ids:
+                raise ValueError(f"question ids must be unique: {question_id!r}")
+            question_ids.add(question_id)
+            answerable = question.get("answerable")
+            if answerable is not None and not isinstance(answerable, bool):
+                raise ValueError(f"{case_id}:{question_number - 1}: answerable must be a boolean")
+            supporting = question.get("supporting")
+            if supporting is not None:
+                if not isinstance(supporting, list) or any(
+                    not isinstance(item, str)
+                    or not item.strip()
+                    or item != item.strip()
+                    for item in supporting
+                ):
+                    raise ValueError(
+                        f"{case_id}:{question_number - 1}: supporting must be a list of strings"
+                    )
+                unknown = sorted(set(supporting) - tags)
+                if unknown:
+                    raise ValueError(
+                        f"{case_id}:{question_number - 1}: unknown supporting memory tags: "
+                        + ", ".join(unknown)
+                    )
+            elif "document" not in case and answerable is not False:
+                raise ValueError(
+                    f"{case_id}:{question_number - 1}: supporting must be supplied for "
+                    "memory-backed questions"
+                )
+            for field in ("answer", "evidence"):
+                if field in question and not isinstance(question[field], str):
+                    raise ValueError(f"{case_id}:{question_number - 1}: {field} must be a string")
+
+
 
 
 def _git_commit() -> str:
@@ -484,12 +613,27 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
     deliberately explicit because artifacts carry per-question measurements and
     immutable provenance rather than only the CI gate's aggregate fields.
     """
+    _validate_dataset(dataset)
+    if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+        raise ValueError("k must be a positive integer")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+        raise ValueError("dim must be a positive integer")
+    if token_budget is not None and (
+        isinstance(token_budget, bool) or not isinstance(token_budget, int) or token_budget < 0
+    ):
+        raise ValueError("token_budget must be a non-negative integer")
+    if (
+        isinstance(bootstrap_iterations, bool)
+        or not isinstance(bootstrap_iterations, int)
+        or bootstrap_iterations < 0
+    ):
+        raise ValueError("bootstrap_iterations must be a non-negative integer")
     if canonical and not v2:
         v2 = True
     if v2 and not dataset_path:
         raise ValueError("v2 output requires dataset_path so the dataset can be hashed")
     baseline = executable_baseline(baseline_label)
-    configured_reranker = reranker or IdentityReranker()
+    configured_reranker = reranker if reranker is not None else IdentityReranker()
     _validate_baseline_dataset(dataset, baseline, configured_reranker)
     if canonical:
         profile_errors = validate_canonical_profile(canonical_profile)
@@ -522,7 +666,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         context_token_counter = None
         context_token_method = "deterministic_estimate"
         context_tokenizer_identity = None
-    embedder = embedder or DeterministicEmbedder(dim=dim)
+    embedder = embedder if embedder is not None else DeterministicEmbedder(dim=dim)
     per_q = []
     curve_measurements = {budget: [] for budget in CANONICAL_TOKEN_BUDGETS} if canonical else {}
 
@@ -575,7 +719,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             id_to_tags[mid] = source_tags or ["whole_document"]
             id_to_text[mid] = document
         else:
-            for m in case["memories"]:
+            for m in case.get("memories", []):
                 mid = engine.remember(
                     m["text"], workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
                     scope=Scope.REPO, title=str(m.get("title", "")),
@@ -597,9 +741,18 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         if history_records is not None:
             history_records.sort(key=lambda record: (record.valid_from or record.ingested_at or 0.0, record.id))
 
-        for question_number, q in enumerate(case["questions"]):
+        for question_number, q in enumerate(case.get("questions", [])):
             question_id = str(q.get("id") or f"{case.get('id')}:{question_number}")
             started = time.perf_counter_ns()
+            supporting = q.get("supporting", ["whole_document"] if document_record else [])
+            # An answerable question must name its gold evidence; an empty support list
+            # would otherwise score as a perfect recall/ndcg via the metric defaults.
+            # Explicitly unanswerable questions are excluded from scoring instead.
+            if q.get("answerable") is not False and not supporting:
+                raise ValueError(
+                    f"question '{question_id}' is answerable but declares no supporting "
+                    "evidence; add gold `supporting` ids or mark `answerable: false`"
+                )
             res = _recall_for_baseline(
                 engine, q["q"], workspace_id=wid, repo_id=rid, k=k,
                 token_budget=token_budget, baseline=baseline,
@@ -610,7 +763,6 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             retrieved_ids = [c["id"] for c in res.chunks]
             retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [None])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
-            supporting = q.get("supporting", ["whole_document"] if document_record else [])
             excluded = None
             if q.get("answerable") is False:
                 excluded = exclusion(
@@ -860,7 +1012,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
         if args.artifact:
             write_canonical_artifact(report, args.artifact, canonical=args.canonical)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         ap.error(str(exc))
     if args.json or args.v2 or args.canonical:
         print(json.dumps(report, indent=2))

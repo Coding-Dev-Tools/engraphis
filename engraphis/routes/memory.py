@@ -1,11 +1,12 @@
 """All Engraphis-compatible API routes, mounted under /memory.
 
 Every route returns {"data": ...} to match the upstream SDK contract
-(the Python SDK does `payload["data"]` on every response).
+(the Python SDK does ``payload["data"]`` on every response).
 """
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -37,6 +38,7 @@ from engraphis.stores import ledger as ledger_store
 from engraphis.stores import vectors as mem_store
 from engraphis import licensing
 from engraphis.core.store import _escape_like
+from engraphis.core.secrets import SecretDetectedError
 from pydantic import BaseModel
 
 logger = logging.getLogger("engraphis.routes")
@@ -45,6 +47,44 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 def _ok(data: Any) -> dict[str, Any]:
     return {"data": data}
+
+
+def _safe_call(fn, *args, **kwargs):
+    """Map route-facing failures to stable, content-free HTTP errors.
+
+    The legacy engines predate FastAPI and can raise provider, SQLite, or secret
+    detector exceptions directly. Never let those implementation details become
+    an API response; validation remains a client error while all other failures
+    use one generic server error.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except SecretDetectedError:
+        raise HTTPException(status_code=400, detail={"error": "memory content rejected"}) from None
+    except HTTPException as exc:
+        status = exc.status_code if isinstance(exc.status_code, int) else 500
+        if 400 <= status <= 499:
+            raise HTTPException(status_code=status, detail={"error": "request rejected"}) from None
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
+    except (TypeError, ValueError) as exc:
+        logger.info("memory route validation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+    except Exception as exc:  # noqa: BLE001 - legacy providers expose varied exception types
+        logger.error("memory route operation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
+
+
+def _bounded_count(value: Optional[int], *, field: str, default: int,
+                   maximum: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"{field} must be between 1 and {maximum}"},
+        )
+    return value
+
 
 
 def _norm_doc_id(item: DocumentItem) -> str:
@@ -65,7 +105,8 @@ async def insert_memory(req: InsertMemoryRequest):
             key=req.key, content=req.content, namespace=req.namespace,
             metadata=req.metadata or {}, created_at=req.created_at, updated_at=req.updated_at,
         )
-    result = ingest_engine.ingest_document(
+    result = _safe_call(
+        ingest_engine.ingest_document,
         namespace=item.namespace,
         document_id=item.key,
         title=item.key,
@@ -90,10 +131,14 @@ async def query_memory(req: QueryMemoryRequest):
     doc_ids = req.documentIds or req.keys
     if req.key and not doc_ids:
         doc_ids = [req.key]
-    result = recall_engine.recall(
+    result = _safe_call(
+        recall_engine.recall,
         namespace=req.namespace,
         prompt=prompt,
-        num_chunks=req.maxChunks or req.num_chunks or 10,
+        num_chunks=_bounded_count(
+            req.maxChunks if req.maxChunks is not None else req.num_chunks,
+            field="maxChunks", default=10, maximum=100,
+        ),
         document_ids=doc_ids,
     )
     return _ok(result)
@@ -105,7 +150,7 @@ async def delete_memory(req: DeleteMemoryRequest):
     confirm = req.delete_all or (req.deleteAll or False)
     if not confirm:
         raise HTTPException(400, "Set delete_all=True to confirm namespace deletion")
-    count = mem_store.delete_namespace(req.namespace)
+    count = _safe_call(mem_store.delete_namespace, req.namespace)
     return _ok({"deleted": count, "nodesDeleted": count})
 
 
@@ -115,7 +160,8 @@ async def delete_memory(req: DeleteMemoryRequest):
 async def insert_document(req: InsertDocumentRequest):
     """POST /memory/documents — insert a single document."""
     doc_id = _norm_doc_id(req)
-    result = ingest_engine.ingest_document(
+    result = _safe_call(
+        ingest_engine.ingest_document,
         namespace=req.namespace,
         document_id=doc_id,
         title=req.title,
@@ -145,15 +191,16 @@ async def insert_documents_batch(req: BatchDocumentsRequest):
             "createdAt": it.created_at or it.createdAt,
             "updatedAt": it.updated_at or it.updatedAt,
         })
-    result = ingest_engine.ingest_batch(items)
+    result = _safe_call(ingest_engine.ingest_batch, items)
     return _ok(result)
 
 
 @router.get("/documents")
-async def list_documents(namespace: Optional[str] = None, limit: Optional[int] = None,
-                         offset: Optional[int] = None):
+async def list_documents(namespace: Optional[str] = None,
+                         limit: Optional[int] = Query(default=None, ge=1, le=10_000),
+                         offset: Optional[int] = Query(default=None, ge=0, le=1_000_000)):
     """GET /memory/documents — list documents."""
-    docs = mem_store.list_documents(namespace=namespace, limit=limit, offset=offset)
+    docs = _safe_call(mem_store.list_documents, namespace=namespace, limit=limit, offset=offset)
     return _ok({"documents": docs, "count": len(docs)})
 
 
@@ -162,7 +209,7 @@ async def get_document(document_id: str, namespace: Optional[str] = None):
     """GET /memory/documents/{documentId} — get a single document. Without ``namespace``,
     look it up across all namespaces instead of a nonexistent ``_global`` one (which made
     the query always 404)."""
-    doc = mem_store.find_document(document_id, namespace)
+    doc = _safe_call(mem_store.find_document, document_id, namespace)
     if not doc:
         raise HTTPException(404, f"Document {document_id} not found")
     return _ok(doc)
@@ -171,7 +218,7 @@ async def get_document(document_id: str, namespace: Optional[str] = None):
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: str, namespace: str = Query(...)):
     """DELETE /memory/documents/{documentId} — delete a single document."""
-    count = mem_store.delete_memory_document(document_id, namespace)
+    count = _safe_call(mem_store.delete_memory_document, document_id, namespace)
     return _ok({"deleted": count, "documentId": document_id})
 
 
@@ -181,10 +228,13 @@ async def delete_document(document_id: str, namespace: str = Query(...)):
 async def query_memory_context(req: QueryContextRequest):
     """POST /memory/queries — query memory context with optional LLM."""
     doc_ids = req.documentIds or req.document_ids
-    result = recall_engine.recall(
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail={"error": "query is required"})
+    result = _safe_call(
+        recall_engine.recall,
         namespace=req.namespace,
         prompt=req.query,
-        num_chunks=req.maxChunks or 10,
+        num_chunks=_bounded_count(req.maxChunks, field="maxChunks", default=10, maximum=100),
         document_ids=doc_ids,
     )
     if req.recallOnly:
@@ -215,7 +265,7 @@ async def chat_memory_context(req: ChatRequest):
     user_content = user_msg.get("content")
     if not user_content or not str(user_content).strip():
         raise HTTPException(400, "The latest user message must have non-empty 'content'")
-    ctx = recall_engine.recall(namespace=None, prompt=user_content, num_chunks=10)
+    ctx = _safe_call(recall_engine.recall, namespace=None, prompt=user_content, num_chunks=10)
     import asyncio
     try:
         def _call():
@@ -247,7 +297,8 @@ async def record_interactions(req: InteractionRequest):
     level = req.interactionLevel or req.interaction_level or (levels[0] if levels else "view")
     reinforced = 0
     for name in names:
-        ledger_store.record_interaction(
+        _safe_call(
+            ledger_store.record_interaction,
             namespace=req.namespace,
             entity_name=name,
             interaction_level=level,
@@ -256,7 +307,9 @@ async def record_interactions(req: InteractionRequest):
         )
         # Actually reinforce memories mentioning the entity — otherwise the signal is only
         # logged and never affects retention.
-        reinforced += reweight.boost_entity_memories(req.namespace, name, level)
+        reinforced += _safe_call(
+            reweight.boost_entity_memories, req.namespace, name, level
+        )
     return _ok({"recorded": len(names), "namespace": req.namespace, "level": level,
                 "memories_reinforced": reinforced})
 
@@ -275,40 +328,45 @@ async def reinforce_memory(req: ReinforceRequest):
     Ebbinghaus decay. Use when an agent finds a past memory useful for current work.
     """
     namespace = req.namespace or "default"
-    mem = mem_store.get_memory(namespace, req.documentId)
+    mem = _safe_call(mem_store.get_memory, namespace, req.documentId)
     if not mem:
         raise HTTPException(404, f"Document {req.documentId} not found in namespace {namespace}")
-    reweight.reinforce(mem["id"])
+    _safe_call(reweight.reinforce, mem["id"])
     return _ok({"reinforced": True, "documentId": req.documentId, "namespace": namespace})
 
 
 @router.post("/prune")
 async def prune_memory(req: PruneRequest):
-    """POST /memory/prune — delete decayed memories below a retention threshold.
-
-    Ebbinghaus decay marks memories as forgotten but never removes the rows;
-    over time that degrades recall relevance and bloats the vector scan. This
-    endpoint garbage-collects them. Namespace is required (no accidental
-    cross-vault wipes); memories with metadata.pinned=true are always kept;
-    dryRun reports what would be deleted without deleting.
-    """
+    """POST /memory/prune — delete decayed memories below a retention threshold."""
     from engraphis.engines.reweight import retention_score
 
-    # Prefer snake_case, then camelCase, then the default — but honor an explicit 0.0
-    # (``req.minRetention or 0.05`` wrongly treated 0.0 as unset and deleted memories the
-    # caller asked to keep by requesting a zero threshold).
     if req.min_retention is not None:
         threshold = req.min_retention
     elif req.minRetention is not None:
         threshold = req.minRetention
     else:
         threshold = 0.05
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        threshold = math.nan
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "minRetention must be between 0 and 1"},
+        )
     dry_run = req.dry_run if req.dry_run is not None else bool(req.dryRun)
     keep_pinned = req.keepPinned if req.keepPinned is not None else True
-    max_delete = max(1, min(req.maxDelete or 500, 10000))
+    max_delete = req.maxDelete if req.maxDelete is not None else 500
+    if (isinstance(max_delete, bool) or not isinstance(max_delete, int)
+            or not 0 <= max_delete <= 10_000):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "maxDelete must be between 0 and 10000"},
+        )
 
     candidates = []
-    for mem in mem_store.list_documents(namespace=req.namespace, limit=100000):
+    for mem in _safe_call(mem_store.list_documents, namespace=req.namespace, limit=100000):
         if keep_pinned and (mem.get("metadata") or {}).get("pinned"):
             continue
         r = retention_score(mem)
@@ -325,7 +383,9 @@ async def prune_memory(req: PruneRequest):
     deleted = 0
     if not dry_run:
         for c in candidates:
-            deleted += mem_store.delete_memory_document(c["documentId"], req.namespace)
+            deleted += _safe_call(
+                mem_store.delete_memory_document, c["documentId"], req.namespace
+            )
 
     return _ok({
         "namespace": req.namespace,
@@ -341,10 +401,13 @@ async def prune_memory(req: PruneRequest):
 
 @router.post("/memories/thoughts")
 async def recall_thoughts(req: ThoughtRequest):
-    """POST /memory/memories/thoughts — generate reflective thoughts."""
-    result = thoughts_engine.synthesize_thoughts(
+    result = _safe_call(
+        thoughts_engine.synthesize_thoughts,
         namespace=req.namespace,
-        max_chunks=req.maxChunks or req.max_chunks or 10,
+        max_chunks=_bounded_count(
+            req.maxChunks if req.maxChunks is not None else req.max_chunks,
+            field="maxChunks", default=10, maximum=100,
+        ),
         temperature=req.temperature,
         randomness_seed=req.randomnessSeed or req.randomness_seed,
         persist=req.persist if req.persist is not None else True,
@@ -355,30 +418,42 @@ async def recall_thoughts(req: ThoughtRequest):
 
 @router.post("/memories/recall")
 async def recall_memories(req: RecallMemoriesRequest):
-    """POST /memory/memories/recall — recall from Ebbinghaus bank by retention."""
-    result = recall_engine.recall_by_retention(
+    result = _safe_call(
+        recall_engine.recall_by_retention,
         namespace=req.namespace,
-        top_k=int(req.topK or req.top_k or 10),
-        min_retention=req.minRetention or req.min_retention or 0.0,
+        top_k=_bounded_count(
+            req.topK if req.topK is not None else req.top_k,
+            field="topK", default=10, maximum=100,
+        ),
+        min_retention=(
+            req.minRetention if req.minRetention is not None
+            else req.min_retention if req.min_retention is not None else 0.0
+        ),
         as_of=req.asOf or req.as_of,
     )
     return _ok(result)
 
 
 @router.post("/memories/context")
-async def memories_context(namespace: Optional[str] = None, maxChunks: Optional[int] = 10):
-    """POST /memory/memories/context — recall context. Without a namespace, recall across
-    all of them (not a nonexistent '_global', which always returned nothing)."""
-    result = recall_engine.recall_master(namespace=namespace, max_chunks=maxChunks or 10)
+async def memories_context(namespace: Optional[str] = None,
+                           maxChunks: Optional[int] = Query(default=10, ge=1, le=100)):
+    """POST /memory/memories/context — recall context across all namespaces when unset."""
+    result = _safe_call(
+        recall_engine.recall_master, namespace=namespace, max_chunks=maxChunks
+    )
     return _ok(result)
 
 
 @router.post("/recall")
 async def recall_master(req: RecallMasterRequest):
     """POST /memory/recall — recall from master node (highest retention)."""
-    result = recall_engine.recall_master(
+    result = _safe_call(
+        recall_engine.recall_master,
         namespace=req.namespace,
-        max_chunks=req.maxChunks or req.max_chunks or 10,
+        max_chunks=_bounded_count(
+            req.maxChunks if req.maxChunks is not None else req.max_chunks,
+            field="maxChunks", default=10, maximum=100,
+        ),
     )
     return _ok(result)
 
@@ -393,14 +468,18 @@ async def chat_memory(req: ChatRequest):
 
 @router.get("/admin/graph-snapshot")
 async def graph_snapshot(namespace: Optional[str] = None, mode: Optional[str] = None,
-                         limit: int = 200, seed_limit: int = 10):
+                         limit: int = Query(default=200, ge=1, le=5_000),
+                         seed_limit: int = Query(default=10, ge=0, le=100)):
     """GET /memory/admin/graph-snapshot — entity/relation graph snapshot."""
-    snap = graph_store.graph_snapshot(namespace=namespace, limit=limit, seed_limit=seed_limit)
+    snap = _safe_call(
+        graph_store.graph_snapshot, namespace=namespace, limit=limit, seed_limit=seed_limit
+    )
     return _ok(snap)
 
 
 @router.get("/entity/{entity_name}/memories")
-async def entity_memories(entity_name: str, namespace: Optional[str] = None, limit: int = 20):
+async def entity_memories(entity_name: str, namespace: Optional[str] = None,
+                          limit: int = Query(default=20, ge=1, le=50)):
     """GET /memory/entity/{name}/memories — every memory behind a knowledge-graph node.
 
     Powers the dashboard's graph drill-down: click an entity, see (and open) the
@@ -416,7 +495,7 @@ async def entity_memories(entity_name: str, namespace: Optional[str] = None, lim
     name = (entity_name or "").strip()
     if not name or len(name) > 200:
         raise HTTPException(400, "invalid entity name")
-    limit = max(1, min(50, int(limit)))
+    limit = int(limit)
     conn = get_conn()
 
     seen: set = set()
@@ -475,7 +554,7 @@ async def entity_memories(entity_name: str, namespace: Optional[str] = None, lim
 @router.get("/ingestion/jobs/{job_id}")
 async def get_ingestion_job(job_id: str):
     """GET /memory/ingestion/jobs/{jobId} — get job status."""
-    job = ledger_store.get_job(job_id)
+    job = _safe_call(ledger_store.get_job, job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id} not found")
     return _ok(job)
@@ -553,8 +632,9 @@ async def list_namespaces():
 
 
 @router.get("/search")
-async def search_documents(q: str = Query(...), namespace: Optional[str] = None,
-                           limit: int = 50):
+async def search_documents(q: str = Query(..., min_length=1, max_length=1_000),
+                           namespace: Optional[str] = None,
+                           limit: int = Query(default=50, ge=1, le=1_000)):
     """GET /memory/search — full-text search across document content/titles."""
     from engraphis.stores import get_conn
     conn = get_conn()
@@ -577,7 +657,8 @@ async def search_documents(q: str = Query(...), namespace: Optional[str] = None,
 
 
 @router.get("/timeline")
-async def get_timeline(namespace: Optional[str] = None, limit: int = 100):
+async def get_timeline(namespace: Optional[str] = None,
+                        limit: int = Query(default=100, ge=1, le=1_000)):
     """GET /memory/timeline — chronological event feed."""
     from engraphis.stores import get_conn
     import json
@@ -595,13 +676,19 @@ async def get_timeline(namespace: Optional[str] = None, limit: int = 100):
     events = []
     for r in rows:
         d = dict(r)
-        d["payload"] = json.loads(d.get("payload") or "{}")
+        try:
+            d["payload"] = json.loads(d.get("payload") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Old databases may contain a malformed event payload; preserve the
+            # timeline shape rather than turning one corrupt row into a 500.
+            d["payload"] = {}
         events.append(d)
     return _ok({"events": events, "count": len(events)})
 
 
 @router.get("/thoughts")
-async def list_thoughts(namespace: Optional[str] = None, limit: int = 50):
+async def list_thoughts(namespace: Optional[str] = None,
+                         limit: int = Query(default=50, ge=1, le=1_000)):
     """GET /memory/thoughts — list synthesized thoughts."""
     from engraphis.stores import get_conn
     import json
@@ -672,6 +759,7 @@ async def upload_document(
         content=content,
         source_type=source_type,
         metadata={"filename": file.filename, "content_type": file.content_type},
+        trusted=False,
     )
     return _ok(result)
 

@@ -87,6 +87,68 @@ def test_load_longmemeval_sessions_and_abstention(tmp_path):
     assert cases[1]["questions"][0]["answerable"] is False
 
 
+def test_load_longmemeval_collapses_identical_duplicate_session_ids(tmp_path):
+    data = [{
+        "question_id": "q-duplicate", "question": "Which tool was selected?",
+        "answer": "pnpm", "haystack_session_ids": ["s1", "s1", "s2"],
+        "haystack_dates": ["2023/05/01", "2023/05/05", "2023/05/02"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "We selected pnpm."}],
+            [{"role": "user", "content": "We selected pnpm."}],
+            [{"role": "user", "content": "Unrelated."}],
+        ],
+        "answer_session_ids": ["s1"],
+    }]
+    path = tmp_path / "duplicate-lme.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    cases = load_longmemeval(str(path))
+
+    assert [memory["tag"] for memory in cases[0]["memories"]] == ["s1", "s2"]
+    assert cases[0]["questions"][0]["supporting"] == ["s1"]
+    assert cases[0]["source_secret_redactions"] == 0
+    assert run(cases, k=2)["recall_at_k"] == 1.0
+
+
+def test_load_longmemeval_rejects_conflicting_duplicate_session_ids(tmp_path):
+    data = [{
+        "question_id": "q-conflict", "question": "Which tool was selected?",
+        "answer": "pnpm", "haystack_session_ids": ["s1", "s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "We selected pnpm."}],
+            [{"role": "user", "content": "We selected yarn."}],
+        ],
+        "answer_session_ids": ["s1"],
+    }]
+    path = tmp_path / "conflicting-lme.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate session id 's1' has conflicting content"):
+        load_longmemeval(str(path))
+
+
+def test_external_loader_redacts_credential_shaped_source_text(tmp_path):
+    secret = "sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    data = [{
+        "question_id": "q-redact", "question": "What tool was selected?",
+        "answer": "pnpm", "haystack_session_ids": ["s1"],
+        "haystack_sessions": [[{
+            "role": "user", "content": f"provider_key={secret}; we selected pnpm.",
+        }]],
+        "answer_session_ids": ["s1"],
+    }]
+    path = tmp_path / "redacted-lme.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    cases = load_longmemeval(str(path))
+    stored = cases[0]["memories"][0]["text"]
+
+    assert secret not in stored
+    assert "<redacted>" in stored
+    assert cases[0]["source_secret_redactions"] == 1
+    assert run(cases, k=1)["recall_at_k"] == 1.0
+
+
 def test_external_cases_run_through_the_real_harness(tmp_path):
     cases = load_locomo(_locomo_fixture(tmp_path))
     report = run(cases, k=3)                           # offline deterministic embedder

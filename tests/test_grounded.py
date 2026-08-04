@@ -208,8 +208,8 @@ def test_delayed_trigger_from_prior_session_cannot_override_fenced_synthesis():
         workspace="acme", repo="backend", session_id=initial["session_id"],
         scope="repo", resolve_conflicts=False,
     )
-    # Service ingress is evidence, not model context. Model the required human
-    # ceremony for the benign control while leaving the delayed trigger pending.
+    # The local-agent control is prompt-visible immediately; the external trigger
+    # remains pending/quarantined and cannot enter grounded context.
     fact = svc.engine.approve_for_prompt(
         fact["id"], reviewer="test_operator", reason="verified benign control",
     )
@@ -241,10 +241,10 @@ def test_delayed_trigger_from_prior_session_cannot_override_fenced_synthesis():
     assert svc.store.get_memory(fact["id"]).access_count > fact_before
     # The detector preserves the payload for audited/historical inspection while normal
     # recall/listing hides its zero-length validity interval.
-    # The pending evidence and its approved successor both remain auditable; only
-    # the quarantined payload is outside the current valid-time view.
-    assert len(svc.store.list_memories()) == 2
-    assert len(svc.store.list_memories(include_invalid=True)) == 3
+    # The local-agent fact is one live record; the quarantined payload remains
+    # auditable outside the current valid-time view.
+    assert len(svc.store.list_memories()) == 1
+    assert len(svc.store.list_memories(include_invalid=True)) == 2
 
 
 def test_grounded_excludes_metadata_quarantine_without_exposing_or_reinforcing_it():
