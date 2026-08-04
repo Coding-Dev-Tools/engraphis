@@ -253,7 +253,9 @@ for the reproducible commands and reporting limits.
 `engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
 omits it so `all` remains resolvable on macOS, Windows, Linux ARM, and musl; on those
 targets, provision a compatible SQLCipher driver separately before enabling a database
-key. Plaintext SQLite remains the explicit default on every platform.
+key. The programmatic core remains plaintext unless a database key is configured. For a
+fresh database, `engraphis-init` enables SQLCipher automatically when a compatible driver is
+available, creates a private key sidecar, and can be overridden with `--no-encryption`.
 
 > **Linux / macOS:** if `pip install` fails with `error: externally-managed-environment`,
 > your system Python is marked read-only (PEP 668). Install into a virtual environment
@@ -265,6 +267,10 @@ key. Plaintext SQLite remains the explicit default on every platform.
 > overlap, not meaning: recall and grounded MCP responses set `degraded_mode=true` and
 > `semantic_support=false`, and disable vector retrieval plus semantic-cosine evidence. Install
 > a declared embedding model for semantic retrieval.
+
+> To require a model that is already local, set `ENGRAPHIS_EMBED_MODEL=local:/absolute/model/path`
+> or `local:<cached-model-id>`. This path never downloads a model. If it is unavailable, Engraphis
+> explicitly enters lexical degraded mode instead of presenting hash-vector scores as semantic.
 
 ---
 
@@ -324,6 +330,14 @@ including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOL
 
 For installation, configuration, lifecycle commands, and the local trust boundary, see the
 [Pi extension guide](integrations/pi/README.md).
+
+### Hermes provider
+
+Engraphis also ships a native Hermes memory-provider plugin with local prefetch, bounded turn
+capture, scoped recall, and explicit secure erase. Install Engraphis in the Hermes Python
+environment, copy the provider, then select it with `hermes memory setup`. See the
+[Hermes integration guide](integrations/hermes/README.md). The provider never installs itself or
+downloads an embedding model.
 
 ## Quickstart: repository graph
 
