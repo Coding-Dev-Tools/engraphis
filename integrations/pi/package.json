@@ -48,6 +48,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0"
   },
+  "overrides": {
+    "hono": "^4.12.34"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

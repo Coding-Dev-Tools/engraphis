@@ -536,7 +536,10 @@ for (const cloudStatus of [402, 501]) {
 // and who only needs to reconnect -- is the regression this guards.
 test('An expired cloud session asks the customer to reconnect, not to buy', async ({ page }) => {
   const errors = recordBrowserErrors(page);
-  await mockLocalClient(page, 401);
+  // This is a revoked credential for a customer who already owns Pro, not an
+  // unconfigured free installation. Keep the entitlement active so a regression
+  // that misclassifies 401 as a sales prompt is observable.
+  await mockLocalClient(page, 401, null, null, proLicense);
   await page.goto('/classic');
 
   await openView(page, 'analytics');

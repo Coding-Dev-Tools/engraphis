@@ -11,6 +11,7 @@ MATCH directly, so ``search`` expands the ANN window until it has enough visible
 """
 from __future__ import annotations
 
+import re
 import sys
 from numbers import Integral
 from typing import Optional
@@ -44,6 +45,42 @@ def _validated_dimension(dim: int) -> int:
     return dimension
 
 
+def _validated_k(k: int) -> int:
+    if isinstance(k, bool) or not isinstance(k, Integral) or int(k) < 0:
+        raise ValueError("k must be a non-negative integer")
+    return int(k)
+
+
+def _vector_batch(vecs: np.ndarray, dim: int) -> np.ndarray:
+    try:
+        values = np.asarray(vecs, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("vectors must be a finite float32 array") from exc
+    if values.ndim != 2 or values.shape[1] != dim:
+        actual = values.shape[1] if values.ndim == 2 else "?"
+        raise ValueError(
+            f"vector dimension {actual} does not match the ANN index dimension {dim}"
+        )
+    if not np.isfinite(values).all():
+        raise ValueError("vectors must contain only finite values")
+    return values
+
+
+def _vector_query(vec: np.ndarray, dim: int) -> np.ndarray:
+    try:
+        values = np.asarray(vec, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("query vector must be a finite 1-D float32 array") from exc
+    if values.ndim != 1 or values.shape[0] != dim:
+        actual = values.shape[0] if values.ndim == 1 else "?"
+        raise ValueError(
+            f"query dimension {actual} does not match the ANN index dimension {dim}"
+        )
+    if not np.isfinite(values).all():
+        raise ValueError("query vector must contain only finite values")
+    return values
+
+
 class SqliteVecVectorIndex:
     """ANN over embeddings using the sqlite-vec extension."""
 
@@ -65,33 +102,76 @@ class SqliteVecVectorIndex:
         self.dim = dimension
         conn = store.conn
         conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            # Never leave extension loading enabled on a shared connection, including
+            # when the optional native load fails.
+            conn.enable_load_extension(False)
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_vec_ann'"
+        ).fetchone()
+        if existing and existing["sql"]:
+            match = re.search(r"FLOAT\s*\[\s*(\d+)\s*\]", existing["sql"], re.IGNORECASE)
+            if match and int(match.group(1)) != dimension:
+                raise ValueError(
+                    f"existing ANN index dimension {match.group(1)} does not match "
+                    f"requested dimension {dimension}"
+                )
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec_ann USING vec0("
             f"id TEXT PRIMARY KEY, embedding FLOAT[{dimension}])"
         )
         conn.commit()
 
-    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None) -> None:
-        vecs = np.asarray(vecs, dtype=np.float32)
+    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
+               *, commit: bool = True) -> None:
+        values = _vector_batch(vecs, self.dim)
+        try:
+            count = len(ids)
+        except TypeError as exc:
+            raise ValueError("ids must be a sequence matching the vector batch") from exc
+        if count != values.shape[0]:
+            raise ValueError(
+                f"ids length {count} does not match vector batch size {values.shape[0]}"
+            )
+        if any(not isinstance(mid, str) or not mid for mid in ids):
+            raise ValueError("ids must contain non-empty strings")
+        if not count:
+            return
         for i, mid in enumerate(ids):
-            v = vecs[i]
-            n = float(np.linalg.norm(v))
+            v = values[i]
+            with np.errstate(over="ignore", invalid="ignore"):
+                n = float(np.linalg.norm(v))
+            if not np.isfinite(n):
+                raise ValueError("vector norm must be finite")
             if n > 0:
                 v = v / n
             self.store.conn.execute(
                 "INSERT OR REPLACE INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
                 (mid, v.tobytes()),
             )
-        self.store.conn.commit()
+        if commit:
+            self.store.conn.commit()
+
+    def delete(self, ids: list[str], *, commit: bool = True) -> None:
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        self.store.conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+        if commit:
+            self.store.conn.commit()
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
-        if k <= 0:
+        k = _validated_k(k)
+        if k == 0:
             return []
-        v = np.asarray(vec, dtype=np.float32)
-        n = float(np.linalg.norm(v))
+        v = _vector_query(vec, self.dim)
+        with np.errstate(over="ignore", invalid="ignore"):
+            n = float(np.linalg.norm(v))
+        if not np.isfinite(n):
+            raise ValueError("query vector norm must be finite")
         if n > 0:
             v = v / n
         total = k
@@ -102,13 +182,7 @@ class SqliteVecVectorIndex:
                 return []
         limit = min(k, total)
         while True:
-            # The KNN cap uses vec0's explicit ``k = ?`` constraint, NOT ``LIMIT ?``:
-            # SQLite < 3.41 never passes a LIMIT down to a virtual table's xBestIndex,
-            # so vec0 raises "A LIMIT or 'k = ?' constraint is required on vec0 knn
-            # queries" — which the resolve path swallows, silently degrading every
-            # near-duplicate write to ADD on those systems. ``k = ?`` is the syntax
-            # sqlite-vec documents for exactly this reason and works on every
-            # supported SQLite/sqlite-vec combination.
+            # The KNN cap uses vec0's explicit `k = ?` constraint, NOT `LIMIT ?`.
             rows = self.store.conn.execute(
                 "SELECT id, distance FROM mem_vec_ann WHERE embedding MATCH ? "
                 "AND k = ? ORDER BY distance",
@@ -120,24 +194,18 @@ class SqliteVecVectorIndex:
                     rec = self.store.get_memory(row["id"])
                     if rec is None or not _visible(rec, filter):
                         continue
-                out.append((row["id"], _cosine_from_l2(row["distance"])))
+                # A zero query has no direction; retain the NumPy backend's
+                # deterministic zero similarity rather than converting its
+                # distance to the mathematically unrelated 0.5.
+                score = 0.0 if n == 0 else _cosine_from_l2(row["distance"])
+                out.append((row["id"], score))
                 if len(out) >= k:
                     return out
             if filter is None or len(rows) < limit or limit >= total:
                 return out
-            # Filtered search widens geometrically until k visible hits are found. Once
-            # the next doubling would already cover a quarter of the index, jump straight
-            # to a single full scan: on a workspace dense with invisible rows (expired/
-            # out-of-scope), the geometric tail otherwise re-runs several near-full ANN
-            # scans back to back for one query.
+            # Filtered search widens geometrically until k visible hits are found.
             limit = total if limit * 2 >= total // 4 else limit * 2
 
-    def delete(self, ids: list[str]) -> None:
-        if not ids:
-            return
-        marks = ",".join("?" for _ in ids)
-        self.store.conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
-        self.store.conn.commit()
 
 
 def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):
@@ -147,11 +215,13 @@ def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):
             or "numpy" (force the reference index).
     """
     dimension = _validated_dimension(dim)
+    if prefer not in {"auto", "sqlite-vec", "numpy"}:
+        raise ValueError("prefer must be one of: auto, sqlite-vec, numpy")
     if prefer == "numpy":
-        return NumpyVectorIndex(store)
+        return NumpyVectorIndex(store, dim=dimension)
     try:
         return SqliteVecVectorIndex(store, dimension)
     except Exception:
         if prefer == "sqlite-vec":
             raise
-        return NumpyVectorIndex(store)
+        return NumpyVectorIndex(store, dim=dimension)

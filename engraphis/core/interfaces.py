@@ -88,6 +88,11 @@ class MemoryRecord:
     provenance: dict[str, Any] = field(default_factory=dict)
     embedding: Optional[np.ndarray] = None
     valid_to_recorded_at: Optional[float] = None  # when valid_to was learned
+    # Keep additions after the established positional fields; callers may construct
+    # records positionally even though keyword construction is preferred.
+    pinned_at: Optional[float] = None     # system-time when a pin last became effective
+    unpinned_at: Optional[float] = None   # system-time when an unpin became effective
+    confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
 
 
 @dataclass
@@ -312,10 +317,15 @@ def embedder_capabilities(embedder: Any) -> dict[str, Any]:
 
 @runtime_checkable
 class VectorIndex(Protocol):
-    """Approximate nearest-neighbour index over embeddings (§6.2)."""
-    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None) -> None: ...
+    """Approximate nearest-neighbour index over embeddings (§6.2).
+
+    ``commit=False`` keeps derived-index writes inside a caller-owned transaction;
+    existing callers retain the historical committing default.
+    """
+    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
+               *, commit: bool = True) -> None: ...
     def search(self, vec: np.ndarray, k: int, *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]: ...
-    def delete(self, ids: list[str]) -> None: ...
+    def delete(self, ids: list[str], *, commit: bool = True) -> None: ...
 
 
 @runtime_checkable

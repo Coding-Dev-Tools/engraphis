@@ -136,6 +136,12 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     assert erased["maintenance"]["vacuum"] in {"completed", "failed"}
 
 
+def test_writable_store_enables_sqlite_secure_delete_before_an_emergency_erase(tmp_path):
+    """Deleted rows are scrubbed even if a later erase cannot VACUUM immediately."""
+    store = Store(str(tmp_path / "secure-delete.db"))
+    assert store.conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
 def test_secure_erase_rebuilds_shared_edge_provenance_from_remaining_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")

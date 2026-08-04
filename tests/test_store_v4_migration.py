@@ -57,7 +57,7 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     _prepare_v3(db)
 
     migrated = Store(str(db))
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 9
     assert migrated.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -147,7 +147,7 @@ def test_v4_upgrade_rebuilds_code_history_and_backfills_claim_identity(tmp_path)
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 7
+        assert upgraded.schema_version == 9
         assert Path(f"{db}.pre-migration-v5.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= columns
@@ -248,8 +248,8 @@ def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_pa
             "SELECT valid_from, ingested_at, valid_to, expired_at "
             "FROM mem_links WHERE a='mem_a'"
         ).fetchone()
-        assert upgraded.schema_version == 7
-        assert Path(f"{db}.pre-migration-v7.bak").is_file()
+        assert upgraded.schema_version == 9
+        assert Path(f"{db}.pre-migration-v9.bak").is_file()
         assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
         assert row["valid_from"] == row["ingested_at"] == 123
         assert row["valid_to"] is None and row["expired_at"] is None
@@ -298,7 +298,7 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
         history = upgraded.conn.execute(
             "SELECT file, content_hash, valid_from, ingested_at FROM code_file_history"
         ).fetchone()
-        assert upgraded.schema_version == 7
+        assert upgraded.schema_version == 9
         assert Path(f"{db}.pre-migration-v6.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert history["file"] == "api.py"
@@ -306,6 +306,175 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
         assert history["valid_from"] == history["ingested_at"]
     finally:
         upgraded.close()
+
+
+def test_v6_upgrade_adds_confidence_and_preserves_rows(tmp_path):
+    """A v6 database upgrades to the current schema: the additive ``confidence``
+    column appears, every existing row keeps its identity/content, and the column
+    defaults to 1.0 so pre-existing memories score exactly as they did before."""
+    db = tmp_path / "v6-confidence.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_v6",
+        content="Staging runs PostgreSQL 16.",
+        workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        importance=0.7,
+    ))
+    store.conn.execute(
+        "UPDATE memories SET importance=0.7 WHERE id=?", (memory_id,)
+    )
+    # Downgrade the schema marker to v6 so the next open runs the v6→v7→v8→v9 path
+    # (the additive ALTERs, confidence marker, and scoped tombstones).
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (6, 0)")
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        columns = {row["name"] for row in upgraded.conn.execute(
+            "PRAGMA table_info(memories)"
+        ).fetchall()}
+        row = upgraded.conn.execute(
+            "SELECT id, content, importance, confidence FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        record = upgraded.get_memory(memory_id)
+
+        assert upgraded.schema_version == 9
+        # A v6 source backs up as v7 (min(SCHEMA_VERSION, previous_version + 1)).
+        assert Path(f"{db}.pre-migration-v7.bak").is_file()
+        assert "confidence" in columns
+        assert row["id"] == memory_id
+        assert row["content"] == "Staging runs PostgreSQL 16."
+        assert row["importance"] == 0.7
+        assert float(row["confidence"]) == 1.0          # NOT NULL DEFAULT 1.0 backfill
+        assert record is not None
+        assert record.confidence == 1.0
+        assert record.importance == 0.7
+
+        # The v7 deterministic-hashing marker also lands (v6 < v7), keeping the
+        # embed-rebuild durable marker retryable on the next open.
+        assert upgraded.embedding_version("deterministic_hashing") is not None
+    finally:
+        upgraded.close()
+
+
+def test_v7_reopen_canonicalizes_legacy_entity_aliases_idempotently(
+        monkeypatch, tmp_path):
+    """A v7 store gets the one-time alias repair when it first reopens."""
+    db = tmp_path / "v7-entity-aliases.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    store.conn.executemany(
+        "INSERT INTO entities("
+        "id, workspace_id, repo_id, name, etype, canonical_id, normalized_name, "
+        "canonical_method, canonical_confidence, created_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("ent_openai", workspace_id, None, "OpenAI", "org", "ent_openai", "",
+             "identity", 1.0, 1.0),
+            ("ent_open_ai", workspace_id, None, "Open AI", "org", "ent_open_ai", "",
+             "identity", 1.0, 2.0),
+        ],
+    )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (7, 0)")
+    store.conn.commit()
+    store.close()
+
+    reopened = Store(str(db))
+    try:
+        rows = reopened.conn.execute(
+            "SELECT id, canonical_id, canonical_method FROM entities "
+            "ORDER BY id"
+        ).fetchall()
+        assert reopened.schema_version == 9
+        assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
+            ("ent_open_ai", "token_overlap"),
+            ("ent_open_ai", "token_overlap"),
+        ]
+    finally:
+        reopened.close()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("entity canonicalization repeated after v9 migration")
+
+    monkeypatch.setattr(Store, "_backfill_entity_canonicalization", unexpected)
+    reopened_again = Store(str(db))
+    try:
+        rows = reopened_again.conn.execute(
+            "SELECT id, canonical_id, canonical_method FROM entities "
+            "ORDER BY id"
+        ).fetchall()
+        assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
+            ("ent_open_ai", "token_overlap"),
+            ("ent_open_ai", "token_overlap"),
+        ]
+    finally:
+        reopened_again.close()
+
+
+def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_path):
+    db = tmp_path / "v8-tombstones.db"
+    store = Store(str(db))
+    store.conn.execute("DROP INDEX idx_memory_tombstones_workspace")
+    store.conn.execute("ALTER TABLE memory_tombstones RENAME TO memory_tombstones_current")
+    store.conn.execute(
+        "CREATE TABLE memory_tombstones ("
+        "memory_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, device_id TEXT NOT NULL, "
+        "workspace_id TEXT, created_at REAL NOT NULL)"
+    )
+    store.conn.execute(
+        "INSERT INTO memory_tombstones "
+        "(memory_id, deleted_at, device_id, workspace_id, created_at) "
+        "VALUES ('legacy-erased', 10.0, 'old-device', NULL, 10.0)"
+    )
+    store.conn.execute("DROP TABLE memory_tombstones_current")
+    store.conn.execute(
+        "CREATE INDEX idx_memory_tombstones_workspace "
+        "ON memory_tombstones(workspace_id, memory_id)"
+    )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (8, 0)")
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        columns = [
+            row["name"] for row in upgraded.conn.execute(
+                "PRAGMA table_info(memory_tombstones)"
+            ).fetchall()
+        ]
+        index_columns = [
+            row["name"] for row in upgraded.conn.execute(
+                "PRAGMA index_info('idx_memory_tombstones_workspace')"
+            ).fetchall()
+        ]
+        row = upgraded.conn.execute(
+            "SELECT memory_id, repo_id FROM memory_tombstones WHERE memory_id='legacy-erased'"
+        ).fetchone()
+        assert upgraded.schema_version == 9
+        assert "repo_id" in columns
+        assert index_columns == ["workspace_id", "repo_id", "memory_id"]
+        assert row["memory_id"] == "legacy-erased"
+        assert row["repo_id"] is None
+        assert Path(f"{db}.pre-migration-v9.bak").is_file()
+    finally:
+        upgraded.close()
+
+    reopened = Store(str(db))
+    try:
+        assert [
+            row["name"] for row in reopened.conn.execute(
+                "PRAGMA index_info('idx_memory_tombstones_workspace')"
+            ).fetchall()
+        ] == ["workspace_id", "repo_id", "memory_id"]
+    finally:
+        reopened.close()
 
 
 def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypatch):
@@ -321,7 +490,7 @@ def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypa
     monkeypatch.setattr(Store, "_migrate_code_file_history_v6", unexpected)
     reopened = Store(str(db))
     try:
-        assert reopened.schema_version == 7
+        assert reopened.schema_version == 9
     finally:
         reopened.close()
 
@@ -353,7 +522,7 @@ def test_migration_transform_failure_rolls_back_and_restart_completes(
 
     monkeypatch.setattr(Store, "_backfill_edge_supports", original)
     restarted = Store(str(db))
-    assert restarted.schema_version == 7
+    assert restarted.schema_version == 9
     assert restarted.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -484,4 +653,4 @@ def test_backup_directory_is_durable_before_schema_transform(monkeypatch, tmp_pa
     monkeypatch.setattr(Store, "_apply_schema", require_flush_before_schema)
 
     Store(str(db)).close()
-    assert _version(db) == 7
+    assert _version(db) == 9

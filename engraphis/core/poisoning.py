@@ -456,6 +456,10 @@ def apply_quarantine_metadata(metadata: Mapping[str, Any],
     provenance.update({
         "trusted": False,
         "quarantined": True,
+        # Quarantine always overrides approval: a detected payload must never keep
+        # an approved review state (e.g. a local-agent write) that would hide it
+        # from the review inbox.
+        "review_state": QUARANTINE_STATE,
         "quarantine_policy": decision.policy,
         "quarantine_reasons": list(decision.reasons),
     })

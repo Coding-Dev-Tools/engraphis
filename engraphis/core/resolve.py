@@ -32,10 +32,23 @@ DUP_TOKEN_JACCARD = 0.85
 # Token Jaccard: at/above this (but below DUP) it's the same subject with new content.
 SUBJECT_TOKEN_JACCARD = 0.40
 # Supersession without an explicit claim key is intentionally stricter than a
-# generic "related" judgment.  Both independent signals must agree before a
-# write hides a currently-live fact from ordinary recall.
 STRONG_SUBJECT_TOKEN_JACCARD = 0.55
 STRONG_JOINT_EMBED_SIM = 0.45
+# Equal or near-equal lexical evidence from multiple live memories is not enough
+# to retire one of them.  The hash-vector score is only a discovery/joint signal
+# (see resolve()), so a margin keeps an ambiguous write from becoming a
+# supersession merely because of candidate ordering.
+AMBIGUITY_EPSILON = 1e-9
+AMBIGUITY_MARGIN = 0.05
+
+# Relation persisted on ``mem_links`` when the deterministic detector finds a genuine
+# high-severity contradiction that the resolver cannot safely supersede (no shared
+# claim key and not enough joint lexical/semantic evidence). ``conflicts_with`` is a
+# free-form relation label on an already-bi-temporal table: ``mem_links.relation`` is
+# TEXT and every read/write path treats it as opaque, so no schema change is needed.
+# The graph layer inference in ``core/graph_layers.py`` classifies unknown labels as
+# the generic SEMANTIC overlay, which is the correct conservative default.
+CONFLICT_RELATION = "conflicts_with"
 
 
 def _normalise_claim_text(value: str) -> str:
@@ -84,9 +97,11 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
     already scoped to the same workspace/repo/scope/mtype as the candidate (conflict
     resolution must not silently cross a scope boundary — promotion is explicit, §5.1)
     and filtered to currently-visible memories. Order doesn't matter; every neighbor
-    above ``RELATED_SIM_FLOOR`` is checked and the best token-overlap match wins. Cosine
-    is candidate-discovery and *joint* evidence only: the dependency-free hashing
-    embedder is lexical, not a sound paraphrase/contradiction classifier.
+    above ``RELATED_SIM_FLOOR`` is checked, and the best token-overlap match wins unless
+    another live memory is a near-equal strong match, in which case resolution relates
+    without superseding either one. Cosine is candidate-discovery and *joint* evidence
+    only: the dependency-free hashing embedder is lexical, not a sound
+    paraphrase/contradiction classifier.
     """
     cand_tokens = tokenize(candidate_text)
     candidate_subject = str(subject_key or "").strip()
@@ -109,12 +124,26 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         fallback_neighbors.append((sim, rec))
 
     considered = exact_claim_neighbors or fallback_neighbors
-    best: Optional[tuple[float, MemoryRecord, float]] = None      # (overlap, rec, sim)
+    scored: list[tuple[float, MemoryRecord, float]] = []
     for sim, rec in considered:
         overlap = jaccard(cand_tokens, tokenize(f"{rec.title} {rec.content}"))
-        if best is None or overlap > best[0]:
-            best = (overlap, rec, sim)
-
+        scored.append((overlap, rec, sim))
+    # Retrieval order is not part of the resolution contract.  Stable tie-breaking
+    # makes repeated writes idempotent even when a vector backend returns equal-score
+    # neighbors in a different order.  When a claim has multiple visible versions,
+    # prefer the latest world-time version before falling back to its id so a
+    # supersession follows the temporal chain rather than arbitrary retrieval order.
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            -item[2],
+            -(item[1].valid_from if item[1].valid_from is not None else float("-inf")),
+            str(item[1].id),
+        )
+    )
+    best: Optional[tuple[float, MemoryRecord, float]] = (
+        scored[0] if scored else None
+    )
     if best is None:
         return Resolution(ResolutionOp.ADD, reason="no related memory in scope")
 
@@ -168,6 +197,19 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
     # neighbor rather than a contradiction, so it does not change either fact.
     if (not candidate_subject and overlap >= STRONG_SUBJECT_TOKEN_JACCARD
             and sim >= STRONG_JOINT_EMBED_SIM):
+        ambiguous = [
+            item for item in scored[1:]
+            if item[0] >= STRONG_SUBJECT_TOKEN_JACCARD
+            and item[2] >= STRONG_JOINT_EMBED_SIM
+            and overlap - item[0] <= AMBIGUITY_MARGIN + AMBIGUITY_EPSILON
+        ]
+        if ambiguous:
+            ids = ", ".join(sorted({rec.id, *(item[1].id for item in ambiguous)}))
+            return Resolution(
+                ResolutionOp.RELATE,
+                reason=f"ambiguous strong match among {ids}; no memory superseded "
+                       f"(best overlap={overlap:.2f}, similarity={sim:.2f})",
+            )
         return Resolution(ResolutionOp.INVALIDATE, target_id=rec.id,
                           reason=f"supersedes {rec.id} (strong joint evidence: "
                                  f"token overlap={overlap:.2f}, similarity={sim:.2f})")

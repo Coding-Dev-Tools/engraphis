@@ -50,6 +50,11 @@ VECTOR_SCAN_BATCH = 2000
 # Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
 IN_CLAUSE_CHUNK = 500
+# Keep dynamic blocking predicates well below SQLite's conservative 999-variable
+# and expression-depth limits. Each token contributes two LIKE parameters.
+ENTITY_BLOCK_TOKEN_CHUNK = 200
+# Do not materialize unbounded common-token buckets during migration/live writes.
+ENTITY_BLOCK_BUCKET_LIMIT = 1024
 def now_ts() -> float:
     return time.time()
 
@@ -163,6 +168,44 @@ def normalize_entity_name(value: str) -> str:
     """
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _entity_token_set(name: Any) -> set[str]:
+    """Return conservative blocking tokens for one entity spelling."""
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", str(name or "").casefold())
+        if len(token) >= 2
+    }
+
+
+def _entity_compact_name(name: Any) -> str:
+    """Return the punctuation-preserving, whitespace-insensitive spelling."""
+    return re.sub(r"\s+", "", normalize_entity_name(str(name or "")))
+
+
+def _entity_punctuation_signature(name: Any) -> str:
+    """Return meaningful punctuation so token blocking cannot cross its boundary."""
+    normalized = normalize_entity_name(str(name or ""))
+    return "".join(
+        character for character in normalized
+        if not character.isalnum() and not character.isspace()
+    )
+
+
+def _entity_overlap(left: Any, right: Any) -> Optional[float]:
+    """Return the token-blocking score, or ``None`` when no safe match exists."""
+    left_compact = _entity_compact_name(left)
+    right_compact = _entity_compact_name(right)
+    if left_compact and left_compact == right_compact:
+        return 1.0
+    if _entity_punctuation_signature(left) != _entity_punctuation_signature(right):
+        return None
+    left_tokens = _entity_token_set(left)
+    right_tokens = _entity_token_set(right)
+    if not left_tokens or not right_tokens:
+        return None
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
 
 
 _SUPPORT_CONFIDENCE = {
@@ -755,6 +798,12 @@ class Store:
                     and "fts5" in str(row["sql"] or "").casefold()
                 )
             else:
+                # Keep deleted pages scrubbed even when an emergency erase cannot run a
+                # final VACUUM because another connection has the database busy.  The
+                # per-erase helper sets this too for legacy connections and backups;
+                # setting it at writable-store startup makes the protection durable for
+                # every normal v2 connection without changing the schema or data model.
+                self.conn.execute("PRAGMA secure_delete=ON")
                 self.conn.execute("PRAGMA synchronous=NORMAL")
                 self.init_schema()
                 # journal_mode is persistent state, so set it only after a required backup
@@ -1060,6 +1109,9 @@ class Store:
         # explicit, idempotent ALTER TABLE here (SQLite has no "ADD COLUMN IF NOT EXISTS").
         for stmt in (
             "ALTER TABLE memories ADD COLUMN sort_order REAL",
+            "ALTER TABLE memories ADD COLUMN pinned_at REAL",
+            "ALTER TABLE memories ADD COLUMN unpinned_at REAL",
+            "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE memories ADD COLUMN subject_key TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN claim_kind TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN valid_to_recorded_at REAL",
@@ -1094,11 +1146,26 @@ class Store:
             "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
+            "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
         ):
             try:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        tombstone_index_columns = [
+            str(row["name"])
+            for row in self.conn.execute(
+                "PRAGMA index_info('idx_memory_tombstones_workspace')"
+            ).fetchall()
+        ]
+        if tombstone_index_columns != ["workspace_id", "repo_id", "memory_id"]:
+            self.conn.execute(
+                "DROP INDEX IF EXISTS idx_memory_tombstones_workspace"
+            )
+            self.conn.execute(
+                "CREATE INDEX idx_memory_tombstones_workspace "
+                "ON memory_tombstones(workspace_id, repo_id, memory_id)"
+            )
         # This cannot live in SCHEMA_SQL: CREATE TABLE IF NOT EXISTS leaves an
         # early-v5 ``mem_links`` table untouched, so the index would reference
         # temporal columns before the additive ALTERs above install them.
@@ -1153,6 +1220,21 @@ class Store:
                 "VALUES (?,?,?)",
                 ("deterministic_hashing", "v1_legacy", now_ts()),
             )
+        if previous_version < 8:
+            # v7 memories predate first-class confidence. ``confidence`` is a
+            # scoring multiplier with a 1.0 default, so existing rows need no
+            # backfill — the NOT NULL DEFAULT 1.0 column already covers them
+            # (the additive ALTER above is one-shot on reopens).
+            # v7 pin state has no clock. Synthesize earliest-wins markers so a
+            # legacy pinned row still participates in the new pin lattice: a pinned
+            # row without ``pinned_at`` is treated as pinned since the epoch (it
+            # can never be beaten by a peer's unpin, which matches the old
+            # OR-semantics), and a legacy unpinned row carries no marker at all
+            # (a peer's pin simply applies). Rows with real clocks are untouched.
+            self.conn.execute(
+                "UPDATE memories SET pinned_at=0.0 "
+                "WHERE pinned=1 AND pinned_at IS NULL"
+            )
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -1170,9 +1252,15 @@ class Store:
                             (inferred, row["rowid"]),
                         )
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
-        # backfills before creating representative-only uniqueness indexes so exact
-        # normalized aliases can safely converge onto one deterministic canonical id.
-        self._backfill_entity_canonicalization()
+        # backfill only when the database crosses the migration that introduced the
+        # canonical fields. Running the all-pairs token pass on every fresh/opened
+        # database turns startup into an O(n²) scan of the entire entity table.
+        if previous_version < 4:
+            self._backfill_entity_canonicalization()
+        elif previous_version < 9:
+            # v8 databases may have canonical fields but never received the token
+            # overlap pass; v9 is the one-time repair for that gap.
+            self._backfill_entity_canonicalization()
         self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
             "ON entities(workspace_id, normalized_name, etype) "
@@ -1441,7 +1529,105 @@ class Store:
         """Materialize the evidence incidence for one freshly written memory."""
         self._backfill_memory_entities_v5(memory_id)
 
+    def _entity_blocking_candidates(self, *, entity_id: Optional[str],
+                                     workspace_id: Optional[str],
+                                     etype: Optional[str], name: Any) -> list[sqlite3.Row]:
+        """Select lexical peers without making one unbounded SQL expression.
+        Ordinary token blocks return every matching peer; unusually broad blocks are
+        deliberately discarded rather than materialized. The compact-alias query always
+        runs. The Python score below then applies the exact compact/Jaccard rule.
+        Matching both normalized_name and the legacy name column lets a partially
+        upgraded database participate before its next migration completes.
+        """
+        tokens = sorted(_entity_token_set(name))
+        if not tokens:
+            return []
+        base_sql = (
+            "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
+            "normalized_name, canonical_method, canonical_confidence "
+            "FROM entities WHERE workspace_id IS ? AND etype IS ? AND ("
+        )
+        found: dict[str, sqlite3.Row] = {}
+
+        def collect(clauses: list[str], patterns: list[str], *,
+                    guard_broad: bool) -> None:
+            params: list[Any] = [workspace_id, etype, *patterns]
+            sql = base_sql + " OR ".join(clauses) + ")"
+            if entity_id is not None:
+                sql += " AND id<>?"
+                params.append(entity_id)
+            if guard_broad:
+                sql += " LIMIT ?"
+                params.append(ENTITY_BLOCK_BUCKET_LIMIT + 1)
+            rows = self.conn.execute(sql, params).fetchall()
+            if guard_broad and len(rows) > ENTITY_BLOCK_BUCKET_LIMIT:
+                # A common token is not useful as a blocking key. Do not retain
+                # an arbitrarily large bucket; the exact compact query still runs.
+                return
+            for row in rows:
+                found[str(row["id"])] = row
+
+        for start in range(0, len(tokens), ENTITY_BLOCK_TOKEN_CHUNK):
+            clauses: list[str] = []
+            patterns: list[str] = []
+            for token in tokens[start:start + ENTITY_BLOCK_TOKEN_CHUNK]:
+                pattern = "%" + _escape_like(token) + "%"
+                clauses.append(
+                    "(normalized_name LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\')"
+                )
+                patterns.extend((pattern, pattern))
+            collect(clauses, patterns, guard_broad=True)
+
+        # Whitespace-separated aliases such as OpenAI/Open AI have no shared token,
+        # but their compact spellings are still an exact canonical match.
+        compact = _entity_compact_name(name)
+        if compact:
+            compact_pattern = "%" + _escape_like(compact) + "%"
+            collect(
+                [
+                    "(replace(lower(normalized_name), ' ', '') LIKE ? ESCAPE '\\' "
+                    "OR replace(lower(name), ' ', '') LIKE ? ESCAPE '\\')"
+                ],
+                [compact_pattern, compact_pattern], guard_broad=False,
+            )
+        return [found[key] for key in sorted(found)]
+
     def _backfill_entity_canonicalization(self) -> None:
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, workspace_id, name, etype, canonical_id, normalized_name, "
+            "canonical_method, canonical_confidence FROM entities "
+            "ORDER BY workspace_id, etype, id"
+        ).fetchall()]
+        # Close canonical chains to their root FIRST. A legacy database can carry a
+        # two-hop chain (A→B, B→C) when an earlier pass merged B into C after A had
+        # already pointed at B; the group pass below keeps "any existing canonical
+        # wins", so A would otherwise dangle at B while B points at C. Resolve every
+        # id to its transitive root (an id whose canonical is itself, or a
+        # non-existent id — caller-provided roots are authoritative) and persist one
+        # hop, so the group pass and the singleton-reset logic below see roots only.
+        # Deterministic and idempotent.
+        root_of: dict[str, str] = {row["id"]: row["id"] for row in rows}
+        for row in rows:
+            cid = str(row.get("canonical_id") or "")
+            if cid:
+                root_of[row["id"]] = cid
+        for mid in root_of:
+            seen: set[str] = set()
+            cursor = root_of[mid]
+            while cursor in root_of and root_of[cursor] != cursor:
+                if cursor in seen:  # cycle safety (should not happen)
+                    break
+                seen.add(cursor)
+                cursor = root_of[cursor]
+            root_of[mid] = cursor
+        for row in rows:
+            root = root_of.get(row["id"])
+            cid = str(row.get("canonical_id") or "")
+            if cid and root and root != cid:
+                self.conn.execute(
+                    "UPDATE entities SET canonical_id=? WHERE id=?",
+                    (root, row["id"]),
+                )
         rows = [dict(row) for row in self.conn.execute(
             "SELECT id, workspace_id, name, etype, canonical_id, normalized_name, "
             "canonical_method, canonical_confidence FROM entities "
@@ -1489,6 +1675,58 @@ class Store:
                     "canonical_method=?, canonical_confidence=? WHERE id=?",
                     (row["_normalized"], canonical_id, method, confidence, row["id"]),
                 )
+
+        # Token-overlap blocking is deliberately query-backed rather than an in-memory
+        # all-pairs pass.  It is still a one-time migration transform, but a workspace
+        # with many unrelated entities should not turn an upgrade into quadratic work.
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, workspace_id, repo_id, name, etype, canonical_id, normalized_name, "
+            "canonical_method, canonical_confidence FROM entities "
+            "ORDER BY workspace_id, etype, id"
+        ).fetchall()]
+        row_by_id = {str(row["id"]): row for row in rows}
+        seen_pairs: set[tuple[str, str]] = set()
+        for row in rows:
+            if not _entity_token_set(row.get("name")):
+                continue
+            candidates = self._entity_blocking_candidates(
+                entity_id=row["id"], workspace_id=row.get("workspace_id"),
+                etype=row.get("etype"), name=row.get("name"),
+            )
+            for candidate in candidates:
+                other = dict(candidate)
+                pair = tuple(sorted((str(row["id"]), str(other["id"]))))
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                overlap = _entity_overlap(row.get("name"), other.get("name"))
+                if overlap is None or overlap < 0.6:
+                    continue
+                # Existing canonical ids win when either side has one; otherwise the
+                # lexicographically oldest typed id is deterministic.
+                other_state = row_by_id.get(str(other["id"]))
+                if other_state is not None:
+                    other["canonical_id"] = other_state.get("canonical_id")
+                    other["canonical_method"] = other_state.get("canonical_method")
+                existing = sorted({
+                    str(row.get("canonical_id") or ""),
+                    str(other.get("canonical_id") or ""),
+                })
+                existing = [value for value in existing if value]
+                canonical = existing[0] if existing else min(pair)
+                for member in (row, other):
+                    state = row_by_id.get(str(member["id"]), member)
+                    if state.get("canonical_id") != canonical or \
+                            state.get("canonical_method") != "token_overlap":
+                        self.conn.execute(
+                            "UPDATE entities SET canonical_id=?, canonical_method=? "
+                            "WHERE id=?",
+                            (canonical, "token_overlap", member["id"]),
+                        )
+                    state["canonical_id"] = canonical
+                    state["canonical_method"] = "token_overlap"
+                    member["canonical_id"] = canonical
+                    member["canonical_method"] = "token_overlap"
 
     def _backfill_edge_supports(self) -> None:
         rows = self.conn.execute(
@@ -1958,17 +2196,28 @@ class Store:
                            f"existing provenance={existing['provenance']}, "
                            f"incoming provenance={_dumps(rec.provenance)}", commit=False)
         ts = now_ts()
+        # A "closed history" record may legitimately carry only a past ``valid_to`` with
+        # ``valid_from`` defaulting to ingest time (the fixture/backfill convention). The
+        # empty-interval invariant therefore applies only when the caller explicitly
+        # supplied BOTH endpoints — a caller-authored inversion is always a bug, whereas
+        # a defaulted ``valid_from`` with a past ``valid_to`` is an accepted closed window.
+        valid_from_was_explicit = rec.valid_from is not None
         rec.ingested_at = rec.ingested_at if rec.ingested_at is not None else ts
         rec.valid_from = rec.valid_from if rec.valid_from is not None else ts
         rec.last_access = rec.last_access if rec.last_access is not None else ts
+        if (valid_from_was_explicit and rec.valid_to is not None
+                and rec.valid_to < rec.valid_from):
+            raise ValueError(
+                "valid_to cannot predate valid_from; the validity interval would be empty"
+            )
         self.conn.execute(
             """INSERT INTO memories
                (id, workspace_id, repo_id, session_id, scope, mtype, title, content, summary,
                 keywords, metadata, importance, surprise, stability, access_count, last_access,
                 valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
                 subject_key, claim_kind,
-                pinned, sensitivity, provenance)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                pinned, sensitivity, provenance, confidence, pinned_at, unpinned_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                 workspace_id=excluded.workspace_id, repo_id=excluded.repo_id,
                 session_id=excluded.session_id, scope=excluded.scope, mtype=excluded.mtype,
@@ -1982,7 +2231,9 @@ class Store:
                 ingested_at=excluded.ingested_at,
                 expired_at=excluded.expired_at, subject_key=excluded.subject_key,
                 claim_kind=excluded.claim_kind, pinned=excluded.pinned,
-                sensitivity=excluded.sensitivity, provenance=excluded.provenance""",
+                sensitivity=excluded.sensitivity, provenance=excluded.provenance,
+                confidence=excluded.confidence,
+                pinned_at=excluded.pinned_at, unpinned_at=excluded.unpinned_at""",
             (rec.id, rec.workspace_id, rec.repo_id, rec.session_id,
              _enum(rec.scope), _enum(rec.mtype), rec.title, rec.content, rec.summary,
              _dumps(rec.keywords), _dumps(rec.metadata), rec.importance, rec.surprise,
@@ -1990,13 +2241,24 @@ class Store:
              rec.valid_to_recorded_at, rec.ingested_at, rec.expired_at,
              rec.subject_key, rec.claim_kind,
              int(rec.pinned), rec.sensitivity,
-             _dumps(rec.provenance)),
+             _dumps(rec.provenance), rec.confidence,
+             rec.pinned_at, rec.unpinned_at),
         )
-        # full-text mirror
-        self._fts_upsert(rec.id, rec.title, rec.content, " ".join(rec.keywords))
-        # vector mirror (L2-normalized for cosine-as-dot)
-        if rec.embedding is not None:
-            self.put_vector(rec.id, rec.embedding, model=str(rec.metadata.get("embed_model", "")))
+        try:
+            # Keep the row, FTS mirror, and vector mirror atomic for the normal
+            # single-write path.  Once the main INSERT succeeds, a mirror failure
+            # otherwise leaves this connection pinned in a partial transaction and
+            # lets a later commit publish an unindexed memory.
+            self._fts_upsert(rec.id, rec.title, rec.content, " ".join(rec.keywords))
+            # vector mirror (L2-normalized for cosine-as-dot)
+            if rec.embedding is not None:
+                self.put_vector(
+                    rec.id, rec.embedding, model=str(rec.metadata.get("embed_model", ""))
+                )
+        except BaseException:
+            if commit:
+                self.conn.rollback()
+            raise
         # ``commit=False`` lets a bulk writer (sync's bundle apply) amortize one commit over
         # a batch of rows instead of paying a durability fsync per memory. The caller then
         # owns the transaction and MUST commit or roll back — see SyncEngine.apply_bundle.
@@ -2073,6 +2335,32 @@ class Store:
             sql += " WHERE " + " AND ".join(where)
         row = self.conn.execute(sql, params).fetchone()
         return int(row["count"] if row is not None else 0)
+
+    def list_proactive_overrides(self, flt: Optional[SearchFilter] = None,
+                                 *, prompt_only: bool = False) -> list[MemoryRecord]:
+        """Return pinned/``proactive=always`` rows outside the normal scan window.
+
+        The proactive agenda intentionally bounds its ordinary scan, but explicit user
+        choices are not bounded by recency.  Keep this query separate so a very old pin
+        cannot disappear behind 500 newer memories without making every proactive call
+        materialize the entire store.
+        """
+        sql = "SELECT * FROM memories"
+        where, params = self._where(flt, include_invalid=False)
+        where.append("(pinned=1 OR lower(metadata) LIKE ?)")
+        params.append('%"proactive"%')
+        sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ingested_at DESC"
+        out: list[MemoryRecord] = []
+        for row in self.conn.execute(sql, params):
+            rec = _row_to_record(row)
+            proactive = str((rec.metadata or {}).get("proactive") or "").lower()
+            if not rec.pinned and proactive != "always":
+                continue
+            if prompt_only and not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append(rec)
+        return out
 
     def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
                          session_id: Optional[str], scope: Scope, mtype: MemoryType,
@@ -2169,8 +2457,32 @@ class Store:
 
     def set_pinned(self, memory_id: str, pinned: bool) -> None:
         """Pinned memories are exempt from automatic decay/pruning (AGENTS.md §3.2);
-        governance (explicit forget/correct) can still act on them."""
-        self.conn.execute("UPDATE memories SET pinned=? WHERE id=?", (int(pinned), memory_id))
+        governance (explicit forget/correct) can still act on them.
+
+        Every pin-state transition stamps the system time into the row so sync can
+        merge the state as a latest-transition lattice instead of an OR-set:
+        ``pinned_at`` records the latest pin and ``unpinned_at`` the latest unpin.
+        A re-pin preserves the unpin marker, so peers converge on whichever
+        transition happened last instead of allowing a stale pin to resurrect.
+        """
+        row = self.conn.execute(
+            "SELECT pinned FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            return
+        now = now_ts()
+        if pinned:
+            self.conn.execute(
+                "UPDATE memories SET pinned=1, pinned_at=? "
+                "WHERE id=? AND pinned=0",
+                (now, memory_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE memories SET pinned=0, unpinned_at=? "
+                "WHERE id=? AND pinned=1",
+                (now, memory_id),
+            )
         self.conn.commit()
 
     def reinforce(self, memory_id: str, *, alpha: float = 0.3, boost: float = 0.0) -> None:
@@ -2292,7 +2604,15 @@ class Store:
         """
         if not cls._has_table(conn, "memories"):
             return {"present": False, "removed": False}
-        row = conn.execute("SELECT id FROM memories WHERE id=?", (memory_id,)).fetchone()
+        memory_columns = {
+            item["name"] for item in conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        row = conn.execute(
+            ("SELECT id, workspace_id, repo_id FROM memories WHERE id=?"
+             if "workspace_id" in memory_columns
+             else "SELECT id FROM memories WHERE id=?"),
+            (memory_id,),
+        ).fetchone()
         if row is None:
             return {"present": False, "removed": False}
 
@@ -2423,6 +2743,8 @@ class Store:
         return {
             "present": True,
             "removed": True,
+            "workspace_id": row["workspace_id"] if "workspace_id" in row.keys() else None,
+            "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
             "graph_edges_considered": len(supported_edges),
             "entities_considered": len(incident_entities),
         }
@@ -2490,10 +2812,35 @@ class Store:
         and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
         peers, and a process that already read the secret cannot be recalled or erased.
         """
-        current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
-        if not current["present"]:
-            raise KeyError(f"no memory with id '{memory_id}'")
-        self.conn.commit()
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            # Mint the origin before opening the erase transaction.  ``device_id`` may
+            # need to write sync metadata on a new database; keeping that write outside
+            # the destructive transaction means the deletion and terminal tombstone
+            # commit (or roll back) as one unit.
+            device_id = self.device_id()
+            current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
+            if not current["present"]:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            # Durable sync tombstone: the local row is hard-deleted, but the *deletion*
+            # must survive in sync state so a peer that still holds the row is told this
+            # id is dead instead of re-adding it on the next round. No content travels —
+            # only the id, the erasure time, and this device's id. Scope is captured from
+            # the erased row so an export restricted to a repo still tells that repo's
+            # peers the id is gone (a tombstone scoped to the workspace is never
+            # exported, mirroring how an erased row can no longer be scoped).
+            self.add_memory_tombstone(
+                memory_id, deleted_at=now_ts(),
+                device_id=device_id,
+                workspace_id=current.get("workspace_id"),
+                repo_id=current.get("repo_id"),
+            )
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.commit()
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
         durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
         maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
 
@@ -2590,6 +2937,16 @@ class Store:
 
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
+        """Persist an entity and its derived incidence atomically."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            return self._upsert_entity_impl(node, commit=commit)
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
+    def _upsert_entity_impl(self, node: Node, *, commit: bool = True) -> str:
         normalized = normalize_entity_name(node.name)
         existing = self.conn.execute(
             "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? "
@@ -2623,9 +2980,44 @@ class Store:
         self._backfill_entity_text_mentions(
             nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
         )
+        self._live_canonicalize_entity(
+            nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
+        )
         if commit:
             self.conn.commit()
         return nid
+
+    def _live_canonicalize_entity(self, entity_id: str, *, name: str,
+                                  workspace_id: Optional[str],
+                                  repo_id: Optional[str]) -> None:
+        """Merge a freshly-written entity into a token-overlap alias group."""
+        name = (name or "").strip()
+        if len(name) < 2 or not workspace_id:
+            return
+        entity = self.conn.execute(
+            "SELECT etype FROM entities WHERE id=?", (entity_id,)
+        ).fetchone()
+        if entity is None:
+            return
+        candidates = self._entity_blocking_candidates(
+            entity_id=entity_id, workspace_id=workspace_id,
+            etype=entity["etype"], name=name,
+        )
+        best: Optional[dict] = None
+        best_overlap = 0.0
+        for peer in candidates:
+            overlap = _entity_overlap(name, peer["name"])
+            if overlap is None or overlap < 0.6 or overlap <= best_overlap:
+                continue
+            best_overlap = overlap
+            best = dict(peer)
+        if best is None:
+            return
+        peer_canonical = best["canonical_id"] or best["id"]
+        self.conn.execute(
+            "UPDATE entities SET canonical_id=?, canonical_method=? WHERE id=?",
+            (peer_canonical, "token_overlap", entity_id),
+        )
 
     def _backfill_entity_text_mentions(self, entity_id: str, *, name: str,
                                        workspace_id: Optional[str],
@@ -2639,14 +3031,17 @@ class Store:
         name = (name or "").strip()
         if len(name) < 2:
             return
-        scope_sql = "repo_id IS NULL"
-        scope_params: list[Any] = []
-        if repo_id is not None:
-            # A contextual repo read includes its workspace/user ancestors.  Do not
-            # lose a legacy workspace mention merely because the matching entity was
-            # introduced later in a repository; sibling repositories stay isolated.
+        if repo_id is None:
+            # A workspace-owned entity is the shared identity across its repositories.
+            # Include every repo-owned memory in this workspace, then partition profile
+            # writes by the memory owner so a workspace sweep remains repo-isolated.
+            scope_sql = "1=1"
+            scope_params: list[Any] = []
+        else:
+            # A repo-owned entity may use workspace-level memories as shared evidence,
+            # but must not reach a sibling repository.
             scope_sql = "(repo_id=? OR repo_id IS NULL)"
-            scope_params.append(repo_id)
+            scope_params = [repo_id]
         rows = self.conn.execute(
             "SELECT id, title, content, workspace_id, repo_id, valid_from, valid_to, "
             "valid_to_recorded_at, ingested_at, expired_at FROM memories "
@@ -2670,7 +3065,6 @@ class Store:
                 ingested_at=row["ingested_at"], expired_at=row["expired_at"],
                 provenance={"source": "exact_text_backfill"}, commit=False,
             )
-
     def list_entities(self, flt: Optional[SearchFilter] = None,
                       *, limit: Optional[int] = None) -> list[Node]:
         """Entities in scope, newest first — the seed set the profile-consolidation
@@ -2889,6 +3283,21 @@ class Store:
         return rows
 
     def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
+        """Atomically persist an edge and its normalized support rows.
+
+        The implementation performs several writes.  If a later support write fails,
+        roll back a transaction opened by this call so a partial edge cannot remain
+        pending on the shared connection.
+        """
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            return self._upsert_edge_impl(edge, commit=commit)
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
+    def _upsert_edge_impl(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")
         layer = normalize_graph_layer(edge.layer, edge.relation).value
         source, target = edge.src, edge.dst
@@ -3137,6 +3546,22 @@ class Store:
                          valid_from: Optional[float] = None,
                          ingested_at: Optional[float] = None,
                          commit: bool = True) -> None:
+        """Record support and edge provenance as one write unit."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            self._add_edge_support_impl(
+                edge_id, provenance, valid_from=valid_from,
+                ingested_at=ingested_at, commit=commit,
+            )
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
+    def _add_edge_support_impl(self, edge_id: str, provenance: dict, *,
+                               valid_from: Optional[float] = None,
+                               ingested_at: Optional[float] = None,
+                               commit: bool = True) -> None:
         """Record another source memory supporting an existing graph edge."""
         incoming = _provenance_memory_ids(provenance)
         if not incoming:
@@ -3399,8 +3824,8 @@ class Store:
             if layer is not None else None
         )
         graph_layer = requested_layer or normalize_graph_layer(None, relation).value
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
             # A sync bundle may carry a closed link interval.  It has no live row to
@@ -3418,7 +3843,7 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if started_transaction:
+                if owns_transaction:
                     self.conn.commit()
                 return
             existing = self.conn.execute(
@@ -3471,7 +3896,7 @@ class Store:
                     )
                     if commit:
                         self.conn.commit()
-                elif started_transaction:
+                elif owns_transaction:
                     # The pre-read reservation has no write to batch. Release it even
                     # for ``commit=False``; the old no-op path never opened a transaction.
                     self.conn.commit()
@@ -3490,7 +3915,7 @@ class Store:
             if commit:
                 self.conn.commit()
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -3514,8 +3939,8 @@ class Store:
         stamp = now_ts()
         world_start = stamp if valid_from is None else valid_from
         system_start = stamp if ingested_at is None else ingested_at
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
             exact = self.conn.execute(
@@ -3530,7 +3955,7 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if started_transaction:
+                if owns_transaction:
                     self.conn.commit()
                 return False
             self.conn.execute(
@@ -3545,7 +3970,7 @@ class Store:
                 self.conn.commit()
             return True
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -4909,23 +5334,169 @@ class Store:
         row = self.conn.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
-    def set_sync_state(self, key: str, value: str) -> None:
+    def set_sync_state(self, key: str, value: str, *, commit: bool = True) -> None:
         self.conn.execute(
             "INSERT INTO sync_state(key, value, updated_at) VALUES (?,?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             (key, value, now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
+
+    # ── bounded maintenance cursors (local, never synced) ──────────────────────
+    def get_maintenance_cursor(self, workspace_id: str, repo_id: Optional[str],
+                                name: str) -> str:
+        """Return the last keyset id visited by one scoped maintenance sweep."""
+        row = self.conn.execute(
+            "SELECT cursor FROM maintenance_cursors "
+            "WHERE workspace_id=? AND repo_id=? AND name=?",
+            (workspace_id, repo_id or "", name),
+        ).fetchone()
+        return str(row["cursor"]) if row else ""
+
+    def set_maintenance_cursor(self, workspace_id: str, repo_id: Optional[str],
+                               name: str, cursor: str, *, commit: bool = True) -> None:
+        """Persist bounded-sweep progress without exposing it to sync peers."""
+        normalized_cursor = str(cursor or "")
+        scope = (workspace_id, repo_id or "", name)
+        existing = self.conn.execute(
+            "SELECT cursor FROM maintenance_cursors "
+            "WHERE workspace_id=? AND repo_id=? AND name=?",
+            scope,
+        ).fetchone()
+        if existing is not None and str(existing["cursor"] or "") == normalized_cursor:
+            return
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO maintenance_cursors("
+                "workspace_id, repo_id, name, cursor, updated_at"
+                ") VALUES (?,?,?,?,?)",
+                (*scope, normalized_cursor, now_ts()),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE maintenance_cursors SET cursor=?, updated_at=? "
+                "WHERE workspace_id=? AND repo_id=? AND name=?",
+                (normalized_cursor, now_ts(), *scope),
+            )
+        if commit:
+            self.conn.commit()
+
+    # ── sync tombstones (durable deletion markers that propagate) ───────────────
+    def add_memory_tombstone(self, memory_id: str, *, deleted_at: Optional[float] = None,
+                             device_id: Optional[str] = None,
+                             workspace_id: Optional[str] = None,
+                             repo_id: Optional[str] = None) -> None:
+        """Record that a memory id is dead (secure-erased) so sync can propagate it.
+
+        Carries no user content — only the id, the erasure time, and the origin
+        device. Earliest ``deleted_at`` wins, exactly like the ``valid_to`` closure
+        lattice, so a replayed or stale erasure can never resurrect a memory or move
+        a tombstone later in time. The caller owns the transaction/commit.
+        """
+        ts = now_ts() if deleted_at is None else deleted_at
+        did = device_id or self.device_id()
+        existing = self.conn.execute(
+            "SELECT deleted_at, device_id, workspace_id, repo_id "
+            "FROM memory_tombstones WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO memory_tombstones("
+                "memory_id, deleted_at, device_id, workspace_id, repo_id, created_at"
+                ") VALUES (?,?,?,?,?,?)",
+                (memory_id, ts, did, workspace_id, repo_id, ts),
+            )
+            return
+        existing_workspace = existing["workspace_id"]
+        if (
+            existing_workspace is not None
+            and workspace_id is not None
+            and existing_workspace != workspace_id
+        ):
+            raise ValueError("tombstone workspace scope conflicts with existing marker")
+        existing_repo = existing["repo_id"]
+        if (
+            existing_repo is not None
+            and repo_id is not None
+            and existing_repo != repo_id
+        ):
+            raise ValueError("tombstone repository scope conflicts with existing marker")
+        earlier = float(ts) < float(existing["deleted_at"])
+        merged_workspace = (
+            None
+            if existing_workspace is None or workspace_id is None
+            else (workspace_id if earlier else existing_workspace)
+        )
+        # A repo-less marker is legacy global state. Never narrow it to a repo;
+        # conversely, a legacy marker arriving after a known repo marker widens
+        # the terminal scope rather than allowing sibling-specific overwrite.
+        merged_repo = (
+            None
+            if existing_repo is None or repo_id is None
+            else existing_repo
+        )
+        self.conn.execute(
+            "UPDATE memory_tombstones SET deleted_at=?, device_id=?, "
+            "workspace_id=?, repo_id=? WHERE memory_id=?",
+            (
+                ts if earlier else existing["deleted_at"],
+                did if earlier else existing["device_id"],
+                merged_workspace,
+                merged_repo,
+                memory_id,
+            ),
+        )
+
+    def list_memory_tombstones(self, workspace_id: Optional[str] = None,
+                               repo_id: Optional[str] = None) -> list[dict]:
+        """Return tombstones scoped to a workspace and, when selected, one repo.
+
+        Workspace-scoped tombstones remain visible to every repo in that workspace;
+        repo-scoped tombstones never cross a repo-only export boundary.
+        """
+        if workspace_id is None and repo_id is not None:
+            raise ValueError("repo_id requires workspace_id")
+        if workspace_id is None:
+            rows = self.conn.execute(
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
+                "FROM memory_tombstones ORDER BY memory_id"
+            ).fetchall()
+        elif repo_id is None:
+            rows = self.conn.execute(
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
+                "FROM memory_tombstones WHERE workspace_id=? "
+                "ORDER BY memory_id",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
+                "FROM memory_tombstones WHERE workspace_id=? AND (repo_id=? OR repo_id IS NULL) "
+                "ORDER BY memory_id",
+                (workspace_id, repo_id),
+            ).fetchall()
+        return [
+            {
+                "id": str(row["memory_id"]), "deleted_at": float(row["deleted_at"]),
+                "device": str(row["device_id"] or ""),
+                "workspace_id": row["workspace_id"],
+                "repo_id": row["repo_id"],
+            }
+            for row in rows
+        ]
 
     def device_id(self) -> str:
         """Stable per-database device id (minted once, then persistent). Attributes
         sync bundles to their origin device so a store never re-applies its own
         writes; it is local metadata, never memory, and only ever leaves the machine
         inside a bundle header."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
         did = self.get_sync_state("device_id")
         if not did:
             did = ids.new_id("device")
-            self.set_sync_state("device_id", did)
+            self.set_sync_state("device_id", did, commit=owns_transaction)
         return did
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -5007,6 +5578,10 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         title=row["title"] or "", summary=row["summary"] or "",
         keywords=_loads(row["keywords"], []), metadata=_loads(row["metadata"], {}),
         importance=row["importance"], surprise=row["surprise"], stability=row["stability"],
+        confidence=(
+            row["confidence"]
+            if "confidence" in row.keys() and row["confidence"] is not None else 1.0
+        ),
         access_count=row["access_count"], last_access=row["last_access"],
         valid_from=row["valid_from"], valid_to=row["valid_to"],
         valid_to_recorded_at=(
@@ -5018,6 +5593,8 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         claim_kind=row["claim_kind"] if "claim_kind" in row.keys() else "",
         pinned=bool(row["pinned"]), sensitivity=row["sensitivity"],
         provenance=_loads(row["provenance"], {}),
+        pinned_at=row["pinned_at"] if "pinned_at" in row.keys() else None,
+        unpinned_at=row["unpinned_at"] if "unpinned_at" in row.keys() else None,
     )
 
 

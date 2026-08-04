@@ -113,7 +113,8 @@ def service() -> MemoryService:
     if _service is None:
         _service = MemoryService.create(
             settings.db_path, embed_model=settings.embed_model,
-            embed_dim=settings.embed_dim or 384)
+            embed_dim=settings.embed_dim or 384,
+            vector_backend=settings.vector_backend)
     return _service
 
 
@@ -159,6 +160,16 @@ def _run(fn, *a, **k):
             "recommended_action": "narrow repository, time, type, or relation filters",
         }) from None
     except ValidationError:
+        logger.info("dashboard request rejected")
+        raise _invalid_request() from None
+    except ValueError as exc:
+        if _is_embedder_mismatch(exc):
+            raise HTTPException(status_code=409, detail={
+                "error": "Semantic search needs the embedding model that built your data "
+                         "(sentence-transformers / all-MiniLM). Install it once — "
+                         "pip install \"sentence-transformers>=2.7\" — then restart the "
+                         "dashboard. The Memories, Graph, Overview and Audit tabs work without it.",
+                "embedder": True}) from None
         logger.info("dashboard request rejected")
         raise _invalid_request() from None
     except HTTPException as exc:
@@ -238,23 +249,45 @@ def _managed_call(fn, *args, **kwargs):
 
 
 def _default_ws() -> Optional[str]:
-    wss = service().list_workspaces().get("workspaces") or []
-    return wss[0]["name"] if wss else None
+    try:
+        wss = service().list_workspaces().get("workspaces") or []
+    except (ValidationError, ValueError):
+        logger.info("workspace lookup rejected")
+        raise _invalid_request() from None
+    except HTTPException as exc:
+        raise _sanitized_http_exception(exc.status_code) from None
+    except Exception as exc:  # noqa: BLE001 - keep internal store details out of HTTP
+        logger.error("workspace lookup failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
+    try:
+        return next(
+            (item["name"] for item in wss if isinstance(item, dict) and item.get("name")),
+            None,
+        )
+    except (KeyError, TypeError):
+        logger.error("workspace listing returned malformed data")
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
 
 
 def _require_ws(workspace: Optional[str] = None) -> str:
-    """Resolve an explicitly selected workspace, with a legacy default fallback.
-
-    Cloud automation is workspace-scoped.  Existing clients that omit the query
-    parameter retain the historic first-workspace behavior, but an explicit value
-    is cleaned and authorized before it is used.  Callers validate existence at
-    the cloud boundary so an unknown selection receives the documented 404.
-    """
+    """Resolve an explicitly selected workspace, with a legacy default fallback."""
     if workspace is not None:
-        return service()._clean_ws(workspace)
+        try:
+            return service()._clean_ws(workspace)
+        except (ValidationError, ValueError):
+            logger.info("workspace request rejected")
+            raise _invalid_request() from None
+        except HTTPException as exc:
+            raise _sanitized_http_exception(exc.status_code) from None
+        except Exception:  # noqa: BLE001 — never carry internal details into the response
+            logger.error("workspace validation failed")
+            raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
     ws = _default_ws()
     if not ws:
-        raise HTTPException(status_code=400, detail={"error": "No workspace exists yet. Create one first."})
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "No workspace exists yet. Create one first."},
+        )
     return ws
 
 
@@ -776,7 +809,8 @@ def _metadata_object(raw) -> dict:
 
 
 @router.get("/llm/activity")
-def llm_activity(workspace: Optional[str] = None, limit: int = 100):
+def llm_activity(workspace: Optional[str] = None,
+                 limit: int = Query(default=100, ge=1, le=500)):
     """List memories the LLM extracted, consolidated, or retention-classified.
 
     This is intentionally a derived audit view: it exposes stored memory outcomes and
@@ -787,7 +821,7 @@ def llm_activity(workspace: Optional[str] = None, limit: int = 100):
         return {"workspace": "", "count": 0, "activities": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError:
+    except (ValidationError, ValueError):
         logger.info("LLM activity request rejected")
         raise _invalid_request() from None
     row = service().store.conn.execute(
@@ -1041,7 +1075,9 @@ def stats(workspace: Optional[str] = None):
 
 # ── recall / search ───────────────────────────────────────────────────────────
 @router.get("/recall")
-def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
+def recall(q: str = Query(..., min_length=1, max_length=10_000),
+           workspace: Optional[str] = None,
+           k: int = Query(default=8, ge=1, le=50),
            mtype: Optional[str] = None, as_of: Optional[float] = None,
            valid_at: Optional[float] = None, known_at: Optional[float] = None,
            token_budget: Optional[int] = Query(default=None, ge=0, le=32_768),
@@ -1071,6 +1107,9 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard recall request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(
@@ -1182,7 +1221,8 @@ def answer(req: _AnswerReq):
 
 
 @router.get("/memories")
-def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: int = 200):
+def memories(workspace: Optional[str] = None, q: Optional[str] = Query(default=None, max_length=10_000),
+             limit: int = Query(default=200, ge=1, le=1_000)):
     """List memories directly from the store (no embedding) so browsing works even
     without sentence-transformers. Live memories only (not superseded/expired)."""
     import json as _json
@@ -1194,7 +1234,7 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         return {"workspace": "", "count": 0, "memories": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError:
+    except (ValidationError, ValueError):
         logger.info("dashboard memories request rejected")
         raise _invalid_request() from None
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
@@ -1215,8 +1255,11 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         # Manually dragged rows (sort_order set) come first, in the order they were
         # dropped in; everything never touched by drag-to-reorder falls back to recency.
         sql += " ORDER BY (sort_order IS NULL), sort_order ASC, COALESCE(last_access, valid_from) DESC LIMIT ?"
-        args.append(max(1, min(1000, int(limit))))
+        args.append(limit)
         rows = conn.execute(sql, args).fetchall()
+    except _sql.Error as exc:
+        logger.error("dashboard memory listing failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
     finally:
         conn.close()
 
@@ -1245,7 +1288,9 @@ def memory_detail(memory_id: str, workspace: Optional[str] = None):
 
 # ── bi-temporal: why / timeline / proactive ──────────────────────────────────
 @router.get("/why")
-def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
+def why(q: str = Query(..., min_length=1, max_length=10_000),
+        workspace: Optional[str] = None,
+        k: int = Query(default=5, ge=1, le=50)):
     ws = workspace or _require_ws()
     try:
         out = service().why(q, workspace=ws, k=k)
@@ -1254,6 +1299,9 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard why request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard why failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, k)
@@ -1266,7 +1314,9 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
 
 
 @router.get("/timeline")
-def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 20):
+def timeline(q: str = Query(..., min_length=1, max_length=10_000),
+             workspace: Optional[str] = None,
+             limit: int = Query(default=20, ge=1, le=100)):
     ws = workspace or _default_ws()
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
@@ -1275,6 +1325,9 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard timeline request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, limit)
@@ -1285,7 +1338,8 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
 
 
 @router.get("/proactive")
-def proactive(workspace: Optional[str] = None, k: int = 10):
+def proactive(workspace: Optional[str] = None,
+              k: int = Query(default=10, ge=1, le=50)):
     ws = workspace or _default_ws()
     out = _run(service().recall_proactive, workspace=ws, k=k)
     mems = out.get("memories") or out.get("results") or []
@@ -1364,13 +1418,15 @@ def adaptive_context(req: _AdaptiveContextReq):
 
 
 @router.get("/audit")
-def audit(workspace: Optional[str] = None, limit: int = 100):
+def audit(workspace: Optional[str] = None,
+          limit: int = Query(default=100, ge=1, le=500)):
     ws = workspace or _require_ws()
     return _run(service().audit_log, workspace=ws, limit=limit)
 
 
 @router.get("/receipts")
-def receipts(workspace: Optional[str] = None, limit: int = 100):
+def receipts(workspace: Optional[str] = None,
+             limit: int = Query(default=100, ge=1, le=10_000)):
     ws = workspace or _require_ws()
     return _run(service().receipt_log, workspace=ws, limit=limit)
 
@@ -1383,7 +1439,7 @@ def context_savings(workspace: Optional[str] = None, repo: Optional[str] = None)
 
 @router.get("/receipts/verify")
 def receipts_verify(workspace: Optional[str] = None, expected_head: str = "",
-                    expected_count: Optional[int] = None):
+                    expected_count: Optional[int] = Query(default=None, ge=0, le=10_000_000)):
     ws = workspace or _require_ws()
     return _run(
         service().verify_receipts, workspace=ws,
@@ -1878,7 +1934,8 @@ def maintenance_run(req: _MaintenanceReq, workspace: Optional[str] = None):
 
 # ── knowledge graph (entities + relations, scoped to a workspace) ──────────────
 @router.get("/graph")
-def graph(workspace: Optional[str] = None, limit: int = 2000,
+def graph(workspace: Optional[str] = None,
+          limit: int = Query(default=2_000, ge=1, le=5_000),
           layers: Optional[str] = None, include_code: bool = False,
           repo: Optional[str] = None, full: bool = False,
           connected_only: bool = False,
@@ -2128,7 +2185,7 @@ def code_index(req: _CodeIndexReq):
         root_path = _http_code_index_path(req.root_path)
     except _HttpCodeIndexConfigurationError:
         raise _http_index_configuration_error() from None
-    except ValidationError:
+    except (ValidationError, ValueError):
         raise _invalid_request() from None
     return _run(
         service().index_repo, workspace=req.workspace, repo=req.repo,
@@ -2137,7 +2194,10 @@ def code_index(req: _CodeIndexReq):
 
 
 @router.get("/code/search")
-def code_search(query: str, workspace: str, repo: str, limit: int = 20,
+def code_search(query: str = Query(..., min_length=1, max_length=100_000),
+                workspace: str = Query(..., min_length=1, max_length=200),
+                repo: str = Query(..., min_length=1, max_length=200),
+                limit: int = Query(default=20, ge=1, le=1_000),
                 as_of: Optional[float] = None,
                 valid_at: Optional[float] = None,
                 known_at: Optional[float] = None):
@@ -2152,7 +2212,7 @@ class _CodePathReq(BaseModel):
     repo: str
     source: str
     target: str
-    max_depth: int = 8
+    max_depth: int = Field(default=8, ge=1, le=32)
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None

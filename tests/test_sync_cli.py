@@ -15,13 +15,35 @@ import base64
 import pytest
 
 from engraphis.backends.sync_folder import get_transport
-from engraphis.backends.sync_relay import EncryptedRelayTransport, RelayError, RelayTransport
+from engraphis.backends.sync_relay import (
+    EncryptedRelayTransport,
+    RelayError,
+    RelayTransport,
+    decode_sync_e2ee_key,
+)
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import SyncTransport
 from scripts.sync import main as sync_main
 
 
 # ── factory: relay is now a first-class transport ───────────────────────────────────
+
+def test_decode_sync_e2ee_key_accepts_padded_and_unpadded_forms():
+    pytest.importorskip("cryptography")
+    key = b"k" * 32
+    unpadded = base64.urlsafe_b64encode(key).decode().rstrip("=")
+    padded = unpadded + "="  # conventional 44-char base64 with one '=' pad
+    assert decode_sync_e2ee_key(unpadded) == key
+    assert decode_sync_e2ee_key(padded) == key
+
+
+def test_decode_sync_e2ee_key_rejects_short_and_malformed_values():
+    pytest.importorskip("cryptography")
+    with pytest.raises(RelayError):
+        decode_sync_e2ee_key("short")
+    with pytest.raises(RelayError):
+        decode_sync_e2ee_key("A" * 43 + "==")  # two pads is not a 32-byte key
+
 
 def test_get_transport_relay_builds_relay_transport(monkeypatch):
     pytest.importorskip("cryptography")
@@ -312,3 +334,31 @@ def test_cli_requires_exactly_one_transport(db_with_workspace, tmp_path):
     # both at once
     assert sync_main(["--db", db_with_workspace, "--workspace", "acme",
                       "--remote", str(tmp_path / "s"), "--relay", "https://x.test"]) == 2
+
+
+
+def test_cli_reports_missing_workspace_without_opening_transport(
+        db_with_workspace, _capture_transport, capsys):
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "missing",
+        "--remote", "unused-share",
+    ])
+
+    assert rc == 2
+    assert "no workspace named 'missing'" in capsys.readouterr().err
+    assert _capture_transport == {}
+
+
+def test_cli_reports_missing_repo_without_opening_transport(
+        db_with_workspace, _capture_transport, capsys):
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--repo", "missing",
+        "--remote", "unused-share",
+    ])
+
+    assert rc == 2
+    assert "no repo named 'missing'" in capsys.readouterr().err
+    assert _capture_transport == {}

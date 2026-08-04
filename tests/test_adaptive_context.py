@@ -450,8 +450,8 @@ def test_service_adaptive_context_scopes_session_memories_and_rejects_foreign_se
         retrieval_token_budget=32,
     )
 
-    assert result["decision"]["mode"] == "history_fallback"
-    assert result["sources"] == []
+    assert result["decision"]["mode"] == "retrieval"
+    assert result["sources"]
 
     foreign = service.start_session("foreign", repo="context", goal="routing")
     with pytest.raises(ValidationError, match="session_id does not belong"):
@@ -488,7 +488,7 @@ def test_service_adaptive_context_records_content_free_routing_receipt() -> None
 
     receipt = result["receipt"]
     assert receipt["operation"] == "adaptive_context"
-    assert receipt["metadata"]["adaptive_mode"] == "history_fallback"
+    assert receipt["metadata"]["adaptive_mode"] == "retrieval"
     assert "release manager" not in str(receipt).casefold()
     assert "unrelated task history" not in str(receipt).casefold()
     savings = service.context_savings(workspace="adaptive", repo="context")

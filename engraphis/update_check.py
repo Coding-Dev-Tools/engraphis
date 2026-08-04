@@ -5,8 +5,10 @@ Design goals (why this module looks the way it does):
 * **Fail-silent.** A version check is a convenience, never a dependency. Any network
   error, malformed payload, or unwritable cache degrades to "no update known" and never
   raises into a request handler, the server banner, or an MCP call.
-* **Opt-out.** ``ENGRAPHIS_UPDATE_CHECK=0`` disables all network activity. The dashboard,
-  startup log, and MCP notice then simply report ``enabled=False``.
+* **Explicit opt-in.** Update checks are disabled unless ``ENGRAPHIS_UPDATE_CHECK`` is
+  one of the recognized affirmative values (``1``, ``true``, ``yes``, ``on``, ``enable``,
+  or ``enabled``). With the default setting, the dashboard, startup log, and MCP notice
+  simply report ``enabled=False`` and make no network request.
 * **Cheap + shared.** One disk cache (default 24h TTL) backs all three surfaces
   (dashboard banner, startup log, MCP notice) so opening the dashboard does not re-hit
   the network, and the server boot path never blocks on it.
@@ -45,7 +47,7 @@ DEFAULT_REPO = "Coding-Dev-Tools/engraphis"
 CACHE_TTL_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT = 3.5          # keep short: never stall an interactive request
 _MAX_BYTES = 512 * 1024        # cap the response body we are willing to read
-_FALSY = {"0", "false", "no", "off", "disable", "disabled"}
+_TRUTHY = {"1", "true", "yes", "on", "enable", "enabled"}
 
 _CACHE_LOCK = threading.Lock()
 _REFRESH_LOCK = threading.Lock()
@@ -54,8 +56,14 @@ _refreshing = False
 
 # ── configuration (read straight from the environment) ────────────────────────
 def enabled() -> bool:
-    """Update checks are on by default; any falsy ``ENGRAPHIS_UPDATE_CHECK`` disables them."""
-    return os.environ.get("ENGRAPHIS_UPDATE_CHECK", "1").strip().lower() not in _FALSY
+    """Return true only when the operator explicitly enables update checks.
+
+    A local installation must not contact a release endpoint merely because it was
+    launched. ``ENGRAPHIS_UPDATE_CHECK`` opts into the cached, fail-silent reminder
+    only when it is one of the recognized affirmative values; every unset, falsy,
+    misspelled, or arbitrary value keeps the process fully local.
+    """
+    return os.environ.get("ENGRAPHIS_UPDATE_CHECK", "0").strip().lower() in _TRUTHY
 
 
 def _endpoint() -> str:

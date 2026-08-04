@@ -6,8 +6,10 @@ server (engraphis/app.py) untouched; run this with `python -m scripts.start_dash
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import hmac
+import logging
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,7 +18,7 @@ import secrets
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -34,10 +36,39 @@ from engraphis.local_auth import (
 from engraphis.routes import v2_api
 from engraphis.service import MemoryService
 
+logger = logging.getLogger("engraphis")
+
 _STATIC = Path(__file__).resolve().parent / "static"
 _CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _V2_ASSETS / "index.html"
+
+
+async def _dashboard_consolidation_loop(service: MemoryService) -> None:
+    """Run opt-in v2 consolidation from the dashboard's actual lifespan.
+
+    The retired compatibility app owns the historical consciousness loop, but the
+    supported dashboard is the process that serves the v2 MemoryService. Keep this
+    maintenance task v2-only and dispatch both the candidate scan and SQLite writes to
+    worker threads so request handling never shares the event loop with a sweep.
+    """
+    from engraphis.app import _consolidation_candidates_exist, _run_loop_consolidation
+
+    ticks = 0
+    while True:
+        try:
+            await asyncio.sleep(settings.loop_interval)
+            ticks += 1
+            interval = int(settings.loop_consolidate)
+            if interval <= 0 or ticks % interval:
+                continue
+            if not await asyncio.to_thread(_consolidation_candidates_exist, service.engine):
+                continue
+            await asyncio.to_thread(_run_loop_consolidation, service.engine)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - maintenance must not kill the server
+            logger.error("Dashboard consolidation loop error (%s)", type(exc).__name__)
 
 
 class _FreshStaticFiles(StaticFiles):
@@ -48,7 +79,21 @@ class _FreshStaticFiles(StaticFiles):
     an older graph engine alive after a source/package update.
     """
 
+    @staticmethod
+    def _is_private_asset(path: str) -> bool:
+        """Keep package implementation files out of the public asset mounts."""
+        parts = [part for part in path.replace("\\", "/").split("/") if part]
+        return (
+            any(part == "__pycache__" or part.startswith(".") for part in parts)
+            or any(
+                part.lower().endswith((".py", ".pyc", ".pyo", ".pyi"))
+                for part in parts
+            )
+        )
+
     async def get_response(self, path, scope):
+        if self._is_private_asset(path):
+            return Response(status_code=404)
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
@@ -165,6 +210,7 @@ def create_app() -> FastAPI:
 
     @_contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
+        background_task = None
         try:  # one-line "update available" notice (background, fail-silent, opt-out)
             import logging as _logging
 
@@ -172,11 +218,25 @@ def create_app() -> FastAPI:
             update_check.emit_startup_notice(_logging.getLogger("engraphis").info)
         except Exception:  # noqa: BLE001 - never block dashboard startup
             pass
-        if _mcp_asgi is not None:
-            async with _mcp_mgr.run():
+        if settings.loop_interval > 0 and settings.loop_consolidate > 0:
+            background_task = asyncio.create_task(_dashboard_consolidation_loop(svc))
+            logger.info(
+                "Dashboard consolidation loop started (interval=%ds)",
+                settings.loop_interval,
+            )
+        try:
+            if _mcp_asgi is not None:
+                async with _mcp_mgr.run():
+                    yield
+            else:
                 yield
-        else:
-            yield
+        finally:
+            if background_task is not None:
+                background_task.cancel()
+                try:
+                    await background_task
+                except asyncio.CancelledError:
+                    pass
 
     # FastAPI's interactive docs execute CDN-hosted JavaScript with same-origin
     # authority. Do not expose that supply-chain surface on an authenticated memory
@@ -215,6 +275,7 @@ def create_app() -> FastAPI:
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
         allowed_workspaces=settings.allowed_workspaces)
     app.state.service = svc
     # The review token is intentionally process-local and is never a general API

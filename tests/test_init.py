@@ -50,6 +50,58 @@ def test_init_token_flag_generates_bearer_token(tmp_path, monkeypatch):
     assert "ENGRAPHIS_API_TOKEN=" in (tmp_path / ".env").read_text()
 
 
+def test_init_encrypted_generates_private_key_file_and_mcp_configuration(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+
+    assert main(["--encrypted", "--db", "vault/mem.db"]) == 0
+
+    db_path = (tmp_path / "vault" / "mem.db").resolve()
+    key_path = db_path.with_name(".mem.db.key")
+    env = (tmp_path / ".env").read_text()
+    output = capsys.readouterr().out
+    assert f"ENGRAPHIS_DB_KEY_FILE={key_path}" in env
+    key = key_path.read_text().strip()
+    assert len(key) == 64 and all(character in "0123456789abcdef" for character in key)
+    assert str(key_path) in output
+    assert key not in env and key not in output
+
+
+def test_init_uses_encryption_by_default_when_sqlcipher_is_available(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+
+    assert main([]) == 0
+
+    env = (tmp_path / ".env").read_text()
+    assert "ENGRAPHIS_DB_KEY_FILE=" in env
+
+
+def test_init_refuses_to_attach_new_key_to_existing_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+    existing = tmp_path / "existing.db"
+    existing.write_bytes(b"SQLite format 3\x00")
+
+    assert main(["--encrypted", "--db", str(existing)]) == 1
+
+    assert not (tmp_path / ".env").exists()
+    assert not existing.with_name(".existing.db.key").exists()
+    assert "refusing to enable encryption" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
+def test_generated_encryption_key_is_private(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+
+    assert main(["--encrypted"]) == 0
+
+    key_path = tmp_path / ".engraphis.db.key"
+    assert key_path.stat().st_mode & 0o077 == 0
+
+
 def test_installed_config_loads_the_env_written_in_current_directory(
         tmp_path, monkeypatch):
     """The wheel must consume the exact project-local file ``engraphis-init`` writes."""
