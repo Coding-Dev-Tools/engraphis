@@ -282,7 +282,7 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         not next_cursor
         and advance_cap is not None
         and window_ids
-        and len(window_ids) >= advance_cap
+        and len(window_ids) >= max(1, advance_cap - max(0, int(overlap)))
     ):
         next_cursor = cursor_for_window()
     records.sort(
