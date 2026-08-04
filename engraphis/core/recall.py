@@ -447,7 +447,7 @@ class RecallEngine:
                 # of the base score so raw evidence comparisons stay untouched.
                 fusion_score += CONSOLIDATION_BONUS
             evidence = (
-                _consolidation_evidence(rec, store=self.store)
+                _consolidation_evidence(rec, store=self.store, flt=flt)
                 if _consolidated_source(rec) else []
             )
             arm = (
@@ -581,7 +581,7 @@ class RecallEngine:
             # they summarize as citable evidence (never their bodies — see
             # ``_consolidation_evidence``).  Ordinary memories carry no such field.
             "consolidation_source_ids": (
-                _consolidation_evidence(c.record, store=self.store)
+                _consolidation_evidence(c.record, store=self.store, flt=flt)
             ),
         } for c in final]
         context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
@@ -632,7 +632,7 @@ class RecallEngine:
                     **_source_safety_metadata(candidate.record),
                     **(
                         {"consolidation_source_ids": _consolidation_evidence(
-                            candidate.record, store=self.store
+                            candidate.record, store=self.store, flt=flt
                         )}
                         if _consolidated_source(candidate.record) else {}
                     ),
@@ -1737,16 +1737,36 @@ def _consolidated_source(record: MemoryRecord) -> bool:
     return source in CONSOLIDATION_SOURCES
 
 
-def _consolidation_evidence(record: MemoryRecord, *, store=None) -> list[str]:
+def _consolidation_evidence(
+    record: MemoryRecord, *, store=None, flt: Optional[SearchFilter] = None,
+) -> list[str]:
     """Source memory ids a consolidated digest/profile summarizes (citable evidence).
 
     Returns the union of the persisted ``consolidates``/``profiles`` memory links and
-    any equivalent id lists in the record's provenance/metadata.  This surfaces the
-    digest's sources as evidence ids for citation without duplicating their bodies;
-    ordinary memories have no such links and yield ``[]``.
+    any equivalent id lists in the record's provenance/metadata.  When a caller
+    supplies the active filter, every endpoint is reloaded and checked against that
+    filter before its id is exposed; this prevents a cross-repository link or forged
+    provenance list from widening a recall response.  This surfaces the digest's
+    sources as evidence ids for citation without duplicating their bodies; ordinary
+    memories have no such links and yield ``[]``.
     """
     evidence: list[str] = []
     seen: set[str] = set()
+
+    def append_visible(value: object) -> None:
+        memory_id = str(value or "").strip()
+        if not memory_id or memory_id in seen:
+            return
+        if store is not None and flt is not None:
+            try:
+                source = store.get_memory(memory_id)
+            except Exception:
+                return
+            if source is None or not memory_matches_filter(source, flt):
+                return
+        seen.add(memory_id)
+        evidence.append(memory_id)
+
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
     provenance = record.provenance if isinstance(record.provenance, dict) else {}
     nested = metadata.get("provenance")
@@ -1758,21 +1778,22 @@ def _consolidation_evidence(record: MemoryRecord, *, store=None) -> list[str]:
                 values = [values]
             if isinstance(values, (list, tuple, set)):
                 for value in values:
-                    value = str(value or "").strip()
-                    if value and value not in seen:
-                        seen.add(value)
-                        evidence.append(value)
+                    append_visible(value)
     if record.id and store is not None and hasattr(store, "get_links"):
         try:
-            for link in store.get_links(record.id):
+            try:
+                links = store.get_links(record.id, flt=flt)
+            except TypeError:
+                # Keep compatibility with older store adapters that do not yet
+                # accept the temporal filter keyword; endpoint scope validation
+                # below still applies when a filter is active.
+                links = store.get_links(record.id)
+            for link in links:
                 relation = str(link.get("relation") or "")
                 if relation not in ("consolidates", "profiles"):
                     continue
                 other = link.get("b") if link.get("a") == record.id else link.get("a")
-                other = str(other or "").strip()
-                if other and other not in seen:
-                    seen.add(other)
-                    evidence.append(other)
+                append_visible(other)
         except Exception:
             # Link lookup is best-effort evidence enrichment, never a recall failure.
             pass

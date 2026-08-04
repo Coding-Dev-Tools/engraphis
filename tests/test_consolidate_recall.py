@@ -16,6 +16,7 @@ from engraphis.core.recall import (
     CONSOLIDATION_BONUS,
     CONSOLIDATION_SOURCES,
     RecallEngine,
+    _consolidation_evidence,
     _consolidated_source,
 )
 from engraphis.core.store import Store
@@ -127,6 +128,54 @@ def test_digest_exposes_its_source_ids_as_citable_evidence():
     digest_chunk = next(c for c in res.chunks if c["id"] == digest_id)
     assert digest_chunk["content"] == eng.store.get_memory(digest_id).content
     assert all("flaky" not in str(chunk["consolidation_source_ids"]) for chunk in res.chunks)
+
+
+def test_consolidation_evidence_stays_inside_the_active_repo_scope():
+    """Linked/provenance source ids must not cross a repo recall boundary."""
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(wid, "repo-a")
+    repo_b = store.get_or_create_repo(wid, "repo-b")
+    source_a = store.add_memory(MemoryRecord(
+        id="",
+        content="repo A evidence",
+        mtype=MemoryType.EPISODIC,
+        scope=Scope.REPO,
+        workspace_id=wid,
+        repo_id=repo_a,
+    ))
+    source_b = store.add_memory(MemoryRecord(
+        id="",
+        content="repo B evidence",
+        mtype=MemoryType.EPISODIC,
+        scope=Scope.REPO,
+        workspace_id=wid,
+        repo_id=repo_b,
+    ))
+    digest = store.add_memory(MemoryRecord(
+        id="",
+        content="repo A digest",
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
+        workspace_id=wid,
+        repo_id=repo_a,
+        provenance={
+            "source": "consolidation",
+            "consolidates": [source_a, source_b],
+        },
+    ))
+    store.add_link(digest, source_a, "consolidates")
+    store.add_link(digest, source_b, "consolidates")
+
+    evidence = _consolidation_evidence(
+        store.get_memory(digest),
+        store=store,
+        flt=SearchFilter(workspace_id=wid, repo_id=repo_a),
+    )
+
+    assert evidence == [source_a]
 
 
 def test_non_consolidated_memory_is_unchanged():
