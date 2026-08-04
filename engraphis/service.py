@@ -74,6 +74,11 @@ MAX_METADATA_BYTES = 16_384
 MAX_K = 50
 MAX_TOKEN_BUDGET = 32_768
 RESPONSE_MODES = frozenset({"full", "compact"})
+# These are the transport-neutral producers used by the local agent protocol.  They
+# are allowed to create prompt-visible memories immediately; external source labels
+# remain review-gated below.  Keep this allow-list narrow so arbitrary caller-supplied
+# provenance cannot self-approve a memory.
+LOCAL_AGENT_SOURCES = frozenset({"agent", "intent_api"})
 # Recall's fused rank is min-max normalized inside each query.  Keep this contract in
 # every response mode so API/MCP clients do not treat a high rank as calibrated truth.
 RECALL_SCORE_SEMANTICS = {
@@ -439,23 +444,31 @@ def _strict_bool(value: Any, *, field: str) -> bool:
 def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) -> dict:
     """Create provenance at the service boundary, never from caller metadata.
 
-    The service is a transport boundary: callers may describe an origin but cannot
-    grant model-context authority.  Every service write is held for review, including
-    an asserted local-agent write.  In-process callers that are intentionally trusted
-    use ``MemoryEngine`` directly; that is an explicit local-code capability.
+    Normal local-agent memory creation is intentionally immediate: agents should not
+    need an owner ceremony for every fact they learn.  The service still owns the
+    approval decision, and only the narrow local-agent source allow-list receives
+    prompt eligibility here.  External/imported sources remain pending, while the
+    deterministic poisoning guard can quarantine any payload before it is surfaced.
+    In-process callers that are intentionally trusted may still use ``MemoryEngine``
+    directly; that is an explicit local-code capability.
     """
     source_name = _clean_text(
         source, field="source", max_chars=MAX_NAME_CHARS, required=False
     ) or "agent"
     requested = _strict_bool(trusted, field="trusted")
-    external = raw_ingest or source_is_external(source_name)
+    external = source_is_external(source_name)
+    local_agent = source_name.casefold() in LOCAL_AGENT_SOURCES
     provenance = {
         "source": source_name,
-        "trusted": False,
-        "review_state": REVIEW_PENDING,
-        "trust_origin": "external_ingress" if external else "service_review_gate",
+        "trusted": local_agent,
+        "review_state": REVIEW_APPROVED if local_agent else REVIEW_PENDING,
+        "trust_origin": (
+            "local_agent"
+            if local_agent else
+            "external_ingress" if (external or raw_ingest) else "service_review_gate"
+        ),
     }
-    if requested:
+    if requested and not local_agent:
         # An auditable code, not a copy of source content or a caller-controlled
         # trust assertion.  Operators can see that a downgrade happened without
         # turning it into prompt-visible metadata.
@@ -1281,9 +1294,9 @@ class MemoryService:
                kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
         the text is first distilled into discrete typed facts; without one this behaves
-        exactly like ``remember``. Raw ingest is always untrusted at this boundary;
-        every retained fact stays passive until an approved local write records the
-        corresponding trusted claim."""
+        exactly like ``remember``. Normal local-agent ingest is prompt-visible after
+        validation; explicitly external sources remain pending, and detector matches
+        are quarantined before they can surface."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         _reject_secret_capture((("content", content), ("metadata", metadata)))
         provenance = _canonical_write_provenance(source, trusted, raw_ingest=True)
@@ -1358,8 +1371,9 @@ class MemoryService:
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
-            # Dashboard intent is still a public service ingress.  It can describe
-            # its source but cannot self-approve model-visible memory.
+            # Dashboard intent is a local agent-protocol write.  It may create a
+            # prompt-visible memory immediately; external/imported sources still
+            # remain review-gated by the canonical service boundary.
             valid_from=valid_from, subject_key=subject_key, claim_kind=claim_kind,
             source="intent_api", trusted=False,
         )

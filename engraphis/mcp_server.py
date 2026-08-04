@@ -1446,7 +1446,10 @@ def engraphis_ingest(
     try:
         return _ok(service().ingest(
             content, workspace=workspace, repo=repo, session_id=session_id,
-            mtype=mtype, scope=scope, source="mcp", trusted=False,
+            # MCP's normal ingest path is an agent-authored memory write.  The
+            # service gives this local-agent source immediate prompt eligibility;
+            # explicitly external sources and detector matches remain contained.
+            mtype=mtype, scope=scope, source="agent", trusted=False,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

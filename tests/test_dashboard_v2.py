@@ -423,7 +423,7 @@ def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path
         assert response.status_code == 200
 
 
-def test_http_memory_api_keeps_world_timed_writes_pending(monkeypatch, tmp_path):
+def test_http_memory_api_exposes_world_timed_agent_writes_immediately(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         old = client.post(
             "/api/remember",
@@ -465,14 +465,14 @@ def test_http_memory_api_keeps_world_timed_writes_pending(monkeypatch, tmp_path)
         )
 
         assert before.status_code == 200
-        assert before.json()["memories"] == []
+        assert [memory["id"] for memory in before.json()["memories"]] == [old["id"]]
         assert after.status_code == 200
-        assert after.json()["sources"] == []
+        assert after.json()["sources"]
         service = client.app.state.service
         assert service.store.get_memory(old["id"]).valid_from == 1_000.0
         assert service.store.get_memory(new["id"]).valid_from == 2_000.0
-        assert service.store.get_memory(old["id"]).provenance["review_state"] == "pending"
-        assert service.store.get_memory(new["id"]).provenance["review_state"] == "pending"
+        assert service.store.get_memory(old["id"]).provenance["review_state"] == "approved"
+        assert service.store.get_memory(new["id"]).provenance["review_state"] == "approved"
 
 
 def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_path):
@@ -588,7 +588,7 @@ def test_keyword_recall_fallback_excludes_untrusted_memories(monkeypatch, tmp_pa
     assert "untrusted candidate" not in repr(payload)
 
 
-def test_http_memory_api_keeps_backdated_claims_pending_without_supersession(
+def test_http_memory_api_rejects_backdated_agent_claim_supersession(
     monkeypatch, tmp_path
 ):
     with _client(monkeypatch, tmp_path) as client:
@@ -611,10 +611,9 @@ def test_http_memory_api_keeps_backdated_claims_pending_without_supersession(
             },
         )
 
-        assert rejected.status_code == 200
+        assert rejected.status_code == 400
         assert service.store.get_memory(original["id"]).valid_to is None
-        assert len(service.store.list_memories(include_invalid=True)) == count_before + 1
-        assert service.store.get_memory(rejected.json()["id"]).provenance["review_state"] == "pending"
+        assert len(service.store.list_memories(include_invalid=True)) == count_before
 
 
 def test_manual_consolidation_stays_local_but_dreaming_is_cloud_only(

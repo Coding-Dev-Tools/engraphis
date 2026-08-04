@@ -54,7 +54,8 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
     if isinstance(raw, dict):
         raw = [raw]
     cases = []
-    for sample in raw[: limit or len(raw)]:
+    selected = raw[:limit] if limit is not None else raw
+    for sample in selected:
         conv = sample.get("conversation") or {}
         memories = []
         for key, turns in conv.items():
@@ -102,21 +103,43 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     cases = []
-    for inst in raw[: limit or len(raw)]:
+    selected = raw[:limit] if limit is not None else raw
+    for inst in selected:
         qid = str(inst.get("question_id") or f"lme-{len(cases)}")
         session_ids = inst.get("haystack_session_ids") or []
         sessions = inst.get("haystack_sessions") or []
-        dates = inst.get("haystack_dates") or [""] * len(sessions)
+        dates = inst.get("haystack_dates") or []
+        if len(session_ids) != len(sessions):
+            raise ValueError(
+                f"{qid}: haystack_session_ids and haystack_sessions must have equal lengths"
+            )
+        if dates and len(dates) != len(sessions):
+            raise ValueError(f"{qid}: haystack_dates must be empty or align with haystack_sessions")
         memories = []
-        for sid, session, date in zip(session_ids, sessions, dates):
+        # The cleaned LongMemEval-S release repeats a small number of session IDs,
+        # always with identical sessions. A benchmark memory needs a unique identity,
+        # so collapse those repeated source rows instead of failing the run or inflating
+        # the denominator. Different content under the same source ID is ambiguous.
+        memory_by_session_id: dict[str, str] = {}
+        for index, (sid, session) in enumerate(zip(session_ids, sessions)):
             if not isinstance(session, list):
                 continue
+            date = dates[index] if dates else ""
             lines = [f"{t.get('role', '')}: {t.get('content', '')}"
                      for t in session if isinstance(t, dict) and t.get("content")]
             if not lines:
                 continue
             prefix = f"[{date}] " if date else ""
-            memories.append({"tag": str(sid), "text": prefix + "\n".join(lines)})
+            session_id = str(sid)
+            text = prefix + "\n".join(lines)
+            previous = memory_by_session_id.get(session_id)
+            if previous is None:
+                memory_by_session_id[session_id] = text
+                memories.append({"tag": session_id, "text": text})
+            elif previous != text:
+                raise ValueError(
+                    f"{qid}: duplicate session id {session_id!r} has conflicting content"
+                )
         supporting = [str(s) for s in (inst.get("answer_session_ids") or [])]
         if memories:
             cases.append({"id": qid, "memories": memories,

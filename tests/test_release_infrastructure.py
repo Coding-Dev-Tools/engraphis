@@ -103,7 +103,7 @@ def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     assert "pi install npm:@engraphis/pi" not in readme
     assert "Every advanced state-changing action requires an explicit Pi confirmation dialog" in pi_guide
 
-    review_gate = "Every public write enters review as `pending`"
+    review_gate = "Normal local-agent memory creation is immediate"
     assert review_gate not in readme
     assert review_gate in review_guide
     assert "python -m scripts.rescan_poisoning --db engraphis.db --apply" in review_guide

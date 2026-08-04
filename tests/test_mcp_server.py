@@ -35,12 +35,8 @@ def _module_with_memory_db(monkeypatch):
 
 
 def _approved_successor(srv, result):
-    """Model the local owner approval ceremony for prompt-visible fixtures."""
-    pending = json.loads(result) if isinstance(result, str) else dict(result)
-    approved = srv.service().engine.approve_for_prompt(
-        pending["id"], reviewer="test-owner", reason="approved test fixture",
-    )
-    return {**pending, "id": approved["id"], "pending_id": approved["approved_from"]}
+    """Return a normal local-agent write; no owner ceremony is required."""
+    return json.loads(result) if isinstance(result, str) else dict(result)
 
 
 def _recall_side_effect_snapshot(srv):
@@ -293,6 +289,9 @@ def test_remember_and_recall_tool_callables(monkeypatch):
         ),
     )
     assert stored["stored"] is True
+    record = srv.service().store.get_memory(stored["id"])
+    assert record.provenance["trusted"] is True
+    assert record.provenance["review_state"] == "approved"
 
     recalled = srv.engraphis_recall(
         query="how do we deploy?", workspace="acme", repo="infra")
@@ -398,14 +397,31 @@ def test_recall_context_payload_saves_at_least_half_vs_full_recall(monkeypatch):
     assert ratio <= 0.5, f"compact/full fixture ratio was {ratio:.4f}"
 
 
-def test_public_mcp_writes_do_not_resolve_before_review(monkeypatch):
+def test_public_mcp_writes_resolve_without_owner_approval(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
     text = "We standardized on pnpm as the package manager for all frontend repos."
     first = json.loads(srv.engraphis_remember(content=text, workspace="acme", repo="web"))
     second = json.loads(srv.engraphis_remember(content=text, workspace="acme", repo="web"))
     assert first["op"] == "add"
-    assert second["op"] == "add"
-    assert second["id"] != first["id"]
+    assert second["op"] == "noop"
+    assert second["id"] == first["id"]
+
+
+def test_mcp_ingest_creates_prompt_visible_memory_without_owner_approval(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    result = json.loads(srv.engraphis_ingest(
+        content="The deployment window is Thursday afternoon.",
+        workspace="acme",
+        repo="web",
+    ))
+    memory_id = result["facts"][0]["id"]
+    record = srv.service().store.get_memory(memory_id)
+    assert record.provenance["trusted"] is True
+    assert record.provenance["review_state"] == "approved"
+    recalled = json.loads(srv.engraphis_recall(
+        query="When is the deployment window?", workspace="acme", repo="web",
+    ))
+    assert memory_id in {item["id"] for item in recalled["memories"]}
 
 
 def test_remember_session_id_keeps_repo_default_scope(monkeypatch):
@@ -504,7 +520,10 @@ def test_mcp_tools_expose_point_in_time_write_and_recall(monkeypatch):
         min_support=0.0,
     ))
     assert [memory["id"] for memory in before["memories"]] == [old["id"]]
-    assert {citation["id"] for citation in after["citations"]} == {old["id"], new["id"]}
+    # The newer write is approved immediately and supersedes the older one, so the
+    # later as_of cites only the active record; the earlier as_of still sees the
+    # superseded one.
+    assert {citation["id"] for citation in after["citations"]} == {new["id"]}
     assert [citation["id"] for citation in alias["citations"]] == [old["id"]]
 
 
@@ -514,32 +533,21 @@ def test_tool_returns_actionable_error_on_bad_input(monkeypatch):
     assert out.startswith("Error:")
 
 
-def test_why_and_timeline_tools_keep_pre_review_claims_non_superseding(monkeypatch):
+def test_why_and_timeline_tools_include_local_agent_claims(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    old = srv.engraphis_remember(
+    srv.engraphis_remember(
         content="Until 2026-01 the rate limit was 100 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
-    new = srv.engraphis_remember(
+    srv.engraphis_remember(
         content="As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
 
-    # MCP tool responses are agent context: pending writes must not leak through
-    # historical views before a human approval ceremony.
-    why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
-    assert why["answer"] == []
-    assert why["supersedes"] == []
-    tl = json.loads(srv.engraphis_timeline(query="rate limit", workspace="acme", repo="web"))
-    assert tl["history"] == []
-
-    _approved_successor(srv, old)
-    _approved_successor(srv, new)
+    # Normal MCP memory creation is prompt-visible immediately.
     why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
     assert any("500" in m["content"] for m in why["answer"])
-    assert any("100" in m["content"] for m in why["answer"])
-    assert why["supersedes"] == []
-
+    assert any("100" in m["content"] for m in why["supersedes"])
     tl = json.loads(srv.engraphis_timeline(query="rate limit", workspace="acme", repo="web"))
     assert len(tl["history"]) == 2
 

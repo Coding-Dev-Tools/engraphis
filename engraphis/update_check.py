@@ -5,8 +5,9 @@ Design goals (why this module looks the way it does):
 * **Fail-silent.** A version check is a convenience, never a dependency. Any network
   error, malformed payload, or unwritable cache degrades to "no update known" and never
   raises into a request handler, the server banner, or an MCP call.
-* **Opt-out.** ``ENGRAPHIS_UPDATE_CHECK=0`` disables all network activity. The dashboard,
-  startup log, and MCP notice then simply report ``enabled=False``.
+* **Explicit opt-in.** Update checks are disabled unless ``ENGRAPHIS_UPDATE_CHECK=1``.
+  With the default setting, the dashboard, startup log, and MCP notice simply report
+  ``enabled=False`` and make no network request.
 * **Cheap + shared.** One disk cache (default 24h TTL) backs all three surfaces
   (dashboard banner, startup log, MCP notice) so opening the dashboard does not re-hit
   the network, and the server boot path never blocks on it.
@@ -54,8 +55,13 @@ _refreshing = False
 
 # ── configuration (read straight from the environment) ────────────────────────
 def enabled() -> bool:
-    """Update checks are on by default; any falsy ``ENGRAPHIS_UPDATE_CHECK`` disables them."""
-    return os.environ.get("ENGRAPHIS_UPDATE_CHECK", "1").strip().lower() not in _FALSY
+    """Return true only when the operator explicitly enables update checks.
+
+    A local installation must not contact a release endpoint merely because it was
+    launched.  ``ENGRAPHIS_UPDATE_CHECK=1`` opts into the cached, fail-silent
+    reminder; every unset or falsy value keeps the process fully local.
+    """
+    return os.environ.get("ENGRAPHIS_UPDATE_CHECK", "0").strip().lower() not in _FALSY
 
 
 def _endpoint() -> str:

@@ -12,12 +12,11 @@ from engraphis.service import MemoryService, ValidationError
 
 
 class _ReviewedLocalService:
-    """Test facade that models a local owner approving benign fixture writes.
+    """Compatibility facade for fixtures that still exercise external review.
 
-    ``MemoryService.remember`` is public ingress and correctly creates pending
-    evidence. Most tests in this older facade suite exercise downstream recall,
-    resolution, scope, and governance behavior, so they need an explicit reviewed
-    successor instead of silently relying on pre-review prompt visibility.
+    Normal local-agent writes are approved immediately by ``MemoryService``. For
+    legacy fixtures that use a non-external source label, retain the explicit
+    successor ceremony so those tests continue to model that separate workflow.
     """
 
     def __init__(self, service: MemoryService) -> None:
@@ -161,7 +160,7 @@ def test_degraded_recall_does_not_return_a_weak_vector_neighbour():
     assert result["memories"] == []
 
 
-def test_public_review_writes_do_not_resolve_claims_before_approval():
+def test_local_agent_writes_resolve_claims_without_owner_approval():
     s = _svc()
     old_text = "The API rate limit is one hundred requests every sixty seconds."
     new_text = "Calls are capped at 500 per minute for each key."
@@ -179,11 +178,8 @@ def test_public_review_writes_do_not_resolve_claims_before_approval():
         new_text, workspace="keyed", repo="api", subject_key="api-rate-limit",
         claim_kind="configured_value",
     )
-    # Public ingress is deliberately passive pending review. An asserted claim
-    # key cannot invalidate approved knowledge until the operator chooses an
-    # explicit correction/approval workflow.
-    assert keyed_new["op"] == "add"
-    assert s.store.get_memory(keyed_old["id"]).valid_to is None
+    assert keyed_new["op"] == "invalidate"
+    assert s.store.get_memory(keyed_old["id"]).valid_to is not None
 
 
 @pytest.mark.parametrize("method", ("remember", "ingest"))
@@ -328,10 +324,9 @@ def test_stats_counts():
     s.remember("one", workspace="acme", mtype="semantic")
     s.remember("two", workspace="acme", mtype="procedural")
     st = s.stats(workspace="acme")
-    # The durable inbox preserves both pending evidence and its approved
-    # successor, so accounting includes both records.
-    assert st["memories"] == 4
-    assert st["by_type"].get("procedural") == 2
+    # Local-agent writes do not create a pending + approved duplicate pair.
+    assert st["memories"] == 2
+    assert st["by_type"].get("procedural") == 1
     assert st["schema_version"] >= 2
 
 
@@ -404,24 +399,24 @@ def test_remember_reports_add_op():
     assert out["op"] == "add"
 
 
-def test_public_review_writes_do_not_dedupe_before_approval():
+def test_local_agent_writes_dedupe_without_owner_approval():
     s = _svc()
     text = "We standardized on pnpm as the package manager for all frontend repos."
-    s.remember(text, workspace="acme", repo="web")
+    first = s.remember(text, workspace="acme", repo="web")
     out = s.remember(text, workspace="acme", repo="web")
-    assert out["op"] == "add"
-    assert out["id"] != out["pending_id"]
+    assert out["op"] == "noop"
+    assert out["id"] == first["id"]
 
 
-def test_public_review_writes_do_not_invalidate_before_approval():
+def test_local_agent_writes_invalidate_without_owner_approval():
     s = _svc()
     first = s.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
                        workspace="acme", repo="web")
     second = s.remember(
         "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web")
-    assert second["op"] == "add"
-    assert s.store.get_memory(first["id"]).valid_to is None
+    assert second["op"] == "invalidate"
+    assert s.store.get_memory(first["id"]).valid_to is not None
 
 
 def test_remember_resolve_conflicts_false_keeps_both():
@@ -563,8 +558,7 @@ def test_why_returns_answer_and_history():
               workspace="acme", repo="web")
     out = s.why("what is the rate limit", workspace="acme", repo="web")
     assert any("500" in m["content"] for m in out["answer"])
-    assert any("100" in m["content"] for m in out["answer"])
-    assert out["supersedes"] == []
+    assert any("100" in m["content"] for m in out["supersedes"])
 
 
 def test_why_unknown_workspace_raises():
@@ -580,8 +574,8 @@ def test_timeline_orders_chronologically():
     s.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
               workspace="acme", repo="web")
     out = s.timeline("rate limit", workspace="acme", repo="web")
-    # Each fixture write retains a pending source and creates a reviewed successor;
-    # public history is prompt-only, so it exposes the two reviewed records only.
+    # Prompt-visible local-agent history contains the active record and its
+    # bi-temporal predecessor, without a pending/approved duplicate pair.
     assert len(out["history"]) == 2
     assert out["history"][0]["valid_from"] <= out["history"][-1]["valid_from"]
 
@@ -644,7 +638,7 @@ def test_service_exposes_world_time_writes_and_point_in_time_recall():
         reinforce=False,
     )
     assert [memory["id"] for memory in before["memories"]] == [old["id"]]
-    assert {memory["id"] for memory in after["memories"]} == {old["id"], new["id"]}
+    assert {memory["id"] for memory in after["memories"]} == {new["id"]}
 
 
 @pytest.mark.parametrize(
@@ -665,7 +659,7 @@ def test_service_rejects_invalid_temporal_anchors(method, kwargs):
         getattr(s, method)(**kwargs)
 
 
-def test_public_review_write_allows_a_backdated_candidate_without_supersession():
+def test_external_backdated_candidate_remains_passive_without_supersession():
     s = _svc()
     original = s.remember(
         "The deployment window is Friday afternoon.",
@@ -676,6 +670,8 @@ def test_public_review_write_allows_a_backdated_candidate_without_supersession()
     candidate = s.remember(
         "The deployment window is Thursday afternoon.",
         workspace="acme",
+        source="web",
+        trusted=False,
         valid_from=1_000.0,
     )
 

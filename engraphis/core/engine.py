@@ -1885,11 +1885,18 @@ class MemoryEngine:
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
-            # Approval is a one-way ceremony for pending/quarantined evidence. Repeating it
-            # on an approved successor only duplicates prompt-visible content and weakens the
-            # audit story; a human correction must use the governed correction path instead.
+            # Normal local-agent writes are already approved and do not need an owner
+            # ceremony. Treat an explicit retry against such a record as an idempotent
+            # no-op so older clients that still call the former approval step do not fail
+            # after upgrading. A human correction still uses the governed correction path.
             if provenance_is_approved(old.provenance):
-                raise ValueError("memory is already approved")
+                return {
+                    "id": old.id,
+                    "approved_from": old.provenance.get("approved_from"),
+                    "reviewer": str(
+                        old.metadata.get("approval", {}).get("reviewer", reviewer)
+                    ),
+                }
 
             now = now_ts()
             if (

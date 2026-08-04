@@ -583,7 +583,9 @@ def test_conflict_review_lists_pending_and_quarantined_without_bodies(monkeypatc
         workspace="acme",
     ))
     review = _payload(server.engraphis_conflict_review(workspace="acme"))
-    assert review["count"] >= 1
+    # The local-agent "All quiet" write is approved and therefore NOT in the
+    # review inbox; only the quarantined payload appears, content-free.
+    assert review["count"] == 1
     for item in review["items"]:
         assert item["review_state"] in ("pending", "quarantined")
         assert item["excerpt"] == ""   # untrusted content is content-free

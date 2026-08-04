@@ -31,24 +31,26 @@ is feature hashing with lexical overlap). In that mode vector retrieval and sema
 evidence are disabled; recall remains lexical/graph/code based and grounded answers use
 lexical support only.
 
-Trust boundary: every MCP write is `pending` review, regardless of a caller-supplied `source` or
-`trusted` label. The same rule applies to REST/dashboard-intent, import, sync, and extractor
-ingress; detector matches are `quarantined` immediately. Pending and quarantined records are
-available only to explicit inspection workflows and never appear in prompt-ready MCP recall or
-context, `engraphis_why`, or `engraphis_timeline`, nor can they feed resolution, links,
-graph/code backfill, or derived prompt context. `include_untrusted=True` is inspection-only and
-must never be copied into a model prompt.
+Trust boundary: normal local-agent memory creation is prompt-visible immediately after validation;
+it does not require owner approval. The default `agent` source covers `engraphis_remember`,
+`engraphis_ingest`, and dashboard intent writes. External sources remain `pending` regardless of
+a caller-supplied `trusted` label, and detector matches are `quarantined` immediately. Pending
+and quarantined records are available only to explicit inspection workflows and never appear in
+prompt-ready MCP recall or context, `engraphis_why`, or `engraphis_timeline`, nor can they feed
+resolution, links, graph/code backfill, or derived prompt context. `include_untrusted=True` is
+inspection-only and must never be copied into a model prompt.
 
-MCP deliberately has no approval tool. Approval creates a fresh, audited `approved` successor
-while retaining the reviewed source and its provenance. In the local product it is available only
-through the CSRF-bound dashboard review action (with `ENGRAPHIS_API_TOKEN`) or the interactive
-TTY command `python -m scripts.approve_memory MEM_ID --reason "..."`; the command rejects
-redirected input and requires a typed confirmation. Hosted approval is an owner/admin action of
-the private hosted service. Direct in-process `MemoryEngine` use is a trusted-code boundary for
-code that already has local database authority, not a transport permission.
+MCP deliberately has no approval tool. Approval is only for external or quarantined evidence: it
+creates a fresh, audited `approved` successor while retaining the reviewed source and its
+provenance. In the local product it is available only through the CSRF-bound dashboard review
+action (with `ENGRAPHIS_API_TOKEN`) or the interactive TTY command
+`python -m scripts.approve_memory MEM_ID --reason "..."`; the command rejects redirected input
+and requires a typed confirmation. Hosted approval is an owner/admin action of the private hosted
+service. Direct in-process `MemoryEngine` use is a trusted-code boundary for code that already has
+local database authority, not a transport permission.
 
-For the full public-write review and existing-store migration procedure, see the
-[public write review gate](WRITE_REVIEW.md).
+For the full memory trust model and existing-store migration procedure, see the
+[memory write trust model](WRITE_REVIEW.md).
 
 | Category | Tool | What it does |
 |---|---|---|

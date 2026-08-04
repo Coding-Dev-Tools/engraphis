@@ -82,7 +82,7 @@ def test_fetch_rejects_unsafe_schemes(url):
     assert u._fetch(url, timeout=0.01) is None
 
 
-# ── endpoint / opt-out configuration ──────────────────────────────────────────
+# ── endpoint / explicit opt-in configuration ──────────────────────────────────
 def test_endpoint_default_and_overrides(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_UPDATE_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_UPDATE_REPO", raising=False)
@@ -93,8 +93,8 @@ def test_endpoint_default_and_overrides(monkeypatch):
     assert u._endpoint() == "https://mirror/latest.json"  # explicit URL wins over repo
 
 
-def test_disabled_opt_out(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "0")
+def test_disabled_by_default_and_explicit_opt_out(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_CHECK", raising=False)
     assert u.enabled() is False
     # A hard failure if any network is attempted while disabled.
     monkeypatch.setattr(u, "_fetch", lambda *a, **k: pytest.fail("must not hit network"))
@@ -102,6 +102,14 @@ def test_disabled_opt_out(monkeypatch):
     assert snap == u._disabled_snapshot()
     assert snap["enabled"] is False and snap["update_available"] is False
     assert u.notice_line(snap) is None
+
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "0")
+    assert u.enabled() is False
+
+
+def test_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
+    assert u.enabled() is True
 
 
 # ── cache + snapshot behavior ─────────────────────────────────────────────────

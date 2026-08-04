@@ -214,9 +214,12 @@ def _write_or_resume_profile(engine, name: str, etype: str,
 
 
 def _error_entry(cluster: list[MemoryRecord], exc: Exception) -> dict:
+    # Only the exception TYPE reaches the client-facing report. The message can
+    # echo internal details or carry stack-trace information; the full error is
+    # logged server-side by the caller instead.
     return {
         "source_ids": [memory.id for memory in cluster],
-        "error": f"{type(exc).__name__}: {exc}",
+        "error": type(exc).__name__,
     }
 
 

@@ -1,10 +1,10 @@
 """Deterministic, offline red-team evaluation for delayed memory-poisoning triggers.
 
-The fixture writes public-service facts and attacker-controlled records in an initial
+The fixture writes local-agent facts and attacker-controlled records in an initial
 session, then asks trigger-shaped questions from a distinct later session.  The service
-boundary labels every ingress record untrusted/pending.  The fixture simulates an
-explicit human review only for declared benign evidence; attacker-controlled records
-remain pending or quarantined.  It measures labeled-untrusted retrieval-path
+boundary leaves local-agent facts prompt-visible immediately while attacker-controlled
+external records remain pending or quarantined. The fixture may simulate an explicit
+human review for benign external evidence. It measures labeled-untrusted retrieval-path
 containment, whether reviewed evidence supports the expected answer, and whether
 excluded records were cited or reinforced.
 
@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 from typing import Any, Optional, Union
 
+from engraphis.core.poisoning import source_is_external
 from engraphis.service import MemoryService
 
 
@@ -224,10 +225,9 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
             result = service.remember(item["content"], **write_args)
             memory_id = str(result["id"])
         written.append((item, memory_id))
-    # Public service ingress never receives model authority from the fixture's
-    # ``trusted`` label.  Simulate the separate human-review ceremony only for
-    # benign evidence.  In particular, a forged ``trusted: true`` attacker label
-    # must not cause this code to approve the record.
+    # Local-agent facts are approved at creation. Simulate the separate human-review
+    # ceremony only for benign external evidence. In particular, a forged
+    # ``trusted: true`` attacker label must not cause external content to be approved.
     approved_ids = set()
     for item, memory_id in written:
         if item["trusted"] and not item.get("adversarial"):
@@ -243,10 +243,12 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
         memory_id for item, memory_id in written if item.get("adversarial") is True
     }
     records = {memory_id: service.store.get_memory(memory_id) for _, memory_id in written}
-    # Every source record went through the public service boundary and therefore
-    # must stay labeled untrusted.  The approved records above are fresh successors,
-    # not a mutation of their untrusted source.
-    expected_untrusted_ids = {memory_id for _, memory_id in written}
+    # Only external source records are expected to remain untrusted. Local-agent
+    # records are prompt-visible at creation and are not duplicated by review.
+    expected_untrusted_ids = {
+        memory_id for item, memory_id in written
+        if source_is_external(item["source"])
+    }
     untrusted_ids = {
         memory_id for memory_id, record in records.items()
         if _provenance(record).get("trusted") is False
