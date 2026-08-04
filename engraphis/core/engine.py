@@ -1719,7 +1719,10 @@ class MemoryEngine:
         now = now_ts()
         scored = []
         always: list = []
-        for rec in self.store.list_memories(flt, limit=500, prompt_only=prompt_only):
+        candidates = self.store.list_memories(flt, limit=500, prompt_only=prompt_only)
+        overrides = self.store.list_proactive_overrides(flt, prompt_only=prompt_only)
+        records = {rec.id: rec for rec in [*candidates, *overrides]}.values()
+        for rec in records:
             eligible = (
                 prompt_eligible(rec.provenance, rec.metadata)
                 if prompt_only

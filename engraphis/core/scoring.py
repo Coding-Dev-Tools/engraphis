@@ -56,7 +56,7 @@ def weights_for(mtype: MemoryType) -> Weights:
 def _finite_number(value: object, default: float = 0.0) -> float:
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
 
@@ -84,7 +84,7 @@ def retention(stability: float, last_access: Optional[float], now: float) -> flo
     """
     try:
         supplied = float(stability)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         supplied = DEFAULT_STABILITY_DAYS
     S = supplied if math.isfinite(supplied) and supplied > 0 else DEFAULT_STABILITY_DAYS
     current = _finite_number(now, float("nan"))
@@ -148,17 +148,31 @@ def normalize(scores: dict[str, float]) -> dict[str, float]:
     for key, value in scores.items():
         try:
             number = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue  # unparseable evidence is missing evidence
         if math.isfinite(number):
             finite[key] = number
     if not finite:
         return {}
     lo, hi = min(finite.values()), max(finite.values())
-    if hi - lo < 1e-12:
+    span = hi - lo
+    if not math.isfinite(span):
+        scale = max(abs(lo), abs(hi))
+        if not math.isfinite(scale) or scale == 0.0:
+            return {key: 1.0 for key in finite}
+        scaled_lo = lo / scale
+        scaled_hi = hi / scale
+        span = scaled_hi - scaled_lo
+        if not math.isfinite(span) or span < 1e-12:
+            return {key: 1.0 for key in finite}
+        return {
+            key: max(0.0, min(1.0, (value / scale - scaled_lo) / span))
+            for key, value in finite.items()
+        }
+    if span < 1e-12:
         return {key: 1.0 for key in finite}
     return {
-        key: max(0.0, min(1.0, (value - lo) / (hi - lo)))
+        key: max(0.0, min(1.0, (value - lo) / span))
         for key, value in finite.items()
     }
 

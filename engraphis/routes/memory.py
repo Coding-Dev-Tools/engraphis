@@ -66,6 +66,9 @@ def _safe_call(fn, *args, **kwargs):
         if 400 <= status <= 499:
             raise HTTPException(status_code=status, detail={"error": "request rejected"}) from None
         raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
+    except (TypeError, ValueError) as exc:
+        logger.info("memory route validation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
     except Exception as exc:  # noqa: BLE001 - legacy providers expose varied exception types
         logger.error("memory route operation failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None

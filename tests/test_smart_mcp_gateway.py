@@ -551,6 +551,45 @@ def test_get_memory_returns_governed_record_and_never_quarantined_content(monkey
     assert retryable is False
 
 
+def test_get_memory_repo_scope_filters_cross_repo_links_and_chain(monkeypatch):
+    server = _memory_server(monkeypatch)
+    svc = server._service
+
+    def add(repo, content):
+        return svc.remember(
+            content, workspace="acme", repo=repo, source="cli", trusted=True,
+            _local_cli_operator=True,
+        )["id"]
+
+    target_id = add("repo-a", "The repo A release is on Tuesday.")
+    sibling_id = add("repo-b", "The repo B release is on Friday.")
+    svc.store.add_link(target_id, sibling_id, relation="related")
+    svc.store.conn.execute(
+        "UPDATE memories SET metadata=? WHERE id=?",
+        (json.dumps({"supersedes": [target_id]}), sibling_id),
+    )
+    svc.store.conn.execute(
+        "UPDATE memories SET confidence=? WHERE id=?",
+        (0.42, target_id),
+    )
+    svc.store.conn.commit()
+
+    scoped = _payload(server.engraphis_get_memory(
+        memory_id=target_id, workspace="acme", repo="repo-a",
+    ))
+    assert scoped["confidence"] == 0.42
+    assert sibling_id not in {row["id"] for row in scoped["links"]}
+    assert sibling_id not in {row["id"] for row in scoped["chain"]}
+
+    # Omitting repo is a workspace read and keeps the existing cross-repo
+    # relationship/history projection.
+    workspace = _payload(server.engraphis_get_memory(
+        memory_id=target_id, workspace="acme",
+    ))
+    assert sibling_id in {row["id"] for row in workspace["links"]}
+    assert sibling_id in {row["id"] for row in workspace["chain"]}
+
+
 def test_update_memory_edits_metadata_and_rejects_secrets(monkeypatch):
     server = _memory_server(monkeypatch)
     created = server._service.remember_local_cli(

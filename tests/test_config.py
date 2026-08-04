@@ -163,7 +163,7 @@ def test_malformed_boolean_values_use_safe_default(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", "perhaps")
     assert Settings().llm_auto_extract is False
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "perhaps")
-    assert Settings().update_check is True
+    assert Settings().update_check is False
 
 @pytest.mark.parametrize("url", RETIRED_RELAY_URLS)
 def test_retired_relay_url_override_is_canonicalized(url):

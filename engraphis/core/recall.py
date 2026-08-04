@@ -339,7 +339,8 @@ class RecallEngine:
                 memory_id
                 for run in query_runs
                 for arm in ("vector", "lexical", "graph", "code")
-                for memory_id in run[arm]
+                for memory_id, _score in _finite_arm_items(run.get(arm))
+                if isinstance(memory_id, str) and memory_id
             })
             fetched = self.store.get_memories(candidate_ids)
             recs: dict[str, MemoryRecord] = {}
@@ -357,7 +358,7 @@ class RecallEngine:
                     recs[mid] = rec
 
             can_expand = any(
-                enabled and len(run[arm]) >= arm_candidate_k
+                len(_finite_arm_items(run.get(arm))) >= arm_candidate_k
                 for run in query_runs
                 for arm, enabled in (
                     ("vector", run["config"].vector),
@@ -365,6 +366,7 @@ class RecallEngine:
                     ("graph", run["config"].graph),
                     ("code", run["config"].code),
                 )
+                if enabled
             )
             if (
                 not prompt_only
@@ -1459,12 +1461,17 @@ def _planned_filter(
     return replace(flt, mtypes=ordered)
 
 
-def _finite_arm_score(value: object) -> float:
+def _finite_arm_value(value: object) -> Optional[float]:
     try:
         score = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return score if math.isfinite(score) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _finite_arm_score(value: object) -> float:
+    score = _finite_arm_value(value)
+    return score if score is not None else 0.0
 
 
 def _fuse_query_runs(
@@ -1493,11 +1500,11 @@ def _fuse_query_runs(
         config = run["config"]
         priority_weight = 1.0 / max(1, int(item.priority))
         for source_name, output_name in names.items():
-            raw = {
-                mid: _finite_arm_score(score)
-                for mid, score in (run.get(source_name) or {}).items()
-                if mid in recs
-            }
+            raw = {}
+            for mid, number in _finite_arm_items(run.get(source_name)):
+                if mid not in recs:
+                    continue
+                raw[mid] = number
             normalized = scoring.normalize(raw)
             scale = max(
                 0.0,
@@ -1677,7 +1684,8 @@ def _graph_traversal_details(query_runs: list[dict[str, Any]]) -> list[dict[str,
         if not isinstance(plan, GraphTraversalPlan):
             continue
         candidates = sorted(
-            run["graph"].items(), key=lambda item: (-item[1], item[0])
+            _finite_arm_items(run.get("graph")),
+            key=lambda item: (-item[1], str(item[0])),
         )[:50]
         details.append({
             "query": run["query"].text,
@@ -1790,7 +1798,7 @@ def _absolute_retrieval_support(
     """
     try:
         raw_semantic = float(semantic_cosine)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raw_semantic = 0.0
     semantic = max(0.0, min(1.0, raw_semantic)) if math.isfinite(raw_semantic) else 0.0
     # Titles improve candidate discovery, but are metadata rather than answer-bearing
@@ -1805,15 +1813,25 @@ def _entity_pattern(name: str) -> re.Pattern[str]:
     return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
 
 
+def _finite_arm_items(arm: object) -> list[tuple[object, float]]:
+    if not isinstance(arm, dict):
+        return []
+    return [
+        (memory_id, score)
+        for memory_id, raw_score in arm.items()
+        if (score := _finite_arm_value(raw_score)) is not None
+    ]
+
+
 def _ranked(arm: dict[str, float], recs: dict) -> list[str]:
     # Tie-break on id: RRF depends on rank position, so equal arm scores must not order
-    # differently between runs (they feed the final score).  Adapters can return
-    # malformed scores; those are treated as absent evidence rather than sorting NaN.
+    # differently between runs (they feed the final score). Adapters can return
+    # malformed scores; those are absent evidence, not zero-scored memories.
     return [
         memory_id
         for memory_id, _ in sorted(
-            arm.items(),
-            key=lambda item: (-_finite_arm_score(item[1]), str(item[0])),
+            _finite_arm_items(arm),
+            key=lambda item: (-item[1], str(item[0])),
         )
         if memory_id in recs
     ]

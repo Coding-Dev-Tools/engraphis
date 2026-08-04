@@ -1,6 +1,8 @@
 """Sync tombstones: secure-erase and unpin must propagate across devices."""
 from __future__ import annotations
 
+import pytest
+
 from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.store import Store
 from engraphis.core.sync import SyncEngine, merge_record
@@ -108,6 +110,26 @@ def test_new_id_after_secure_erase_is_not_blocked_by_old_tombstone():
     assert b.get_memory(mid) is None
 
 
+def test_repo_export_keeps_repo_tombstones_in_the_selected_repo():
+    a, _b, aw, _bw = _two_devices()
+    repo_a = a.get_or_create_repo(aw, "a")
+    repo_b = a.get_or_create_repo(aw, "b")
+    mid_a = a.add_memory(MemoryRecord(
+        id="", content="repo a", workspace_id=aw, repo_id=repo_a, scope=Scope.REPO,
+    ))
+    mid_b = a.add_memory(MemoryRecord(
+        id="", content="repo b", workspace_id=aw, repo_id=repo_b, scope=Scope.REPO,
+    ))
+    a.secure_erase_memory(mid_a)
+    a.secure_erase_memory(mid_b)
+
+    bundle = SyncEngine(a).export_bundle(aw, repo_id=repo_a)
+    tombstone_ids = {item["id"] for item in bundle["tombstones"]}
+    assert mid_a in tombstone_ids
+    assert mid_b not in tombstone_ids
+    assert all(item["repo_id"] in (None, repo_a) for item in bundle["tombstones"])
+
+
 
 def test_repin_after_unpin_beats_the_unpin_marker(monkeypatch):
     """A later pin must converge after an earlier unpin on another device."""
@@ -213,12 +235,129 @@ def test_tombstone_order_and_duplicate_events_are_safe():
     tombstones = store.list_memory_tombstones(workspace)
     assert tombstones == [{
         "id": "erased", "deleted_at": 10.0, "device": "early",
-        "workspace_id": workspace,
+        "workspace_id": workspace, "repo_id": None,
     }]
 
     # Replaying the same events cannot create a row or move the earliest marker.
     second = syncer.apply_bundle(bundle, into_workspace="w")
-    assert second["tombstones_applied"] == 1
+    assert second["tombstones_applied"] == 0
     assert second["rejected"] == 1
     assert store.get_memory("erased") is None
     assert store.list_memory_tombstones(workspace) == tombstones
+
+
+
+def test_store_tombstone_scope_conflict_and_repo_filter_are_explicit():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    store.add_memory_tombstone(
+        "scoped", deleted_at=10.0, workspace_id=workspace, repo_id=repo_a,
+    )
+    with pytest.raises(ValueError, match="repository scope"):
+        store.add_memory_tombstone(
+            "scoped", deleted_at=1.0, workspace_id=workspace, repo_id=repo_b,
+        )
+    store.add_memory_tombstone(
+        "scoped", deleted_at=20.0, workspace_id=workspace,
+    )
+    marker = store.list_memory_tombstones(workspace, repo_id=repo_a)
+    assert marker[0]["repo_id"] is None
+    with pytest.raises(ValueError, match="requires workspace"):
+        store.list_memory_tombstones(repo_id=repo_a)
+
+
+def test_repo_tombstone_cannot_delete_same_id_in_a_sibling_repo():
+    """A repo-A erase must not remove a same-id row owned by repo B."""
+    a, b, aw, bw = _two_devices()
+    source_repo = a.get_or_create_repo(aw, "repo-a")
+    b.get_or_create_repo(bw, "repo-a")
+    destination_repo = b.get_or_create_repo(bw, "repo-b")
+    shared_id = "same-id-different-repo"
+    a.add_memory_tombstone(
+        shared_id, deleted_at=1.0, workspace_id=aw, repo_id=source_repo,
+    )
+    b.add_memory(MemoryRecord(
+        id=shared_id, content="repo B fact", workspace_id=bw,
+        repo_id=destination_repo, scope=Scope.REPO,
+    ))
+
+    bundle = SyncEngine(a).export_bundle(aw, repo_id=source_repo)
+    report = SyncEngine(b).apply_bundle(bundle, into_workspace="w")
+
+    assert report["tombstones_applied"] == 0
+    assert report["rejected"] >= 1
+    assert b.get_memory(shared_id).content == "repo B fact"
+    assert b.list_memory_tombstones(bw) == []
+
+
+def test_legacy_repo_less_tombstone_stays_global_against_sibling_reuse():
+    """A legacy marker must not be narrowed to the repo of the erased local row."""
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    store.add_memory(MemoryRecord(
+        id="legacy-global", content="repo B fact", workspace_id=workspace,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+
+    SyncEngine(store).apply_bundle({
+        "format": "engraphis-sync", "version": 1, "workspace_name": "w",
+        "repos": {}, "memories": [],
+        "tombstones": [{"id": "legacy-global", "deleted_at": 1.0}],
+        "mem_links": [],
+    }, into_workspace="w")
+
+    assert store.get_memory("legacy-global") is None
+    marker = store.list_memory_tombstones(workspace)
+    assert marker and marker[0]["repo_id"] is None
+
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    report = SyncEngine(store).apply_bundle({
+        "format": "engraphis-sync", "version": 2, "workspace_name": "w",
+        "repos": {"remote-a": "repo-a"},
+        "memories": [{
+            "id": "legacy-global", "content": "reused in repo A",
+            "scope": "repo", "repo_id": "remote-a",
+        }],
+        "tombstones": [], "mem_links": [],
+    }, into_workspace="w")
+
+    assert report["rejected"] == 1
+    assert store.get_memory("legacy-global") is None
+    assert store.get_or_create_repo(workspace, "repo-a") == repo_a
+
+
+def test_same_id_tombstones_keep_sibling_repository_scopes_independent():
+    """An earlier sibling marker must not hide a later marker for the local repo."""
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    store.add_memory(MemoryRecord(
+        id="scoped-sibling", content="repo B fact", workspace_id=workspace,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+
+    report = SyncEngine(store).apply_bundle({
+        "format": "engraphis-sync", "version": 2, "workspace_name": "w",
+        "repos": {"remote-a": "repo-a", "remote-b": "repo-b"},
+        "memories": [],
+        "tombstones": [
+            {"id": "scoped-sibling", "deleted_at": 1.0,
+             "repo_id": "remote-a"},
+            {"id": "scoped-sibling", "deleted_at": 2.0,
+             "repo_id": "remote-b"},
+        ],
+        "mem_links": [],
+    }, into_workspace="w")
+
+    assert report["tombstones_applied"] == 1
+    assert store.get_memory("scoped-sibling") is None
+    markers = store.list_memory_tombstones(workspace)
+    assert len(markers) == 1
+    assert markers[0]["id"] == "scoped-sibling"
+    assert markers[0]["deleted_at"] == 2.0
+    assert markers[0]["device"]
+    assert markers[0]["workspace_id"] == workspace
+    assert markers[0]["repo_id"] == repo_b

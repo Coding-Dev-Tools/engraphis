@@ -25,6 +25,7 @@ import math
 import copy
 import time
 import threading
+import numpy as np
 from collections import Counter, OrderedDict
 from dataclasses import asdict
 from functools import wraps
@@ -48,6 +49,7 @@ from engraphis.core.interfaces import (
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
     REVIEW_PENDING,
+    inspection_eligible,
     prompt_eligible,
     source_is_external,
 )
@@ -154,6 +156,7 @@ GRAPH_ENTITY_RELATION_LIMIT = 200
 GRAPH_ENTITY_EVIDENCE_LIMIT = 100
 GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT = 400
 GRAPH_ENTITY_HISTORY_LIMIT = 50
+CONFLICT_REVIEW_SCAN_LIMIT = 10_000
 
 
 def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -> str:
@@ -4070,10 +4073,14 @@ class MemoryService:
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
+        existing = self.store.get_memory(mid)
+        old_title = existing.title if existing is not None else ""
         sets, params, changes = [], [], []
+        title_changed = False
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
             _reject_secret_capture((("title", title),))
+            title_changed = title != old_title
             sets.append("title=?")
             params.append(title)
             changes.append("title")
@@ -4105,11 +4112,70 @@ class MemoryService:
                 kw = " ".join(json.loads(kw)) if kw.strip().startswith("[") else kw
             except Exception:
                 pass
-            self.store._fts_upsert(mid, row["title"], row["content"], kw)
+            if title_changed:
+                text = f"{row['title']}\n{row['content']}" if row["title"] else row["content"]
+                vector_row = self.store.conn.execute(
+                    "SELECT model FROM mem_vectors WHERE id=?", (mid,)
+                ).fetchone()
+                # Quarantined records and explicitly secret records are retained for
+                # local governance only. A metadata edit must not turn either into a
+                # semantic candidate or send its payload to an embedder.
+                if (
+                    existing.sensitivity == "secret"
+                    or not inspection_eligible(existing.provenance, existing.metadata)
+                ):
+                    self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
+                    self.engine.index.delete([mid], commit=False)
+                else:
+                    # Existing rows may predate the write-path secret guard.  Do not send
+                    # such content to a remote embedder while changing unrelated metadata.
+                    _reject_secret_capture((("content", row["content"]),))
+                    try:
+                        vectors = np.asarray(
+                            self.engine.embedder.embed([text]), dtype=np.float32,
+                        )
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValidationError("embedder returned an invalid vector") from exc
+                    expected_dim = int(
+                        getattr(self.engine.embedder, "dim",
+                                getattr(self.engine.index, "dim", 0)) or 0
+                    )
+                    if (
+                        vectors.ndim != 2
+                        or vectors.shape != (1, expected_dim)
+                        or not np.isfinite(vectors).all()
+                    ):
+                        raise ValidationError("embedder returned an invalid vector")
+                    try:
+                        self.engine.index.upsert([mid], vectors, commit=False)
+                    except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
+                        logger.warning("vector-index upsert failed for title update %s (%s)",
+                                       mid, type(exc).__name__)
+                        try:
+                            self.store.audit(
+                                "engine", "index_upsert_failed", mid,
+                                "failure_type=%s" % type(exc).__name__, commit=False,
+                            )
+                        except Exception:
+                            pass
+                        raise
+                    old_model = (
+                        vector_row["model"] if vector_row is not None else ""
+                    )
+                    current_model = getattr(self.engine.embedder, "model_name", None)
+                    if not isinstance(current_model, str) or not current_model:
+                        current_model = getattr(self.engine.embedder, "model", "")
+                    if not isinstance(current_model, str):
+                        current_model = ""
+                    model = current_model or str(old_model or "")
+                    # NumPy's index writes the portable row itself; write it once more
+                    # with the current model identity so both backend paths preserve the
+                    # same normalized vector and model/dimension metadata.
+                    self.store.put_vector(mid, vectors[0], model=model)
+
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
         return {"id": mid, "updated": changes}
-
     @_rollback_service_transaction
     def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
                          actor: str = "user") -> dict:
@@ -4149,7 +4215,9 @@ class MemoryService:
         for link in self.store.get_links(mid):
             other_id = link["b"] if link["a"] == mid else link["a"]
             other = self.store.get_memory(other_id)
-            if other is not None and not self._memory_visible_to_caller(other):
+            if (other is None or other.workspace_id != wid
+                    or (rid is not None and other.repo_id != rid)
+                    or not self._memory_visible_to_caller(other)):
                 continue
             links.append({"id": other_id, "relation": link["relation"],
                           "layer": link.get("layer") or "semantic",
@@ -4174,41 +4242,106 @@ class MemoryService:
         limit = max(1, min(100, limit))
         params: list[Any] = [wid]
         sql = (
-            "SELECT id, title, content, metadata, provenance "
-            "FROM memories WHERE workspace_id=? "
+            "SELECT id, title, content, metadata, provenance, workspace_id, repo_id, "
+            "scope, session_id, ingested_at FROM memories WHERE workspace_id=? "
         )
         if rid is not None:
             sql += "AND repo_id=? "
             params.append(rid)
-        sql += "ORDER BY ingested_at DESC LIMIT ?"
-        params.append(max(100, limit * 4))
-
         items = []
-        for row in self.store.conn.execute(sql, params):
-            provenance = _loads(row["provenance"], {})
-            provenance = provenance if isinstance(provenance, dict) else {}
-            metadata = _loads(row["metadata"], {})
-            metadata = metadata if isinstance(metadata, dict) else {}
-            review_state = provenance.get("review_state") or ""
-            quarantined = bool(metadata.get("quarantine") or provenance.get("quarantined"))
-            conflicted = bool(metadata.get("conflict_with"))
-            if not (quarantined or review_state == REVIEW_PENDING or conflicted):
-                continue
-            # Pending/quarantined content is evidence for a human reviewer, not model
-            # context. Return only an excerpt for already-approved conflict records.
-            excerpt = ""
-            if prompt_eligible(provenance, metadata):
-                excerpt = (row["content"] or row["title"] or "")[:200]
-            items.append({
-                "id": row["id"],
-                "review_state": review_state,
-                "quarantined": quarantined,
-                "conflict_with": metadata.get("conflict_with") if conflicted else None,
-                "excerpt": excerpt,
-            })
-            if len(items) >= limit:
+        batch_size = max(100, limit * 4)
+        scanned = 0
+        truncated = False
+        cursor_id = None
+        cursor_ingested = None
+        session_visibility: dict[tuple[str, Optional[str]], bool] = {}
+        while len(items) < limit and scanned < CONFLICT_REVIEW_SCAN_LIMIT:
+            batch_params = [*params]
+            if cursor_id is None:
+                batch_sql = sql
+            elif cursor_ingested is None:
+                batch_sql = sql + "AND ingested_at IS NULL AND id < ? "
+                batch_params.append(cursor_id)
+            else:
+                batch_sql = sql + (
+                    "AND (ingested_at IS NULL OR ingested_at < ? "
+                    "OR (ingested_at = ? AND id < ?)) "
+                )
+                batch_params.extend([cursor_ingested, cursor_ingested, cursor_id])
+            requested_batch_size = min(batch_size, CONFLICT_REVIEW_SCAN_LIMIT - scanned)
+            batch_sql += (
+                "ORDER BY CASE WHEN ingested_at IS NULL THEN 1 ELSE 0 END, "
+                "ingested_at DESC, id DESC LIMIT ?"
+            )
+            rows = self.store.conn.execute(
+                batch_sql, [*batch_params, requested_batch_size]).fetchall()
+            if not rows:
                 break
-        return {"workspace": workspace, "items": items, "count": len(items)}
+            scanned += len(rows)
+            last = rows[-1]
+            cursor_id = last["id"]
+            cursor_ingested = last["ingested_at"]
+            for row in rows:
+                # The raw SQL scope is not enough for session records: an inbox is a
+                # shared workspace surface, so enforce the same caller/session
+                # authorization used by recall and inspection before exposing even an
+                # id, state, or metadata-derived conflict marker. Cache the decision
+                # because many memories can belong to one session.
+                row_scope = str(row["scope"] or Scope.WORKSPACE.value)
+                if row_scope not in (
+                        Scope.SESSION.value, Scope.REPO.value,
+                        Scope.WORKSPACE.value, Scope.USER.value):
+                    continue
+                if row_scope == Scope.SESSION.value:
+                    sid = str(row["session_id"] or "")
+                    if not sid:
+                        continue
+                    visibility_key = (sid, row["repo_id"])
+                    visible = session_visibility.get(visibility_key)
+                    if visible is None:
+                        session = self.store.get_session(sid)
+                        visible = bool(
+                            session
+                            and session.get("workspace_id") == wid
+                            and session.get("repo_id") == row["repo_id"]
+                        )
+                        if visible:
+                            try:
+                                self._authorize_session(session)
+                            except ValidationError:
+                                visible = False
+                        session_visibility[visibility_key] = visible
+                    if not visible:
+                        continue
+                provenance = _loads(row["provenance"], {})
+                provenance = provenance if isinstance(provenance, dict) else {}
+                metadata = _loads(row["metadata"], {})
+                metadata = metadata if isinstance(metadata, dict) else {}
+                review_state = provenance.get("review_state") or ""
+                quarantined = bool(metadata.get("quarantine") or provenance.get("quarantined"))
+                conflicted = bool(metadata.get("conflict_with"))
+                if not (quarantined or review_state == REVIEW_PENDING or conflicted):
+                    continue
+                # Pending/quarantined content is evidence for a human reviewer, not model
+                # context. Return only an excerpt for already-approved conflict records.
+                excerpt = ""
+                if prompt_eligible(provenance, metadata):
+                    excerpt = (row["content"] or row["title"] or "")[:200]
+                items.append({
+                    "id": row["id"],
+                    "review_state": review_state,
+                    "quarantined": quarantined,
+                    "conflict_with": metadata.get("conflict_with") if conflicted else None,
+                    "excerpt": excerpt,
+                })
+                if len(items) >= limit:
+                    break
+            if len(rows) < requested_batch_size:
+                break
+        if len(items) < limit and scanned >= CONFLICT_REVIEW_SCAN_LIMIT:
+            truncated = True
+        return {"workspace": workspace, "items": items, "count": len(items),
+                "truncated": truncated}
 
     def _chain_entry(self, rec, wid: str) -> dict:
         d = _mem_to_dict(rec)
@@ -7880,6 +8013,7 @@ def _mem_to_dict(rec: Any) -> dict:
         "scope": rec.scope.value, "mtype": rec.mtype.value,
         "workspace_id": rec.workspace_id, "repo_id": rec.repo_id,
         "importance": rec.importance, "pinned": rec.pinned,
+        "confidence": rec.confidence,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,

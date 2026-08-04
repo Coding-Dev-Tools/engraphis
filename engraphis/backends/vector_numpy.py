@@ -60,7 +60,8 @@ class NumpyVectorIndex:
         self.store = store
         self.dim = _validated_dimension(dim) if dim is not None else None
 
-    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None) -> None:
+    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
+               *, commit: bool = True) -> None:
         values = _vector_batch(vecs)
         if self.dim is not None and values.shape[1] != self.dim:
             raise ValueError(
@@ -80,7 +81,15 @@ class NumpyVectorIndex:
             return
         for i, mid in enumerate(ids):
             self.store.put_vector(mid, values[i])
-        self.store.conn.commit()
+        if commit:
+            self.store.conn.commit()
+    def delete(self, ids: list[str], *, commit: bool = True) -> None:
+        marks = ",".join("?" for _ in ids)
+        if not ids:
+            return
+        self.store.conn.execute(f"DELETE FROM mem_vectors WHERE id IN ({marks})", ids)
+        if commit:
+            self.store.conn.commit()
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
@@ -121,10 +130,3 @@ class NumpyVectorIndex:
             range(len(ids)), key=lambda index: (-float(scores[index]), ids[index])
         )[:k]
         return [(ids[index], float(scores[index])) for index in top]
-
-    def delete(self, ids: list[str]) -> None:
-        marks = ",".join("?" for _ in ids)
-        if not ids:
-            return
-        self.store.conn.execute(f"DELETE FROM mem_vectors WHERE id IN ({marks})", ids)
-        self.store.conn.commit()

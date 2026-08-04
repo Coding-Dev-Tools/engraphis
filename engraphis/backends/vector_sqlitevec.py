@@ -124,7 +124,8 @@ class SqliteVecVectorIndex:
         )
         conn.commit()
 
-    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None) -> None:
+    def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
+               *, commit: bool = True) -> None:
         values = _vector_batch(vecs, self.dim)
         try:
             count = len(ids)
@@ -150,7 +151,16 @@ class SqliteVecVectorIndex:
                 "INSERT OR REPLACE INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
                 (mid, v.tobytes()),
             )
-        self.store.conn.commit()
+        if commit:
+            self.store.conn.commit()
+
+    def delete(self, ids: list[str], *, commit: bool = True) -> None:
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        self.store.conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+        if commit:
+            self.store.conn.commit()
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
@@ -196,12 +206,6 @@ class SqliteVecVectorIndex:
             # Filtered search widens geometrically until k visible hits are found.
             limit = total if limit * 2 >= total // 4 else limit * 2
 
-    def delete(self, ids: list[str]) -> None:
-        if not ids:
-            return
-        marks = ",".join("?" for _ in ids)
-        self.store.conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
-        self.store.conn.commit()
 
 
 def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):

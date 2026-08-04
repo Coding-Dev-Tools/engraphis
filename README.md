@@ -134,9 +134,11 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
 > require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
-> moves to version 8 (additive: `confidence`, `pinned_at`/`unpinned_at`, and the
-> `memory_tombstones` table), which migrates automatically on first open. See the
-> [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
+> moves to version 9. Existing v7-to-v8 databases already contain `confidence` and
+> `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table support
+> and performs a one-time entity-canonicalization repair, then migrates automatically on first
+> open. A tombstone with a known `repo_id` is terminal only in that repository; legacy repo-less
+> tombstones remain global. See the [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
 
 ---
 

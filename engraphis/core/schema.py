@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -485,7 +485,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     updated_at REAL
 );
 
--- Durable per-memory tombstones (sync deletion markers, v8).
+-- Durable per-memory tombstones (sync deletion markers, v9).
 --
 -- ``secure_erase`` hard-deletes the memory row and all local derivatives, but the
 -- deletion must still PROPAGATE: without a tombstone, a peer that still holds the
@@ -500,11 +500,12 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
     deleted_at REAL NOT NULL,             -- system-time when the erasure happened
     device_id  TEXT NOT NULL,             -- origin device (sync attribution only)
     workspace_id TEXT,                    -- sync scope (may be NULL for legacy rows)
+    repo_id    TEXT,                       -- repo scope; NULL means workspace scope/legacy
     created_at REAL NOT NULL
 );
 -- Sync exports scope tombstones by workspace; keep that read bounded as erasures grow.
 CREATE INDEX IF NOT EXISTS idx_memory_tombstones_workspace
-    ON memory_tombstones(workspace_id, memory_id);
+    ON memory_tombstones(workspace_id, repo_id, memory_id);
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

@@ -712,11 +712,11 @@ class Settings:
     rate_window: int = field(default_factory=lambda: _env_int("ENGRAPHIS_RATE_WINDOW", 60))
 
     # Update reminder: check the newest published release and surface it in the dashboard,
-    # server startup log, and MCP. On by default; ``ENGRAPHIS_UPDATE_CHECK=0`` opts out and
-    # stops all network activity. ``ENGRAPHIS_UPDATE_URL`` overrides the default GitHub
-    # releases source (see engraphis.update_check, the runtime authority for both knobs).
+    # server startup log, and MCP. Off by default; ``ENGRAPHIS_UPDATE_CHECK`` must contain
+    # a recognized affirmative value before any network activity is allowed. The runtime
+    # authority is :mod:`engraphis.update_check`, which reads the same knob directly.
     update_check: bool = field(
-        default_factory=lambda: _env_bool("ENGRAPHIS_UPDATE_CHECK", True))
+        default_factory=lambda: _env_bool("ENGRAPHIS_UPDATE_CHECK", False))
     update_check_url: str = field(
         default_factory=lambda: _env("ENGRAPHIS_UPDATE_URL", ""))
 

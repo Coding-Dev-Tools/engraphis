@@ -2371,18 +2371,29 @@ def engraphis_get_memory(
     metadata = target.metadata
     if not prompt_eligible(provenance, metadata):
         return _gateway_error("memory_not_prompt_eligible")
+    # ``inspect`` serializes the governed record, but the store object is the
+    # authoritative source for fields that must not be lost in projection.
+    confidence = mem.get("confidence")
+    if confidence is None:
+        confidence = target.confidence
+    # ``inspect`` authorizes the target against the requested scope, while related
+    # records are intentionally returned as a bounded projection.  Keep the same
+    # hierarchy for that projection: an explicit repo request is exact-repo only,
+    # whereas omitting repo retains the established workspace-wide behavior.
+    requested_repo_id = None
+    if repo:
+        try:
+            _, requested_repo_id = svc._require_scope(workspace, repo)
+        except Exception as exc:  # noqa: BLE001 — inspect already validated the request
+            return _classify_gateway_exception(exc)
     safe_links = []
     for link in record.get("links") or []:
         other = svc.store.get_memory(link.get("id")) if link.get("id") else None
         if (other is None or other.workspace_id != target.workspace_id
                 or not prompt_eligible(other.provenance, other.metadata)):
             continue
-        # Repo-scoped reads must not expose sibling-repo memories through links:
-        # workspace-scoped link(..., repo=None) can create cross-repo links, and the
-        # linked memory's title would otherwise leak through this repo-scoped tool.
-        # A target read at workspace scope (repo=None) may surface links from any repo
-        # in the workspace; a repo-scoped target is confined to that same repo.
-        if target.repo_id and other.repo_id != target.repo_id:
+        if (requested_repo_id is not None
+                and other.repo_id not in (None, requested_repo_id)):
             continue
         safe_links.append(link)
     safe_chain = []
@@ -2390,23 +2401,13 @@ def engraphis_get_memory(
         other = svc.store.get_memory(entry.get("id")) if entry.get("id") else None
         if (other is not None and other.workspace_id == target.workspace_id
                 and prompt_eligible(other.provenance, other.metadata)
-                and (target.repo_id is None or other.repo_id == target.repo_id)):
+                and (requested_repo_id is None
+                     or other.repo_id in (None, requested_repo_id))):
             safe_chain.append(entry)
-    ws_name = repo_name = None
-    ws_row = svc.store.conn.execute(
-        "SELECT name FROM workspaces WHERE id=?", (target.workspace_id,)).fetchone()
-    if ws_row is not None:
-        ws_name = ws_row["name"]
-    if target.repo_id:
-        repo_row = svc.store.conn.execute(
-            "SELECT name FROM repos WHERE id=?", (target.repo_id,)).fetchone()
-        if repo_row is not None:
-            repo_name = repo_row["name"]
     return _ok({
         "id": mem.get("id"), "content": mem.get("content"), "title": mem.get("title"),
         "mtype": mem.get("mtype"), "scope": mem.get("scope"),
-        "workspace": ws_name, "repo": repo_name,
-        "importance": mem.get("importance"), "confidence": target.confidence,
+        "importance": mem.get("importance"), "confidence": confidence,
         "valid_from": mem.get("valid_from"), "valid_to": mem.get("valid_to"),
         "ingested_at": mem.get("ingested_at"),
         "provenance": {k: provenance.get(k) for k in ("source", "trusted", "review_state")},

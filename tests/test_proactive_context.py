@@ -7,6 +7,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.ai_context import build_proactive_context  # noqa: E402
+from engraphis.core.interfaces import MemoryRecord, Scope  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
@@ -175,6 +176,25 @@ def test_recall_proactive_honors_pinned_and_proactive_flags():
     assert approved[pinned["id"]] in ids       # pinned low-importance still surfaces
     assert approved[always["id"]] in ids       # proactive=always surfaces
     assert approved[never["id"]] not in ids    # proactive=never is excluded
+
+
+def test_old_pinned_memory_is_not_lost_behind_proactive_scan_window():
+    svc = MemoryService.create(":memory:", embed_model="")
+    wid = svc.store.get_or_create_workspace("acme")
+    old = svc.store.add_memory(MemoryRecord(
+        id="mem_old_pin", content="Old pinned context", workspace_id=wid,
+        scope=Scope.WORKSPACE, pinned=True, ingested_at=1.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    for index in range(501):
+        svc.store.add_memory(MemoryRecord(
+            id=f"mem_new_{index}", content=f"New context {index}", workspace_id=wid,
+            scope=Scope.WORKSPACE, ingested_at=2.0 + index,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+
+    out = svc.engine.recall_proactive(workspace_id=wid, k=10, prompt_only=True)
+    assert old in {memory.id for memory in out["memories"]}
 
 
 def test_compact_proactive_context_is_bounded_and_does_not_repeat_source_bodies():

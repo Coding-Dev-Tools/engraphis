@@ -87,6 +87,46 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "embed_model", "")
     from engraphis.app import create_legacy_reference_app
     return TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem-v1.db"))
+def test_safe_call_classifies_and_sanitizes_legacy_failures():
+    from fastapi import HTTPException
+    from engraphis.core.secrets import SecretDetectedError
+    from engraphis.routes import memory as memory_routes
+
+    def fail_with(exc):
+        raise exc
+
+    cases = [
+        (SecretDetectedError("content", "token"), 400,
+         {"error": "memory content rejected"}),
+        (TypeError("private type detail"), 400, {"error": "invalid request"}),
+        (ValueError("private value detail"), 400, {"error": "invalid request"}),
+        (HTTPException(status_code=422, detail="private detail"), 422,
+         {"error": "request rejected"}),
+        (RuntimeError("private provider detail"), 500,
+         {"error": "internal server error"}),
+    ]
+    for error, status, detail in cases:
+        with pytest.raises(HTTPException) as caught:
+            memory_routes._safe_call(fail_with, error)
+        assert caught.value.status_code == status
+        assert caught.value.detail == detail
+        assert "private" not in repr(caught.value.detail)
+
+
+def test_safe_call_does_not_forward_invalid_http_status():
+    from fastapi import HTTPException
+    from engraphis.routes import memory as memory_routes
+
+    with pytest.raises(HTTPException) as caught:
+        memory_routes._safe_call(
+            lambda: (_ for _ in ()).throw(
+                HTTPException(status_code=999, detail="private status")
+            )
+        )
+    assert caught.value.status_code == 500
+    assert caught.value.detail == {"error": "internal server error"}
+
+
 
 
 def test_prune_honors_explicit_zero_threshold(monkeypatch, tmp_path):

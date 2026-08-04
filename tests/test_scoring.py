@@ -32,6 +32,25 @@ def test_normalize():
     assert scoring.normalize({"a": 5.0, "b": 5.0}) == {"a": 1.0, "b": 1.0}
 
 
+@pytest.mark.parametrize("bad", [
+    float("nan"), float("inf"), float("-inf"), None, "bad", 10 ** 1000,
+])
+def test_normalize_ignores_nonfinite_and_malformed_evidence(bad):
+    assert scoring.normalize({
+        "low": 2.0,
+        "bad": bad,
+        "high": 6.0,
+    }) == {"low": 0.0, "high": 1.0}
+    assert scoring.normalize({"bad": bad}) == {}
+
+
+def test_normalize_preserves_order_for_extreme_finite_range():
+    out = scoring.normalize({"low": -1e308, "mid": 0.0, "high": 1e308})
+    assert out["low"] == pytest.approx(0.0)
+    assert out["mid"] == pytest.approx(0.5)
+    assert out["high"] == pytest.approx(1.0)
+
+
 def test_scoring_edge_inputs_stay_finite_and_bounded():
     now = 1_000_000.0
     # Non-finite values are missing evidence: they are dropped, not kept as 0.0.
@@ -43,6 +62,7 @@ def test_scoring_edge_inputs_stay_finite_and_bounded():
     assert scoring.normalize({"nan": float("nan"), "inf": float("inf")}) == {}
     assert 0.0 <= scoring.retention("bad", "bad", now) <= 1.0
     assert 0.0 <= scoring.retention(1.0, now, float("nan")) <= 1.0
+    assert 0.0 <= scoring.retention(10 ** 1000, now, now) <= 1.0
     assert 0.0 <= scoring.recency("bad", now, tau_days=0) <= 1.0
     assert 0.0 <= scoring.staleness_penalty(float("nan"), now) <= 1.0
     fused = scoring.reciprocal_rank_fusion([["a", "a", "", None], ["a"]], k=0)

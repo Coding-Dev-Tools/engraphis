@@ -50,6 +50,11 @@ VECTOR_SCAN_BATCH = 2000
 # Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
 IN_CLAUSE_CHUNK = 500
+# Keep dynamic blocking predicates well below SQLite's conservative 999-variable
+# and expression-depth limits. Each token contributes two LIKE parameters.
+ENTITY_BLOCK_TOKEN_CHUNK = 200
+# Do not materialize unbounded common-token buckets during migration/live writes.
+ENTITY_BLOCK_BUCKET_LIMIT = 1024
 def now_ts() -> float:
     return time.time()
 
@@ -163,6 +168,44 @@ def normalize_entity_name(value: str) -> str:
     """
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _entity_token_set(name: Any) -> set[str]:
+    """Return conservative blocking tokens for one entity spelling."""
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", str(name or "").casefold())
+        if len(token) >= 2
+    }
+
+
+def _entity_compact_name(name: Any) -> str:
+    """Return the punctuation-preserving, whitespace-insensitive spelling."""
+    return re.sub(r"\s+", "", normalize_entity_name(str(name or "")))
+
+
+def _entity_punctuation_signature(name: Any) -> str:
+    """Return meaningful punctuation so token blocking cannot cross its boundary."""
+    normalized = normalize_entity_name(str(name or ""))
+    return "".join(
+        character for character in normalized
+        if not character.isalnum() and not character.isspace()
+    )
+
+
+def _entity_overlap(left: Any, right: Any) -> Optional[float]:
+    """Return the token-blocking score, or ``None`` when no safe match exists."""
+    left_compact = _entity_compact_name(left)
+    right_compact = _entity_compact_name(right)
+    if left_compact and left_compact == right_compact:
+        return 1.0
+    if _entity_punctuation_signature(left) != _entity_punctuation_signature(right):
+        return None
+    left_tokens = _entity_token_set(left)
+    right_tokens = _entity_token_set(right)
+    if not left_tokens or not right_tokens:
+        return None
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
 
 
 _SUPPORT_CONFIDENCE = {
@@ -755,6 +798,12 @@ class Store:
                     and "fts5" in str(row["sql"] or "").casefold()
                 )
             else:
+                # Keep deleted pages scrubbed even when an emergency erase cannot run a
+                # final VACUUM because another connection has the database busy.  The
+                # per-erase helper sets this too for legacy connections and backups;
+                # setting it at writable-store startup makes the protection durable for
+                # every normal v2 connection without changing the schema or data model.
+                self.conn.execute("PRAGMA secure_delete=ON")
                 self.conn.execute("PRAGMA synchronous=NORMAL")
                 self.init_schema()
                 # journal_mode is persistent state, so set it only after a required backup
@@ -1097,11 +1146,26 @@ class Store:
             "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
+            "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
         ):
             try:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        tombstone_index_columns = [
+            str(row["name"])
+            for row in self.conn.execute(
+                "PRAGMA index_info('idx_memory_tombstones_workspace')"
+            ).fetchall()
+        ]
+        if tombstone_index_columns != ["workspace_id", "repo_id", "memory_id"]:
+            self.conn.execute(
+                "DROP INDEX IF EXISTS idx_memory_tombstones_workspace"
+            )
+            self.conn.execute(
+                "CREATE INDEX idx_memory_tombstones_workspace "
+                "ON memory_tombstones(workspace_id, repo_id, memory_id)"
+            )
         # This cannot live in SCHEMA_SQL: CREATE TABLE IF NOT EXISTS leaves an
         # early-v5 ``mem_links`` table untouched, so the index would reference
         # temporal columns before the additive ALTERs above install them.
@@ -1188,14 +1252,15 @@ class Store:
                             (inferred, row["rowid"]),
                         )
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
-        # backfills before creating representative-only uniqueness indexes so exact
-        # normalized aliases can safely converge onto one deterministic canonical id.
-        # This is a live maintenance transform, not a one-shot migration: fresh
-        # databases run it before any entities exist, and upgraded databases must
-        # also canonicalize entities written before the pass existed. The pass is
-        # idempotent (it only issues UPDATEs when a row actually changes), and the
-        # token-overlap loop is bounded per workspace/etype bucket.
-        self._backfill_entity_canonicalization()
+        # backfill only when the database crosses the migration that introduced the
+        # canonical fields. Running the all-pairs token pass on every fresh/opened
+        # database turns startup into an O(n²) scan of the entire entity table.
+        if previous_version < 4:
+            self._backfill_entity_canonicalization()
+        elif previous_version < 9:
+            # v8 databases may have canonical fields but never received the token
+            # overlap pass; v9 is the one-time repair for that gap.
+            self._backfill_entity_canonicalization()
         self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
             "ON entities(workspace_id, normalized_name, etype) "
@@ -1464,6 +1529,69 @@ class Store:
         """Materialize the evidence incidence for one freshly written memory."""
         self._backfill_memory_entities_v5(memory_id)
 
+    def _entity_blocking_candidates(self, *, entity_id: Optional[str],
+                                     workspace_id: Optional[str],
+                                     etype: Optional[str], name: Any) -> list[sqlite3.Row]:
+        """Select lexical peers without making one unbounded SQL expression.
+        Ordinary token blocks return every matching peer; unusually broad blocks are
+        deliberately discarded rather than materialized. The compact-alias query always
+        runs. The Python score below then applies the exact compact/Jaccard rule.
+        Matching both normalized_name and the legacy name column lets a partially
+        upgraded database participate before its next migration completes.
+        """
+        tokens = sorted(_entity_token_set(name))
+        if not tokens:
+            return []
+        base_sql = (
+            "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
+            "normalized_name, canonical_method, canonical_confidence "
+            "FROM entities WHERE workspace_id IS ? AND etype IS ? AND ("
+        )
+        found: dict[str, sqlite3.Row] = {}
+
+        def collect(clauses: list[str], patterns: list[str], *,
+                    guard_broad: bool) -> None:
+            params: list[Any] = [workspace_id, etype, *patterns]
+            sql = base_sql + " OR ".join(clauses) + ")"
+            if entity_id is not None:
+                sql += " AND id<>?"
+                params.append(entity_id)
+            if guard_broad:
+                sql += " LIMIT ?"
+                params.append(ENTITY_BLOCK_BUCKET_LIMIT + 1)
+            rows = self.conn.execute(sql, params).fetchall()
+            if guard_broad and len(rows) > ENTITY_BLOCK_BUCKET_LIMIT:
+                # A common token is not useful as a blocking key. Do not retain
+                # an arbitrarily large bucket; the exact compact query still runs.
+                return
+            for row in rows:
+                found[str(row["id"])] = row
+
+        for start in range(0, len(tokens), ENTITY_BLOCK_TOKEN_CHUNK):
+            clauses: list[str] = []
+            patterns: list[str] = []
+            for token in tokens[start:start + ENTITY_BLOCK_TOKEN_CHUNK]:
+                pattern = "%" + _escape_like(token) + "%"
+                clauses.append(
+                    "(normalized_name LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\')"
+                )
+                patterns.extend((pattern, pattern))
+            collect(clauses, patterns, guard_broad=True)
+
+        # Whitespace-separated aliases such as OpenAI/Open AI have no shared token,
+        # but their compact spellings are still an exact canonical match.
+        compact = _entity_compact_name(name)
+        if compact:
+            compact_pattern = "%" + _escape_like(compact) + "%"
+            collect(
+                [
+                    "(replace(lower(normalized_name), ' ', '') LIKE ? ESCAPE '\\' "
+                    "OR replace(lower(name), ' ', '') LIKE ? ESCAPE '\\')"
+                ],
+                [compact_pattern, compact_pattern], guard_broad=False,
+            )
+        return [found[key] for key in sorted(found)]
+
     def _backfill_entity_canonicalization(self) -> None:
         rows = [dict(row) for row in self.conn.execute(
             "SELECT id, workspace_id, name, etype, canonical_id, normalized_name, "
@@ -1548,59 +1676,57 @@ class Store:
                     (row["_normalized"], canonical_id, method, confidence, row["id"]),
                 )
 
-        # Token-overlap blocking — a SEPARATE final pass so it sees the persisted exact
-        # canonicals and only adds cross-group merges. Entities that normalize
-        # differently but share most of their name tokens ("Open AI" vs "OpenAI",
-        # "Acme Corp" vs "Acme Corporation") are the same real-world identity. Compact
-        # name equality ("openai" == "openai") catches the single-token alias split that
-        # token overlap alone cannot see; otherwise a deterministic Jaccard over the
-        # normalized token sets, within one workspace + etype, joins onto the same
-        # canonical. Conservative (>= 0.6) so "C++" and "C#" never merge.
-        by_workspace_type: dict[tuple[str, str], list[dict]] = {}
+        # Token-overlap blocking is deliberately query-backed rather than an in-memory
+        # all-pairs pass.  It is still a one-time migration transform, but a workspace
+        # with many unrelated entities should not turn an upgrade into quadratic work.
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, workspace_id, repo_id, name, etype, canonical_id, normalized_name, "
+            "canonical_method, canonical_confidence FROM entities "
+            "ORDER BY workspace_id, etype, id"
+        ).fetchall()]
+        row_by_id = {str(row["id"]): row for row in rows}
+        seen_pairs: set[tuple[str, str]] = set()
         for row in rows:
-            by_workspace_type.setdefault(
-                (str(row.get("workspace_id") or ""), str(row.get("etype") or "")), []
-            ).append(row)
-
-        def _token_set(name: str) -> set:
-            return {t for t in re.split(r"[^a-z0-9]+", name.casefold()) if len(t) >= 2}
-
-        def _compact(name: str) -> str:
-            return "".join(re.split(r"[^a-z0-9]+", name.casefold()))
-
-        for (ws, etype), members in by_workspace_type.items():
-            for i, row in enumerate(members):
-                ti = _token_set(row.get("name") or "")
-                ci = _compact(row.get("name") or "")
-                if not ti:
+            if not _entity_token_set(row.get("name")):
+                continue
+            candidates = self._entity_blocking_candidates(
+                entity_id=row["id"], workspace_id=row.get("workspace_id"),
+                etype=row.get("etype"), name=row.get("name"),
+            )
+            for candidate in candidates:
+                other = dict(candidate)
+                pair = tuple(sorted((str(row["id"]), str(other["id"]))))
+                if pair in seen_pairs:
                     continue
-                for other in members[i + 1:]:
-                    tj = _token_set(other.get("name") or "")
-                    cj = _compact(other.get("name") or "")
-                    if not tj:
-                        continue
-                    if not (ci and cj and ci == cj):
-                        overlap = len(ti & tj) / max(len(ti), len(tj))
-                        if overlap < 0.6:
-                            continue
-                    # The representative is the existing canonical when either side has
-                    # one, else the oldest id — deterministic and idempotent.
-                    existing = sorted({
-                        str(row.get("canonical_id") or ""),
-                        str(other.get("canonical_id") or ""),
-                    })
-                    existing = [v for v in existing if v]
-                    canonical = existing[0] if existing else min(row["id"], other["id"])
-                    for member in (row, other):
-                        if member.get("canonical_id") != canonical or \
-                                member.get("canonical_method") != "token_overlap":
-                            self.conn.execute(
-                                "UPDATE entities SET canonical_id=?, canonical_method=? "
-                                "WHERE id=?",
-                                (canonical, "token_overlap", member["id"]),
-                            )
-                            member["canonical_id"] = canonical
-                            member["canonical_method"] = "token_overlap"
+                seen_pairs.add(pair)
+                overlap = _entity_overlap(row.get("name"), other.get("name"))
+                if overlap is None or overlap < 0.6:
+                    continue
+                # Existing canonical ids win when either side has one; otherwise the
+                # lexicographically oldest typed id is deterministic.
+                other_state = row_by_id.get(str(other["id"]))
+                if other_state is not None:
+                    other["canonical_id"] = other_state.get("canonical_id")
+                    other["canonical_method"] = other_state.get("canonical_method")
+                existing = sorted({
+                    str(row.get("canonical_id") or ""),
+                    str(other.get("canonical_id") or ""),
+                })
+                existing = [value for value in existing if value]
+                canonical = existing[0] if existing else min(pair)
+                for member in (row, other):
+                    state = row_by_id.get(str(member["id"]), member)
+                    if state.get("canonical_id") != canonical or \
+                            state.get("canonical_method") != "token_overlap":
+                        self.conn.execute(
+                            "UPDATE entities SET canonical_id=?, canonical_method=? "
+                            "WHERE id=?",
+                            (canonical, "token_overlap", member["id"]),
+                        )
+                    state["canonical_id"] = canonical
+                    state["canonical_method"] = "token_overlap"
+                    member["canonical_id"] = canonical
+                    member["canonical_method"] = "token_overlap"
 
     def _backfill_edge_supports(self) -> None:
         rows = self.conn.execute(
@@ -2210,6 +2336,32 @@ class Store:
         row = self.conn.execute(sql, params).fetchone()
         return int(row["count"] if row is not None else 0)
 
+    def list_proactive_overrides(self, flt: Optional[SearchFilter] = None,
+                                 *, prompt_only: bool = False) -> list[MemoryRecord]:
+        """Return pinned/``proactive=always`` rows outside the normal scan window.
+
+        The proactive agenda intentionally bounds its ordinary scan, but explicit user
+        choices are not bounded by recency.  Keep this query separate so a very old pin
+        cannot disappear behind 500 newer memories without making every proactive call
+        materialize the entire store.
+        """
+        sql = "SELECT * FROM memories"
+        where, params = self._where(flt, include_invalid=False)
+        where.append("(pinned=1 OR lower(metadata) LIKE ?)")
+        params.append('%"proactive"%')
+        sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ingested_at DESC"
+        out: list[MemoryRecord] = []
+        for row in self.conn.execute(sql, params):
+            rec = _row_to_record(row)
+            proactive = str((rec.metadata or {}).get("proactive") or "").lower()
+            if not rec.pinned and proactive != "always":
+                continue
+            if prompt_only and not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append(rec)
+        return out
+
     def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
                          session_id: Optional[str], scope: Scope, mtype: MemoryType,
                          subject_key: str, claim_kind: str) -> list[MemoryRecord]:
@@ -2456,7 +2608,7 @@ class Store:
             item["name"] for item in conn.execute("PRAGMA table_info(memories)").fetchall()
         }
         row = conn.execute(
-            ("SELECT id, workspace_id FROM memories WHERE id=?"
+            ("SELECT id, workspace_id, repo_id FROM memories WHERE id=?"
              if "workspace_id" in memory_columns
              else "SELECT id FROM memories WHERE id=?"),
             (memory_id,),
@@ -2592,6 +2744,7 @@ class Store:
             "present": True,
             "removed": True,
             "workspace_id": row["workspace_id"] if "workspace_id" in row.keys() else None,
+            "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
             "graph_edges_considered": len(supported_edges),
             "entities_considered": len(incident_entities),
         }
@@ -2673,6 +2826,7 @@ class Store:
             memory_id, deleted_at=now_ts(),
             device_id=self.device_id(),
             workspace_id=current.get("workspace_id"),
+            repo_id=current.get("repo_id"),
         )
         self.conn.commit()
         durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
@@ -2824,48 +2978,27 @@ class Store:
     def _live_canonicalize_entity(self, entity_id: str, *, name: str,
                                   workspace_id: Optional[str],
                                   repo_id: Optional[str]) -> None:
-        """Merge a freshly-written entity into a token-overlap alias group.
-
-        The on-open canonicalization pass keeps pre-existing databases coherent, but
-        entities written after open only ever matched exact-normalized names.  This
-        bounded, per-scope check gives the new entity the same canonical-group
-        treatment the pass applies: if its name shares most tokens (or the compact
-        spelling) with an existing same-scope/etype entity, both join the same
-        canonical representative.  Conservative (>= 0.6 Jaccard) so distinct
-        identities like "C++" and "C#" never merge.
-        """
+        """Merge a freshly-written entity into a token-overlap alias group."""
         name = (name or "").strip()
         if len(name) < 2 or not workspace_id:
             return
-        token_set = {t for t in re.split(r"[^a-z0-9]+", name.casefold()) if len(t) >= 2}
-        compact = "".join(re.split(r"[^a-z0-9]+", name.casefold()))
-        if not token_set and not compact:
+        entity = self.conn.execute(
+            "SELECT etype FROM entities WHERE id=?", (entity_id,)
+        ).fetchone()
+        if entity is None:
             return
-        peers = self.conn.execute(
-            "SELECT id, name, canonical_id, canonical_method FROM entities "
-            "WHERE workspace_id=? AND etype=(SELECT etype FROM entities WHERE id=?) "
-            "AND id<>? ORDER BY id LIMIT 500",
-            (workspace_id, entity_id, entity_id),
-        ).fetchall()
+        candidates = self._entity_blocking_candidates(
+            entity_id=entity_id, workspace_id=workspace_id,
+            etype=entity["etype"], name=name,
+        )
         best: Optional[dict] = None
         best_overlap = 0.0
-        for peer in peers:
-            peer_name = (peer["name"] or "").strip()
-            if not peer_name:
+        for peer in candidates:
+            overlap = _entity_overlap(name, peer["name"])
+            if overlap is None or overlap < 0.6 or overlap <= best_overlap:
                 continue
-            pt = {t for t in re.split(r"[^a-z0-9]+", peer_name.casefold()) if len(t) >= 2}
-            pc = "".join(re.split(r"[^a-z0-9]+", peer_name.casefold()))
-            if not pt:
-                continue
-            if compact and pc and compact == pc:
-                overlap = 1.0
-            elif token_set and pt:
-                overlap = len(token_set & pt) / max(len(token_set), len(pt))
-            else:
-                continue
-            if overlap >= 0.6 and overlap > best_overlap:
-                best_overlap = overlap
-                best = peer
+            best_overlap = overlap
+            best = dict(peer)
         if best is None:
             return
         peer_canonical = best["canonical_id"] or best["id"]
@@ -2917,7 +3050,6 @@ class Store:
                 ingested_at=row["ingested_at"], expired_at=row["expired_at"],
                 provenance={"source": "exact_text_backfill"}, commit=False,
             )
-
     def list_entities(self, flt: Optional[SearchFilter] = None,
                       *, limit: Optional[int] = None) -> list[Node]:
         """Entities in scope, newest first — the seed set the profile-consolidation
@@ -5198,7 +5330,8 @@ class Store:
     # ── sync tombstones (durable deletion markers that propagate) ───────────────
     def add_memory_tombstone(self, memory_id: str, *, deleted_at: Optional[float] = None,
                              device_id: Optional[str] = None,
-                             workspace_id: Optional[str] = None) -> None:
+                             workspace_id: Optional[str] = None,
+                             repo_id: Optional[str] = None) -> None:
         """Record that a memory id is dead (secure-erased) so sync can propagate it.
 
         Carries no user content — only the id, the erasure time, and the origin
@@ -5208,40 +5341,93 @@ class Store:
         """
         ts = now_ts() if deleted_at is None else deleted_at
         did = device_id or self.device_id()
+        existing = self.conn.execute(
+            "SELECT deleted_at, device_id, workspace_id, repo_id "
+            "FROM memory_tombstones WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO memory_tombstones("
+                "memory_id, deleted_at, device_id, workspace_id, repo_id, created_at"
+                ") VALUES (?,?,?,?,?,?)",
+                (memory_id, ts, did, workspace_id, repo_id, ts),
+            )
+            return
+        existing_workspace = existing["workspace_id"]
+        if (
+            existing_workspace is not None
+            and workspace_id is not None
+            and existing_workspace != workspace_id
+        ):
+            raise ValueError("tombstone workspace scope conflicts with existing marker")
+        existing_repo = existing["repo_id"]
+        if (
+            existing_repo is not None
+            and repo_id is not None
+            and existing_repo != repo_id
+        ):
+            raise ValueError("tombstone repository scope conflicts with existing marker")
+        earlier = float(ts) < float(existing["deleted_at"])
+        merged_workspace = (
+            None
+            if existing_workspace is None or workspace_id is None
+            else (workspace_id if earlier else existing_workspace)
+        )
+        # A repo-less marker is legacy global state. Never narrow it to a repo;
+        # conversely, a legacy marker arriving after a known repo marker widens
+        # the terminal scope rather than allowing sibling-specific overwrite.
+        merged_repo = (
+            None
+            if existing_repo is None or repo_id is None
+            else existing_repo
+        )
         self.conn.execute(
-            "INSERT INTO memory_tombstones(memory_id, deleted_at, device_id, workspace_id, created_at) "
-            "VALUES (?,?,?,?,?) "
-            "ON CONFLICT(memory_id) DO UPDATE SET "
-            "deleted_at=MIN(memory_tombstones.deleted_at, excluded.deleted_at), "
-            "device_id=CASE WHEN excluded.deleted_at<memory_tombstones.deleted_at "
-            "THEN excluded.device_id ELSE memory_tombstones.device_id END, "
-            "workspace_id=CASE "
-            "WHEN memory_tombstones.workspace_id IS NULL AND excluded.workspace_id IS NOT NULL "
-            "THEN excluded.workspace_id "
-            "WHEN excluded.deleted_at<memory_tombstones.deleted_at "
-            "THEN excluded.workspace_id ELSE memory_tombstones.workspace_id END",
-            (memory_id, ts, did, workspace_id, ts),
+            "UPDATE memory_tombstones SET deleted_at=?, device_id=?, "
+            "workspace_id=?, repo_id=? WHERE memory_id=?",
+            (
+                ts if earlier else existing["deleted_at"],
+                did if earlier else existing["device_id"],
+                merged_workspace,
+                merged_repo,
+                memory_id,
+            ),
         )
 
-    def list_memory_tombstones(self, workspace_id: Optional[str] = None) -> list[dict]:
-        """Return tombstone rows, optionally scoped to one workspace (for export)."""
+    def list_memory_tombstones(self, workspace_id: Optional[str] = None,
+                               repo_id: Optional[str] = None) -> list[dict]:
+        """Return tombstones scoped to a workspace and, when selected, one repo.
+
+        Workspace-scoped tombstones remain visible to every repo in that workspace;
+        repo-scoped tombstones never cross a repo-only export boundary.
+        """
+        if workspace_id is None and repo_id is not None:
+            raise ValueError("repo_id requires workspace_id")
         if workspace_id is None:
             rows = self.conn.execute(
-                "SELECT memory_id, deleted_at, device_id, workspace_id "
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
                 "FROM memory_tombstones ORDER BY memory_id"
             ).fetchall()
-        else:
+        elif repo_id is None:
             rows = self.conn.execute(
-                "SELECT memory_id, deleted_at, device_id, workspace_id "
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
                 "FROM memory_tombstones WHERE workspace_id=? "
                 "ORDER BY memory_id",
                 (workspace_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
+                "FROM memory_tombstones WHERE workspace_id=? AND (repo_id=? OR repo_id IS NULL) "
+                "ORDER BY memory_id",
+                (workspace_id, repo_id),
             ).fetchall()
         return [
             {
                 "id": str(row["memory_id"]), "deleted_at": float(row["deleted_at"]),
                 "device": str(row["device_id"] or ""),
                 "workspace_id": row["workspace_id"],
+                "repo_id": row["repo_id"],
             }
             for row in rows
         ]

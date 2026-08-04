@@ -107,9 +107,16 @@ def test_disabled_by_default_and_explicit_opt_out(monkeypatch):
     assert u.enabled() is False
 
 
-def test_explicit_opt_in(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "enable", "enabled"])
+def test_recognized_explicit_opt_in_values(monkeypatch, value):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", value)
     assert u.enabled() is True
+
+
+@pytest.mark.parametrize("value", ["", "treu", "enabled-ish", "2", "random"])
+def test_unrecognized_update_check_values_are_disabled(monkeypatch, value):
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", value)
+    assert u.enabled() is False
 
 
 # ── cache + snapshot behavior ─────────────────────────────────────────────────

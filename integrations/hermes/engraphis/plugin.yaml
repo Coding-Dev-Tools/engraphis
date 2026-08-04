@@ -1,0 +1,7 @@
+name: engraphis
+version: 1.4.5
+description: "Engraphis local memory provider with scoped recall, history, and explicit secure erase."
+pip_dependencies: []
+requires_env: []
+hooks:
+  - on_session_switch

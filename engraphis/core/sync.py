@@ -26,10 +26,11 @@ therefore a **state-based CRDT** over memory rows, not a bespoke replication log
       merge latest-wins (the newest transition dominates), so a re-pin on one device
       beats a stale unpin on another instead of losing a legitimate toggle.
       ``pinned`` itself is derived from the merged markers.
-    - ``deleted_at``: secure-erase tombstones are terminal. An erased id is carried
-      in the bundle's ``tombstones`` list (id + erasure time + origin device, never
-      content) and merged earliest-wins; ``_apply_one`` rejects every later row with
-      that id, so an erased memory never resurrects from a peer that still holds it.
+    - ``deleted_at``: secure-erase tombstones are terminal within their known
+      repository scope. An erased id is carried in the bundle's ``tombstones`` list
+      (id + erasure time + origin device, never content) and merged earliest-wins;
+      legacy repo-less markers remain global for compatibility, while a known marker
+      cannot erase a same-id row from a sibling repository.
     - descriptive fields (title/content/keywords/…): last-writer-wins under a
       **deterministic total order** — ``(last_access, ingested_at, content-hash)`` —
       so the winner is a function of the data, never of arrival order.
@@ -663,7 +664,7 @@ class SyncEngine:
             "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
-            "tombstones": self.store.list_memory_tombstones(workspace_id),
+            "tombstones": self.store.list_memory_tombstones(workspace_id, repo_id),
             "mem_links": [
                 {
                     "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
@@ -753,6 +754,14 @@ class SyncEngine:
         # Tombstones are scoped before they are applied. A bundle authorized for one
         # workspace must never hard-delete a known id owned by another workspace.
         for tomb in parsed_tombstones:
+            remote_tomb_repo = tomb.get("repo_id")
+            mapped_tomb_repo = (
+                repo_remap.get(remote_tomb_repo)
+                if remote_tomb_repo is not None else None
+            )
+            if remote_tomb_repo is not None and mapped_tomb_repo is None:
+                report["rejected"] += 1
+                continue
             existing = (
                 self.store.get_memory(tomb["id"])
                 if local_ws is not None else None
@@ -761,26 +770,60 @@ class SyncEngine:
             # let a same-id marker from another workspace overwrite or poison the local
             # workspace's deletion state when the id is no longer present locally.
             tombstone_row = self.store.conn.execute(
-                "SELECT workspace_id, deleted_at FROM memory_tombstones WHERE memory_id=?",
-                (tomb["id"],),
+                "SELECT workspace_id, repo_id, deleted_at "
+                "FROM memory_tombstones WHERE memory_id=?",
+                (tomb["id"],)
             ).fetchone()
             if (tombstone_row is not None
                     and tombstone_row["workspace_id"] is not None
                     and tombstone_row["workspace_id"] != local_ws):
                 report["rejected"] += 1
                 continue
-            if existing is not None and existing.workspace_id != local_ws:
+            # Once a tombstone has a repository identity, a marker from a sibling
+            # repository must not overwrite it.  A NULL marker is legacy global
+            # state and must not be upgraded from an incoming repository identity.
+            if (tombstone_row is not None
+                    and tombstone_row["repo_id"] is not None
+                    and mapped_tomb_repo is not None
+                    and tombstone_row["repo_id"] != mapped_tomb_repo):
+                report["rejected"] += 1
+                continue
+            if (existing is not None and existing.workspace_id != local_ws):
+                report["rejected"] += 1
+                continue
+            # A repo-scoped tombstone can only erase a row in that same repo.
+            # Legacy repo-less markers retain their historical global-id behavior.
+            if (existing is not None and mapped_tomb_repo is not None
+                    and existing.repo_id != mapped_tomb_repo):
                 report["rejected"] += 1
                 continue
             if (existing is not None and only_repo_id is not None
                     and existing.repo_id != only_repo_id):
                 report["rejected"] += 1
                 continue
-            accepted_tombstones.append(tomb)
+            if (only_repo_id is not None and mapped_tomb_repo is not None
+                    and mapped_tomb_repo != only_repo_id):
+                report["rejected"] += 1
+                continue
+            # Preserve an already-known repository identity, but never infer one
+            # from the live row for a legacy marker: doing so narrows a global marker
+            # and permits a same-id row from a sibling repository to resurrect.
+            stored_tomb_repo = mapped_tomb_repo
+            if stored_tomb_repo is None and tombstone_row is not None:
+                stored_tomb_repo = tombstone_row["repo_id"]
+            marker_changed = (
+                tombstone_row is None
+                or float(tomb["deleted_at"]) < float(tombstone_row["deleted_at"])
+                or tombstone_row["repo_id"] != stored_tomb_repo
+            )
+            accepted_tombstones.append({
+                **tomb, "_mapped_repo_id": stored_tomb_repo,
+            })
             if not dry_run:
                 self.store.add_memory_tombstone(
                     tomb["id"], deleted_at=tomb["deleted_at"],
                     device_id=tomb["device"], workspace_id=local_ws,
+                    repo_id=stored_tomb_repo,
                 )
                 # A peer's secure erase must remove a row this device still holds
                 # immediately, not only block a future re-add.
@@ -795,8 +838,9 @@ class SyncEngine:
                         # so a retry can recover instead of leaving stale content behind.
                         self.store.conn.rollback()
                         raise
-            report["tombstones_applied"] += 1
-        if not dry_run and report["tombstones_applied"]:
+            if marker_changed or dry_run:
+                report["tombstones_applied"] += 1
+        if not dry_run and accepted_tombstones:
             self.store.conn.commit()
 
         # Bulk apply. Previously this was N+1: a SELECT per id to test existence, then a
@@ -832,22 +876,30 @@ class SyncEngine:
                         accepted: dict[str, MemoryRecord], local_ws, repo_remap: dict,
                         only_repo_id, src_device, dry_run: bool,
                         tombstones: Optional[list[dict]] = None) -> None:
-        # Live tombstones = local ones plus everything this bundle just applied
-        # (already committed above in apply_bundle). A row in this very bundle whose
-        # id is tombstoned must not be added after its own tombstone was applied.
+        # Keep repository identity with the terminal marker.  A known repo marker
+        # must not reject a same-id memory from a sibling repo; a legacy NULL repo
+        # marker remains global for backward compatibility.
         live_tombstones = (
             {
-                t["id"]: float(t["deleted_at"])
+                t["id"]: (float(t["deleted_at"]), t.get("repo_id"))
                 for t in self.store.list_memory_tombstones(local_ws)
             }
             if local_ws is not None else {}
         )
         for tomb in tombstones or []:
             timestamp = float(tomb["deleted_at"])
+            mapped_repo = tomb.get("_mapped_repo_id")
+            if mapped_repo is None and tomb.get("repo_id") is not None:
+                mapped_repo = repo_remap.get(tomb["repo_id"])
             existing = live_tombstones.get(tomb["id"])
-            live_tombstones[tomb["id"]] = (
-                timestamp if existing is None else min(existing, timestamp)
-            )
+            if existing is None:
+                live_tombstones[tomb["id"]] = (timestamp, mapped_repo)
+            elif existing[1] is None:
+                # A legacy marker is global.  Never upgrade it to a repository
+                # identity merely because a newer peer also knows a repo scope.
+                continue
+            elif mapped_repo is not None and timestamp < existing[0]:
+                live_tombstones[tomb["id"]] = (timestamp, mapped_repo)
         for start in range(0, len(mem_dicts), APPLY_BATCH):
             batch = mem_dicts[start:start + APPLY_BATCH]
             parsed = [dict_to_record(d) for d in batch]
@@ -868,12 +920,6 @@ class SyncEngine:
                    local_ws, repo_remap: dict, only_repo_id, src_device,
                    dry_run: bool, live_tombstones: Optional[dict] = None) -> None:
         if rec is None:
-            report["rejected"] += 1
-            return
-        # A secure-erasure tombstone is terminal for a globally unique memory id.
-        # A peer must create a fresh id for intentional recreation; timestamp tricks
-        # cannot resurrect erased content.
-        if (live_tombstones or {}).get(rec.id) is not None:
             report["rejected"] += 1
             return
         # Sync bundles have no authenticated session owner or session lifecycle metadata.
@@ -919,6 +965,14 @@ class SyncEngine:
             rec.repo_id = repo_remap[remote_repo_id]
         else:
             rec.repo_id = None
+        # A known repository tombstone is terminal only for that repository.  Legacy
+        # repo-less tombstones intentionally retain their historical global-id behavior.
+        tombstone = (live_tombstones or {}).get(rec.id)
+        if tombstone is not None:
+            tombstone_repo = tombstone[1] if isinstance(tombstone, tuple) else None
+            if tombstone_repo is None or tombstone_repo == rec.repo_id:
+                report["rejected"] += 1
+                return
         if only_repo_id is not None and rec.repo_id != only_repo_id:
             report["rejected"] += 1
             return
@@ -1178,15 +1232,18 @@ class SyncEngine:
     def _parse_tombstones(self, tomb_dicts: list, src_device: object) -> list[dict]:
         """Validate + clamp untrusted bundle tombstones. Never raises.
 
-        A tombstone is just ``{id, deleted_at, device}`` — no content — so there is
+        A tombstone is ``{id, deleted_at, device, repo_id}`` — no content — so there is
         nothing to quarantine; it is clamped like any other untrusted input and a
         malformed entry is silently dropped (counted by the caller only for entries
         that survive). ``deleted_at`` is bounded to ``[0, now + skew]`` so a hostile
-        far-future erasure cannot permanently tombstone a memory id.
+        far-future erasure cannot permanently tombstone a memory id. A missing
+        ``repo_id`` is a legacy global marker.
         """
-        out: list[dict] = []
-        seen: dict[str, float] = {}
-        positions: dict[str, int] = {}
+        # Scope is part of tombstone identity now.  Keep the earliest event for
+        # each (memory id, repository) pair, but a legacy repo-less marker is
+        # global and therefore suppresses every repo-scoped marker for that id.
+        best: dict[tuple[str, Optional[str]], dict] = {}
+        positions: dict[tuple[str, Optional[str]], int] = {}
         now = now_ts()
         for t in tomb_dicts:
             if not isinstance(t, dict):
@@ -1200,24 +1257,27 @@ class SyncEngine:
                 continue
             deleted_at = max(0.0, min(deleted_at, now + TS_FUTURE_SKEW))
             device = _clamp_str(t.get("device"), 128) if t.get("device") else ""
-            # A duplicate id in one bundle is one erasure: keep the earliest mark
-            # (matches the store's ON CONFLICT ... MIN(deleted_at)) so the report
-            # never counts the same memory twice. If the earlier mark arrives later,
-            # replace the existing output entry rather than appending a duplicate.
-            earlier = seen.get(mid)
-            if earlier is not None and earlier <= deleted_at:
+            repo_id = (
+                _clamp_str(t.get("repo_id"), 128)
+                if isinstance(t.get("repo_id"), str) and t.get("repo_id")
+                else None
+            )
+            key = (mid, repo_id)
+            previous = best.get(key)
+            if previous is not None and previous["deleted_at"] <= deleted_at:
                 continue
-            item = {
+            best[key] = {
                 "id": mid, "deleted_at": deleted_at,
                 "device": device or (_clamp_str(src_device, 128) if src_device else ""),
+                "repo_id": repo_id,
             }
-            seen[mid] = deleted_at
-            if mid in positions:
-                out[positions[mid]] = item
-            else:
-                positions[mid] = len(out)
-                out.append(item)
-        return out
+            if key not in positions:
+                positions[key] = len(positions)
+        global_ids = {mid for mid, repo_id in best if repo_id is None}
+        return [
+            best[key] for key in positions
+            if key[1] is None or key[0] not in global_ids
+        ]
 
     def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep

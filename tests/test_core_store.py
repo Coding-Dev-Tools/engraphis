@@ -22,7 +22,7 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 8
+    assert store.schema_version == 9
 
 
 def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
@@ -73,6 +73,75 @@ def test_entity_normalization_preserves_meaningful_punctuation():
     assert normalize_entity_name("  OpenAI\tPlatform  ") == "openai platform"
     assert normalize_entity_name("C++") != normalize_entity_name("C#")
     assert normalize_entity_name("AT&T") != normalize_entity_name("ATT")
+
+
+def test_live_canonicalization_preserves_punctuation_with_shared_tokens(store):
+    wid = store.get_or_create_workspace("w")
+    cpp = store.upsert_entity(Node(
+        id="ent_cpp_language", name="C++ language", ntype="topic", workspace_id=wid,
+    ))
+    csharp = store.upsert_entity(Node(
+        id="ent_csharp_language", name="C# language", ntype="topic", workspace_id=wid,
+    ))
+    rows = store.conn.execute(
+        "SELECT id, canonical_id FROM entities WHERE id IN (?, ?) ORDER BY id",
+        (cpp, csharp),
+    ).fetchall()
+    assert [row["canonical_id"] for row in rows] == [cpp, csharp]
+
+def test_live_entity_canonicalization_searches_beyond_arbitrary_peer_cap(store):
+    wid = store.get_or_create_workspace("w")
+    canonical = store.upsert_entity(Node(
+        id="ent_openai", name="OpenAI", ntype="org", workspace_id=wid,
+    ))
+    for index in range(500):
+        store.upsert_entity(Node(
+            id=f"ent_filler_{index}", name=f"Filler Company {index}",
+            ntype="org", workspace_id=wid,
+        ))
+    alias = store.upsert_entity(Node(
+        id="ent_open_ai", name="Open AI", ntype="org", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id, canonical_method FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert row["canonical_id"] == canonical
+    assert row["canonical_method"] == "token_overlap"
+
+def test_entity_blocking_chunks_long_token_names(store):
+    wid = store.get_or_create_workspace("w")
+    tokens = " ".join(f"tok{index}x" for index in range(600))
+    canonical = store.upsert_entity(Node(
+        id="ent_long_canonical", name=tokens, ntype="topic", workspace_id=wid,
+    ))
+    alias = store.upsert_entity(Node(
+        id="ent_long_alias", name=tokens + " alias", ntype="topic", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id, canonical_method FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert canonical != alias
+    assert row["canonical_id"] == canonical
+    assert row["canonical_method"] == "token_overlap"
+
+def test_entity_blocking_skips_broad_token_buckets(store, monkeypatch):
+    from engraphis.core import store as store_module
+
+    monkeypatch.setattr(store_module, "ENTITY_BLOCK_BUCKET_LIMIT", 2)
+    wid = store.get_or_create_workspace("w")
+    for index in range(3):
+        store.upsert_entity(Node(
+            id=f"ent_shared_{index}", name=f"Shared Entity {index}",
+            ntype="topic", workspace_id=wid,
+        ))
+    alias = store.upsert_entity(Node(
+        id="ent_shared_alias", name="Shared Entity Alias",
+        ntype="topic", workspace_id=wid,
+    ))
+    row = store.conn.execute(
+        "SELECT canonical_id FROM entities WHERE id=?", (alias,)
+    ).fetchone()
+    assert row["canonical_id"] == alias
 
 
 def test_replacing_edge_closes_removed_normalized_support(store):
@@ -256,7 +325,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 8
+    assert migrated.schema_version == 9
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"

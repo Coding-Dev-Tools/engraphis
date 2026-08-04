@@ -169,6 +169,87 @@ def _derived_memory_for_sources(store, first: MemoryRecord, source_ids: set[str]
             return candidate
     return None
 
+def _derived_memories_for_source_subset(
+    store, first: MemoryRecord, source_ids: set[str], *, provenance_source: str,
+) -> list[tuple[MemoryRecord, set[str]]]:
+    """Find derived rows whose cited sources are a subset of one cluster.
+
+    Structured consolidation may emit several facts per cluster.  Recovering each
+    exact fact before pending detection prevents a partial fact write from either
+    stranding its remaining sources or being duplicated on retry.
+    """
+    flt = SearchFilter(
+        workspace_id=first.workspace_id,
+        repo_id=first.repo_id,
+        scopes=[Scope(first.scope)],
+        mtypes=[MemoryType.SEMANTIC],
+    )
+    recovered: list[tuple[MemoryRecord, set[str]]] = []
+    for candidate in store.list_memories(flt, include_invalid=True):
+        provenance = (candidate.metadata or {}).get("provenance") or {}
+        if provenance.get("source") != provenance_source:
+            continue
+        cited = {
+            str(memory_id) for memory_id in (
+                provenance.get("consolidates")
+                or provenance.get("source_ids")
+                or []
+            )
+        }
+        if cited and cited <= source_ids:
+            recovered.append((candidate, cited))
+    return recovered
+
+
+def _audit_consolidation_once(engine, action: str, target: str, detail: str) -> None:
+    """Record one completion audit even when a derived write was resumed."""
+    exists = engine.store.conn.execute(
+        "SELECT 1 FROM audit WHERE actor=? AND action=? AND target=? LIMIT 1",
+        ("consolidation", action, target),
+    ).fetchone()
+    if exists is None:
+        engine.store.audit("consolidation", action, target, detail)
+
+
+def _resume_structured_digests(
+    engine, cluster: list[MemoryRecord], *, supersede_sources: bool = False,
+    now: Optional[float] = None,
+) -> None:
+    """Repair every structured fact already committed for this cluster."""
+    source_by_id = {memory.id: memory for memory in cluster}
+    cluster_ids = set(source_by_id)
+    cited_sources: set[str] = set()
+    for existing, cited_ids in _derived_memories_for_source_subset(
+        engine.store, cluster[0], cluster_ids,
+        provenance_source="structured_consolidation",
+    ):
+        sources = [source_by_id[source_id] for source_id in cited_ids]
+        sensitivity, trusted = _inherit_safety(engine, existing.id, sources)
+        _ensure_derived_links(engine.store, existing.id, sources, "consolidates")
+        cited_sources.update(cited_ids)
+        structured = (existing.metadata or {}).get("structured_consolidation") or {}
+        audit = structured.get("llm") or {}
+        try:
+            confidence = float(
+                structured.get("confidence", existing.confidence or 0.0)
+            )
+        except (TypeError, ValueError):
+            confidence = 0.0
+        _audit_consolidation_once(
+            engine, "distill_structured", existing.id,
+            f"schema-distilled {len(sources)} memories; "
+            f"confidence={float(confidence):.2f}; sensitivity={sensitivity}; "
+            f"trusted={trusted}; prompt_sha256={audit.get('prompt_sha256', '')}",
+        )
+    if supersede_sources:
+        at = time.time() if now is None else now
+        for memory in cluster:
+            if memory.id in cited_sources:
+                engine.store.close_validity(
+                    memory.id, at=at, actor="consolidation",
+                    reason="superseded by structured consolidation",
+                )
+
 
 def _ensure_derived_links(store, derived_id: str, sources: list[MemoryRecord],
                           relation: str) -> None:
@@ -193,7 +274,16 @@ def _write_or_resume_digest(engine, cluster: list[MemoryRecord], *, content: str
         store, cluster[0], source_ids, provenance_source="consolidation",
     )
     if existing is not None:
+        # A previous attempt may have committed the derived row before safety
+        # inheritance failed. Reapply it before treating the row as complete; otherwise
+        # the source links make the next sweep skip a secret/poisoned digest forever.
+        sensitivity, trusted = _inherit_safety(engine, existing.id, cluster)
         _ensure_derived_links(store, existing.id, cluster, "consolidates")
+        _audit_consolidation_once(
+            engine, "distill", existing.id,
+            f"digested {len(cluster)} episodic memories "
+            f"(sensitivity={sensitivity}, trusted={trusted})",
+        )
         return existing.id, False
     return _write_digest(engine, cluster, content=content, subject=subject, now=now), True
 
@@ -208,7 +298,13 @@ def _write_or_resume_profile(engine, name: str, etype: str,
         provenance_source="profile_consolidation",
     )
     if existing is not None:
+        sensitivity, trusted = _inherit_safety(engine, existing.id, sources)
         _ensure_derived_links(store, existing.id, sources, PROFILE_RELATION)
+        _audit_consolidation_once(
+            engine, "profile", existing.id,
+            f"profiled {len(sources)} memories about {name} "
+            f"(sensitivity={sensitivity}, trusted={trusted})",
+        )
         return existing.id, False
     return _write_profile(engine, name, etype, sources, content=content, now=now), True
 
@@ -289,7 +385,21 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         ) if not dry_run else None
         if existing is not None:
             try:
+                sensitivity, trusted = _inherit_safety(engine, existing.id, cluster)
                 _ensure_derived_links(store, existing.id, cluster, "consolidates")
+                _audit_consolidation_once(
+                    engine, "distill", existing.id,
+                    f"digested {len(cluster)} episodic memories "
+                    f"(sensitivity={sensitivity}, trusted={trusted})",
+                )
+            except Exception as exc:
+                report["errors"].append(_error_entry(cluster, exc))
+                continue
+        if structured and not dry_run:
+            try:
+                _resume_structured_digests(
+                    engine, cluster, supersede_sources=bool(supersede_sources), now=now,
+                )
             except Exception as exc:
                 report["errors"].append(_error_entry(cluster, exc))
                 continue
@@ -957,7 +1067,13 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
             ) if not dry_run else None
             if existing is not None:
                 try:
+                    sensitivity, trusted = _inherit_safety(engine, existing.id, sources)
                     _ensure_derived_links(store, existing.id, sources, PROFILE_RELATION)
+                    _audit_consolidation_once(
+                        engine, "profile", existing.id,
+                        f"profiled {len(sources)} memories about {name} "
+                        f"(sensitivity={sensitivity}, trusted={trusted})",
+                    )
                 except Exception as exc:
                     report["errors"].append(_error_entry(sources, exc))
                     continue
