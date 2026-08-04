@@ -60,6 +60,10 @@ DISTILL_SCAN_LIMIT = 2000
 # Bound the population that reaches the quadratic fallback clustering pass while
 # allowing the storage scan to page in smaller batches and skip pending rows.
 DISTILL_CLUSTER_LIMIT = 2000
+# Carry a small, bounded set of incomplete clusters into the next sweep.  This keeps
+# interleaved subjects from being permanently split across rotating windows without
+# turning a maintenance pass into an unbounded full-table scan.
+DISTILL_PENDING_LIMIT = 512
 # Cursor name for the bounded episodic sweep; the value is scoped by workspace/repo.
 DISTILL_CURSOR_NAME = "episodic-consolidation"
 
@@ -203,29 +207,54 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
                         batch_size: int, prompt_only: bool = False,
                         max_records: Optional[int] = None,
                         exclude_relation: Optional[str] = None,
-                        start_after_id: str = "") -> tuple[list[MemoryRecord], str]:
+                        start_after_id: str = "", overlap: int = 0,
+                        advance_records: Optional[int] = None,
+                        ) -> tuple[list[MemoryRecord], str]:
     """Read one bounded keyset window and return its next persistent cursor.
 
     ``Store.list_memories_page`` orders by id.  When a bounded window reaches the
     end, the empty cursor deliberately makes the *next* sweep wrap to the start;
     this rotates maintenance over all eligible rows without materializing or
-    clustering the full population on every run.
+    clustering the full population on every run.  ``overlap`` retains a bounded
+    suffix of the raw keyset window for the next sweep, which keeps clusters that
+    straddle a maintenance boundary intact.  ``advance_records`` is a raw-row
+    progress floor used when filtering leaves fewer than ``max_records`` eligible
+    rows; it prevents a bounded sweep from pinning its cursor on an excluded page.
     """
     size = max(1, int(batch_size))
     cap = None if max_records is None else max(0, int(max_records))
-    if cap == 0:
+    advance_cap = (
+        None if advance_records is None else max(0, int(advance_records))
+    )
+    if cap == 0 or advance_cap == 0:
         return [], str(start_after_id or "")
     after_id = str(start_after_id or "")
     records: list[MemoryRecord] = []
+    window_ids: list[str] = []
     scoped = _replace(flt, mtypes=mtypes)
     next_cursor = ""
+
+    def cursor_for_window() -> str:
+        retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
+        return window_ids[len(window_ids) - retained - 1]
+
     while True:
-        page = store.list_memories_page(scoped, after_id=after_id, limit=size)
+        if advance_cap is not None and len(window_ids) >= advance_cap:
+            next_cursor = cursor_for_window()
+            break
+        remaining = None if cap is None else max(1, cap - len(records))
+        page_limit = size if remaining is None else min(size, remaining)
+        if advance_cap is not None:
+            page_limit = min(page_limit, advance_cap - len(window_ids))
+        page = store.list_memories_page(
+            scoped, after_id=after_id, limit=page_limit,
+        )
         if not page:
             # The persisted cursor was at the end of the keyspace. Start the next
             # sweep from the beginning instead of retrying an empty tail forever.
             break
         next_after = page[-1].id
+        window_ids.extend(memory.id for memory in page)
         page_size = len(page)
         if exclude_relation:
             excluded = _linked_memory_ids(
@@ -240,12 +269,22 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         else:
             records.extend(page)
         if cap is not None and len(records) >= cap:
-            next_cursor = next_after
+            next_cursor = cursor_for_window()
             break
-        if next_after == after_id or page_size < size:
+        if advance_cap is not None and len(window_ids) >= advance_cap:
+            next_cursor = cursor_for_window()
+            break
+        if next_after == after_id or page_size < page_limit:
             # End-of-keyspace: clear the cursor for the next invocation.
             break
         after_id = next_after
+    if (
+        not next_cursor
+        and advance_cap is not None
+        and window_ids
+        and len(window_ids) >= max(1, advance_cap - max(0, int(overlap)))
+    ):
+        next_cursor = cursor_for_window()
     records.sort(
         key=lambda memory: (
             memory.ingested_at if memory.ingested_at is not None else float("-inf"),
@@ -254,6 +293,90 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         reverse=True,
     )
     return records[:cap] if cap is not None else records, next_cursor
+
+
+def _decode_distill_cursor(value: str) -> tuple[str, list[str]]:
+    """Read a legacy keyset cursor or the current cursor-plus-candidates state."""
+    raw = str(value or "")
+    if not raw.startswith("{"):
+        return raw, []
+    try:
+        state = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw, []
+    if not isinstance(state, dict):
+        return raw, []
+    cursor = state.get("cursor")
+    pending = state.get("pending")
+    if not isinstance(cursor, str) or not isinstance(pending, list):
+        return raw, []
+    ids = list(dict.fromkeys(
+        str(memory_id) for memory_id in pending if str(memory_id or "")
+    ))
+    return cursor, ids[:DISTILL_PENDING_LIMIT]
+
+
+def _encode_distill_cursor(cursor: str, pending_ids: list[str]) -> str:
+    """Persist bounded partial-cluster candidates alongside the scan cursor."""
+    normalized = list(dict.fromkeys(
+        str(memory_id) for memory_id in pending_ids if str(memory_id or "")
+    ))[:DISTILL_PENDING_LIMIT]
+    if not normalized:
+        return str(cursor or "")
+    return json.dumps(
+        {"cursor": str(cursor or ""), "pending": normalized},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _load_distill_candidates(
+    store, flt: SearchFilter, pending_ids: list[str], *, now: float,
+) -> list[MemoryRecord]:
+    """Reload prior partial-cluster sources, dropping deleted or ineligible rows."""
+    from engraphis.core.store import memory_matches_filter
+
+    if not pending_ids:
+        return []
+    records: list[MemoryRecord] = []
+    for memory_id in dict.fromkeys(pending_ids):
+        memory = store.get_memory(memory_id)
+        if (
+            memory is not None
+            and memory.mtype == MemoryType.EPISODIC
+            and memory_matches_filter(memory, flt, at=now)
+            and prompt_eligible(memory.provenance, memory.metadata)
+        ):
+            records.append(memory)
+    if not records:
+        return []
+    linked = _linked_memory_ids(
+        store, [memory.id for memory in records], relation="consolidates",
+    )
+    return [memory for memory in records if memory.id not in linked]
+
+
+def _pending_distill_ids(clusters: list[list[MemoryRecord]], *, min_cluster: int) -> list[str]:
+    """Select bounded candidates whose cluster needs a later sweep to complete.
+
+    Multi-record partial clusters are preferred because they carry positive evidence
+    that a subject is recurring.  Singleton records with an explicit subject key are
+    retained too; unrelated singleton noise is intentionally not allowed to consume
+    the whole carry-over budget.
+    """
+    incomplete = [cluster for cluster in clusters if 0 < len(cluster) < min_cluster]
+    prioritized = [
+        cluster for cluster in incomplete
+        if len(cluster) > 1 or any(memory.subject_key for memory in cluster)
+    ]
+    selected: list[str] = []
+    for cluster in prioritized:
+        for memory in cluster[-max(1, min_cluster - 1):]:
+            if memory.id not in selected:
+                selected.append(memory.id)
+            if len(selected) >= DISTILL_PENDING_LIMIT:
+                return selected
+    return selected
 
 
 def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
@@ -687,19 +810,30 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 except Exception as exc:
                     report["errors"].append(_error_entry(retry_cluster, exc))
 
-    distill_cursor = store.get_maintenance_cursor(
+    distill_state = store.get_maintenance_cursor(
         workspace_id, repo_id, DISTILL_CURSOR_NAME,
     )
+    distill_cursor, pending_ids = _decode_distill_cursor(distill_state)
+    distill_overlap = max(0, int(min_cluster) - 1)
     episodic, next_distill_cursor = _scan_memory_window(
         store, flt, mtypes=[MemoryType.EPISODIC],
         batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
-        max_records=DISTILL_CLUSTER_LIMIT,
+        max_records=DISTILL_CLUSTER_LIMIT + distill_overlap,
         exclude_relation="consolidates",
         start_after_id=distill_cursor,
+        overlap=distill_overlap,
+        advance_records=DISTILL_CLUSTER_LIMIT + distill_overlap,
     )
-    if not dry_run:
-        store.set_maintenance_cursor(
-            workspace_id, repo_id, DISTILL_CURSOR_NAME, next_distill_cursor,
+    prior_candidates = _load_distill_candidates(store, flt, pending_ids, now=now)
+    if prior_candidates:
+        by_id = {memory.id: memory for memory in [*prior_candidates, *episodic]}
+        episodic = sorted(
+            by_id.values(),
+            key=lambda memory: (
+                memory.ingested_at if memory.ingested_at is not None else float("-inf"),
+                memory.id,
+            ),
+            reverse=True,
         )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
@@ -711,6 +845,14 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
             owner_memories, threshold=subject_jaccard, store=store, flt=flt,
         )
     ]
+    if not dry_run:
+        store.set_maintenance_cursor(
+            workspace_id, repo_id, DISTILL_CURSOR_NAME,
+            _encode_distill_cursor(
+                next_distill_cursor,
+                _pending_distill_ids(clusters, min_cluster=min_cluster),
+            ),
+        )
 
     if structured:
         report["structured"] = {"enabled": True, "attempted": 0, "succeeded": 0,
@@ -1424,11 +1566,15 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     profile_cursor = store.get_maintenance_cursor(
         workspace_id, repo_id, PROFILE_CURSOR_NAME,
     )
+    profile_overlap = max(0, int(min_mentions) - 1)
     profile_memories, next_profile_cursor = _scan_memory_window(
         store, flt, mtypes=DURABLE_TYPES,
         batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
-        max_records=PROFILE_MEMORY_LIMIT, exclude_relation=PROFILE_RELATION,
+        max_records=PROFILE_MEMORY_LIMIT + profile_overlap,
+        exclude_relation=PROFILE_RELATION,
         start_after_id=profile_cursor,
+        overlap=profile_overlap,
+        advance_records=PROFILE_MEMORY_LIMIT + profile_overlap,
     )
     if not dry_run:
         store.set_maintenance_cursor(
