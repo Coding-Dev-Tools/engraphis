@@ -61,6 +61,8 @@ DISTILL_SCAN_LIMIT = 2000
 # allowing the storage scan to page in smaller batches and skip pending rows.
 DISTILL_CLUSTER_LIMIT = 2000
 PROFILE_SCAN_LIMIT = 5000
+PROFILE_MEMORY_LIMIT = 5000
+PROFILE_ENTITY_LIMIT = 2000
 # Transient types eligible for archival (pass 2).
 TRANSIENT_TYPES = [MemoryType.WORKING, MemoryType.EPISODIC]
 # Types the optional local profile pass rolls up.
@@ -105,9 +107,30 @@ def _compaction(tokens_before: int, tokens_after: int, units: int) -> dict:
             "tokens_saved": saved, "reduction_pct": pct, "units": units}
 
 
+def _linked_memory_ids(store, memory_ids: list[str], *, relation: str) -> set[str]:
+    """Return candidate memories already attached by one derived-memory relation."""
+    unique_ids = list(dict.fromkeys(str(memory_id) for memory_id in memory_ids if memory_id))
+    linked: set[str] = set()
+    for start in range(0, len(unique_ids), 500):
+        chunk = unique_ids[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        rows = store.conn.execute(
+            f"SELECT a, b FROM mem_links WHERE relation=? "
+            f"AND (a IN ({marks}) OR b IN ({marks}))",
+            (relation, *chunk, *chunk),
+        ).fetchall()
+        for row in rows:
+            if row["a"] in chunk:
+                linked.add(row["a"])
+            if row["b"] in chunk:
+                linked.add(row["b"])
+    return linked
+
+
 def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
                    batch_size: int, prompt_only: bool = False,
-                   max_records: Optional[int] = None) -> list[MemoryRecord]:
+                   max_records: Optional[int] = None,
+                   exclude_relation: Optional[str] = None) -> list[MemoryRecord]:
     """Read every matching row in deterministic keyset batches.
 
     ``Store.list_memories(limit=...)`` deliberately limits the result after ordering by
@@ -126,6 +149,11 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         page = store.list_memories_page(scoped, after_id=after_id, limit=size)
         if not page:
             break
+        if exclude_relation:
+            excluded = _linked_memory_ids(
+                store, [memory.id for memory in page], relation=exclude_relation,
+            )
+            page = [memory for memory in page if memory.id not in excluded]
         if prompt_only:
             records.extend(
                 memory for memory in page
@@ -360,6 +388,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         store, flt, mtypes=[MemoryType.EPISODIC],
         batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
         max_records=DISTILL_CLUSTER_LIMIT,
+        exclude_relation="consolidates",
     )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
@@ -1035,9 +1064,9 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
 
     Deterministic and offline: entities come from the knowledge graph
     (``store.list_entities``); a memory belongs to an entity's profile if the entity's
-    name occurs in its title/content (case-insensitive), within the same scope and the
-    default (live) validity window. A profile is a ``semantic`` memory linked to every
-    source via ``profiles`` and provenance ``source='profile_consolidation'``.
+    name's bounded memory↔entity incidence rows identify the sources within the same
+    scope and the default (live) validity window. A profile is a ``semantic`` memory
+    linked to every source via ``profiles`` and provenance ``source='profile_consolidation'``.
 
     Idempotent (mirrors the distill pass): if any candidate source is already in a
     profile, the entity is skipped rather than re-summarized. Governed like every other
@@ -1055,18 +1084,30 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
         memory for memory in _scan_memories(
             store, flt, mtypes=DURABLE_TYPES,
             batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
+            max_records=PROFILE_MEMORY_LIMIT, exclude_relation=PROFILE_RELATION,
         )
         if memory.metadata.get("provenance", {}).get("source")
         != "profile_consolidation"
     ]
     p_before = p_after = 0
 
-    for ent in store.list_entities(flt):
+    entities = store.list_entities(flt, limit=PROFILE_ENTITY_LIMIT)
+    entity_ids = {entity.id for entity in entities}
+    live_by_id = {memory.id: memory for memory in live}
+    linked_by_entity: dict[str, set[str]] = {}
+    if live_by_id and entity_ids:
+        for link in store.list_memory_entities(flt, memory_ids=list(live_by_id)):
+            entity_id = str(link.get("entity_id") or "")
+            memory_id = str(link.get("memory_id") or "")
+            if entity_id in entity_ids and memory_id in live_by_id:
+                linked_by_entity.setdefault(entity_id, set()).add(memory_id)
+
+    for ent in entities:
         name = (ent.name or "").strip()
         if len(name) < PROFILE_MIN_NAME_LEN:
             continue
-        pattern = _entity_pattern(name)
-        matching = [m for m in live if pattern.search(f"{m.title} {m.content}")]
+        matching = [live_by_id[memory_id]
+                    for memory_id in linked_by_entity.get(ent.id, set())]
         for sources in _partition_by_visibility_owner(matching):
             if len(sources) < min_mentions:
                 continue

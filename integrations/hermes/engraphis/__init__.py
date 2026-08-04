@@ -113,7 +113,7 @@ class EngraphisMemoryProvider(MemoryProvider):
         try:
             result = self._open().recall(
                 str(query), workspace=self._workspace(), repo=self._repo(),
-                k=_PREFETCH_TOP_K, response_mode="compact",
+                k=_PREFETCH_TOP_K, response_mode="full",
             )
         except Exception as exc:  # noqa: BLE001 - memory must remain non-blocking
             logger.warning("Engraphis prefetch failed (%s)", type(exc).__name__)

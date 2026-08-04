@@ -66,6 +66,8 @@ def test_hermes_provider_uses_scoped_service_and_explicit_secure_erase(monkeypat
     provider._service = service
 
     assert "[mem_1] remember this choice" in provider.prefetch("what did we choose")
+    recall_call = next(call for call in service.calls if call[0] == "recall")
+    assert recall_call[2]["response_mode"] == "full"
     provider.sync_turn("Use the blue theme.", "I will keep that preference.", session_id="hermes-1")
     stored = json.loads(provider.handle_tool_call(
         "engraphis_store", {"text": "The theme is blue.", "keywords": ["theme"]},
