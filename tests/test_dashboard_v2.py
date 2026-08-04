@@ -1050,9 +1050,26 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
 
     with pytest.raises(HTTPException) as ordinary_value_error:
         v2_api._run(fail_with, ValueError(secret))
-    assert ordinary_value_error.value.status_code == 500
-    assert ordinary_value_error.value.detail == {"error": "internal server error"}
+    assert ordinary_value_error.value.status_code == 400
+    assert ordinary_value_error.value.detail == {"error": "invalid request"}
     assert secret not in repr(ordinary_value_error.value.detail)
+
+
+def test_dashboard_engine_value_error_is_a_sanitized_client_error(monkeypatch, tmp_path):
+    secret = "malformed document details must stay private"
+    with _client(monkeypatch, tmp_path) as client:
+        def reject_document(*_args, **_kwargs):
+            raise ValueError(secret)
+
+        monkeypatch.setattr(client.app.state.service, "remember", reject_document)
+        response = client.post(
+            "/api/remember",
+            json={"content": "client document", "workspace": "demo"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": {"error": "invalid request"}}
+    assert secret not in response.text
 
 
 def test_managed_cloud_errors_forward_only_bounded_public_copy():

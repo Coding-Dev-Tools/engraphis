@@ -563,10 +563,16 @@ def test_get_memory_repo_scope_filters_cross_repo_links_and_chain(monkeypatch):
 
     target_id = add("repo-a", "The repo A release is on Tuesday.")
     sibling_id = add("repo-b", "The repo B release is on Friday.")
+    workspace_id = add(None, "The workspace release policy is shared.")
     svc.store.add_link(target_id, sibling_id, relation="related")
+    svc.store.add_link(target_id, workspace_id, relation="related")
     svc.store.conn.execute(
         "UPDATE memories SET metadata=? WHERE id=?",
-        (json.dumps({"supersedes": [target_id]}), sibling_id),
+        (json.dumps({"supersedes": [workspace_id]}), sibling_id),
+    )
+    svc.store.conn.execute(
+        "UPDATE memories SET metadata=? WHERE id=?",
+        (json.dumps({"supersedes": [target_id]}), workspace_id),
     )
     svc.store.conn.execute(
         "UPDATE memories SET confidence=? WHERE id=?",
@@ -578,6 +584,8 @@ def test_get_memory_repo_scope_filters_cross_repo_links_and_chain(monkeypatch):
         memory_id=target_id, workspace="acme", repo="repo-a",
     ))
     assert scoped["confidence"] == 0.42
+    assert workspace_id in {row["id"] for row in scoped["links"]}
+    assert workspace_id in {row["id"] for row in scoped["chain"]}
     assert sibling_id not in {row["id"] for row in scoped["links"]}
     assert sibling_id not in {row["id"] for row in scoped["chain"]}
 
@@ -586,6 +594,8 @@ def test_get_memory_repo_scope_filters_cross_repo_links_and_chain(monkeypatch):
     workspace = _payload(server.engraphis_get_memory(
         memory_id=target_id, workspace="acme",
     ))
+    assert workspace_id in {row["id"] for row in workspace["links"]}
+    assert workspace_id in {row["id"] for row in workspace["chain"]}
     assert sibling_id in {row["id"] for row in workspace["links"]}
     assert sibling_id in {row["id"] for row in workspace["chain"]}
 

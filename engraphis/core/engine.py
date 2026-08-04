@@ -1722,6 +1722,16 @@ class MemoryEngine:
         candidates = self.store.list_memories(flt, limit=500, prompt_only=prompt_only)
         overrides = self.store.list_proactive_overrides(flt, prompt_only=prompt_only)
         records = {rec.id: rec for rec in [*candidates, *overrides]}.values()
+        # SQLite's timestamp ordering is not total when records share an ingestion
+        # timestamp.  Use the id as a stable final key so the agenda does not change
+        # between calls (or between the bounded and override queries).
+        def stable_record_key(rec: MemoryRecord) -> tuple:
+            ingested_at = rec.ingested_at
+            return (
+                ingested_at is None,
+                -(float(ingested_at) if ingested_at is not None else 0.0),
+                rec.id,
+            )
         for rec in records:
             eligible = (
                 prompt_eligible(rec.provenance, rec.metadata)
@@ -1741,7 +1751,8 @@ class MemoryEngine:
                 always.append(rec)
                 continue
             scored.append((scoring.score_proactive(rec, now=now), rec))
-        scored.sort(key=lambda t: t[0], reverse=True)
+        always.sort(key=stable_record_key)
+        scored.sort(key=lambda t: (-t[0], *stable_record_key(t[1])))
         top = [r for _, r in scored[:k]]
         if always:
             # Keep the user's explicit choices first, then the score-ranked remainder.

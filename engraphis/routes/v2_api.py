@@ -162,6 +162,16 @@ def _run(fn, *a, **k):
     except ValidationError:
         logger.info("dashboard request rejected")
         raise _invalid_request() from None
+    except ValueError as exc:
+        if _is_embedder_mismatch(exc):
+            raise HTTPException(status_code=409, detail={
+                "error": "Semantic search needs the embedding model that built your data "
+                         "(sentence-transformers / all-MiniLM). Install it once — "
+                         "pip install \"sentence-transformers>=2.7\" — then restart the "
+                         "dashboard. The Memories, Graph, Overview and Audit tabs work without it.",
+                "embedder": True}) from None
+        logger.info("dashboard request rejected")
+        raise _invalid_request() from None
     except HTTPException as exc:
         logger.info("dashboard dependency rejected request (status=%s)", exc.status_code)
         raise _sanitized_http_exception(exc.status_code) from None
@@ -241,7 +251,7 @@ def _managed_call(fn, *args, **kwargs):
 def _default_ws() -> Optional[str]:
     try:
         wss = service().list_workspaces().get("workspaces") or []
-    except ValidationError:
+    except (ValidationError, ValueError):
         logger.info("workspace lookup rejected")
         raise _invalid_request() from None
     except HTTPException as exc:
@@ -264,7 +274,7 @@ def _require_ws(workspace: Optional[str] = None) -> str:
     if workspace is not None:
         try:
             return service()._clean_ws(workspace)
-        except ValidationError:
+        except (ValidationError, ValueError):
             logger.info("workspace request rejected")
             raise _invalid_request() from None
         except HTTPException as exc:
@@ -811,7 +821,7 @@ def llm_activity(workspace: Optional[str] = None,
         return {"workspace": "", "count": 0, "activities": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError:
+    except (ValidationError, ValueError):
         logger.info("LLM activity request rejected")
         raise _invalid_request() from None
     row = service().store.conn.execute(
@@ -1097,6 +1107,9 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard recall request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(
@@ -1221,7 +1234,7 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = Query(default=N
         return {"workspace": "", "count": 0, "memories": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError:
+    except (ValidationError, ValueError):
         logger.info("dashboard memories request rejected")
         raise _invalid_request() from None
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
@@ -1286,6 +1299,9 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard why request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard why failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, k)
@@ -1309,6 +1325,9 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
         raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
+            if isinstance(exc, ValueError):
+                logger.info("dashboard timeline request rejected")
+                raise _invalid_request() from None
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, limit)
@@ -2166,7 +2185,7 @@ def code_index(req: _CodeIndexReq):
         root_path = _http_code_index_path(req.root_path)
     except _HttpCodeIndexConfigurationError:
         raise _http_index_configuration_error() from None
-    except ValidationError:
+    except (ValidationError, ValueError):
         raise _invalid_request() from None
     return _run(
         service().index_repo, workspace=req.workspace, repo=req.repo,

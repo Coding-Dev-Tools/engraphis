@@ -362,6 +362,61 @@ def test_v6_upgrade_adds_confidence_and_preserves_rows(tmp_path):
         upgraded.close()
 
 
+def test_v7_reopen_canonicalizes_legacy_entity_aliases_idempotently(
+        monkeypatch, tmp_path):
+    """A v7 store gets the one-time alias repair when it first reopens."""
+    db = tmp_path / "v7-entity-aliases.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    store.conn.executemany(
+        "INSERT INTO entities("
+        "id, workspace_id, repo_id, name, etype, canonical_id, normalized_name, "
+        "canonical_method, canonical_confidence, created_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("ent_openai", workspace_id, None, "OpenAI", "org", "ent_openai", "",
+             "identity", 1.0, 1.0),
+            ("ent_open_ai", workspace_id, None, "Open AI", "org", "ent_open_ai", "",
+             "identity", 1.0, 2.0),
+        ],
+    )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (7, 0)")
+    store.conn.commit()
+    store.close()
+
+    reopened = Store(str(db))
+    try:
+        rows = reopened.conn.execute(
+            "SELECT id, canonical_id, canonical_method FROM entities "
+            "ORDER BY id"
+        ).fetchall()
+        assert reopened.schema_version == 9
+        assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
+            ("ent_open_ai", "token_overlap"),
+            ("ent_open_ai", "token_overlap"),
+        ]
+    finally:
+        reopened.close()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("entity canonicalization repeated after v9 migration")
+
+    monkeypatch.setattr(Store, "_backfill_entity_canonicalization", unexpected)
+    reopened_again = Store(str(db))
+    try:
+        rows = reopened_again.conn.execute(
+            "SELECT id, canonical_id, canonical_method FROM entities "
+            "ORDER BY id"
+        ).fetchall()
+        assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
+            ("ent_open_ai", "token_overlap"),
+            ("ent_open_ai", "token_overlap"),
+        ]
+    finally:
+        reopened_again.close()
+
+
 def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_path):
     db = tmp_path / "v8-tombstones.db"
     store = Store(str(db))

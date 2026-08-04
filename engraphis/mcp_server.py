@@ -2378,8 +2378,8 @@ def engraphis_get_memory(
         confidence = target.confidence
     # ``inspect`` authorizes the target against the requested scope, while related
     # records are intentionally returned as a bounded projection.  Keep the same
-    # hierarchy for that projection: an explicit repo request is exact-repo only,
-    # whereas omitting repo retains the established workspace-wide behavior.
+    # hierarchy for that projection: an explicit repo request includes that repo and
+    # workspace-level records, whereas omitting repo retains the workspace-wide behavior.
     requested_repo_id = None
     if repo:
         try:
@@ -2387,20 +2387,32 @@ def engraphis_get_memory(
         except Exception as exc:  # noqa: BLE001 — inspect already validated the request
             return _classify_gateway_exception(exc)
     safe_links = []
-    for link in record.get("links") or []:
-        other = svc.store.get_memory(link.get("id")) if link.get("id") else None
+    for link in svc.store.get_links(mem["id"]):
+        other_id = (
+            link.get("b") if link.get("a") == mem["id"] else link.get("a")
+        )
+        other = svc.store.get_memory(other_id) if other_id else None
         if (other is None or other.workspace_id != target.workspace_id
-                or not prompt_eligible(other.provenance, other.metadata)):
+                or not prompt_eligible(other.provenance, other.metadata)
+                or not svc._memory_visible_to_caller(other)):
             continue
         if (requested_repo_id is not None
                 and other.repo_id not in (None, requested_repo_id)):
             continue
-        safe_links.append(link)
+        safe_links.append({
+            "id": other.id,
+            "relation": link.get("relation") or "related",
+            "layer": link.get("layer") or "semantic",
+            "reason": link.get("reason") or "",
+            "title": other.title or other.content[:80],
+            "live": bool(other.expired_at is None and other.valid_to is None),
+        })
     safe_chain = []
     for entry in record.get("chain") or []:
         other = svc.store.get_memory(entry.get("id")) if entry.get("id") else None
         if (other is not None and other.workspace_id == target.workspace_id
                 and prompt_eligible(other.provenance, other.metadata)
+                and svc._memory_visible_to_caller(other)
                 and (requested_repo_id is None
                      or other.repo_id in (None, requested_repo_id))):
             safe_chain.append(entry)

@@ -4175,6 +4175,12 @@ class MemoryService:
                 self.store._fts_upsert(
                     mid, row["title"] or "", row["content"] or "", kw,
                 )
+            else:
+                # Re-apply the title even when its value is unchanged: older databases
+                # may be missing the lexical mirror, and title edits must restore it.
+                self.store._fts_upsert(
+                    mid, row["title"] or "", row["content"] or "", kw,
+                )
 
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()

@@ -178,24 +178,41 @@ def test_recall_proactive_honors_pinned_and_proactive_flags():
     assert approved[never["id"]] not in ids    # proactive=never is excluded
 
 
-def test_old_pinned_memory_is_not_lost_behind_proactive_scan_window():
+def test_old_pinned_and_always_memories_are_not_lost_behind_proactive_scan_window():
     svc = MemoryService.create(":memory:", embed_model="")
     wid = svc.store.get_or_create_workspace("acme")
-    old = svc.store.add_memory(MemoryRecord(
+    rid = svc.store.get_or_create_repo(wid, "api")
+    old_pinned = svc.store.add_memory(MemoryRecord(
         id="mem_old_pin", content="Old pinned context", workspace_id=wid,
         scope=Scope.WORKSPACE, pinned=True, ingested_at=1.0,
         provenance={"trusted": True, "review_state": "approved"},
     ))
+    old_always = svc.store.add_memory(MemoryRecord(
+        id="mem_old_always", content="Old always context", workspace_id=wid,
+        repo_id=rid, scope=Scope.REPO, ingested_at=1.5,
+        metadata={"proactive": "always"},
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
     for index in range(501):
         svc.store.add_memory(MemoryRecord(
-            id=f"mem_new_{index}", content=f"New context {index}", workspace_id=wid,
-            scope=Scope.WORKSPACE, ingested_at=2.0 + index,
+            id=f"mem_new_{index}", content=f"New context {index}",
+            workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            ingested_at=2.0 + index,
             provenance={"trusted": True, "review_state": "approved"},
         ))
 
-    out = svc.engine.recall_proactive(workspace_id=wid, k=10, prompt_only=True)
-    assert old in {memory.id for memory in out["memories"]}
-
+    out = svc.engine.recall_proactive(
+        workspace_id=wid, repo_id=rid, k=10, prompt_only=True,
+    )
+    ids = [memory.id for memory in out["memories"]]
+    assert old_pinned in ids
+    assert old_always in ids
+    assert len(ids) == len(set(ids)) == 10
+    assert ids == [
+        memory.id for memory in svc.engine.recall_proactive(
+            workspace_id=wid, repo_id=rid, k=10, prompt_only=True,
+        )["memories"]
+    ]
 
 def test_compact_proactive_context_is_bounded_and_does_not_repeat_source_bodies():
     svc = MemoryService.create(":memory:", embed_model="")

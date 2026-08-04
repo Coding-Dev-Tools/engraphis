@@ -492,6 +492,23 @@ def test_update_memory_rolls_back_title_when_index_update_fails():
         memory_id for memory_id, _score in service.store.fts_search("New", 5)
     }
 
+def test_update_memory_rebuilds_missing_fts_row_when_title_is_reapplied():
+    service = MemoryService.create(":memory:")
+    created = service.remember(
+        "The release procedure uses a signed artifact.",
+        workspace="acme", title="Existing runbook",
+    )
+    mid = created["id"]
+    service.store.conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+    service.store.conn.commit()
+    assert service.store.fts_search("Existing", 5) == []
+
+    service.update_memory(mid, workspace="acme", title="Existing runbook")
+
+    assert mid in {
+        memory_id for memory_id, _score in service.store.fts_search("Existing", 5)
+    }
+
 
 def test_conflict_review_hides_another_callers_session_memory():
     service = MemoryService.create(":memory:")

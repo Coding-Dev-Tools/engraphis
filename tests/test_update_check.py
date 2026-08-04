@@ -93,30 +93,28 @@ def test_endpoint_default_and_overrides(monkeypatch):
     assert u._endpoint() == "https://mirror/latest.json"  # explicit URL wins over repo
 
 
-def test_disabled_by_default_and_explicit_opt_out(monkeypatch):
-    monkeypatch.delenv("ENGRAPHIS_UPDATE_CHECK", raising=False)
+@pytest.mark.parametrize("value", [
+    None, "0", "false", "no", "off", "disable", "disabled",
+    "treu", "enabled-ish", "2", "random",
+])
+def test_unset_false_like_and_misspelled_values_stay_offline(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("ENGRAPHIS_UPDATE_CHECK", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", value)
     assert u.enabled() is False
-    # A hard failure if any network is attempted while disabled.
+
+    # Every non-affirmative value must keep check() from opening a socket.
     monkeypatch.setattr(u, "_fetch", lambda *a, **k: pytest.fail("must not hit network"))
     snap = u.check()
     assert snap == u._disabled_snapshot()
-    assert snap["enabled"] is False and snap["update_available"] is False
     assert u.notice_line(snap) is None
-
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "0")
-    assert u.enabled() is False
 
 
 @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "enable", "enabled"])
 def test_recognized_explicit_opt_in_values(monkeypatch, value):
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", value)
     assert u.enabled() is True
-
-
-@pytest.mark.parametrize("value", ["", "treu", "enabled-ish", "2", "random"])
-def test_unrecognized_update_check_values_are_disabled(monkeypatch, value):
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", value)
-    assert u.enabled() is False
 
 
 # ── cache + snapshot behavior ─────────────────────────────────────────────────
