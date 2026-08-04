@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS memories (
     importance   REAL DEFAULT 0.0,
     surprise     REAL DEFAULT 1.0,
     stability    REAL DEFAULT 1.0,
+    confidence   REAL NOT NULL DEFAULT 1.0,      -- 0..1 model/extraction confidence (scoring multiplier)
     access_count INTEGER DEFAULT 0,
     last_access  REAL,
     valid_from   REAL,                             -- world-time validity
@@ -81,6 +82,8 @@ CREATE TABLE IF NOT EXISTS memories (
     pinned       INTEGER DEFAULT 0,
     sensitivity  TEXT DEFAULT 'normal',
     provenance   TEXT DEFAULT '{}',
+    pinned_at    REAL,                              -- system-time when a pin last became effective
+    unpinned_at  REAL,                              -- system-time when an unpin became effective
     sort_order   REAL                              -- manual drag-to-reorder position (dashboard); NULL = unordered
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
@@ -481,6 +484,27 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value      TEXT,
     updated_at REAL
 );
+
+-- Durable per-memory tombstones (sync deletion markers, v8).
+--
+-- ``secure_erase`` hard-deletes the memory row and all local derivatives, but the
+-- deletion must still PROPAGATE: without a tombstone, a peer that still holds the
+-- row keeps pushing it and the next apply re-adds it (the erased memory
+-- resurrects). This table records, with no user content, that a memory id is dead.
+--
+-- It is sync state in the same sense as ``sync_state``: durable, additive, and
+-- shared with no other subsystem. It lives in its own table (not the KV) so the
+-- sync layer can read/merge it in bulk and cap it like the other bundle payloads.
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+    memory_id  TEXT PRIMARY KEY,
+    deleted_at REAL NOT NULL,             -- system-time when the erasure happened
+    device_id  TEXT NOT NULL,             -- origin device (sync attribution only)
+    workspace_id TEXT,                    -- sync scope (may be NULL for legacy rows)
+    created_at REAL NOT NULL
+);
+-- Sync exports scope tombstones by workspace; keep that read bounded as erasures grow.
+CREATE INDEX IF NOT EXISTS idx_memory_tombstones_workspace
+    ON memory_tombstones(workspace_id, memory_id);
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

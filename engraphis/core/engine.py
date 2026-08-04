@@ -30,6 +30,7 @@ from engraphis.backends.reranker import IdentityReranker, get_reranker
 from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
+from engraphis.core.conflicts import detect_conflicts
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
@@ -55,9 +56,15 @@ from engraphis.core.retrieval_policy import (
     CANDIDATE_DEPTH_MODES,
     RETRIEVAL_PROFILES,
 )
-from engraphis.core.resolve import RELATED_SIM_FLOOR, Resolution, ResolutionOp, resolve
+from engraphis.core.resolve import (
+    CONFLICT_RELATION,
+    RELATED_SIM_FLOOR,
+    Resolution,
+    ResolutionOp,
+    resolve,
+)
 from engraphis.core.secrets import reject_secrets
-from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.store import Store, _dumps, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger("engraphis.core.engine")
@@ -75,6 +82,17 @@ _SCOPE_RANK = {
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
 EVOLVE_MAX_LINKS = 3
+
+# The deterministic detector's contradiction/obsolete reports below this severity are
+# too weak to justify a durable ``conflicts_with`` relation. The detector floors its
+# own reports at 0.74 (numeric) / 0.78 (polarity) / 0.82 (assertion), so this only
+# filters out margin-of-error edge cases, keeping the repair trigger conservative.
+CONFLICT_MIN_SEVERITY = 0.7
+
+# Deterministic confidence penalty applied to both sides of a persisted conflict
+# repair. Bounded and explainable: the ``conflicts_with`` link + audit row make the
+# discount auditable, and an explicit human resolution can restore confidence.
+CONFLICT_CONFIDENCE_FACTOR = 0.8
 
 # Metadata keys that feed the entity/edge graph under the *trusted*
 # provenance.source="structured_extractor" label — i.e. "a configured Extractor produced
@@ -430,7 +448,8 @@ class MemoryEngine:
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
                  session_id: Optional[str] = None, mtype: MemoryType = MemoryType.SEMANTIC,
                  scope: Optional[Scope] = None, title: str = "", importance: float = 0.0,
-                 keywords: Optional[list] = None, metadata: Optional[dict] = None,
+                 confidence: Optional[float] = None, keywords: Optional[list] = None,
+                 metadata: Optional[dict] = None,
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
                  candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None) -> str:
@@ -440,7 +459,8 @@ class MemoryEngine:
         """
         return self.remember_with_resolution(
             content, workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
-            mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
+            mtype=mtype, scope=scope, title=title, importance=importance,
+            confidence=confidence, keywords=keywords,
             metadata=metadata, valid_from=valid_from, resolve_conflicts=resolve_conflicts,
             candidate_k=candidate_k, subject_key=subject_key, claim_kind=claim_kind,
             _trusted_graph_keys=_trusted_graph_keys,
@@ -449,7 +469,8 @@ class MemoryEngine:
     def remember_with_resolution(self, content: str, *, workspace_id: str,
                  repo_id: Optional[str] = None, session_id: Optional[str] = None,
                  mtype: MemoryType = MemoryType.SEMANTIC, scope: Optional[Scope] = None,
-                 title: str = "", importance: float = 0.0, keywords: Optional[list] = None,
+                 title: str = "", importance: float = 0.0,
+                 confidence: Optional[float] = None, keywords: Optional[list] = None,
                  metadata: Optional[dict] = None, valid_from: Optional[float] = None,
                  resolve_conflicts: bool = True, candidate_k: int = 5,
                  subject_key: str = "", claim_kind: str = "",
@@ -560,7 +581,8 @@ class MemoryEngine:
                 return self._resolve_and_store(
                     content, text=text, vec=vec, workspace_id=workspace_id, repo_id=repo_id,
                     session_id=session_id, mtype=mtype, scope=scope, title=title,
-                    importance=importance, keywords=keywords, metadata=write_metadata,
+                    importance=importance, confidence=confidence, keywords=keywords,
+                    metadata=write_metadata,
                     valid_from=valid_from, resolve_conflicts=resolve_conflicts,
                     candidate_k=candidate_k, subject_key=subject_key,
                     claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
@@ -575,7 +597,8 @@ class MemoryEngine:
     def _resolve_and_store(self, content: str, *, text: str, vec: Optional[np.ndarray],
                            workspace_id: str, repo_id: Optional[str],
                            session_id: Optional[str], mtype: MemoryType, scope: Scope,
-                           title: str, importance: float, keywords: Optional[list],
+                           title: str, importance: float, confidence: Optional[float],
+                           keywords: Optional[list],
                            metadata: Optional[dict], valid_from: Optional[float],
                            resolve_conflicts: bool, candidate_k: int,
                            subject_key: str, claim_kind: str,
@@ -589,12 +612,12 @@ class MemoryEngine:
         genuinely inherited from an ``Extractor``; everything else is treated as
         caller-supplied — see ``_rehome_untrusted_graph_hints``."""
         poisoning = poisoning or PoisoningDecision(False)
-        decision, neighbors = None, []
+        decision, neighbors, conflicted_with = None, [], None
         # Untrusted records are retained as passive inspection evidence.  They may
         # not deduplicate into, invalidate, relate to, reinforce, or otherwise
         # mutate higher-trust memory; that is a trust lattice, not a detector score.
         if resolve_conflicts and trusted_write and not poisoning.quarantined:
-            decision, neighbors = self._resolve_against_neighbors(
+            decision, neighbors, conflicted_with = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
@@ -648,6 +671,12 @@ class MemoryEngine:
                     "valid_from cannot predate the memory it supersedes; "
                     "record the historical interval separately or correct the older memory"
                 )
+        if decision is not None and decision.op == ResolutionOp.INVALIDATE:
+            # A keyed/temporal supersession is the resolution: the detector may have
+            # flagged the superseded predecessor earlier, but a closed record is no
+            # longer a live conflict — drop the repair so no ``conflicts_with`` link,
+            # metadata marker, or confidence discount is written for this write.
+            conflicted_with = None
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
             self.store.reinforce(decision.target_id, boost=scoring.INTERACTION_BOOST["create"])
@@ -670,7 +699,12 @@ class MemoryEngine:
             # Persist the supersession pointer on the new record so the chain is
             # queryable later (why/timeline/inspector), not only in the audit log.
             meta["supersedes"] = [decision.target_id]
-
+        if conflicted_with:
+            # Surface the deterministic conflict repair on the new record so
+            # downstream (recall/why/inspector) can explain the lowered confidence
+            # without a separate graph walk. The neighbor side already carries the
+            # durable ``conflicts_with`` link; this is a minimal, queryable mirror.
+            meta["conflict_with"] = [conflicted_with]
         if poisoning.quarantined:
             # Retained only for governance inspection: an untrusted payload must not
             # elevate itself through caller-supplied retention supervision.
@@ -683,10 +717,25 @@ class MemoryEngine:
             meta["retention_supervision"] = retention_signal
 
         quarantine_at = valid_from if valid_from is not None else now_ts()
+        # Confidence defaults to 1.0 (no scoring change for ordinary writes); a
+        # caller-supplied value wins, and the structured-extraction metadata hint is
+        # honored when present so persisted verdicts actually reach scoring.
+        if confidence is None:
+            confidence = meta.get("confidence", 1.0)
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 1.0
+        confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 1.0
+        if conflicted_with:
+            # The new fact directly contradicts a live memory without a safe
+            # supersession; neither side gets to claim full confidence.
+            confidence = round(confidence * CONFLICT_CONFIDENCE_FACTOR, 4)
         rec = MemoryRecord(
             id="", content=content, mtype=mtype, scope=scope, workspace_id=workspace_id,
             repo_id=repo_id, session_id=session_id, title=title, importance=importance,
-            stability=stability, subject_key=subject_key, claim_kind=claim_kind,
+            stability=stability, confidence=confidence,
+            subject_key=subject_key, claim_kind=claim_kind,
             keywords=keywords or [], metadata=meta,
             # A zero-length validity interval retains the record/audit trail while the
             # existing temporal filters keep it out of every normal recall arm.
@@ -815,6 +864,31 @@ class MemoryEngine:
             return out
 
         linked = self._evolve(mid, neighbors) if trusted_write else []
+        if conflicted_with:
+            # Deterministic conflict repair: persist the ``conflicts_with`` relation
+            # (with the real new-memory id), the audit row, and a bounded confidence
+            # discount on BOTH sides. Non-fatal: a storage hiccup here must not fail
+            # the write — the conflict metadata on the new record already surfaced it.
+            try:
+                self.store.add_link(
+                    mid, conflicted_with, CONFLICT_RELATION,
+                    reason=(
+                        "detector=contradiction; deterministic contradiction "
+                        "(no safe supersession)"
+                    ),
+                    valid_from=valid_from,
+                )
+                self.store.audit(
+                    "resolver", "conflict_detected", conflicted_with,
+                    f"new_memory={mid}; deterministic contradiction (no safe supersession)",
+                )
+                self.store.conn.execute(
+                    "UPDATE memories SET confidence=MIN(confidence, ?) WHERE id=?",
+                    (round(CONFLICT_CONFIDENCE_FACTOR, 4), conflicted_with),
+                )
+                self.store.conn.commit()
+            except Exception:  # noqa: BLE001 — best-effort repair, never fail the write
+                pass
         if decision is not None and decision.op == ResolutionOp.RELATE:
             related_to = decision.target_id
             if related_to and not self.store.has_link(mid, related_to):
@@ -825,6 +899,8 @@ class MemoryEngine:
             }
         else:
             out = {"id": mid, "op": "add", "reason": decision.reason if decision else ""}
+        if conflicted_with:
+            out["conflict_with"] = conflicted_with
         if linked:
             out["linked"] = linked
         return out
@@ -985,9 +1061,10 @@ class MemoryEngine:
                                    valid_at: Optional[float] = None,
                                    content: Optional[str] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
-        resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
-        also evolve the neighborhood. Never raises — a broken/missing index degrades to
-        "no neighbors found" (ADD), not a write failure."""
+        resolver (``core.resolve``). Returns ``(decision, neighbors, conflicted_with)``
+        so the caller can also evolve the neighborhood and persist a conflict repair.
+        Never raises — a broken/missing index degrades to "no neighbors found" (ADD),
+        not a write failure."""
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id if scope == Scope.SESSION else None,
@@ -1074,10 +1151,59 @@ class MemoryEngine:
             for record in authoritative:
                 if record.id not in known_ids:
                     neighbors.append((1.0, record))
-        return resolve(
+        decision = resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
             candidate_content=content,
-        ), neighbors
+        )
+        # Repair trigger: when the resolver cannot safely supersede (INVALIDATE/NOOP),
+        # surface a genuine high-severity contradiction as a persisted relation instead
+        # of a silent coin-flip ADD. ``_repair_conflicts`` is a pure detector (self-
+        # guarding, no-op on any failure); persistence happens in ``_resolve_and_store``
+        # once the new memory exists and its real id is known.
+        conflicted_with: Optional[str] = None
+        if decision.op not in (ResolutionOp.INVALIDATE, ResolutionOp.NOOP):
+            conflicted_with = self._repair_conflicts(
+                "", text, neighbors, workspace_id=workspace_id,
+                repo_id=repo_id, valid_at=valid_at,
+            )
+        return decision, neighbors, conflicted_with
+
+    def _repair_conflicts(self, new_id: str, new_text: str, neighbors: list, *,
+                          workspace_id: str, repo_id: Optional[str],
+                          valid_at: Optional[float]) -> Optional[str]:
+        """Detect a deterministic, high-severity contradiction among the neighbors the
+        resolver could not safely supersede.
+
+        The resolver only INVALIDATEs on a shared claim key or on strong joint
+        lexical+semantic evidence; a true semantic contradiction with little token
+        overlap otherwise lands as a plain ADD — a silent coin-flip between two live
+        facts. This hook runs ``core.conflicts.detect_conflicts`` over the same scoped,
+        prompt-eligible neighbor set that resolution already saw and returns the
+        highest-severity genuine contradiction (``contradiction`` or ``obsolete``)
+        when no safe supersession happened. The caller persists the ``conflicts_with``
+        relation, audit row, and confidence discount after the new memory exists.
+
+        Conservative by construction: the detector is deterministic and precision-first,
+        this runs only for trusted, non-quarantined writes whose resolution produced no
+        INVALIDATE/NOOP, only top-K neighbors are considered (the same bounded set the
+        resolver saw), duplicates/refinements never create a link, and any failure
+        degrades to a no-op — never a write error.
+        """
+        try:
+            conflicts = detect_conflicts(new_text, (rec for _, rec in neighbors))
+        except Exception:
+            return None
+        if not conflicts:
+            return None
+        conflict = conflicts[0]
+        if conflict.type not in ("contradiction", "obsolete"):
+            return None
+        if conflict.severity < CONFLICT_MIN_SEVERITY:
+            return None
+        target_id = conflict.memory_id
+        if not target_id or target_id == new_id:
+            return None
+        return target_id
 
     # ── ingest: extract-then-remember ───────────────────────────────────────────
     def ingest(self, text: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -1592,6 +1718,7 @@ class MemoryEngine:
         )
         now = now_ts()
         scored = []
+        always: list = []
         for rec in self.store.list_memories(flt, limit=500, prompt_only=prompt_only):
             eligible = (
                 prompt_eligible(rec.provenance, rec.metadata)
@@ -1600,9 +1727,23 @@ class MemoryEngine:
             )
             if not eligible:
                 continue
+            # Per-memory proactive rules: a user-flagged ``metadata["proactive"]`` value
+            # ("always" | "never") overrides the score, and ``pinned`` always includes
+            # (the Mem0-style add-to-context analogue). "never" excludes regardless of
+            # importance so a user can silence a memory from the agenda.
+            proactive = (rec.metadata or {}).get("proactive")
+            if str(proactive).lower() == "never":
+                continue
+            if str(proactive).lower() == "always" or rec.pinned:
+                always.append(rec)
+                continue
             scored.append((scoring.score_proactive(rec, now=now), rec))
         scored.sort(key=lambda t: t[0], reverse=True)
         top = [r for _, r in scored[:k]]
+        if always:
+            # Keep the user's explicit choices first, then the score-ranked remainder.
+            top = always + [r for r in top if r.id not in {a.id for a in always}]
+            top = top[:k]
 
         last_session: dict = {}
         if repo_id:
@@ -1835,6 +1976,18 @@ class MemoryEngine:
                 self.store.conn.commit()
             if old.pinned:
                 self.store.set_pinned(result["id"], True)
+            # Carry the proactive-agenda flag ("always"/"never") onto the approved
+            # successor. The user's explicit agenda choice is a governance decision,
+            # not review-dependent content, so it must survive the approval ceremony.
+            if (old.metadata or {}).get("proactive"):
+                successor = self.store.get_memory(result["id"])
+                successor_meta = dict(successor.metadata or {}) if successor else {}
+                successor_meta.setdefault("proactive", old.metadata["proactive"])
+                self.store.conn.execute(
+                    "UPDATE memories SET metadata=? WHERE id=?",
+                    (_dumps(successor_meta), result["id"]),
+                )
+                self.store.conn.commit()
             self.store.audit(
                 "human_review", "approve", result["id"],
                 f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",

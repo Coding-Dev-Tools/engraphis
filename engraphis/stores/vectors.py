@@ -7,7 +7,26 @@ from typing import Any, Optional
 
 import numpy as np
 
-from engraphis.stores import blob_to_vector, get_conn, now_ts, vector_to_blob
+from engraphis.stores import blob_to_vector, get_conn, now_ts
+
+
+def _vector_blob(vector: np.ndarray) -> bytes:
+    """Validate and normalize one persisted embedding without device assumptions."""
+    try:
+        values = np.asarray(vector, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("vector must be a finite 1-D float32 array") from exc
+    if values.ndim != 1 or values.shape[0] < 1:
+        raise ValueError("vector must be a 1-D array with a positive dimension")
+    if not np.isfinite(values).all():
+        raise ValueError("vector must contain only finite values")
+    with np.errstate(over="ignore", invalid="ignore"):
+        norm = float(np.linalg.norm(values))
+    if not np.isfinite(norm):
+        raise ValueError("vector norm must be finite")
+    if norm > 0:
+        values = values / norm
+    return values.tobytes()
 
 
 def upsert_memory(
@@ -29,8 +48,16 @@ def upsert_memory(
     ts = now_ts()
     created_at = created_at or ts
     updated_at = updated_at or ts
-    meta_json = json.dumps(metadata or {}, ensure_ascii=False)
-    vec_blob = vector_to_blob(vector) if vector is not None else None
+    stamped_metadata = dict(metadata or {})
+    if "provenance" not in stamped_metadata:
+        stamped_metadata["provenance"] = {
+            "source": "legacy_store",
+            "trusted": True,
+            "trust_origin": "legacy_store",
+            "review_state": "approved",
+        }
+    meta_json = json.dumps(stamped_metadata, ensure_ascii=False)
+    vec_blob = _vector_blob(vector) if vector is not None else None
 
     existing = conn.execute(
         "SELECT id, access_count, stability, surprise, last_access, memory_type "
@@ -152,7 +179,7 @@ def update_memory_content(
         params.append(json.dumps(metadata, ensure_ascii=False))
     if vector is not None:
         sets.append("vector=?")
-        params.append(vector_to_blob(vector))
+        params.append(_vector_blob(vector))
     if memory_type is not None:
         sets.append("memory_type=?")
         params.append(memory_type)
@@ -220,7 +247,14 @@ def all_vectors(namespace: Optional[str] = None) -> list[tuple[int, str, str, np
     out = []
     for r in rows:
         mem = _row_to_mem(r)
-        vec = blob_to_vector(r["vector"])
+        try:
+            vec = blob_to_vector(r["vector"])
+        except (TypeError, ValueError):
+            # A truncated/legacy-corrupt BLOB must not take down the entire
+            # recall pass; only return well-formed finite vectors.
+            continue
+        if vec.ndim != 1 or vec.shape[0] < 1 or not np.isfinite(vec).all():
+            continue
         out.append((r["id"], mem["namespace"], mem["document_id"], vec, mem))
     return out
 

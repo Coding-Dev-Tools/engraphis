@@ -21,7 +21,7 @@ function esc(s){if(s===undefined||s===null)return '';return (''+s).replace(/&/g,
    removes tab/newline/C0 before resolving a scheme, so a split scheme would re-form
    as javascript: after a naive scheme match had already failed. A scheme-less string
    that still contains ':' therefore fails closed rather than passing through. */
-function safeUrl(u){if(!u||typeof u!=='string')return '#';const s=u.replace(/[\u0000-\u001F\u007F]/g,'').trim();if(/^#/.test(s))return s;const m=s.match(/^([a-z][a-z0-9+.-]*):/i);if(!m)return /:/.test(s)?'#':s;if(/^(https?|mailto|ftps?)$/i.test(m[1]))return s;return '#'}
+function safeUrl(u){if(!u||typeof u!=='string')return '#';const s=u.replace(/[\u0000-\u001F\u007F]/g,'').trim();if(/^#/.test(s))return s;if((s[0]==='/'||s[0]==='\\')&&(s[1]==='/'||s[1]==='\\'))return '#';const m=s.match(/^([a-z][a-z0-9+.-]*):/i);if(!m)return /:/.test(s)?'#':s;if(/^(https?|mailto|ftps?)$/i.test(m[1]))return s;return '#'}
 function showAs(el,visible,mode){if(!el)return;el.classList.toggle('is-hidden',!visible);for(const name of ['is-flex','is-block','is-inline-flex'])el.classList.remove(name);if(visible&&mode)el.classList.add('is-'+mode)}
 function setTone(el,tone){if(!el)return;for(const name of ['tone-red','tone-green','tone-muted'])el.classList.remove(name);if(tone)el.classList.add('tone-'+tone)}
 function renderMd(md){try{return DOMPurify.sanitize(marked.parse(md||''))}catch(e){return esc(md)}}
@@ -462,7 +462,7 @@ async function wsCreate(){
   await loadWorkspaceList();setWS(name);toast('Folder "'+name+'" created — now the active folder','ok');refreshFolders();
  }catch(e){toast('Create failed: '+e.message,'err')}
 }
-function wsSwitch(name){setWS(name);toast('Switched to '+name,'ok');loadOverview();navTo('overview')}
+function wsSwitch(name){setWS(name);toast('Switched to '+name,'ok');navTo('overview')}
 
 /* import (files/folders from this PC — see MemoryService.import_folder/import_files) */
 async function importUpload(items){if(!canCreateWs()){toast('Viewers can’t import','err');return}if(!WS){toast('Create or select a folder first','err');return}if(!items||!items.length)return;const fd=new FormData();fd.append('workspace',WS);fd.append('memory_type','semantic');fd.append('derive_facts',document.getElementById('import-derive').checked?'true':'false');for(const it of items)fd.append('files',it.file,it.name);const el=document.getElementById('import-status');el.textContent='Extracting and importing '+items.length+' file(s)…';try{const r=await api('/workspaces/import-files',{method:'POST',body:fd});const wc=(r.warnings||[]).length;el.textContent=r.imported+' imported, '+r.skipped+' skipped, '+r.errors+' error(s), '+(r.derived_facts||0)+' derived fact(s)'+(wc?', '+wc+' warning(s)':'');toast(r.imported+' resource'+(r.imported===1?'':'s')+' imported into "'+WS+'"','ok');refreshFolders()}catch(e){el.textContent='';toast('Import failed: '+e.message,'err')}}
@@ -516,7 +516,7 @@ function licStateBanner(state,plan,ends,status){
  if(state==='lapsed'){const note=LIC_STATUS_NOTE[status];return `<div class="lic-banner lic-banner-warn"><strong>Your ${esc(plan||'hosted')} subscription is no longer active</strong>${note?esc(note.charAt(0).toUpperCase()+note.slice(1))+', so hosted':'Hosted'} features are locked until billing is up to date. Your local memories are unaffected. Open the account portal to restore access.</div>`}
  if(state==='inactive')return `<div class="lic-banner"><strong>No hosted plan on this installation</strong>The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation, and Team administration run in Engraphis Cloud.</div>`;
  return ''}
-function licActionsHtml(state){if(state!=='active'&&state!=='lapsed'&&state!=='trial')return '';const pro=hostedCta('pro','license');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`}
+function licActionsHtml(state){if(state!=='active'&&state!=='lapsed'&&state!=='trial'&&state!=='inactive'&&state!=='trial_expired')return '';const pro=hostedCta('pro','license');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();
@@ -561,12 +561,14 @@ const setLlmExtractorBase=setLlmExtractor;
 setLlmExtractor=async function(on){if(on&&!await confirmAction('Turn on LLM extraction',EXTERNAL_LLM_PRIVACY_COPY,'Turn on'))return;return setLlmExtractorBase(on)};
 /* Route by cause, exactly like loadAnalytics/loadAutomation. Rendering the purchase panel for
    every failure told a paying customer to buy the plan they already own whenever the network
-   blipped or the cloud answered 5xx. Only 401/402/501 are billing answers. */
+   blipped or the cloud answered 5xx. Only 402 is an entitlement answer; 401/403 require reconnecting. */
 async function loadSyncStatus(){try{const d=await api('/sync/status');renderSync(d)}catch(e){const el=document.getElementById('sync-body');if(!el)return;if(managedConsentRequired(e))el.innerHTML=managedConsentHtml('Cloud Sync');else if(hostedFeatureUnavailable(e))el.innerHTML=unlockHtml('Cloud Sync','pro');else el.innerHTML='<div class="empty" data-csp-style="s87">'+esc(e.message)+'</div>'}}
-function syncTotalAuthorizationDenial(last){if(!last||!(Number(last.attempted)>0)||Number(last.succeeded)!==0)return false;const errors=Array.isArray(last.errors)?last.errors:[];return errors.length===Number(last.attempted)&&errors.every(error=>[401,402,403].includes(Number(error.status)))}
+function syncTotalAuthorizationDenial(last){if(!last||!(Number(last.attempted)>0)||Number(last.succeeded)!==0)return false;const errors=Array.isArray(last.errors)?last.errors:[];return errors.length===Number(last.attempted)&&errors.every(error=>[401,402,403].includes(Number(error&&error.status)))}
 function syncRecoveryHtml(){return unlockHtml('Cloud Sync','pro')+`<div data-csp-style="s177"><button class="btn btn-ghost btn-sm" id="sync-retry-btn" data-onclick="h136">Try Cloud Sync again</button></div>`}
-function renderSync(d){const el=document.getElementById('sync-body');if(!el)return;d=d||{};const last=d.last;if(!d.available){el.innerHTML=unlockHtml('Cloud Sync','pro');return}if(syncTotalAuthorizationDenial(last)){el.innerHTML=syncRecoveryHtml();return}let status='Cloud session connected; no sync recorded on this installation.';if(last){const when=new Date((last.at||0)*1000).toLocaleString();status='Last synced '+when+' — pushed '+(last.exported||0)+', +'+(last.added||0)+' received'+((last.errors&&last.errors.length)?' · '+last.errors.length+' issue(s)':'')+'.'}el.innerHTML=`<div class="cfg-row"><span>Hosted relay</span><span class="pill pill-green">CONNECTED</span></div><div class="field-hint">Relay storage and authorization run in Engraphis Cloud. This package contains only the customer client; it does not run a local relay or background scheduler.</div><div data-csp-style="s177"><button class="btn btn-primary" id="sync-btn" data-onclick="h136">Sync now</button><span class="field-hint" id="sync-status">${esc(status)}</span></div>`}
-async function syncNow(){const b=document.getElementById('sync-btn')||document.getElementById('sync-retry-btn');const original=b&&b.textContent;const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){if(e.status===401||e.status===402||e.status===403){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncRecoveryHtml();toast(e.status===402?'Cloud Sync requires an active Pro or Team entitlement — open Engraphis Cloud to upgrade or renew.':'Cloud Sync authorization is no longer active — reconnect in Engraphis Cloud.','err');return}toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent=original||'Sync now'}if(s)s.textContent='Sync failed — try again.'}}
+function syncReconnectHtml(){return `<div class="empty" data-csp-style="s87">Cloud Sync is not authorized for this installation. Reconnect in Engraphis Cloud or contact your administrator.</div><div data-csp-style="s177"><button class="btn btn-ghost btn-sm" id="sync-retry-btn" data-onclick="h136">Try Cloud Sync again</button></div>`}
+function syncDenialHtml(last){const errors=Array.isArray(last&&last.errors)?last.errors:[];return errors.some(error=>[401,403].includes(Number(error&&error.status)))?syncReconnectHtml():syncRecoveryHtml()}
+function renderSync(d){const el=document.getElementById('sync-body');if(!el)return;d=d||{};const last=d.last;if(!d.available){el.innerHTML=unlockHtml('Cloud Sync','pro');return}if (syncTotalAuthorizationDenial(last)) { el.innerHTML = syncDenialHtml(last); return; }let status='Cloud session connected; no sync recorded on this installation.';if(last){const when=new Date((last.at||0)*1000).toLocaleString();status='Last synced '+when+' — pushed '+(last.exported||0)+', +'+(last.added||0)+' received'+((last.errors&&last.errors.length)?' · '+last.errors.length+' issue(s)':'')+'.'}el.innerHTML=`<div class="cfg-row"><span>Hosted relay</span><span class="pill pill-green">CONNECTED</span></div><div class="field-hint">Relay storage and authorization run in Engraphis Cloud. This package contains only the customer client; it does not run a local relay or background scheduler.</div><div data-csp-style="s177"><button class="btn btn-primary" id="sync-btn" data-onclick="h136">Sync now</button><span class="field-hint" id="sync-status">${esc(status)}</span></div>`}
+async function syncNow(){const b=document.getElementById('sync-btn')||document.getElementById('sync-retry-btn');const original=b&&b.textContent;const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){const status=Number(e&&e.status);if(status===402){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncRecoveryHtml();toast('Cloud Sync requires an active Pro or Team entitlement — open Engraphis Cloud to upgrade or renew.','err')}else if(status===401||status===403){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncReconnectHtml();toast('Cloud Sync authorization is no longer active — reconnect in Engraphis Cloud.','err')}else{toast('Sync failed: '+e.message,'err');if(s)s.textContent='Sync failed — try again.'}}finally{if(b){b.disabled=false;b.textContent=original||'Sync now'}}}
 
 const syncNowBase=syncNow;
 syncNow=async function(){if(!await confirmCloudTransfer('Sync shared workspaces','Cloud Sync sends eligible changes from your shared workspaces to Engraphis Cloud and receives authorized changes from your other installations; secret and session-scoped rows stay local.','Sync now',CLOUD_SYNC_PRIVACY_COPY))return;return syncNowBase()}
@@ -582,6 +584,9 @@ const GRAPH_PRESETS={
  custom:{label:'Custom tuning',curve:.1,particles:0}
 };
 window.GSET=window.GSET||{mode:'communities',font:12,size:3,repel:48,link:16,gravity:48,labels:false,linkw:.72,labelDensity:24,flow:true,frozen:false};
+// Freeze is session-only. Never let a pre-existing dashboard state make a newly opened graph
+// look broken: every Classic graph begins with physics live until its visible switch is clicked.
+window.GSET.frozen=false;
 /* Keep legacy Classic geometry in the same compact world-space range as Ledger. The old
    `size * sqrt(1 + degree)` rule let a highly connected entity become a giant disc, then
    zoom-to-fit magnified that disc again. Degree still adds a restrained emphasis, but it is
@@ -733,7 +738,7 @@ function graphRenderEngine(data,fit,reheat){
    engine.setLayers(layers);
    engine.setScope({showUnlinked,minDegree:showUnlinked?0:1});
    if(dataChanged)engine.setData(data);
-  },fit,reheat&&!prefersReducedMotion());
+  },fit,reheat);
   /* Mirror the engine's clustering back onto the dashboard's own node objects, or the
      cluster legend (which reads GACTIVE_DATA) reports one community for the whole store. */
   const communityMap=GRAPH_ENGINE.communityMap();
@@ -746,7 +751,7 @@ function graphRenderEngine(data,fit,reheat){
      null. Re-apply the parked state here so a renderer created against a hidden pane never
      starts a rAF that nothing will stop. */
   if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
-  graphSetSimulationStatus(prefersReducedMotion()?'Static layout':'Adaptive layout',false);
+  graphSetSimulationStatus(window.GSET.frozen?'Layout frozen':'Adaptive layout',false);
   return true;
  }catch(error){
   graphEngineFallback(error);
@@ -1364,7 +1369,7 @@ function graphUpdateEditedBadge(){
 function graphResetPreset(){graphApplyPreset(window.GSET.mode==='custom'?'compact':window.GSET.mode);toast('Preset restored','ok')}
 function graphToggleFlow(control){window.GSET.flow=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({flow:control.checked});else if(FG)graphRender(false,false)}
 function graphToggleFreeze(control){
- window.GSET.frozen=control.checked;if(GRAPH_ENGINE){GRAPH_ENGINE.freeze(control.checked);return}if(!FG)return;
+ window.GSET.frozen=control.checked;if(GRAPH_ENGINE){GRAPH_ENGINE.freeze(control.checked);graphSetSimulationStatus(control.checked?'Layout frozen':'Adaptive layout',false);return}if(!FG)return;
  const ns=(FG.graphData().nodes)||[];
  if(control.checked){ns.forEach(n=>{n.fx=n.x;n.fy=n.y});graphSetSimulationStatus('Layout frozen')}
  else{ns.forEach(n=>{n.fx=null;n.fy=null});FG.d3ReheatSimulation()}

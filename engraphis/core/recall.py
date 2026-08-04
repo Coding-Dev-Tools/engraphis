@@ -72,6 +72,22 @@ from engraphis.core.textutil import jaccard, tokenize
 PROMPT_ONLY_MIN_CANDIDATES = 256
 PROMPT_ONLY_MAX_CANDIDATES = 1024
 
+# Provenance sources that mark a memory as the durable *product* of consolidation
+# (sleep-time distill digests, schema-distilled facts, and entity profiles — see
+# core/consolidate.py).  Recall gives these consolidated summaries a small,
+# deterministic additive bonus after normalization so a digest retrieved alongside
+# its raw source episodes is preferred, while an ordinary memory is never penalized.
+CONSOLIDATION_SOURCES = frozenset({
+    "consolidation",
+    "structured_consolidation",
+    "profile_consolidation",
+})
+# Additive bonus applied to the fused score of consolidated digests/profiles once
+# every arm contribution has been min-max normalized.  Deliberately small: it is a
+# preference signal, not a relevance substitute — a raw episode that actually matches
+# the query keeps outranking a digest the query merely grazes.
+CONSOLIDATION_BONUS = 0.05
+
 
 @dataclass
 class RecallResult:
@@ -423,6 +439,15 @@ class RecallEngine:
                 if mid in arm_state["raw"][name]
             ]
             fusion_score = base + 0.5 * rrf.get(mid, 0.0)
+            if _consolidated_source(rec):
+                # Small deterministic preference for consolidated digests/profiles
+                # (post-normalization constant; see CONSOLIDATION_BONUS).  Kept out
+                # of the base score so raw evidence comparisons stay untouched.
+                fusion_score += CONSOLIDATION_BONUS
+            evidence = (
+                _consolidation_evidence(rec, store=self.store)
+                if _consolidated_source(rec) else []
+            )
             arm = (
                 "code" if "code" in arms
                 else (arms[0] if len(arms) == 1 else ("hybrid" if arms else "fused"))
@@ -456,6 +481,10 @@ class RecallEngine:
                 "calibrated_score": fusion_score,
                 "arm_agreement": len(arms),
                 "arms": arms,
+                "consolidation_bonus": (
+                    CONSOLIDATION_BONUS if _consolidated_source(rec) else 0.0
+                ),
+                "consolidation_source_ids": evidence,
             }
         # Tie-break on id so equal scores get a stable, process-independent order.
         scored.sort(key=lambda c: (-c.score, c.id))
@@ -546,6 +575,12 @@ class RecallEngine:
             "claim_kind": c.record.claim_kind,
             "retention": round(scoring.retention(c.record.stability, c.record.last_access, now), 4),
             "provenance": c.record.provenance,
+            # Consolidated digests/profiles expose the ids of the source memories
+            # they summarize as citable evidence (never their bodies — see
+            # ``_consolidation_evidence``).  Ordinary memories carry no such field.
+            "consolidation_source_ids": (
+                _consolidation_evidence(c.record, store=self.store)
+            ),
         } for c in final]
         context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
         trace = None
@@ -591,7 +626,15 @@ class RecallEngine:
             ),
             token_counter=getattr(self.context_packer, "count_tokens", None),
             source_metadata={
-                candidate.id: _source_safety_metadata(candidate.record)
+                candidate.id: {
+                    **_source_safety_metadata(candidate.record),
+                    **(
+                        {"consolidation_source_ids": _consolidation_evidence(
+                            candidate.record, store=self.store
+                        )}
+                        if _consolidated_source(candidate.record) else {}
+                    ),
+                }
                 for candidate in final
                 if candidate.record is not None
             },
@@ -1176,7 +1219,13 @@ class RecallEngine:
     def _seed_entity_map(
         self, query: str, flt: SearchFilter, *, limit: int = 2048,
     ) -> dict[str, str]:
-        """Return a bounded, scoped set of entity names that may occur in ``query``."""
+        """Return a bounded, scoped set of entity names that may occur in ``query``.
+
+        Direct name matches come first. When they are thin, a second pass resolves the
+        query against canonical entity names so an alias member ("Open AI") seeds the
+        whole canonical group whose representative ("OpenAI") appears in the query —
+        the graph arm otherwise returns nothing on paraphrases.
+        """
         terms = sorted({
             term.casefold() for term in re.findall(r"[\w@#.+-]+", query)
             if len(term) >= 2
@@ -1208,9 +1257,81 @@ class RecallEngine:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id LIMIT ?"
         params.append(max(0, int(limit)))
-        return {
+        seeds = {
             r["id"]: r["name"]
             for r in self.store.conn.execute(sql, params).fetchall()
+        }
+        if seeds:
+            # Expand to the full canonical group: when a query matches one member of a
+            # canonical alias group, every member is a valid seed (the graph arm should
+            # not depend on which spelling the query happened to use). The expansion
+            # must stay inside the caller's scope — an unscoped JOIN here would let a
+            # scoped recall pull another workspace's members of the same canonical
+            # group into the seeds. Use the same include_ancestors semantics as the
+            # initial seed query and the canonical fallback below.
+            group_clauses = []
+            if flt.workspace_id:
+                if flt.include_ancestors:
+                    group_clauses.append("(e.workspace_id=? OR e.workspace_id IS NULL)")
+                else:
+                    group_clauses.append("e.workspace_id=?")
+                params_group = [flt.workspace_id]
+            else:
+                params_group = []
+            if flt.repo_id:
+                if flt.include_ancestors:
+                    group_clauses.append("(e.repo_id=? OR e.repo_id IS NULL)")
+                else:
+                    group_clauses.append("e.repo_id=?")
+                params_group.append(flt.repo_id)
+            marks = ",".join("?" for _ in seeds)
+            expanded = self.store.conn.execute(
+                "SELECT e.id, e.name FROM entities e WHERE e.canonical_id IN ("
+                "SELECT COALESCE(NULLIF(e2.canonical_id, ''), e2.id) FROM entities e2 "
+                f"WHERE e2.id IN ({marks})"
+                + ((" AND " + " AND ".join(group_clauses)) if group_clauses else "")
+                + ") AND "
+                + (" AND ".join(group_clauses) if group_clauses else "1=1")
+                + " LIMIT ?",
+                # Placeholder order matches the SQL text: subquery marks, subquery
+                # scope clauses, outer scope clauses, then the LIMIT.
+                list(seeds) + params_group + params_group + [max(0, int(limit))],
+            ).fetchall()
+            return {r["id"]: r["name"] for r in expanded} or seeds
+        # Canonical fallback: an entity whose representative name appears in the query
+        # (even when the stored member spelling differs) seeds the whole group. The
+        # JOIN introduces a second `entities` alias, so every scope clause must be
+        # qualified with `e.` to avoid an ambiguous-column error.
+        canonical_clauses = []
+        if flt.workspace_id:
+            if flt.include_ancestors:
+                canonical_clauses.append("(e.workspace_id=? OR e.workspace_id IS NULL)")
+            else:
+                canonical_clauses.append("e.workspace_id=?")
+        if flt.repo_id:
+            if flt.include_ancestors:
+                canonical_clauses.append("(e.repo_id=? OR e.repo_id IS NULL)")
+            else:
+                canonical_clauses.append("e.repo_id=?")
+        canonical_clauses.append(
+            "(" + " OR ".join("instr(lower(c.name), ?) > 0" for _ in terms) + ")"
+        )
+        sql2 = (
+            "SELECT DISTINCT e.id, e.name FROM entities e "
+            "JOIN entities c ON c.id = COALESCE(NULLIF(e.canonical_id, ''), e.id) "
+            "WHERE " + " AND ".join(canonical_clauses) +
+            " ORDER BY e.id LIMIT ?"
+        )
+        # Scope params (workspace_id/repo_id) come first, then the name terms.
+        scope_params = []
+        if flt.workspace_id:
+            scope_params.append(flt.workspace_id)
+        if flt.repo_id:
+            scope_params.append(flt.repo_id)
+        canonical_params = scope_params + terms + [max(0, int(limit))]
+        return {
+            r["id"]: r["name"]
+            for r in self.store.conn.execute(sql2, canonical_params).fetchall()
         }
 
     def _entity_map(self, flt: SearchFilter, *, limit: int = 2048) -> dict[str, str]:
@@ -1338,6 +1459,14 @@ def _planned_filter(
     return replace(flt, mtypes=ordered)
 
 
+def _finite_arm_score(value: object) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
 def _fuse_query_runs(
     query_runs: list[dict[str, Any]],
     recs: dict[str, MemoryRecord],
@@ -1359,19 +1488,31 @@ def _fuse_query_runs(
         for category in ("raw", "normalized", "adjusted")
     }
     rrf: dict[str, float] = {}
-    for run in query_runs:
+    for run in query_runs or []:
         item = run["query"]
         config = run["config"]
         priority_weight = 1.0 / max(1, int(item.priority))
         for source_name, output_name in names.items():
-            raw = {mid: score for mid, score in run[source_name].items() if mid in recs}
+            raw = {
+                mid: _finite_arm_score(score)
+                for mid, score in (run.get(source_name) or {}).items()
+                if mid in recs
+            }
             normalized = scoring.normalize(raw)
-            scale = getattr(config, f"{output_name}_scale")
-            bonus = getattr(config, f"{output_name}_presence_bonus", 0.0)
+            scale = max(
+                0.0,
+                _finite_arm_score(getattr(config, f"{output_name}_scale", 0.0)),
+            )
+            bonus = max(
+                0.0,
+                _finite_arm_score(
+                    getattr(config, f"{output_name}_presence_bonus", 0.0)
+                ),
+            )
             for mid, value in raw.items():
                 state["raw"][output_name][mid] = max(
                     state["raw"][output_name].get(mid, float("-inf")),
-                    float(value),
+                    value,
                 )
                 state["normalized"][output_name][mid] = max(
                     state["normalized"][output_name].get(mid, 0.0),
@@ -1571,6 +1712,68 @@ def _source_safety_metadata(record: MemoryRecord) -> dict:
     return out
 
 
+def _consolidated_source(record: MemoryRecord) -> bool:
+    """Whether a candidate is a consolidated digest/profile (provenance-based).
+
+    Reads the projected provenance field first, then falls back to the same marker
+    inside ``metadata`` for legacy/synced rows that predate the dedicated column
+    (the write path copies, not pops, so both views agree on current rows).
+    """
+    provenance = record.provenance if isinstance(record.provenance, dict) else {}
+    source = str(provenance.get("source") or "").strip().casefold()
+    if not source:
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        nested = metadata.get("provenance")
+        nested = nested if isinstance(nested, dict) else {}
+        source = str(nested.get("source") or "").strip().casefold()
+    return source in CONSOLIDATION_SOURCES
+
+
+def _consolidation_evidence(record: MemoryRecord, *, store=None) -> list[str]:
+    """Source memory ids a consolidated digest/profile summarizes (citable evidence).
+
+    Returns the union of the persisted ``consolidates``/``profiles`` memory links and
+    any equivalent id lists in the record's provenance/metadata.  This surfaces the
+    digest's sources as evidence ids for citation without duplicating their bodies;
+    ordinary memories have no such links and yield ``[]``.
+    """
+    evidence: list[str] = []
+    seen: set[str] = set()
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    provenance = record.provenance if isinstance(record.provenance, dict) else {}
+    nested = metadata.get("provenance")
+    nested = nested if isinstance(nested, dict) else {}
+    for container in (provenance, nested):
+        for key in ("consolidates", "profiles"):
+            values = container.get(key)
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, (list, tuple, set)):
+                for value in values:
+                    value = str(value or "").strip()
+                    if value and value not in seen:
+                        seen.add(value)
+                        evidence.append(value)
+    if record.id and store is not None and hasattr(store, "get_links"):
+        try:
+            for link in store.get_links(record.id):
+                relation = str(link.get("relation") or "")
+                if relation not in ("consolidates", "profiles"):
+                    continue
+                other = link.get("b") if link.get("a") == record.id else link.get("a")
+                other = str(other or "").strip()
+                if other and other not in seen:
+                    seen.add(other)
+                    evidence.append(other)
+        except Exception:
+            # Link lookup is best-effort evidence enrichment, never a recall failure.
+            pass
+    return evidence
+
+
+
+
+
 def _absolute_retrieval_support(
     query: str,
     content: str,
@@ -1585,7 +1788,10 @@ def _absolute_retrieval_support(
     outside the vector arm's top-k. Unlike fused rank, neither component is min-max
     normalised against the other candidates in this response.
     """
-    raw_semantic = float(semantic_cosine)
+    try:
+        raw_semantic = float(semantic_cosine)
+    except (TypeError, ValueError):
+        raw_semantic = 0.0
     semantic = max(0.0, min(1.0, raw_semantic)) if math.isfinite(raw_semantic) else 0.0
     # Titles improve candidate discovery, but are metadata rather than answer-bearing
     # evidence.  Keeping them out of the absolute gate aligns adaptive routing with
@@ -1601,8 +1807,16 @@ def _entity_pattern(name: str) -> re.Pattern[str]:
 
 def _ranked(arm: dict[str, float], recs: dict) -> list[str]:
     # Tie-break on id: RRF depends on rank position, so equal arm scores must not order
-    # differently between runs (they feed the final score).
-    return [i for i, _ in sorted(arm.items(), key=lambda x: (-x[1], x[0])) if i in recs]
+    # differently between runs (they feed the final score).  Adapters can return
+    # malformed scores; those are treated as absent evidence rather than sorting NaN.
+    return [
+        memory_id
+        for memory_id, _ in sorted(
+            arm.items(),
+            key=lambda item: (-_finite_arm_score(item[1]), str(item[0])),
+        )
+        if memory_id in recs
+    ]
 
 
 def _call_temporal_store(

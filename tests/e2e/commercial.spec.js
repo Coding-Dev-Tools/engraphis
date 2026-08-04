@@ -280,7 +280,7 @@ test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel.getByText('LOCAL CORE', { exact: true })).toBeVisible();
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toHaveCount(0);
+  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' })).toHaveCount(0);
   await expect(licensePanel).not.toContainText('Support continued Engraphis development with Pro.');
 
@@ -464,8 +464,8 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // Upgrade CTAs belong with individual locked features, not the general settings panel.
-  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toHaveCount(0);
+  // The header GET PRO badge opens this panel, so it must retain the matching checkout action.
+  await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
     .toHaveCount(0);
@@ -536,7 +536,10 @@ for (const cloudStatus of [402, 501]) {
 // and who only needs to reconnect -- is the regression this guards.
 test('An expired cloud session asks the customer to reconnect, not to buy', async ({ page }) => {
   const errors = recordBrowserErrors(page);
-  await mockLocalClient(page, 401);
+  // This is a revoked credential for a customer who already owns Pro, not an
+  // unconfigured free installation. Keep the entitlement active so a regression
+  // that misclassifies 401 as a sales prompt is observable.
+  await mockLocalClient(page, 401, null, null, proLicense);
   await page.goto('/classic');
 
   await openView(page, 'analytics');

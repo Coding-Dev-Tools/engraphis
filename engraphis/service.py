@@ -285,26 +285,29 @@ class GraphSceneCapacityExceeded(ValidationError):
 
 
 def _rollback_service_transaction(method):
-    """Roll back a failed multi-statement service mutation on the shared connection.
+    """Run a service mutation in an owned transaction and release it on failure.
 
-    The serialized SQLite wrapper pins its write lock until commit or rollback. Workspace
-    lifecycle operations contain many dependent statements, so an unexpected storage or
-    constraint failure must release both the partial transaction and that lock.
+    ``sqlite3.Connection.in_transaction`` is connection-global, while the store
+    serializes transactions with thread-local ownership.  Checking the former can
+    make a request roll back another thread's transaction or leave its own
+    transaction open after waiting for that thread.  Use the store's ownership
+    primitive so lifecycle mutations are atomic without stealing concurrent work.
     """
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        started = not self.store.conn.in_transaction
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
         try:
-            if started:
-                self.store.conn.execute("BEGIN IMMEDIATE")
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             result = method(self, *args, **kwargs)
-            if started and self.store.conn.in_transaction:
-                self.store.conn.commit()
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
             return result
         except BaseException:
-            if self.store.conn.in_transaction:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
                 try:
-                    self.store.conn.rollback()
+                    conn.rollback()
                 except Exception:  # noqa: BLE001 - preserve the original failure
                     pass
             raise
@@ -1522,6 +1525,7 @@ class MemoryService:
             return created, "configured extractor produced no new discrete facts"
         return created, ""
 
+    @_rollback_service_transaction
     def import_folder(self, *, workspace: str, path: str, file_pattern: str = "*.md",
                       memory_type: str = "semantic", actor: str = "user",
                       derive_facts: bool = False) -> dict:
@@ -1620,6 +1624,7 @@ class MemoryService:
                 "derived_facts": derived_facts, "details": details[:50],
                 "warnings": warnings[:50]}
 
+    @_rollback_service_transaction
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
                      actor: str = "user", derive_facts: bool = False) -> dict:
         """Drag-and-drop / picked-file counterpart to ``import_folder``: ingest
@@ -3070,6 +3075,7 @@ class MemoryService:
         return {"workspaces": out}
 
     # ── workspace curation (create / rename / describe / delete) ─────────────────
+    @_rollback_service_transaction
     def create_workspace(self, name: str, description: str = "", *,
                          visibility: str = "personal", confirmed: bool = False,
                          actor: str = "user") -> dict:
@@ -3118,6 +3124,7 @@ class MemoryService:
                 "visibility": visibility,
                 "owner": owner if visibility == "personal" else "", "created": True}
 
+    @_rollback_service_transaction
     def set_workspace_visibility(self, workspace: str, visibility: str, *,
                                  confirmed: bool = False, actor: str = "user") -> dict:
         """Explicitly share or unshare a team folder after user confirmation."""
@@ -3171,6 +3178,7 @@ class MemoryService:
         return {"workspace": ws, "visibility": target,
                 "owner": owner if target == "personal" else "", "changed": previous != target}
 
+    @_rollback_service_transaction
     def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
         relabel — all data stays attached. Same binding + uniqueness the create path enforces."""
@@ -3188,6 +3196,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"old": old, "new": new, "id": wid}
 
+    @_rollback_service_transaction
     def set_workspace_description(self, workspace: str, description: str,
                                  *, actor: str = "user") -> dict:
         """Store a human description in the workspace's ``settings`` JSON (no schema change)."""
@@ -3864,14 +3873,15 @@ class MemoryService:
             c.execute(
                 "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
                 "title, content, summary, keywords, metadata, importance, surprise, stability, "
-                "access_count, last_access, valid_from, valid_to, valid_to_recorded_at, "
+                "confidence, access_count, last_access, valid_from, valid_to, "
+                "valid_to_recorded_at, "
                 "ingested_at, expired_at, subject_key, claim_kind, pinned, sensitivity, "
                 "provenance, sort_order) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (nmid, wid_dst, _new_repo(m["repo_id"]), session_remap.get(m["session_id"]),
                  m["scope"], m["mtype"], m["title"], m["content"], m["summary"], m["keywords"],
                  _remap_json_memory_ids(m["metadata"]), m["importance"],
-                 m["surprise"], m["stability"],
+                 m["surprise"], m["stability"], m["confidence"],
                  m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
                  m["valid_to_recorded_at"], m["ingested_at"], m["expired_at"],
                  m["subject_key"], m["claim_kind"], m["pinned"], m["sensitivity"],
@@ -4035,6 +4045,7 @@ class MemoryService:
         return {"source": src, "workspace": dst, "id": wid_dst,
                "memories_copied": len(memory_remap)}
 
+    @_rollback_service_transaction
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
@@ -4085,6 +4096,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"id": mid, "updated": changes}
 
+    @_rollback_service_transaction
     def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
                          actor: str = "user") -> dict:
         """Persist a manual display order for the Memories tab's drag-to-reorder UI.
@@ -4136,6 +4148,53 @@ class MemoryService:
         chain = [self._chain_entry(r, wid) for r in self._chain_for(rec, wid)]
         return {"memory": _mem_to_dict(rec), "links": links, "audit": audit,
                 "chain": chain}
+
+    def conflict_review(self, *, workspace: str, repo: Optional[str] = None,
+                        limit: int = 50) -> dict:
+        """Return a scope-authorized review inbox without exposing untrusted bodies."""
+        wid, rid = self._require_scope(workspace, repo)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ValidationError("limit must be an integer") from None
+        limit = max(1, min(100, limit))
+        params: list[Any] = [wid]
+        sql = (
+            "SELECT id, title, content, metadata, provenance "
+            "FROM memories WHERE workspace_id=? "
+        )
+        if rid is not None:
+            sql += "AND repo_id=? "
+            params.append(rid)
+        sql += "ORDER BY ingested_at DESC LIMIT ?"
+        params.append(max(100, limit * 4))
+
+        items = []
+        for row in self.store.conn.execute(sql, params):
+            provenance = _loads(row["provenance"], {})
+            provenance = provenance if isinstance(provenance, dict) else {}
+            metadata = _loads(row["metadata"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            review_state = provenance.get("review_state") or ""
+            quarantined = bool(metadata.get("quarantine") or provenance.get("quarantined"))
+            conflicted = bool(metadata.get("conflict_with"))
+            if not (quarantined or review_state == REVIEW_PENDING or conflicted):
+                continue
+            # Pending/quarantined content is evidence for a human reviewer, not model
+            # context. Return only an excerpt for already-approved conflict records.
+            excerpt = ""
+            if prompt_eligible(provenance, metadata):
+                excerpt = (row["content"] or row["title"] or "")[:200]
+            items.append({
+                "id": row["id"],
+                "review_state": review_state,
+                "quarantined": quarantined,
+                "conflict_with": metadata.get("conflict_with") if conflicted else None,
+                "excerpt": excerpt,
+            })
+            if len(items) >= limit:
+                break
+        return {"workspace": workspace, "items": items, "count": len(items)}
 
     def _chain_entry(self, rec, wid: str) -> dict:
         d = _mem_to_dict(rec)
@@ -7804,7 +7863,8 @@ def _mem_to_dict(rec: Any) -> dict:
     responses — mirrors the fields ``RecallEngine`` already exposes in recall chunks."""
     return {
         "id": rec.id, "title": rec.title, "content": rec.content, "summary": rec.summary,
-        "scope": rec.scope.value, "mtype": rec.mtype.value, "repo_id": rec.repo_id,
+        "scope": rec.scope.value, "mtype": rec.mtype.value,
+        "workspace_id": rec.workspace_id, "repo_id": rec.repo_id,
         "importance": rec.importance, "pinned": rec.pinned,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,

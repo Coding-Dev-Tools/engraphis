@@ -16,7 +16,7 @@ import secrets
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -48,7 +48,21 @@ class _FreshStaticFiles(StaticFiles):
     an older graph engine alive after a source/package update.
     """
 
+    @staticmethod
+    def _is_private_asset(path: str) -> bool:
+        """Keep package implementation files out of the public asset mounts."""
+        parts = [part for part in path.replace("\\", "/").split("/") if part]
+        return (
+            any(part == "__pycache__" or part.startswith(".") for part in parts)
+            or any(
+                part.lower().endswith((".py", ".pyc", ".pyo", ".pyi"))
+                for part in parts
+            )
+        )
+
     async def get_response(self, path, scope):
+        if self._is_private_asset(path):
+            return Response(status_code=404)
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
@@ -215,6 +229,7 @@ def create_app() -> FastAPI:
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
         allowed_workspaces=settings.allowed_workspaces)
     app.state.service = svc
     # The review token is intentionally process-local and is never a general API

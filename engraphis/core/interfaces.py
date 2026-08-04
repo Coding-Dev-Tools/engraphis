@@ -88,6 +88,11 @@ class MemoryRecord:
     provenance: dict[str, Any] = field(default_factory=dict)
     embedding: Optional[np.ndarray] = None
     valid_to_recorded_at: Optional[float] = None  # when valid_to was learned
+    # Keep additions after the established positional fields; callers may construct
+    # records positionally even though keyword construction is preferred.
+    pinned_at: Optional[float] = None     # system-time when a pin last became effective
+    unpinned_at: Optional[float] = None   # system-time when an unpin became effective
+    confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
 
 
 @dataclass

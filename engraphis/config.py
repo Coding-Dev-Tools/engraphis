@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import json
 import hashlib
+import math
 import os
 import re
 import sqlite3
@@ -478,6 +479,17 @@ RETIRED_RELAY_URLS = frozenset({
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
+def _parse_vector_backend(value: str) -> str:
+    """Return a supported vector backend, failing closed to the portable default."""
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in {"numpy", "sqlite-vec", "auto"} else "numpy"
+
+
+def _parse_llm_provider(value: str) -> str:
+    """Use the documented provider default when an env entry is blank."""
+    return (value or "").strip().lower() or "openai"
+
+
 def _validate_service_mode(value: str) -> str:
     """Validate service mode against allowed values.
 
@@ -501,19 +513,26 @@ def _env_int(key: str, default: int) -> int:
 
 def _env_float(key: str, default: float) -> float:
     try:
-        return float(_env(key, str(default)))
-    except ValueError:
+        value = float(_env(key, str(default)))
+    except (TypeError, ValueError):
         return default
+    return value if math.isfinite(value) else default
 
 
 _FALSY_ENV = {"0", "false", "no", "off", "disable", "disabled"}
+_TRUTHY_ENV = {"1", "true", "yes", "on", "enable", "enabled"}
 
 
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.environ.get(key)
     if raw is None or not raw.strip():
         return default
-    return raw.strip().lower() not in _FALSY_ENV
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY_ENV:
+        return True
+    if normalized in _FALSY_ENV:
+        return False
+    return default
 
 
 def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
@@ -613,15 +632,28 @@ class Settings:
         )
     )
 
+    # Vector index backend for the v2 engine: "numpy" (default — deterministic,
+    # offline reference index), "sqlite-vec" (require the accelerated ANN backend),
+    # or "auto" (use sqlite-vec when available, fall back to NumPy). The server
+    # entrypoints honor this so a self-host can opt into the accelerated path
+    # without touching code; the constructor default stays "numpy" for determinism.
+    vector_backend: str = field(
+        default_factory=lambda: _parse_vector_backend(
+            _env("ENGRAPHIS_VECTOR_BACKEND", "numpy")
+        )
+    )
+
     # Fact extraction on the v2 write path: "none" (default — store text as given),
     # "chunk" (deterministic, offline structure-aware chunking — knobs
     # ENGRAPHIS_CHUNK_TOKENS/_OVERLAP/_MAX and optional pinned
-    # ENGRAPHIS_CHUNK_TOKENIZER_MODEL/_REVISION), or "llm" (distill raw text into
-    # discrete facts via the configured LLM before storing).
+    # ENGRAPHIS_CHUNK_TOKENIZER_MODEL/_REVISION), "llm" (free-form fact extraction), or
+    # "llm_structured" (schema-validated facts, entities, relations, and keywords via LLM).
     extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_EXTRACTOR", "none").lower())
 
     llm_provider: str = field(
-        default_factory=lambda: _env("ENGRAPHIS_LLM_PROVIDER", "openai").lower()
+        default_factory=lambda: _parse_llm_provider(
+            _env("ENGRAPHIS_LLM_PROVIDER", "openai")
+        )
     )
     llm_model: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_MODEL", "gpt-4o-mini"))
     llm_api_key: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_API_KEY", ""))
@@ -634,8 +666,7 @@ class Settings:
     # Settings On/Off control, or ENGRAPHIS_LLM_AUTO_EXTRACT=1) — so a mere connection
     # test never silently starts provider egress of ingested content.
     llm_auto_extract: bool = field(
-        default_factory=lambda: _env("ENGRAPHIS_LLM_AUTO_EXTRACT", "0").lower()
-        not in ("0", "false", "no", "off")
+        default_factory=lambda: _env_bool("ENGRAPHIS_LLM_AUTO_EXTRACT", False)
     )
 
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
@@ -664,6 +695,13 @@ class Settings:
 
     loop_interval: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_INTERVAL", 60))
     loop_top_k: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_TOP_K", 20))
+    # OFF by default (opt-in): the background consciousness loop only runs a local
+    # consolidation sweep when this is enabled. Consolidation is the only loop stage that
+    # ever calls the LLM (``structured``/``profiles`` are never used here, so the default
+    # sweep is fully deterministic), and it is expensive: a workspace-wide cluster scan.
+    # It therefore needs an explicit operator decision. 0 = disabled; N > 0 = run at most
+    # once every N loop ticks (every 60s tick is usually far too often).
+    loop_consolidate: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_CONSOLIDATE", 0))
     decay_halflife_days: float = field(
         default_factory=lambda: _env_float("ENGRAPHIS_DECAY_HALFLIFE_DAYS", 7.0)
     )
@@ -698,10 +736,15 @@ def _parse_headers(raw: str) -> dict:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
         return {}
-
+    if not isinstance(parsed, dict):
+        return {}
+    if not all(isinstance(key, str) and isinstance(value, str)
+               for key, value in parsed.items()):
+        return {}
+    return parsed
 
 def _parse_origins(raw: str, port: int = 8700) -> list:
     """CORS allow-list. Empty -> loopback on the CONFIGURED port (safe local-first default).

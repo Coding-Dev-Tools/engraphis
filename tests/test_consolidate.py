@@ -316,6 +316,7 @@ def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sour
     assert digest.mtype == MemoryType.SEMANTIC
     assert digest.metadata["provenance"]["source"] == "structured_consolidation"
     assert digest.metadata["structured_consolidation"]["confidence"] == 0.91
+    assert digest.confidence == 0.91      # promoted from metadata to the first-class field
     assert digest.metadata["entities"] == ["Acme API", "PASETO", "JWT"]
     assert digest.metadata["relations"][0]["relation"] == "uses"
     assert "source_ids" in digest.metadata["provenance"]
@@ -534,6 +535,51 @@ def test_profiles_pass_rolls_entity_memories_into_one_digest():
     assert report["compaction"]["tokens_before"] > report["compaction"]["tokens_after"] > 0
 
 
+def test_profiles_batch_all_eligible_memories(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+
+    monkeypatch.setattr(consolidate_module, "PROFILE_SCAN_LIMIT", 2)
+    eng, wid, rid, name = _engine_with_entity_mentions()
+
+    report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert report["errors"] == []
+    assert len(report["profiles_created"]) == 1
+    assert report["profiles_created"][0]["entity"] == name
+    assert report["profiles_created"][0]["mentions"] == 8
+
+def test_profile_retry_completes_an_interrupted_link_set(monkeypatch):
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, _ = _engine_with_entity_mentions()
+    original_add_link = eng.store.add_link
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("link store unavailable")
+        return original_add_link(*args, **kwargs)
+
+    monkeypatch.setattr(eng.store, "add_link", fail_once)
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    assert len(first["profiles_created"]) == 0
+    assert len(first["errors"]) == 1
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    profiles = [
+        memory for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC])
+        )
+        if memory.metadata.get("provenance", {}).get("source") == "profile_consolidation"
+    ]
+    assert len(profiles) == 1
+    assert sum(link["relation"] == "profiles"
+               for link in eng.store.get_links(profiles[0].id)) == 8
+
 def test_profiles_pass_via_consolidate_flag_and_is_idempotent():
     eng, wid, rid, _ = _engine_with_entity_mentions()
     first = consolidate(eng, workspace_id=wid, repo_id=rid, profiles=True)
@@ -737,6 +783,93 @@ def test_distill_pass_sees_episodics_behind_newer_semantic_rows(monkeypatch):
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
 
     assert len(report["digests_created"]) == 1, "old code truncated to 6 semantic rows"
+
+def test_distill_batches_all_eligible_episodes(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 2)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source_ids = [
+        eng.remember(
+            f"Recurring deploy failure on the flaky integration test, run {index}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            resolve_conflicts=False,
+        )
+        for index in range(6)
+    ]
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(report["digests_created"]) == 1
+    assert set(report["digests_created"][0]["consolidates"]) == set(source_ids)
+    assert report["errors"] == []
+
+
+def test_archive_batches_all_eligible_transients(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 2)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale_ids = [
+        eng.remember(
+            f"Old scratch note {index}.", workspace_id=wid,
+            mtype=MemoryType.WORKING, resolve_conflicts=False,
+        )
+        for index in range(5)
+    ]
+    old = time.time() - 86_400
+    eng.store.conn.executemany(
+        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
+        [(old, memory_id) for memory_id in stale_ids],
+    )
+    eng.store.conn.commit()
+
+    report = consolidate(eng, workspace_id=wid, now=time.time())
+
+    assert {row["id"] for row in report["archived"]} == set(stale_ids)
+    assert report["errors"] == []
+
+
+def test_digest_retry_completes_an_interrupted_link_set(monkeypatch):
+    eng, wid, rid = _engine_with_repeats()
+    original_add_link = eng.store.add_link
+    state = {"calls": 0}
+
+    def fail_once(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("link store unavailable")
+        return original_add_link(*args, **kwargs)
+
+    monkeypatch.setattr(eng.store, "add_link", fail_once)
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert len(first["digests_created"]) == 0
+    assert len(first["errors"]) == 1
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert len(second["digests_created"]) == 0
+    semantic = eng.store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.SEMANTIC])
+    )
+    digest = [memory for memory in semantic
+              if memory.metadata.get("provenance", {}).get("source") == "consolidation"]
+    assert len(digest) == 1
+    assert sum(link["relation"] == "consolidates" for link in eng.store.get_links(digest[0].id)) == 3
+
+
+def test_derived_digest_uses_sweep_timestamp():
+    eng, wid, rid = _engine_with_repeats()
+    sweep_time = time.time() - 10
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, now=sweep_time)
+
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    assert digest.valid_from == sweep_time
 
 
 def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):

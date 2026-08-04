@@ -9,24 +9,26 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 Engraphis 1.4 makes the compact Smart MCP gateway the default agent interface while preserving
 the complete Classic surface for existing integrations. It also strengthens review-gated writes,
-bounded context delivery, secure erasure, and release/runtime hardening without changing the v2
-database schema.
+bounded context delivery, secure erasure, and release/runtime hardening, and moves the v2 SQLite
+schema to version 8 (additive: `confidence`, `pinned_at`/`unpinned_at`, and the
+`memory_tombstones` table), which migrates automatically on first open.
 
 ### Upgrade notes
 
-- `engraphis-mcp` now exposes six Smart tools instead of 33 direct tools. Clients that depend on
+- `engraphis-mcp` now exposes nine Smart tools instead of 33 direct tools. Clients that depend on
   the former names should switch their server command to `engraphis-mcp-classic`; HTTP clients can
   use `engraphis-mcp-http --classic`.
-- Existing v2 databases remain on schema 7 and require no migration for this release.
+- Existing v2 databases migrate automatically to schema 8 on first open; the change is additive
+  and requires no manual step.
 - The NumPy-only core supports Python 3.9+. Dashboard, MCP, documents, Cloud Sync, and `all`
   installations require Python 3.10+ because their supported dependency versions require it.
 
 ### Added
 
-- Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes six compact tools
-  for sessions, prompt-ready recall, durable memory, discovery, and validated read/action
-  execution. `engraphis-mcp-classic` preserves the former 33 direct tool names and legacy alias
-  response shapes for pinned integrations.
+- Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes nine compact tools:
+  sessions, prompt-ready recall, durable memory, discovery, validated read/action execution, and
+  governed record read/update plus conflict review. `engraphis-mcp-classic` preserves the former 33
+  direct tool names and legacy alias response shapes for pinned integrations.
 - The first-party `@engraphis/pi` package under `integrations/pi` exposes that Smart MCP surface
   as native Pi tools, verifies the Engraphis 1.4.x handshake, and ships with independent npm
   packaging and release gates.
@@ -36,7 +38,7 @@ database schema.
 - Opt-in planned recall adds a bounded deterministic planner, an injectable planner protocol and
   optional LLM backend, priority-weighted multi-query RRF, post-rerank memory-type maxima, stable
   context revisions, and diagnostics-only planner traces across Python, service, REST, and MCP
-  recall surfaces. The default remains the existing single-query path on schema 7.
+  recall surfaces. The default remains the existing single-query path (now on schema 8).
 - A 40-task context-routing stress fixture, four-way five-budget ablation harness, pinned
   LongMemEval-V2 planner configurations, and evaluation-only imported-resource hierarchy prototype
   encode local regression gates and matrix tooling. Official benchmark, safety, and hosted-cache

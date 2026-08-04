@@ -57,7 +57,7 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     _prepare_v3(db)
 
     migrated = Store(str(db))
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 8
     assert migrated.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -147,7 +147,7 @@ def test_v4_upgrade_rebuilds_code_history_and_backfills_claim_identity(tmp_path)
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 7
+        assert upgraded.schema_version == 8
         assert Path(f"{db}.pre-migration-v5.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= columns
@@ -248,8 +248,8 @@ def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_pa
             "SELECT valid_from, ingested_at, valid_to, expired_at "
             "FROM mem_links WHERE a='mem_a'"
         ).fetchone()
-        assert upgraded.schema_version == 7
-        assert Path(f"{db}.pre-migration-v7.bak").is_file()
+        assert upgraded.schema_version == 8
+        assert Path(f"{db}.pre-migration-v8.bak").is_file()
         assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
         assert row["valid_from"] == row["ingested_at"] == 123
         assert row["valid_to"] is None and row["expired_at"] is None
@@ -298,12 +298,66 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
         history = upgraded.conn.execute(
             "SELECT file, content_hash, valid_from, ingested_at FROM code_file_history"
         ).fetchone()
-        assert upgraded.schema_version == 7
+        assert upgraded.schema_version == 8
         assert Path(f"{db}.pre-migration-v6.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert history["file"] == "api.py"
         assert history["content_hash"] == "v5-hash"
         assert history["valid_from"] == history["ingested_at"]
+    finally:
+        upgraded.close()
+
+
+def test_v6_upgrade_adds_confidence_and_preserves_rows(tmp_path):
+    """A v6 database upgrades to the current schema: the additive ``confidence``
+    column appears, every existing row keeps its identity/content, and the column
+    defaults to 1.0 so pre-existing memories score exactly as they did before."""
+    db = tmp_path / "v6-confidence.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_v6",
+        content="Staging runs PostgreSQL 16.",
+        workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        importance=0.7,
+    ))
+    store.conn.execute(
+        "UPDATE memories SET importance=0.7 WHERE id=?", (memory_id,)
+    )
+    # Downgrade the schema marker to v6 so the next open runs the v6→v7→v8 path
+    # (the additive ALTER and the v8 confidence marker).
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (6, 0)")
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        columns = {row["name"] for row in upgraded.conn.execute(
+            "PRAGMA table_info(memories)"
+        ).fetchall()}
+        row = upgraded.conn.execute(
+            "SELECT id, content, importance, confidence FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        record = upgraded.get_memory(memory_id)
+
+        assert upgraded.schema_version == 8
+        # A v6 source backs up as v7 (min(SCHEMA_VERSION, previous_version + 1)).
+        assert Path(f"{db}.pre-migration-v7.bak").is_file()
+        assert "confidence" in columns
+        assert row["id"] == memory_id
+        assert row["content"] == "Staging runs PostgreSQL 16."
+        assert row["importance"] == 0.7
+        assert float(row["confidence"]) == 1.0          # NOT NULL DEFAULT 1.0 backfill
+        assert record is not None
+        assert record.confidence == 1.0
+        assert record.importance == 0.7
+
+        # The v7 deterministic-hashing marker also lands (v6 < v7), keeping the
+        # embed-rebuild durable marker retryable on the next open.
+        assert upgraded.embedding_version("deterministic_hashing") is not None
     finally:
         upgraded.close()
 
@@ -321,7 +375,7 @@ def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypa
     monkeypatch.setattr(Store, "_migrate_code_file_history_v6", unexpected)
     reopened = Store(str(db))
     try:
-        assert reopened.schema_version == 7
+        assert reopened.schema_version == 8
     finally:
         reopened.close()
 
@@ -353,7 +407,7 @@ def test_migration_transform_failure_rolls_back_and_restart_completes(
 
     monkeypatch.setattr(Store, "_backfill_edge_supports", original)
     restarted = Store(str(db))
-    assert restarted.schema_version == 7
+    assert restarted.schema_version == 8
     assert restarted.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -484,4 +538,4 @@ def test_backup_directory_is_durable_before_schema_transform(monkeypatch, tmp_pa
     monkeypatch.setattr(Store, "_apply_schema", require_flush_before_schema)
 
     Store(str(db)).close()
-    assert _version(db) == 7
+    assert _version(db) == 8

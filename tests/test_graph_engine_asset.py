@@ -793,6 +793,70 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
     assert report["particleArrow"] is True
 
 
+@requires_node
+def test_unfreezing_reapplies_enabled_relation_flow_after_a_frozen_render() -> None:
+    """Freeze must not leave a still-enabled relation-flow switch visually inert."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        const particles = () => store.linkDirectionalParticles({ layer: 'semantic' });
+        api.setSettings({ flow: true });
+        api.setData(chain(2));
+        const live = particles();
+        api.freeze(true);
+        api.setData(chain(3));
+        const frozen = particles();
+        api.freeze(false);
+        emit({ live, frozen, resumed: particles() });
+        """
+    )
+    assert report == {"live": 3, "frozen": 0, "resumed": 3}
+
+
+@requires_node
+def test_a_dashboard_sync_that_turns_freeze_off_reheats_the_renderer() -> None:
+    """Classic redraws send the full settings object, so ``frozen:false`` must be actionable."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        api.freeze(true);
+        const before = invocations.d3ReheatSimulation || 0;
+        api.setSettings({ frozen: false });
+        emit({
+          state: api.state().settings.frozen,
+          alpha: store.d3AlphaDecay,
+          reheats: (invocations.d3ReheatSimulation || 0) - before,
+          cooldown: store.cooldownTime,
+        });
+        """
+    )
+    assert report == {"state": False, "alpha": 0.035, "reheats": 1, "cooldown": 2200}
+
+
+@requires_node
+def test_reduced_motion_keeps_auto_fit_instant_while_physics_stays_live() -> None:
+    """OS visual-motion preferences suppress camera animation, not layout physics."""
+
+    report = _run_engine(
+        """
+        const timers = [];
+        globalThis.setTimeout = (callback, delay) => { timers.push(delay); callback(); return timers.length; };
+        globalThis.clearTimeout = () => {};
+        store.getGraphBbox = { x: [-10, 10], y: [-10, 10] };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(2));
+        emit({ timers, center: store.centerAt, zoom: store.zoom, cooldown: store.cooldownTime });
+        """
+    )
+    assert report["timers"] == [0]
+    assert report["center"][-1] == 0
+    assert report["zoom"][-1] == 0
+    assert report["cooldown"] == 2200
+
+
 def test_legacy_flow_particles_use_small_directional_arrows() -> None:
     """Classic and its static compatibility copy must not regress to round flow dots."""
     for path in (DASHBOARD, CLASSIC_DASHBOARD):
@@ -1003,7 +1067,7 @@ const engine = {
   setData(data) { log.seeded = data.nodes.length; },
 };
 const api = {
-  apply(fn) { fn(engine); }, communityMap: () => ({}),
+  apply(fn, fit, reheat) { fn(engine); log.apply = { fit: !!fit, reheat: !!reheat }; }, communityMap: () => ({}),
   freeze() {}, destroy() {}, resume() {}, pause() { log.paused += 1; },
 };
 globalThis.EngraphisGraph = { create() { log.created += 1; return api; } };
@@ -1015,7 +1079,7 @@ globalThis.GCOLOR_OVERRIDES = {};
 /* The state the nav-away pause recorded while GRAPH_ENGINE was still null. */
 globalThis.GRAPH_ENGINE_PARKED = scenario.parked;
 globalThis.showAs = () => {};
-globalThis.prefersReducedMotion = () => false;
+globalThis.prefersReducedMotion = () => !!scenario.reducedMotion;
 for (const name of ['graphSetLayoutStatus', 'graphSyncReadouts', 'graphUpdateEditedBadge',
                     'graphUpdateHud', 'graphRenderLegend', 'graphSetHighlight',
                     'graphSetSimulationStatus', 'syncGraphExplorerSelection', 'graphNodeClick',
@@ -1033,12 +1097,18 @@ console.log(JSON.stringify(Object.assign({ rendered }, log)));
 """
 
 
-def _run_render(*, show_unlinked: bool = False, parked: bool = False) -> dict:
+def _run_render(
+    *, show_unlinked: bool = False, parked: bool = False, reduced_motion: bool = False
+) -> dict:
     source = DASHBOARD.read_text(encoding="utf-8")
     # The harness slices real source; keep its landmarks honest.
     assert "function graphRenderEngine(" in source
     assert "/* Nav away from the graph view" in source
-    scenario = json.dumps({"showUnlinked": show_unlinked, "parked": parked})
+    scenario = json.dumps({
+        "showUnlinked": show_unlinked,
+        "parked": parked,
+        "reducedMotion": reduced_motion,
+    })
     result = subprocess.run(
         [NODE, "-e", RENDER_HARNESS, str(DASHBOARD), scenario],
         cwd=ROOT,
@@ -1120,6 +1190,28 @@ def test_a_renderer_created_after_leaving_the_graph_view_is_born_paused() -> Non
     live = _run_render(parked=False)
     assert live["created"] == 1
     assert live["paused"] == 0
+
+
+@requires_node
+def test_classic_graph_starts_live_even_when_the_os_prefers_reduced_motion() -> None:
+    """Reduced visual motion cannot suppress the explicit physics default."""
+
+    report = _run_render(reduced_motion=True)
+    assert report["apply"] == {"fit": True, "reheat": True}
+
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    assert "window.GSET.frozen=false;" in source
+    engine = source[source.index("function graphRenderEngine("):]
+    engine = engine[:engine.index("/* Nav away from the graph view")]
+    assert "},fit,reheat);" in engine
+    assert "reheat&&!prefersReducedMotion()" not in engine
+
+
+def test_classic_freeze_switch_keeps_the_status_readout_in_sync() -> None:
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    start = source.index("function graphToggleFreeze(")
+    handler = source[start:source.index("\nfunction graphToggleLabels", start)]
+    assert "GRAPH_ENGINE.freeze(control.checked);graphSetSimulationStatus(control.checked?'Layout frozen':'Adaptive layout',false);return" in handler
 
 
 def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
@@ -1281,17 +1373,103 @@ def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
         """
         const api = G.create(el, { reducedMotion: () => false });
         api.setData(chain(2));
+        api.freeze(true);
         const node = store.graphData.nodes[0];
         node.x = 17; node.y = 23;
         store.onNodeDragEnd(node);
         const pinned = { fx: node.fx, fy: node.fy };
-        api.freeze(true);
         api.freeze(false);
         emit({ pinned, released: { fx: node.fx, fy: node.fy } });
         """
     )
     assert report["pinned"] == {"fx": 17, "fy": 23}
     assert report["released"] == {}, "unfreezing left a dragged node immovable"
+
+
+@requires_node
+def test_dragging_a_live_node_releases_the_temporary_anchor_and_reheats() -> None:
+    """Drag placement must not make one node behave frozen while the switch is off."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData(chain(2));
+        const node = store.graphData.nodes[0];
+        node.x = 17; node.y = 23;
+        const before = invocations.d3ReheatSimulation || 0;
+        store.onNodeDragEnd(node);
+        emit({
+          released: { fx: node.fx, fy: node.fy },
+          reheats: (invocations.d3ReheatSimulation || 0) - before,
+        });
+        """
+    )
+    assert report == {"released": {}, "reheats": 1}
+
+
+@requires_node
+def test_drag_follow_force_pulls_direct_neighbors_towards_the_active_node() -> None:
+    """The drag interaction must pull linked neighbors, not only recenter the whole graph."""
+
+    report = _run_engine(
+        """
+        const bodyForce = () => ({ strength() { return this; } });
+        globalThis.d3 = {
+          forceManyBody: bodyForce,
+          forceLink: () => ({ id() { return this; }, distance() { return this; } }),
+          forceX: () => ({ strength() { return this; } }),
+          forceY: () => ({ strength() { return this; } }),
+          forceCollide: () => ({ iterations() { return this; } }),
+        };
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        const nodes = store.graphData.nodes;
+        nodes[0].x = 120; nodes[0].y = 0;
+        nodes[1].x = 0; nodes[1].y = 0;
+        nodes[2].x = -120; nodes[2].y = 0;
+        nodes.forEach(node => { node.vx = 0; node.vy = 0; });
+        store.onNodeDragStart(nodes[0]);
+        store.d3Forces.dragFollow(1);
+        emit({
+          linkedMovesRight: nodes[1].vx > 0,
+          unlinkedStaysStill: nodes[2].vx === 0,
+          alphaDecay: store.d3AlphaDecay,
+          cooldownInfinite: !Number.isFinite(store.cooldownTime),
+        });
+        """
+    )
+    assert report == {
+        "linkedMovesRight": True,
+        "unlinkedStaysStill": True,
+        "alphaDecay": 0,
+        "cooldownInfinite": True,
+    }
+
+
+@requires_node
+def test_unfreezing_restores_the_live_simulation_budget_after_a_frozen_render() -> None:
+    """A render while frozen must not leave its one-tick budget behind on unfreeze."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(2));
+        api.freeze(true);
+        api.setData(chain(3));
+        const frozen = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+        };
+        api.freeze(false);
+        emit({
+          frozen,
+          resumed: {
+            time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          },
+        });
+        """
+    )
+    assert report["frozen"] == {"time": 0, "ticks": 1, "warmup": 0}
+    assert report["resumed"] == {"time": 2200, "ticks": 160, "warmup": 40}
 
 
 @requires_node
@@ -2213,6 +2391,14 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     move = move[:move.index("      const beginManualDrag", 1)]
     assert "if (!manualDrag.dragged)" in move
     assert move.index("if (Math.hypot(dx, dy) < 3)") < move.index("const node = manualDrag.node;")
+    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "if (started) {" in move
+    assert "setActiveDragNode(node);" in move
+    assert "reheatLiveLayout(true);" in move
+    assert "function makeDragFollowForce()" in source
+    assert "onNodeDragStart" in source
+    assert "fg.cooldownTime(Infinity)" in source
+    assert "fg.cooldownTicks(Infinity)" in source
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 

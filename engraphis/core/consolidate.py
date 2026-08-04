@@ -102,6 +102,124 @@ def _compaction(tokens_before: int, tokens_after: int, units: int) -> dict:
             "tokens_saved": saved, "reduction_pct": pct, "units": units}
 
 
+def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
+                   batch_size: int, prompt_only: bool = False) -> list[MemoryRecord]:
+    """Read every matching row in deterministic keyset batches.
+
+    ``Store.list_memories(limit=...)`` deliberately limits the result after ordering by
+    ingest time.  A maintenance sweep must not mistake that operational batch size for
+    the complete eligible population: newer unrelated rows otherwise hide older work.
+    Keyset pagination is stable while the caller performs writes between passes.
+    """
+    size = max(1, int(batch_size))
+    after_id = ""
+    records: list[MemoryRecord] = []
+    scoped = _replace(flt, mtypes=mtypes)
+    while True:
+        page = store.list_memories_page(scoped, after_id=after_id, limit=size)
+        if not page:
+            break
+        if prompt_only:
+            records.extend(
+                memory for memory in page
+                if prompt_eligible(memory.provenance, memory.metadata)
+            )
+        else:
+            records.extend(page)
+        next_after = page[-1].id
+        if next_after == after_id or len(page) < size:
+            break
+        after_id = next_after
+    records.sort(
+        key=lambda memory: (
+            memory.ingested_at if memory.ingested_at is not None else float("-inf"),
+            memory.id,
+        ),
+        reverse=True,
+    )
+    return records
+
+
+def _derived_memory_for_sources(store, first: MemoryRecord, source_ids: set[str],
+                                *, provenance_source: str) -> Optional[MemoryRecord]:
+    """Find a previously inserted but incompletely linked derived memory.
+
+    Memory insertion and link insertion are separate store operations.  If a link write
+    fails after the derived row is committed, a retry must finish that row instead of
+    creating a second digest and leaving the original sources permanently pending.
+    """
+    flt = SearchFilter(
+        workspace_id=first.workspace_id,
+        repo_id=first.repo_id,
+        scopes=[Scope(first.scope)],
+        mtypes=[MemoryType.SEMANTIC],
+    )
+    for candidate in store.list_memories(flt, include_invalid=True):
+        provenance = (candidate.metadata or {}).get("provenance") or {}
+        if provenance.get("source") != provenance_source:
+            continue
+        cited = {
+            str(memory_id) for memory_id in (
+                provenance.get("consolidates")
+                or provenance.get("profiles")
+                or []
+            )
+        }
+        if cited == source_ids:
+            return candidate
+    return None
+
+
+def _ensure_derived_links(store, derived_id: str, sources: list[MemoryRecord],
+                          relation: str) -> None:
+    """Complete an idempotent source-link set, allowing retries after partial writes."""
+    existing = {
+        (link["a"], link["b"])
+        for link in store.get_links(derived_id)
+        if link["relation"] == relation
+    }
+    for source in sources:
+        if (derived_id, source.id) in existing or (source.id, derived_id) in existing:
+            continue
+        store.add_link(derived_id, source.id, relation)
+
+
+def _write_or_resume_digest(engine, cluster: list[MemoryRecord], *, content: str,
+                            subject: str, now: float) -> tuple[str, bool]:
+    """Write a digest once, or finish one whose links were interrupted."""
+    store = engine.store
+    source_ids = {memory.id for memory in cluster}
+    existing = _derived_memory_for_sources(
+        store, cluster[0], source_ids, provenance_source="consolidation",
+    )
+    if existing is not None:
+        _ensure_derived_links(store, existing.id, cluster, "consolidates")
+        return existing.id, False
+    return _write_digest(engine, cluster, content=content, subject=subject, now=now), True
+
+
+def _write_or_resume_profile(engine, name: str, etype: str,
+                             sources: list[MemoryRecord], *, content: str,
+                             now: float) -> tuple[str, bool]:
+    """Write a profile once, or finish one whose links were interrupted."""
+    store = engine.store
+    existing = _derived_memory_for_sources(
+        store, sources[0], {memory.id for memory in sources},
+        provenance_source="profile_consolidation",
+    )
+    if existing is not None:
+        _ensure_derived_links(store, existing.id, sources, PROFILE_RELATION)
+        return existing.id, False
+    return _write_profile(engine, name, etype, sources, content=content, now=now), True
+
+
+def _error_entry(cluster: list[MemoryRecord], exc: Exception) -> dict:
+    return {
+        "source_ids": [memory.id for memory in cluster],
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+
+
 def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 min_cluster: int = MIN_CLUSTER, subject_jaccard: float = SUBJECT_JACCARD,
                 archive_below: float = ARCHIVE_BELOW, dry_run: bool = False,
@@ -130,10 +248,9 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id,
                        scopes=MAINTENANCE_SCOPES)
 
-    episodic = store.list_memories(
-        _replace(flt, mtypes=[MemoryType.EPISODIC]),
-        limit=DISTILL_SCAN_LIMIT,
-        prompt_only=True,
+    episodic = _scan_memories(
+        store, flt, mtypes=[MemoryType.EPISODIC],
+        batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
     )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
@@ -148,7 +265,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "clusters_found": 0, "digests_created": [], "archived": [],
-                    "skipped_already_consolidated": 0}
+                    "skipped_already_consolidated": 0, "errors": []}
     if structured:
         report["structured"] = {"enabled": True, "attempted": 0, "succeeded": 0,
                                 "fallbacks": 0, "sources_superseded": 0}
@@ -160,6 +277,19 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         if len(cluster) < min_cluster:
             continue
         report["clusters_found"] += 1
+        # A prior attempt may have committed the derived row and only some links before
+        # failing. Complete that exact row first; otherwise the pending-count check below
+        # could strand the remaining sources forever.
+        existing = _derived_memory_for_sources(
+            store, cluster[0], {memory.id for memory in cluster},
+            provenance_source="consolidation",
+        ) if not dry_run else None
+        if existing is not None:
+            try:
+                _ensure_derived_links(store, existing.id, cluster, "consolidates")
+            except Exception as exc:
+                report["errors"].append(_error_entry(cluster, exc))
+                continue
         pending = [m for m in cluster if not _already_consolidated(store, m.id)]
         if len(pending) < min_cluster:
             report["skipped_already_consolidated"] += 1
@@ -199,9 +329,13 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                     if supersede_sources:
                         entry["would_supersede_sources"] = source_ids
                 else:
-                    ids = _write_structured_digests(
-                        engine, cluster, structured_facts, subject=subject, now=now,
-                        supersede_sources=bool(supersede_sources))
+                    try:
+                        ids = _write_structured_digests(
+                            engine, cluster, structured_facts, subject=subject, now=now,
+                            supersede_sources=bool(supersede_sources))
+                    except Exception as exc:
+                        report["errors"].append(_error_entry(cluster, exc))
+                        continue
                     entry["ids"] = ids
                     if ids:
                         entry["id"] = ids[0]
@@ -221,13 +355,22 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         if dry_run:
             entry["would_consolidate"] = entry.pop("consolidates")
         else:
-            entry["id"] = _write_digest(engine, cluster, content=content,
-                                        subject=subject, now=now)
+            try:
+                digest_id, created = _write_or_resume_digest(
+                    engine, cluster, content=content, subject=subject, now=now,
+                )
+            except Exception as exc:
+                report["errors"].append(_error_entry(cluster, exc))
+                continue
+            entry["id"] = digest_id
+            if not created:
+                entry["resumed"] = True
         report["digests_created"].append(entry)
 
     # ── pass 2: archive fully-decayed transient memories ─────────────────────
-    for m in store.list_memories(_replace(flt, mtypes=TRANSIENT_TYPES),
-                                 limit=DISTILL_SCAN_LIMIT):
+    for m in _scan_memories(
+        store, flt, mtypes=TRANSIENT_TYPES, batch_size=DISTILL_SCAN_LIMIT,
+    ):
         if m.pinned:
             continue
         r = scoring.retention(m.stability, m.last_access, now)
@@ -237,13 +380,18 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         report["archived"].append({"id": m.id, "retention": round(r, 4),
                                    "tokens_freed": _mem_tokens(m)})
         if not dry_run:
-            store.close_validity(
-                m.id, actor="consolidation",
-                reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
+            try:
+                store.close_validity(
+                    m.id, at=now, actor="consolidation",
+                    reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
+            except Exception as exc:
+                report["errors"].append(_error_entry([m], exc))
+                report["archived"].pop()
+                archived_tokens -= _mem_tokens(m)
+                continue
             # Preserve the vector as historical evidence. Temporal filtering keeps the
             # archived row out of current recall while allowing an explicit ``as_of``
             # query to reproduce the semantic result from when it was live.
-
     # ── compaction summary: the payoff of the sweep, as a number ─────────────
     report["compaction"] = {
         "distilled": _compaction(distilled_before, distilled_after,
@@ -665,11 +813,11 @@ def _write_digest(engine, cluster: list[MemoryRecord], *, content: str, subject:
         keywords=_common_tokens(cluster, k=8),
         metadata={"provenance": {"source": "consolidation", "trusted": trusted,
                                  "consolidates": [m.id for m in cluster]}},
+        valid_from=now,
         resolve_conflicts=False,   # the digest is new by construction
     )
     sensitivity, trusted = _inherit_safety(engine, digest_id, cluster)
-    for m in cluster:
-        engine.store.add_link(digest_id, m.id, "consolidates")
+    _ensure_derived_links(engine.store, digest_id, cluster, "consolidates")
     engine.store.audit("consolidation", "distill", digest_id,
                        f"digested {len(cluster)} episodic memories "
                        f"(sensitivity={sensitivity}, trusted={trusted})")
@@ -722,15 +870,15 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
             title=(fact.get("title") or f"Consolidated: {subject}")[:200],
             importance=importance,
+            confidence=fact.get("confidence", 0.0),
             keywords=fact.get("keywords") or _common_tokens(sources, k=8),
-            metadata=metadata, resolve_conflicts=False,
+            metadata=metadata, valid_from=now, resolve_conflicts=False,
             _trusted_graph_keys=frozenset(
                 key for key in ("entities", "relations") if key in metadata
             ),
         )
         sensitivity, trusted = _inherit_safety(engine, mid, sources)
-        for memory in sources:
-            engine.store.add_link(mid, memory.id, "consolidates")
+        _ensure_derived_links(engine.store, mid, sources, "consolidates")
         audit = fact.get("llm") or {}
         engine.store.audit("consolidation", "distill_structured", mid,
                            f"schema-distilled {len(sources)} memories; "
@@ -777,20 +925,20 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id,
                        scopes=MAINTENANCE_SCOPES)
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
-                    "entities_considered": 0, "profiles_created": [], "skipped_existing": 0}
+                    "entities_considered": 0, "profiles_created": [], "skipped_existing": 0,
+                    "errors": []}
 
     live = [
-        memory for memory in store.list_memories(
-            _replace(flt, mtypes=DURABLE_TYPES),
-            limit=PROFILE_SCAN_LIMIT,
-            prompt_only=True,
+        memory for memory in _scan_memories(
+            store, flt, mtypes=DURABLE_TYPES,
+            batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
         )
         if memory.metadata.get("provenance", {}).get("source")
         != "profile_consolidation"
     ]
     p_before = p_after = 0
 
-    for ent in store.list_entities(flt, limit=2000):
+    for ent in store.list_entities(flt):
         name = (ent.name or "").strip()
         if len(name) < PROFILE_MIN_NAME_LEN:
             continue
@@ -800,6 +948,18 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
             if len(sources) < min_mentions:
                 continue
             report["entities_considered"] += 1
+            existing = _derived_memory_for_sources(
+                store, sources[0], {memory.id for memory in sources},
+                provenance_source="profile_consolidation",
+            ) if not dry_run else None
+            if existing is not None:
+                try:
+                    _ensure_derived_links(store, existing.id, sources, PROFILE_RELATION)
+                except Exception as exc:
+                    report["errors"].append(_error_entry(sources, exc))
+                    continue
+                report["skipped_existing"] += 1
+                continue
             if any(_in_profile(store, m.id) for m in sources):
                 report["skipped_existing"] += 1
                 continue
@@ -813,8 +973,16 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
             if dry_run:
                 entry["would_profile"] = [m.id for m in sources]
             else:
-                entry["id"] = _write_profile(engine, name, ent.ntype, sources,
-                                              content=content, now=now)
+                try:
+                    profile_id, created = _write_or_resume_profile(
+                        engine, name, ent.ntype, sources, content=content, now=now,
+                    )
+                except Exception as exc:
+                    report["errors"].append(_error_entry(sources, exc))
+                    continue
+                entry["id"] = profile_id
+                if not created:
+                    entry["resumed"] = True
             report["profiles_created"].append(entry)
 
     report["compaction"] = _compaction(p_before, p_after, len(report["profiles_created"]))
@@ -854,11 +1022,11 @@ def _write_profile(engine, name: str, etype: str, sources: list[MemoryRecord],
         metadata={"provenance": {"source": "profile_consolidation", "trusted": trusted,
                                  "entity": name,
                                  "etype": etype, "profiles": [m.id for m in sources]}},
+        valid_from=now,
         resolve_conflicts=False,   # a profile is new by construction
     )
     sensitivity, trusted = _inherit_safety(engine, profile_id, sources)
-    for m in sources:
-        engine.store.add_link(profile_id, m.id, PROFILE_RELATION)
+    _ensure_derived_links(engine.store, profile_id, sources, PROFILE_RELATION)
     engine.store.audit("consolidation", "profile", profile_id,
                        f"profiled {len(sources)} memories about {name} "
                        f"(sensitivity={sensitivity}, trusted={trusted})")

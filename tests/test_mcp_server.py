@@ -84,6 +84,9 @@ _SMART_TOOLS = {
     "engraphis_discover_actions",
     "engraphis_execute_read",
     "engraphis_execute_action",
+    "engraphis_get_memory",
+    "engraphis_update_memory",
+    "engraphis_conflict_review",
 }
 
 

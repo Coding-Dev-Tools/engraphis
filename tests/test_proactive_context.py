@@ -21,6 +21,11 @@ class _UncitedLLM:
     def chat(self, messages, system=None, **kw):
         return "Use SQLite."
 
+class _InvalidCitationLLM:
+    def chat(self, messages, system=None, **kw):
+        return "- Use the unrelated guidance [99]."
+
+
 
 def test_ai_context_accepts_only_cited_llm_synthesis():
     memories = [{"id": "m1", "title": "Storage", "content": "Use SQLite for local storage."}]
@@ -33,6 +38,14 @@ def test_ai_context_accepts_only_cited_llm_synthesis():
                                       last_session={}, llm=_UncitedLLM(), synthesize=True)
     assert uncited["synthesized"] is False
     assert "[1]" in uncited["context_summary"]  # deterministic fallback preserves citations
+
+    invalid = build_proactive_context(task="implement persistence", memories=memories,
+                                      last_session={}, llm=_InvalidCitationLLM(),
+                                      synthesize=True)
+    assert invalid["synthesized"] is False
+    assert invalid["context_summary"] == uncited["context_summary"]
+
+
 
 
 def test_service_proactive_context_is_deterministic_and_cited():
@@ -47,6 +60,38 @@ def test_service_proactive_context_is_deterministic_and_cited():
     assert "[1]" in out["context_summary"]
     assert out["citations"][0]["id"]
     assert any("Storage backend" in q or "persistence" in q for q in out["suggested_queries"])
+    repeat = svc.proactive_context(workspace="acme", task="work on persistence", k=5)
+    assert repeat["context_summary"] == out["context_summary"]
+    assert [citation["id"] for citation in repeat["citations"]] == [
+        citation["id"] for citation in out["citations"]
+    ]
+    assert repeat["suggested_queries"] == out["suggested_queries"]
+
+
+def test_proactive_context_excludes_closed_and_cross_workspace_memories():
+    svc = MemoryService.create(":memory:", embed_model="")
+    historical = svc.remember(
+        "The retired billing target was legacy.example.",
+        workspace="acme", scope="workspace", title="Retired billing target", importance=0.9,
+    )
+    foreign = svc.remember(
+        "The other workspace billing target is other.example.",
+        workspace="other", scope="workspace", title="Foreign billing target", importance=0.9,
+    )
+    approved_historical = svc.engine.approve_for_prompt(
+        historical["id"], reviewer="test", reason="approved fixture",
+    )
+    approved_foreign = svc.engine.approve_for_prompt(
+        foreign["id"], reviewer="test", reason="approved fixture",
+    )
+    svc.store.close_validity(approved_historical["id"], reason="historical fixture")
+
+    out = svc.proactive_context(workspace="acme", k=5)
+    citation_ids = {citation["id"] for citation in out["citations"]}
+    assert approved_historical["id"] not in citation_ids
+    assert approved_foreign["id"] not in citation_ids
+
+
 
 
 def test_service_proactive_context_logs_recall_failure_without_exception_text(
@@ -106,6 +151,32 @@ def test_api_proactive_context_round_trip():
     assert data["citations"][0]["title"] == "Auth convention"
 
 
+def test_recall_proactive_honors_pinned_and_proactive_flags():
+    svc = MemoryService.create(":memory:", embed_model="")
+    wid = svc.store.get_or_create_workspace("acme")
+    pinned = svc.remember("The deployment target is fly.io.", workspace="acme",
+                          scope="workspace", importance=0.1)
+    always = svc.remember("The auth convention is PASETO.", workspace="acme",
+                          scope="workspace", importance=0.1,
+                          metadata={"proactive": "always"})
+    never = svc.remember("Internal debug log noise.", workspace="acme",
+                         scope="workspace", importance=0.9,
+                         metadata={"proactive": "never"})
+    svc.engine.store.set_pinned(pinned["id"], True)
+    approved = {}
+    for mid in (pinned["id"], always["id"], never["id"]):
+        res = svc.engine.approve_for_prompt(mid, reviewer="test", reason="approved fixture")
+        approved[mid] = res["id"]
+
+    out = svc.engine.recall_proactive(workspace_id=wid, k=10, prompt_only=True)
+    ids = {m.id for m in out["memories"]}
+    # Approval creates an approved successor (the pending original is not prompt-visible).
+    # The successor inherits pinning/proactive flags, so it is the one recalled.
+    assert approved[pinned["id"]] in ids       # pinned low-importance still surfaces
+    assert approved[always["id"]] in ids       # proactive=always surfaces
+    assert approved[never["id"]] not in ids    # proactive=never is excluded
+
+
 def test_compact_proactive_context_is_bounded_and_does_not_repeat_source_bodies():
     svc = MemoryService.create(":memory:", embed_model="")
     pending = svc.remember(
@@ -147,6 +218,8 @@ def test_compact_proactive_context_never_emits_partial_citations(budget):
     )
 
     cited_numbers = {int(number) for number in re.findall(r"\[(\d+)\]", out["context"])}
+    counter = svc.engine.recall_engine.context_packer.count_tokens
+    assert counter(out["context"]) <= budget
     assert not re.search(r"\[(?:\d*)$", out["context"])
     assert {source["n"] for source in out["sources"]} == cited_numbers
     assert out["grounded"] is bool(cited_numbers)

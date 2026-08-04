@@ -124,9 +124,18 @@ continues to support Python 3.9+.
 For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
 the [agent connection guide](docs/AGENT_CONNECT.md).
 
-> **Upgrading to 1.4:** `engraphis-mcp` now exposes the six-tool Smart gateway. Integrations that
+### Updating
+
+Use `engraphis-update` to upgrade the installation using its detected install method. Package
+metadata does not record which extras were selected, so the updater defaults to the safe
+superset `engraphis[all]` rather than silently dropping an optional surface. For a deliberate
+selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
+`server,mcp`), or set it to `none` for the base package only.
+
+> **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
 > require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
-> remains version 7, so this MCP surface change does not require a data migration. See the
+> moves to version 8 (additive: `confidence`, `pinned_at`/`unpinned_at`, and the
+> `memory_tombstones` table), which migrates automatically on first open. See the
 > [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
 
 ---
@@ -203,8 +212,8 @@ outcomes, never keys, prompts, or raw provider responses. See the
 > `chunk` extractor when ingestion must remain entirely local.
 
 Choose and configure an external LLM with the [LLM provider guide](docs/LLM_PROVIDERS.md),
-including OpenAI, Anthropic, Google, OpenRouter, Ollama, Cohere Command, Command Code, and
-compatible endpoints.
+including OpenAI, Anthropic, Google, OpenRouter, Ollama, Cohere Command, Command Code Provider,
+and other compatible endpoints. The guide also covers Codex subscription MCP connections.
 
 ---
 
@@ -291,14 +300,15 @@ install premium server implementations into this image. See `docker-compose.yml`
 pip install "engraphis[mcp]"
 engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
-cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
+codex mcp add engraphis -- engraphis-mcp  # Codex subscription
+
 ```
+For Codex subscription setup and verification, see the [agent connection guide](docs/AGENT_CONNECT.md)
+and the [LLM provider guide](docs/LLM_PROVIDERS.md).
 
-For Command Code scopes, verification, and its optional Provider API setup, see the
-[Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
-
-`engraphis-mcp` is zero-configuration Smart MCP: agents begin with six compact tools for sessions,
-prompt-ready recall, durable memory, action discovery, and safe execution. For code graphs,
+`engraphis-mcp` is zero-configuration Smart MCP: agents begin with nine compact tools for sessions,
+prompt-ready recall, durable memory, governed record read/update, conflict review, action discovery,
+and safe execution. For code graphs,
 governance, audit, or other advanced work, the agent calls `engraphis_discover_actions` and then
 the indicated read or action executor; no profile selection is required. The gateway validates
 the discovered capability again before it runs it, and clients remain responsible for their

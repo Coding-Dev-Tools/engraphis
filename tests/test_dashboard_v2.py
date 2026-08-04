@@ -55,7 +55,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert page.status_code == 200
         assert "<title>Engraphis Ledger</title>" in page.text
         assert 'class="sidebar"' in page.text
-        for area in ("Today", "Ask", "Library", "Relationships", "Provenance", "Manage"):
+        for area in ("Today", "Ask", "Library", "Graph &amp; Relationships", "Provenance", "Manage"):
             assert f">{area}<" in page.text
         assert 'value="matrix">Matrix' in page.text
         assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
@@ -288,7 +288,8 @@ def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
         ledger = client.get("/v2-assets/ledger.js")
         assert engine.status_code == 200
         assert "function selectedPalette()" in engine.text
-        assert "function commPal() { return selectedPalette()" in engine.text
+        assert "function commPal() {" in engine.text
+        assert "return selectedPalette() ||" in engine.text
         assert "const colors = selectedPalette() || GRAPH_HEAT;" in engine.text
         # Palettes still recolor every identity mode, but material families stay stable:
         # semantic color belongs to the slim identity ring rather than rotating the whole

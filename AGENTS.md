@@ -20,7 +20,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 7`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 8`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -35,7 +35,7 @@ task is ambiguous, decide which side it belongs to *before* editing.
 # ── Install ──────────────────────────────────────────────────────────────────
 pip install numpy pytest            # v2 core + tests, fully OFFLINE (this is what CI does)
 pip install -e ".[all,dev]"         # full stack: FastAPI server, ST embeddings, ruff
-cp .env.example .env                # only needed for the v1 server / LLM features
+cp .env.example .env                # optional; configure server, LLM, encryption, or hosted client settings
 
 # ── Quality gate (offline, no API key — KEEP THIS GREEN; mirrors .github/workflows/ci.yml) ──
 python -m pytest tests/ -q                                          # unit tests (offline)
@@ -182,7 +182,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 7`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 8`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -230,8 +230,6 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **`docs/HOSTED_PLANS.md`** — concise pricing, plan contents, trial, and hosted-service boundary.
 - **`docs/MCP_TOOLS.md`** — standalone inventory of the public MCP surface; keep it synchronized
   with `engraphis/mcp_server.py`.
-- **`docs/OLLAMA.md`** — local Ollama configuration. Keep setup details here instead of
-  duplicating them in the README.
 - **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, and the
   untrusted-bundle security model.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.

@@ -1,4 +1,4 @@
-"""Documentation contracts for supported LLM and Command Code integrations."""
+"""Documentation contracts for supported LLM, Codex, and Command Code integrations."""
 from pathlib import Path
 
 
@@ -47,6 +47,7 @@ def test_provider_guides_use_the_runtime_provider_contract():
         assert setting in hub
 
     assert hub.count("ENGRAPHIS_LLM_PROVIDER=custom") >= 4
+    assert "http://localhost:11434/v1" in hub
     assert "https://api.cohere.ai/compatibility/v1" in hub
     assert "native `cohere`" in hub
 
@@ -83,7 +84,22 @@ def test_command_code_guide_covers_mcp_and_provider_api_boundaries():
         assert content in guide
 
 
+def test_codex_subscription_guide_covers_mcp_boundary():
+    guide = _read("docs/LLM_PROVIDERS.md")
+    for content in (
+        "Codex subscription",
+        "codex mcp add engraphis -- engraphis-mcp",
+        "codex mcp list",
+        "does not use ``ENGRAPHIS_LLM_PROVIDER``",
+        "do not\nconfigure a local model endpoint",
+    ):
+        assert content in guide
+
 def test_readme_and_env_example_link_to_the_provider_guides():
-    assert "docs/LLM_PROVIDERS.md" in _read("README.md")
-    assert "docs/LLM_PROVIDERS.md#command-code" in _read("README.md")
+    readme = _read("README.md")
+    assert "docs/LLM_PROVIDERS.md" in readme
+    assert "docs/AGENT_CONNECT.md" in readme
+    assert "Ollama" in readme
+    assert "Command Code Provider" in readme
+    assert "codex mcp add engraphis -- engraphis-mcp" in readme
     assert "docs/LLM_PROVIDERS.md" in _read(".env.example")
