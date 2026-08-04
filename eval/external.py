@@ -7,6 +7,8 @@ resolution, evolution) and hybrid recall.
 
 It measures **retrieval** (evidence recall@k / hit@k), not end-to-end QA accuracy.
 An official answering model and evaluator are required before reporting QA accuracy.
+Credential-shaped source text is redacted before the fixture reaches the engine;
+the report records the number of affected source records.
 
 Usage::
 
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from engraphis.backends.embedder_st import get_embedder
+from engraphis.core.secrets import redact_secrets
 from eval.harness import run
 
 
@@ -58,6 +61,7 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
     for sample in selected:
         conv = sample.get("conversation") or {}
         memories = []
+        redactions = 0
         for key, turns in conv.items():
             if not key.startswith("session_") or key.endswith("_date_time") or not isinstance(turns, list):
                 continue
@@ -71,7 +75,10 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
                 if not tag or not text:
                     continue
                 prefix = f"[{stamp}] " if stamp else ""
-                memories.append({"tag": tag, "text": f"{prefix}{speaker}: {text}"})
+                raw_text = f"{prefix}{speaker}: {text}"
+                safe_text = redact_secrets(raw_text)
+                redactions += int(safe_text != raw_text)
+                memories.append({"tag": tag, "text": safe_text})
         questions = []
         for question_number, qa in enumerate(sample.get("qa") or []):
             supporting = [str(e).strip() for e in (qa.get("evidence") or []) if str(e).strip()]
@@ -87,7 +94,8 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
             })
         if memories and questions:
             cases.append({"id": str(sample.get("sample_id") or f"locomo-{len(cases)}"),
-                          "memories": memories, "questions": questions})
+                          "memories": memories, "questions": questions,
+                          "source_secret_redactions": redactions})
     return cases
 
 
@@ -116,10 +124,12 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
         if dates and len(dates) != len(sessions):
             raise ValueError(f"{qid}: haystack_dates must be empty or align with haystack_sessions")
         memories = []
+        redactions = 0
         # The cleaned LongMemEval-S release repeats a small number of session IDs,
-        # always with identical sessions. A benchmark memory needs a unique identity,
-        # so collapse those repeated source rows instead of failing the run or inflating
-        # the denominator. Different content under the same source ID is ambiguous.
+        # always with identical conversation content but occasionally a different
+        # haystack date label. A benchmark memory needs a unique source identity, so
+        # retain the first occurrence. Different conversation content under one source
+        # ID remains ambiguous and fails closed.
         memory_by_session_id: dict[str, str] = {}
         for index, (sid, session) in enumerate(zip(session_ids, sessions)):
             if not isinstance(session, list):
@@ -131,18 +141,22 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
                 continue
             prefix = f"[{date}] " if date else ""
             session_id = str(sid)
-            text = prefix + "\n".join(lines)
+            content = "\n".join(lines)
             previous = memory_by_session_id.get(session_id)
             if previous is None:
-                memory_by_session_id[session_id] = text
-                memories.append({"tag": session_id, "text": text})
-            elif previous != text:
+                memory_by_session_id[session_id] = content
+                raw_text = prefix + content
+                safe_text = redact_secrets(raw_text)
+                redactions += int(safe_text != raw_text)
+                memories.append({"tag": session_id, "text": safe_text})
+            elif previous != content:
                 raise ValueError(
                     f"{qid}: duplicate session id {session_id!r} has conflicting content"
                 )
         supporting = [str(s) for s in (inst.get("answer_session_ids") or [])]
         if memories:
             cases.append({"id": qid, "memories": memories,
+                          "source_secret_redactions": redactions,
                           "questions": [{"q": str(inst.get("question") or ""),
                                          "answer": str(inst.get("answer") or ""),
                                          "supporting": supporting,
@@ -200,6 +214,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     n_mem = sum(len(c["memories"]) for c in cases)
     n_q = sum(len(c["questions"]) for c in cases)
+    source_secret_redactions = sum(int(c.get("source_secret_redactions", 0)) for c in cases)
     embedder = get_embedder(None if args.offline else args.embed_model)
     embedder_name = type(embedder).__name__
     print(f"{args.format}: {len(cases)} cases · {n_mem} memories · {n_q} questions "
@@ -218,6 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     report["measures"] = "retrieval (evidence recall@k), not end-to-end QA accuracy"
     report["wall_seconds"] = round(dt, 1)
     report["canonical"] = bool(args.canonical)
+    report["source_secret_redactions"] = source_secret_redactions
 
     print(f"\nEngraphis × {args.format} — {report['questions']} questions @ k={args.k} "
           f"({dt:.1f}s)")
@@ -226,6 +242,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"  answer_token_recall : {report['answer_token_recall']:.3f}")
     print(f"  retrieval scored    : {report['scored_questions']}/{report['questions']} "
           f"(exclusions={len(report['exclusions'])})")
+    if source_secret_redactions:
+        print(f"  source redactions   : {source_secret_redactions} credential-shaped records")
     if args.json_out:
         slim = {k: v for k, v in report.items() if k != "detail"}
         Path(args.json_out).write_text(json.dumps(slim, indent=2), encoding="utf-8")

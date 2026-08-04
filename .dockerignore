@@ -56,7 +56,8 @@ playwright-report
 .playwright
 .private-eval
 .hosted-eval-results
-/.tmp[-_]*/
+/.tmp-*/
+/.tmp_*/
 /.release-full-tmp/
 /_to_delete/
 *.log

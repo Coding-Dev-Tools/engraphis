@@ -73,6 +73,12 @@ _SENSITIVE_MAPPING_KEY = re.compile(
     """,
 )
 _REDACTION = re.compile(r"^<?(?:redacted|removed|withheld|not[_ -]?set)>?$", re.I)
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?"
+    r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----",
+    re.I,
+)
+_REDACTED = "<redacted>"
 
 
 def _text(value: Any) -> str:
@@ -137,6 +143,26 @@ def secret_kind(value: Any) -> str | None:
     if _ASSIGNMENT.search(value):
         return "credential assignment"
     return None
+
+
+def redact_secrets(text: str) -> str:
+    """Return *text* with credential-shaped values replaced by a safe marker.
+
+    This is intentionally separate from :func:`reject_secrets`: product writes
+    must still fail closed. It is for callers that explicitly need a safe copy
+    of untrusted text, such as an evaluation corpus that must not persist an
+    incidental credential found in source material. The returned text is
+    suitable for the normal capture boundary and never includes the original
+    matching value.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    safe = _PEM_BLOCK.sub(_REDACTED, text)
+    for _kind, pattern in _PATTERNS:
+        safe = pattern.sub(_REDACTED, safe)
+    safe = _DSN.sub(_REDACTED, safe)
+    safe = _ASSIGNMENT.sub(_REDACTED, safe)
+    return safe
 
 
 def reject_secrets(fields: Iterable[tuple[str, Any]]) -> None:
