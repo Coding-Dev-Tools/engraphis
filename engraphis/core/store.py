@@ -5343,6 +5343,45 @@ class Store:
         if commit:
             self.conn.commit()
 
+    # ── bounded maintenance cursors (local, never synced) ──────────────────────
+    def get_maintenance_cursor(self, workspace_id: str, repo_id: Optional[str],
+                                name: str) -> str:
+        """Return the last keyset id visited by one scoped maintenance sweep."""
+        row = self.conn.execute(
+            "SELECT cursor FROM maintenance_cursors "
+            "WHERE workspace_id=? AND repo_id=? AND name=?",
+            (workspace_id, repo_id or "", name),
+        ).fetchone()
+        return str(row["cursor"]) if row else ""
+
+    def set_maintenance_cursor(self, workspace_id: str, repo_id: Optional[str],
+                               name: str, cursor: str, *, commit: bool = True) -> None:
+        """Persist bounded-sweep progress without exposing it to sync peers."""
+        normalized_cursor = str(cursor or "")
+        scope = (workspace_id, repo_id or "", name)
+        existing = self.conn.execute(
+            "SELECT cursor FROM maintenance_cursors "
+            "WHERE workspace_id=? AND repo_id=? AND name=?",
+            scope,
+        ).fetchone()
+        if existing is not None and str(existing["cursor"] or "") == normalized_cursor:
+            return
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO maintenance_cursors("
+                "workspace_id, repo_id, name, cursor, updated_at"
+                ") VALUES (?,?,?,?,?)",
+                (*scope, normalized_cursor, now_ts()),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE maintenance_cursors SET cursor=?, updated_at=? "
+                "WHERE workspace_id=? AND repo_id=? AND name=?",
+                (normalized_cursor, now_ts(), *scope),
+            )
+        if commit:
+            self.conn.commit()
+
     # ── sync tombstones (durable deletion markers that propagate) ───────────────
     def add_memory_tombstone(self, memory_id: str, *, deleted_at: Optional[float] = None,
                              device_id: Optional[str] = None,

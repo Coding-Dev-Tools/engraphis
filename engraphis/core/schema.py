@@ -484,6 +484,21 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value      TEXT,
     updated_at REAL
 );
+-- ── Maintenance cursors (local bounded-sweep progress) ───────────────────────
+-- Consolidation scans are intentionally bounded. Persist their keyset cursor so
+-- recurring sweeps rotate past rows that are not currently clusterable instead of
+-- restarting at the same oldest window forever. This is local bookkeeping and is
+-- never included in sync bundles.
+CREATE TABLE IF NOT EXISTS maintenance_cursors (
+    workspace_id TEXT NOT NULL,
+    repo_id      TEXT NOT NULL DEFAULT '',
+    name         TEXT NOT NULL,
+    cursor       TEXT NOT NULL DEFAULT '',
+    updated_at   REAL NOT NULL,
+    PRIMARY KEY (workspace_id, repo_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_cursors_workspace
+    ON maintenance_cursors(workspace_id, repo_id, name);
 
 -- Durable per-memory tombstones (sync deletion markers, v9).
 --

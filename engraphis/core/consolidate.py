@@ -60,6 +60,9 @@ DISTILL_SCAN_LIMIT = 2000
 # Bound the population that reaches the quadratic fallback clustering pass while
 # allowing the storage scan to page in smaller batches and skip pending rows.
 DISTILL_CLUSTER_LIMIT = 2000
+# Cursor name for the bounded episodic sweep; the value is scoped by workspace/repo.
+DISTILL_CURSOR_NAME = "episodic-consolidation"
+
 PROFILE_SCAN_LIMIT = 5000
 PROFILE_MEMORY_LIMIT = 5000
 PROFILE_ENTITY_LIMIT = 2000
@@ -194,31 +197,32 @@ def _linked_memory_ids(store, memory_ids: list[str], *, relation: str) -> set[st
     return linked
 
 
-def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
-                   batch_size: int, prompt_only: bool = False,
-                   max_records: Optional[int] = None,
-                   exclude_relation: Optional[str] = None) -> list[MemoryRecord]:
-    """Read every matching row in deterministic keyset batches.
+def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
+                        batch_size: int, prompt_only: bool = False,
+                        max_records: Optional[int] = None,
+                        exclude_relation: Optional[str] = None,
+                        start_after_id: str = "") -> tuple[list[MemoryRecord], str]:
+    """Read one bounded keyset window and return its next persistent cursor.
 
-    ``Store.list_memories(limit=...)`` deliberately limits the result after ordering by
-    ingest time.  A maintenance sweep must not mistake that operational batch size for
-    the complete eligible population: newer unrelated rows otherwise hide older work.
-    Keyset pagination is stable while the caller performs writes between passes.
+    ``Store.list_memories_page`` orders by id.  When a bounded window reaches the
+    end, the empty cursor deliberately makes the *next* sweep wrap to the start;
+    this rotates maintenance over all eligible rows without materializing or
+    clustering the full population on every run.
     """
     size = max(1, int(batch_size))
     cap = None if max_records is None else max(0, int(max_records))
     if cap == 0:
-        return []
-    after_id = ""
+        return [], str(start_after_id or "")
+    after_id = str(start_after_id or "")
     records: list[MemoryRecord] = []
     scoped = _replace(flt, mtypes=mtypes)
+    next_cursor = ""
     while True:
         page = store.list_memories_page(scoped, after_id=after_id, limit=size)
         if not page:
+            # The persisted cursor was at the end of the keyspace. Start the next
+            # sweep from the beginning instead of retrying an empty tail forever.
             break
-        # Keep the cursor from the storage page, not the filtered page.  A page
-        # can contain only already-linked memories (or have its final row
-        # filtered), and pagination must still advance past those rows.
         next_after = page[-1].id
         page_size = len(page)
         if exclude_relation:
@@ -234,8 +238,10 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         else:
             records.extend(page)
         if cap is not None and len(records) >= cap:
+            next_cursor = next_after
             break
         if next_after == after_id or page_size < size:
+            # End-of-keyspace: clear the cursor for the next invocation.
             break
         after_id = next_after
     records.sort(
@@ -245,7 +251,21 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         ),
         reverse=True,
     )
-    return records[:cap] if cap is not None else records
+    return records[:cap] if cap is not None else records, next_cursor
+
+
+def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
+                   batch_size: int, prompt_only: bool = False,
+                   max_records: Optional[int] = None,
+                   exclude_relation: Optional[str] = None,
+                   start_after_id: str = "") -> list[MemoryRecord]:
+    """Read every matching row, or one bounded window when ``max_records`` is set."""
+    records, _ = _scan_memory_window(
+        store, flt, mtypes=mtypes, batch_size=batch_size,
+        prompt_only=prompt_only, max_records=max_records,
+        exclude_relation=exclude_relation, start_after_id=start_after_id,
+    )
+    return records
 
 
 def _derived_memory_for_sources(store, first: MemoryRecord, source_ids: set[str],
@@ -573,12 +593,20 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 except Exception as exc:
                     report["errors"].append(_error_entry(retry_cluster, exc))
 
-    episodic = _scan_memories(
+    distill_cursor = store.get_maintenance_cursor(
+        workspace_id, repo_id, DISTILL_CURSOR_NAME,
+    )
+    episodic, next_distill_cursor = _scan_memory_window(
         store, flt, mtypes=[MemoryType.EPISODIC],
         batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
         max_records=DISTILL_CLUSTER_LIMIT,
         exclude_relation="consolidates",
+        start_after_id=distill_cursor,
     )
+    if not dry_run:
+        store.set_maintenance_cursor(
+            workspace_id, repo_id, DISTILL_CURSOR_NAME, next_distill_cursor,
+        )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
     # another repo's content (or mix scope visibility).

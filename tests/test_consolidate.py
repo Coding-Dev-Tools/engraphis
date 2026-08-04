@@ -806,6 +806,43 @@ def test_distill_batches_all_eligible_episodes(monkeypatch):
     assert set(report["digests_created"][0]["consolidates"]) == set(source_ids)
     assert report["errors"] == []
 
+def test_distill_cursor_rotates_past_unclusterable_window(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "DISTILL_CLUSTER_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for content in (
+        "Amber protocol observation.",
+        "Cobalt ledger anomaly.",
+        "Violet queue measurement.",
+    ):
+        eng.remember(
+            content, workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    assert first["clusters_found"] == 0
+    assert eng.store.get_maintenance_cursor(
+        wid, rid, consolidate_module.DISTILL_CURSOR_NAME,
+    )
+
+    source_ids = [
+        eng.remember(
+            f"Recurring deploy failure during run {index}.",
+            workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(3)
+    ]
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(second["digests_created"]) == 1
+    assert set(second["digests_created"][0]["consolidates"]) == set(source_ids)
+
 
 def test_scan_advances_past_a_fully_excluded_page():
     from engraphis.core import consolidate as consolidate_module
