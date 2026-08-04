@@ -7,8 +7,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [1.4.5] - 2026-08-04
 
-Patch release for the governed recall/write hardening, schema 9 migration and tombstone
-handling, Smart MCP gateway fixes, and credential-safe evaluation capture included in PR #111.
+Patch release aligning the package, runtime, commercial manifest, and plugin metadata at 1.4.5
+for the governed recall/write hardening, schema 8 migration, Smart MCP gateway fixes, and
+credential-safe evaluation capture included in PR #111.
 
 ## [1.4.0] - 2026-08-02
 
