@@ -24,11 +24,11 @@
         </select>
       </label>
 
-      <div class="dashboard-switcher" aria-label="Dashboard interface">
+      <nav class="dashboard-switcher" aria-label="Dashboard interface">
         <span>Dashboard</span>
         <a class="dashboard-link active" href="/" aria-current="page">Ledger</a>
         <a class="dashboard-link" href="/classic">Classic</a>
-      </div>
+      </nav>
 
       <label class="theme-switcher">
         <span>Theme</span>
@@ -51,18 +51,18 @@
           <span>Library</span><small>memories and imports</small>
         </button>
         <button class="nav-item" type="button" data-view="relations">
-          <span>Relationships</span><small>connections and evidence</small>
+          <span>Graph &amp; Relationships</span><small>connections and evidence</small>
         </button>
         <button class="nav-item" type="button" data-view="provenance">
           <span>Provenance</span><small>why, timeline, receipts</small>
         </button>
       </nav>
 
-      <div class="manage-nav">
+      <nav class="manage-nav" aria-label="Management">
         <button class="nav-item" type="button" data-view="manage">
           <span>Manage</span><small>workspaces, consolidate, settings</small>
         </button>
-      </div>
+      </nav>
 
       <div class="sidebar-promo">
         <div class="pro-sidebar-copy" id="sidebar-pro-copy">Support continued Engraphis development with Pro.</div>
@@ -112,7 +112,7 @@
               </div>
               <div class="table-scroll">
                 <table class="activity-table">
-                  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Scope</th><th>Receipt</th></tr></thead>
+                  <thead><tr><th scope="col">When</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Scope</th><th scope="col">Receipt</th></tr></thead>
                   <tbody id="activity-body"><tr><td colspan="5">Loading activity…</td></tr></tbody>
                 </table>
               </div>
@@ -233,16 +233,17 @@
           <div class="graph-stage">
             <header class="graph-header">
               <div>
-                <p class="eyebrow">Graph &amp; Relations · evidence graph</p>
+                <p class="eyebrow">Graph &amp; Relationships · evidence graph</p>
                 <h1 id="relations-title">How this workspace connects</h1>
               </div>
             </header>
-            <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Interactive knowledge graph"></div>
-            <div id="graph-empty" class="graph-empty">Open Graph &amp; Relations to load the graph.</div>
+            <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Interactive knowledge graph" aria-describedby="graph-a11y-help graph-count graph-mode"></div>
+            <div id="graph-empty" class="graph-empty" role="status" aria-live="polite">Open Graph &amp; Relationships to load the graph.</div>
             <div class="graph-hud">
               <span id="graph-count">0 entities · 0 relations</span>
               <span id="graph-mode">Community islands</span>
             </div>
+            <p id="graph-a11y-help" class="sr-only">The graph is a visual summary. Open the Analyse tab to inspect entities and relations with keyboard controls.</p>
           </div>
 
           <aside class="graph-rail" aria-label="Graph controls">
@@ -398,13 +399,13 @@
           </header>
 
           <div class="tab-list" role="tablist" aria-label="Provenance views">
-            <button class="tab active" type="button" role="tab" data-provenance-tab="belief" aria-selected="true">What we believe</button>
-            <button class="tab" type="button" role="tab" data-provenance-tab="timeline" aria-selected="false">Timeline</button>
-            <button class="tab" type="button" role="tab" data-provenance-tab="audit" aria-selected="false">Audit &amp; receipts</button>
-            <button class="tab" type="button" role="tab" data-provenance-tab="supersessions" aria-selected="false">Supersessions</button>
+            <button id="provenance-belief-tab" class="tab active" type="button" role="tab" data-provenance-tab="belief" aria-selected="true" aria-controls="provenance-belief-panel">What we believe</button>
+            <button id="provenance-timeline-tab" class="tab" type="button" role="tab" data-provenance-tab="timeline" aria-selected="false" aria-controls="provenance-timeline-panel">Timeline</button>
+            <button id="provenance-audit-tab" class="tab" type="button" role="tab" data-provenance-tab="audit" aria-selected="false" aria-controls="provenance-audit-panel">Audit &amp; receipts</button>
+            <button id="provenance-supersessions-tab" class="tab" type="button" role="tab" data-provenance-tab="supersessions" aria-selected="false" aria-controls="provenance-supersessions-panel">Supersessions</button>
           </div>
 
-          <section class="tab-panel active" data-provenance-panel="belief">
+          <section id="provenance-belief-panel" class="tab-panel active" data-provenance-panel="belief" role="tabpanel" aria-labelledby="provenance-belief-tab">
             <form id="why-form" class="inline-form" novalidate>
               <label>Claim or topic<input id="why-input" required placeholder="Why do we believe…?"></label>
               <button class="primary-button" type="submit">Trace belief</button>
@@ -412,7 +413,7 @@
             <div id="why-result" class="memory-list"><p class="empty-state">Search for a claim to inspect its live support and what it replaced.</p></div>
           </section>
 
-          <section class="tab-panel" data-provenance-panel="timeline">
+          <section id="provenance-timeline-panel" class="tab-panel" data-provenance-panel="timeline" role="tabpanel" aria-labelledby="provenance-timeline-tab">
             <form id="timeline-form" class="inline-form" novalidate>
               <label>Topic<input id="timeline-input" required placeholder="Database choice"></label>
               <button class="primary-button" type="submit">Show history</button>
@@ -420,7 +421,7 @@
             <div id="timeline-result" class="timeline-list"><p class="empty-state">Search a topic to travel through its valid-time history.</p></div>
           </section>
 
-          <section class="tab-panel" data-provenance-panel="audit">
+          <section id="provenance-audit-panel" class="tab-panel" data-provenance-panel="audit" role="tabpanel" aria-labelledby="provenance-audit-tab">
             <div class="section-heading">
               <div><h2>Recorded operations</h2><p>Actor, action, scope and verification state.</p></div>
               <div class="header-actions">
@@ -431,7 +432,7 @@
             <div id="audit-list" class="audit-list"><p class="empty-state">Loading audit records…</p></div>
           </section>
 
-          <section class="tab-panel" data-provenance-panel="supersessions">
+          <section id="provenance-supersessions-panel" class="tab-panel" data-provenance-panel="supersessions" role="tabpanel" aria-labelledby="provenance-supersessions-tab">
             <form id="supersession-form" class="inline-form" novalidate>
               <label>Topic<input id="supersession-input" required placeholder="What changed?"></label>
               <button class="primary-button" type="submit">Find supersessions</button>
@@ -450,16 +451,16 @@
           </header>
 
           <div class="tab-list manage-tabs" role="tablist" aria-label="Manage views">
-            <button class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true">Workspaces</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="consolidate" aria-selected="false">Consolidate</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="analytics" aria-selected="false">Analytics</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="automation" aria-selected="false">Automation</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="team" aria-selected="false">Team</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="plans" aria-selected="false">Plans &amp; billing</button>
-            <button class="tab" type="button" role="tab" data-manage-tab="settings" aria-selected="false">Settings</button>
+            <button id="manage-workspaces-tab" class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true" aria-controls="manage-workspaces-panel">Workspaces</button>
+            <button id="manage-consolidate-tab" class="tab" type="button" role="tab" data-manage-tab="consolidate" aria-selected="false" aria-controls="manage-consolidate-panel">Consolidate</button>
+            <button id="manage-analytics-tab" class="tab" type="button" role="tab" data-manage-tab="analytics" aria-selected="false" aria-controls="manage-analytics-panel">Analytics</button>
+            <button id="manage-automation-tab" class="tab" type="button" role="tab" data-manage-tab="automation" aria-selected="false" aria-controls="manage-automation-panel">Automation</button>
+            <button id="manage-team-tab" class="tab" type="button" role="tab" data-manage-tab="team" aria-selected="false" aria-controls="manage-team-panel">Team</button>
+            <button id="manage-plans-tab" class="tab" type="button" role="tab" data-manage-tab="plans" aria-selected="false" aria-controls="manage-plans-panel">Plans &amp; billing</button>
+            <button id="manage-settings-tab" class="tab" type="button" role="tab" data-manage-tab="settings" aria-selected="false" aria-controls="manage-settings-panel">Settings</button>
           </div>
 
-          <section class="tab-panel active" data-manage-panel="workspaces">
+          <section id="manage-workspaces-panel" class="tab-panel active" data-manage-panel="workspaces" role="tabpanel" aria-labelledby="manage-workspaces-tab">
             <div class="section-heading">
               <div><h2>Workspaces</h2><p>Each workspace is an independent visibility boundary.</p></div>
               <button id="create-workspace-toggle" class="primary-button" type="button">New workspace</button>
@@ -472,7 +473,7 @@
             <div id="workspace-list" class="workspace-list"><p class="empty-state">Loading workspaces…</p></div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="consolidate">
+          <section id="manage-consolidate-panel" class="tab-panel" data-manage-panel="consolidate" role="tabpanel" aria-labelledby="manage-consolidate-tab">
             <div class="split-callout">
               <div>
                 <p class="eyebrow">Sleep-time maintenance</p>
@@ -489,7 +490,7 @@
             <div id="consolidate-result" class="result-card"><p class="empty-state">No preview has been run.</p></div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="analytics">
+          <section id="manage-analytics-panel" class="tab-panel" data-manage-panel="analytics" role="tabpanel" aria-labelledby="manage-analytics-tab">
             <div class="hosted-hero">
               <p class="eyebrow">Pro · hosted compute</p>
               <h2>Portfolio analytics without moving secret memory</h2>
@@ -499,7 +500,7 @@
             </div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="automation">
+          <section id="manage-automation-panel" class="tab-panel" data-manage-panel="automation" role="tabpanel" aria-labelledby="manage-automation-tab">
             <div class="hosted-hero">
               <p class="eyebrow">Pro · managed maintenance</p>
               <h2>Schedule consolidation with an explicit upload boundary</h2>
@@ -509,7 +510,7 @@
             </div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="team">
+          <section id="manage-team-panel" class="tab-panel" data-manage-panel="team" role="tabpanel" aria-labelledby="manage-team-tab">
             <div class="hosted-hero">
               <p class="eyebrow">Team · hosted control plane</p>
               <h2>Shared workspaces, member roles and named seats</h2>
@@ -519,7 +520,7 @@
             </div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="plans">
+          <section id="manage-plans-panel" class="tab-panel" data-manage-panel="plans" role="tabpanel" aria-labelledby="manage-plans-tab">
             <div class="section-heading">
               <div><h2>Plans &amp; billing</h2><p>Free is local forever. Pay only for hosted services.</p></div>
               <label class="billing-toggle">Billing<select id="billing-select"><option value="monthly">Monthly</option><option value="annual">Annual · two months free</option></select></label>
@@ -527,7 +528,7 @@
             <div id="plan-cards" class="plan-cards"></div>
             <div class="comparison-table-wrap">
               <table class="comparison-table">
-                <thead><tr><th>Capability</th><th>Free</th><th>Pro</th><th>Team</th></tr></thead>
+                <thead><tr><th scope="col">Capability</th><th scope="col">Free</th><th scope="col">Pro</th><th scope="col">Team</th></tr></thead>
                 <tbody>
                   <tr><td>Local memory engine</td><td>Included</td><td>Included</td><td>Included</td></tr>
                   <tr><td>Grounded recall</td><td>Included</td><td>Included</td><td>Included</td></tr>
@@ -545,7 +546,7 @@
             </div>
           </section>
 
-          <section class="tab-panel" data-manage-panel="settings">
+          <section id="manage-settings-panel" class="tab-panel" data-manage-panel="settings" role="tabpanel" aria-labelledby="manage-settings-tab">
             <div class="settings-grid">
               <section class="setting-card">
                 <p class="eyebrow">Interface</p>

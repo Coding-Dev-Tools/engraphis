@@ -22,7 +22,15 @@ therefore a **state-based CRDT** over memory rows, not a bespoke replication log
       device invalidates everywhere — never resurrected).
     - ``stability`` / ``access_count`` / ``last_access``: ``max`` (reinforcement is
       monotone; the spacing effect only ever grows stability).
-    - ``pinned``: logical OR.
+    - ``pinned``: a per-field pin lattice — ``pinned_at``/``unpinned_at`` markers
+      merge latest-wins (the newest transition dominates), so a re-pin on one device
+      beats a stale unpin on another instead of losing a legitimate toggle.
+      ``pinned`` itself is derived from the merged markers.
+    - ``deleted_at``: secure-erase tombstones are terminal within their known
+      repository scope. An erased id is carried in the bundle's ``tombstones`` list
+      (id + erasure time + origin device, never content) and merged earliest-wins;
+      legacy repo-less markers remain global for compatibility, while a known marker
+      cannot erase a same-id row from a sibling repository.
     - descriptive fields (title/content/keywords/…): last-writer-wins under a
       **deterministic total order** — ``(last_access, ingested_at, content-hash)`` —
       so the winner is a function of the data, never of arrival order.
@@ -68,6 +76,9 @@ SYNC_FORMAT = "engraphis-sync"
 SYNC_VERSION = 2
 SYNC_ACCEPTED_VERSIONS = frozenset({1, 2})
 
+# ── tombstone bundle constants ────────────────────────────────────────────────
+MAX_TOMBSTONES = 200_000             # same cap as MAX_MEMORIES (ids only, no content)
+
 # ── validation caps (untrusted bundle → clamp, don't trust) ───────────────────
 MAX_MEMORIES = 200_000
 MAX_LINKS = 500_000
@@ -100,7 +111,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # handled separately and are NOT part of this set.
 _LWW_FIELDS = (
     "title", "content", "summary", "keywords", "metadata", "mtype", "scope",
-    "importance", "surprise", "sensitivity", "valid_from", "ingested_at",
+    "importance", "surprise", "confidence", "sensitivity", "valid_from", "ingested_at",
     "session_id", "provenance", "subject_key", "claim_kind",
 )
 
@@ -145,7 +156,7 @@ def _label_tuple(rec: MemoryRecord) -> list:
     return [
         rec.title, rec.content, rec.summary, sorted(rec.keywords or []),
         _enum(rec.mtype), _enum(rec.scope), rec.importance, rec.surprise,
-        rec.sensitivity, rec.valid_from, rec.session_id,
+        rec.confidence, rec.sensitivity, rec.valid_from, rec.session_id,
         rec.subject_key, rec.claim_kind,
         json.dumps(rec.metadata or {}, sort_keys=True, default=str),
         json.dumps(rec.provenance or {}, sort_keys=True, default=str),
@@ -169,6 +180,7 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """
     winner = local if _version_key(local) >= _version_key(incoming) else incoming
     valid_to, valid_to_recorded_at = _merge_closure(local, incoming)
+    pinned, pinned_at, unpinned_at = _pin_lattice(local, incoming)
     return MemoryRecord(
         id=local.id,
         # scope pointers are always local — never merged from the remote
@@ -178,7 +190,8 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         content=winner.content, title=winner.title, summary=winner.summary,
         keywords=list(winner.keywords or []), metadata=dict(winner.metadata or {}),
         mtype=winner.mtype, scope=winner.scope, importance=winner.importance,
-        surprise=winner.surprise, sensitivity=winner.sensitivity,
+        surprise=winner.surprise, confidence=winner.confidence,
+        sensitivity=winner.sensitivity,
         session_id=winner.session_id, provenance=dict(winner.provenance or {}),
         subject_key=winner.subject_key, claim_kind=winner.claim_kind,
         valid_from=winner.valid_from,
@@ -199,7 +212,9 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         stability=max(local.stability, incoming.stability),
         access_count=max(local.access_count, incoming.access_count),
         last_access=_max_nonnull(local.last_access, incoming.last_access),
-        pinned=bool(local.pinned or incoming.pinned),
+        pinned=pinned,
+        pinned_at=pinned_at,
+        unpinned_at=unpinned_at,
         valid_to_recorded_at=valid_to_recorded_at,
     )
 
@@ -229,6 +244,71 @@ def _merge_closure(
     return local.valid_to, min(
         local.valid_to_recorded_at, incoming.valid_to_recorded_at
     )
+
+
+def _merge_closure_ts(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    """Latest non-null wins for one pin-transition marker.
+
+    Pin state is a toggle, not a closure. The newest transition must therefore
+    dominate an older peer marker; retaining only the earliest marker makes a
+    legitimate re-pin impossible to propagate after an unpin.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a >= b else b
+
+
+def _normalise_pin_state(rec: MemoryRecord) -> tuple[bool, Optional[float], Optional[float]]:
+    """Drop contradictory marker combinations before merging untrusted rows.
+
+    A pinned row may be legacy (no markers), or carry a pin marker newer than its
+    unpin marker. An unpinned row may carry the history of a pin, but a pin marker
+    without an unpin marker is inconsistent with ``pinned=False`` and must not grant
+    authority merely because a peer serialized a timestamp.
+    """
+    pinned = bool(rec.pinned)
+    pinned_at = rec.pinned_at
+    unpinned_at = rec.unpinned_at
+    if pinned:
+        if pinned_at is None:
+            # Legacy pinned rows have no trustworthy transition clock. Preserve the
+            # legacy state and ignore a marker-only forged unpin.
+            unpinned_at = None
+        elif unpinned_at is not None and pinned_at <= unpinned_at:
+            # The markers describe an unpinned state; the explicit boolean cannot
+            # override the newer unpin event.
+            pinned = False
+    elif pinned_at is not None and (
+            unpinned_at is None or pinned_at > unpinned_at):
+        # A false row must not become pinned from a lone peer-controlled marker.
+        pinned_at = None
+    return pinned, pinned_at, unpinned_at
+
+
+def _pin_lattice(local: MemoryRecord, incoming: MemoryRecord) -> tuple[bool, Optional[float], Optional[float]]:
+    """Merge pin state as a latest-transition lattice.
+
+    The two markers retain the latest pin and unpin events. Deriving the boolean
+    from their newest values makes pin/unpin/re-pin convergence commutative,
+    associative, and idempotent while rejecting contradictory marker-only authority.
+    """
+    local_pinned, local_pinned_at, local_unpinned_at = _normalise_pin_state(local)
+    incoming_pinned, incoming_pinned_at, incoming_unpinned_at = _normalise_pin_state(incoming)
+    pinned_at = _merge_closure_ts(local_pinned_at, incoming_pinned_at)
+    unpinned_at = _merge_closure_ts(local_unpinned_at, incoming_unpinned_at)
+    # A legacy pinned row carries no marker. Treat it as pinned since the epoch so
+    # an explicit unpin can still propagate to peers that have not migrated it.
+    if pinned_at is None and (local_pinned or incoming_pinned):
+        pinned_at = 0.0
+    if unpinned_at is None:
+        pinned = pinned_at is not None
+    elif pinned_at is None:
+        pinned = False
+    else:
+        pinned = pinned_at > unpinned_at
+    return pinned, pinned_at, unpinned_at
 
 
 # Fields ``Store.add_memory`` fills in from the SERVER clock when they arrive as ``None``
@@ -284,6 +364,7 @@ def _same_sync_payload(left: MemoryRecord, right: MemoryRecord) -> bool:
         and left.scope == right.scope
         and left.importance == right.importance
         and left.surprise == right.surprise
+        and left.confidence == right.confidence
         and left.sensitivity == right.sensitivity
         and left.valid_from == right.valid_from
         and left.ingested_at == right.ingested_at
@@ -299,6 +380,7 @@ def _signature(rec: MemoryRecord) -> str:
         rec.valid_to, rec.valid_to_recorded_at, rec.expired_at,
         rec.ingested_at, rec.stability,
         rec.access_count, rec.last_access, bool(rec.pinned),
+        rec.pinned_at, rec.unpinned_at,
     ])
 
 
@@ -311,11 +393,13 @@ def record_to_dict(rec: MemoryRecord) -> dict:
         "title": rec.title, "content": rec.content, "summary": rec.summary,
         "keywords": list(rec.keywords or []), "metadata": rec.metadata or {},
         "importance": rec.importance, "surprise": rec.surprise, "stability": rec.stability,
-        "access_count": rec.access_count, "last_access": rec.last_access,
+        "confidence": rec.confidence, "access_count": rec.access_count,
+        "last_access": rec.last_access,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
         "pinned": bool(rec.pinned), "sensitivity": rec.sensitivity,
+        "pinned_at": rec.pinned_at, "unpinned_at": rec.unpinned_at,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "provenance": rec.provenance or {},
     }
@@ -500,6 +584,7 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         importance=_clamp_num(d.get("importance"), 0.0, 1.0, 0.0),
         surprise=_clamp_num(d.get("surprise"), 0.0, 100.0, 1.0),
         stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0),
+        confidence=_clamp_num(d.get("confidence"), 0.0, 1.0, 1.0),
         access_count=min(MAX_ACCESS_COUNT, max(0, _as_int(d.get("access_count"), 0))),
         last_access=_clamp_ts(d.get("last_access"), now),
         # World-time validity may be in the future; the system timestamps below may not
@@ -512,6 +597,8 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         # Authority-bearing booleans are strict. In particular ``"false"`` must
         # not become truthy and then remain permanently pinned through the CRDT OR.
         pinned=d.get("pinned") is True, sensitivity=sens,
+        pinned_at=_clamp_ts(d.get("pinned_at"), now),
+        unpinned_at=_clamp_ts(d.get("unpinned_at"), now),
         subject_key=_clamp_str(d.get("subject_key"), 512),
         claim_kind=_clamp_str(d.get("claim_kind"), 256),
         provenance=_safe_json_obj(d.get("provenance")),
@@ -577,6 +664,7 @@ class SyncEngine:
             "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
+            "tombstones": self.store.list_memory_tombstones(workspace_id, repo_id),
             "mem_links": [
                 {
                     "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
@@ -612,9 +700,12 @@ class SyncEngine:
 
         mem_dicts = bundle.get("memories") or []
         link_dicts = bundle.get("mem_links") or []
-        if not isinstance(mem_dicts, list) or not isinstance(link_dicts, list):
-            raise SyncError("bundle memories/mem_links must be lists")
-        if len(mem_dicts) > MAX_MEMORIES or len(link_dicts) > MAX_LINKS:
+        tomb_dicts = bundle.get("tombstones") or []
+        if not isinstance(mem_dicts, list) or not isinstance(link_dicts, list) \
+                or not isinstance(tomb_dicts, list):
+            raise SyncError("bundle memories/mem_links/tombstones must be lists")
+        if len(mem_dicts) > MAX_MEMORIES or len(link_dicts) > MAX_LINKS \
+                or len(tomb_dicts) > MAX_TOMBSTONES:
             raise SyncError("bundle exceeds size caps")
 
         raw_ws_name = into_workspace if into_workspace is not None else bundle.get("workspace_name")
@@ -626,7 +717,7 @@ class SyncEngine:
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
         report = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-                  "links_added": 0, "links_updated": 0,
+                  "links_added": 0, "links_updated": 0, "tombstones_applied": 0,
                   "workspace": ws_name, "dry_run": bool(dry_run)}
 
         # Resolve scope by NAME (per-device ids differ; names are the sync key). A
@@ -645,18 +736,119 @@ class SyncEngine:
         if dry_run:
             row = self.store.conn.execute(
                 "SELECT id FROM workspaces WHERE name=?", (ws_name,)).fetchone()
-            local_ws = row["id"] if row else None
+            # Use non-persisted scope sentinels when the target does not exist yet.
+            # Dry-run must evaluate the same repo-scoped acceptance path as a real
+            # apply; ``None`` would incorrectly reject rows that the real apply would
+            # accept after creating the workspace/repository.
+            local_ws = row["id"] if row else f"__dry_run_workspace__:{ws_name}"
             for rid, rname in valid_remote_repos.items():
                 repo_row = (self.store.conn.execute(
                     "SELECT id FROM repos WHERE workspace_id=? AND name=?",
-                    (local_ws, rname)).fetchone() if local_ws is not None else None)
-                repo_remap[rid] = repo_row["id"] if repo_row else None
+                    (row["id"], rname)).fetchone() if row else None)
+                repo_remap[rid] = (
+                    repo_row["id"] if repo_row
+                    else f"__dry_run_repo__:{ws_name}:{rid}"
+                )
         else:
             local_ws = self.store.get_or_create_workspace(ws_name)
             for rid, rname in valid_remote_repos.items():
                 repo_remap[rid] = self.store.get_or_create_repo(local_ws, rname)
 
         accepted: dict[str, MemoryRecord] = {}
+        parsed_tombstones = self._parse_tombstones(tomb_dicts, src_device)
+        accepted_tombstones: list[dict] = []
+
+        # Tombstones are scoped before they are applied. A bundle authorized for one
+        # workspace must never hard-delete a known id owned by another workspace.
+        for tomb in parsed_tombstones:
+            remote_tomb_repo = tomb.get("repo_id")
+            mapped_tomb_repo = (
+                repo_remap.get(remote_tomb_repo)
+                if remote_tomb_repo is not None else None
+            )
+            if remote_tomb_repo is not None and mapped_tomb_repo is None:
+                report["rejected"] += 1
+                continue
+            existing = (
+                self.store.get_memory(tomb["id"])
+                if local_ws is not None else None
+            )
+            # Tombstone scope is durable even after the erased row disappears. Do not
+            # let a same-id marker from another workspace overwrite or poison the local
+            # workspace's deletion state when the id is no longer present locally.
+            tombstone_row = self.store.conn.execute(
+                "SELECT workspace_id, repo_id, deleted_at "
+                "FROM memory_tombstones WHERE memory_id=?",
+                (tomb["id"],)
+            ).fetchone()
+            if (tombstone_row is not None
+                    and tombstone_row["workspace_id"] is not None
+                    and tombstone_row["workspace_id"] != local_ws):
+                report["rejected"] += 1
+                continue
+            # Once a tombstone has a repository identity, a marker from a sibling
+            # repository must not overwrite it.  A NULL marker is legacy global
+            # state and must not be upgraded from an incoming repository identity.
+            if (tombstone_row is not None
+                    and tombstone_row["repo_id"] is not None
+                    and mapped_tomb_repo is not None
+                    and tombstone_row["repo_id"] != mapped_tomb_repo):
+                report["rejected"] += 1
+                continue
+            if (existing is not None and existing.workspace_id != local_ws):
+                report["rejected"] += 1
+                continue
+            # A repo-scoped tombstone can only erase a row in that same repo.
+            # Legacy repo-less markers retain their historical global-id behavior.
+            if (existing is not None and mapped_tomb_repo is not None
+                    and existing.repo_id != mapped_tomb_repo):
+                report["rejected"] += 1
+                continue
+            if (existing is not None and only_repo_id is not None
+                    and existing.repo_id != only_repo_id):
+                report["rejected"] += 1
+                continue
+            if (only_repo_id is not None and mapped_tomb_repo is not None
+                    and mapped_tomb_repo != only_repo_id):
+                report["rejected"] += 1
+                continue
+            # Preserve an already-known repository identity, but never infer one
+            # from the live row for a legacy marker: doing so narrows a global marker
+            # and permits a same-id row from a sibling repository to resurrect.
+            stored_tomb_repo = mapped_tomb_repo
+            if stored_tomb_repo is None and tombstone_row is not None:
+                stored_tomb_repo = tombstone_row["repo_id"]
+            marker_changed = (
+                tombstone_row is None
+                or float(tomb["deleted_at"]) < float(tombstone_row["deleted_at"])
+                or tombstone_row["repo_id"] != stored_tomb_repo
+            )
+            accepted_tombstones.append({
+                **tomb, "_mapped_repo_id": stored_tomb_repo,
+            })
+            if not dry_run:
+                self.store.add_memory_tombstone(
+                    tomb["id"], deleted_at=tomb["deleted_at"],
+                    device_id=tomb["device"], workspace_id=local_ws,
+                    repo_id=stored_tomb_repo,
+                )
+                # A peer's secure erase must remove a row this device still holds
+                # immediately, not only block a future re-add.
+                if existing is not None:
+                    try:
+                        self.store._erase_memory_rows(
+                            self.store.conn, tomb["id"], actor="sync_tombstone"
+                        )
+                    except Exception:  # noqa: BLE001 — never leave erased data resident
+                        # The tombstone must not be treated as successfully applied if
+                        # local derivative cleanup failed. Roll back this tombstone batch
+                        # so a retry can recover instead of leaving stale content behind.
+                        self.store.conn.rollback()
+                        raise
+            if marker_changed or dry_run:
+                report["tombstones_applied"] += 1
+        if not dry_run and accepted_tombstones:
+            self.store.conn.commit()
 
         # Bulk apply. Previously this was N+1: a SELECT per id to test existence, then a
         # Store.add_memory that did its own dupe-check SELECT, INSERT, FTS delete+insert,
@@ -672,7 +864,8 @@ class SyncEngine:
         # than retrying; one wide transaction would silently roll the whole bundle back.
         try:
             self._apply_memories(mem_dicts, report, accepted, local_ws,
-                                 repo_remap, only_repo_id, src_device, dry_run)
+                                 repo_remap, only_repo_id, src_device, dry_run,
+                                 accepted_tombstones)
             self._apply_links(link_dicts, report, accepted, local_ws,
                               only_repo_id, src_device, dry_run)
         except BaseException:
@@ -687,8 +880,33 @@ class SyncEngine:
         return report
 
     def _apply_memories(self, mem_dicts: list, report: dict,
-                        accepted: dict, local_ws, repo_remap: dict,
-                        only_repo_id, src_device, dry_run: bool) -> None:
+                        accepted: dict[str, MemoryRecord], local_ws, repo_remap: dict,
+                        only_repo_id, src_device, dry_run: bool,
+                        tombstones: Optional[list[dict]] = None) -> None:
+        # Keep repository identity with the terminal marker.  A known repo marker
+        # must not reject a same-id memory from a sibling repo; a legacy NULL repo
+        # marker remains global for backward compatibility.
+        live_tombstones = (
+            {
+                t["id"]: (float(t["deleted_at"]), t.get("repo_id"))
+                for t in self.store.list_memory_tombstones(local_ws)
+            }
+            if local_ws is not None else {}
+        )
+        for tomb in tombstones or []:
+            timestamp = float(tomb["deleted_at"])
+            mapped_repo = tomb.get("_mapped_repo_id")
+            if mapped_repo is None and tomb.get("repo_id") is not None:
+                mapped_repo = repo_remap.get(tomb["repo_id"])
+            existing = live_tombstones.get(tomb["id"])
+            if existing is None:
+                live_tombstones[tomb["id"]] = (timestamp, mapped_repo)
+            elif existing[1] is None:
+                # A legacy marker is global.  Never upgrade it to a repository
+                # identity merely because a newer peer also knows a repo scope.
+                continue
+            elif mapped_repo is not None and timestamp < existing[0]:
+                live_tombstones[tomb["id"]] = (timestamp, mapped_repo)
         for start in range(0, len(mem_dicts), APPLY_BATCH):
             batch = mem_dicts[start:start + APPLY_BATCH]
             parsed = [dict_to_record(d) for d in batch]
@@ -700,13 +918,14 @@ class SyncEngine:
                 [rec.id for rec in parsed if rec is not None])
             for d, rec in zip(batch, parsed):
                 self._apply_one(d, rec, report, accepted, known, local_ws,
-                                repo_remap, only_repo_id, src_device, dry_run)
+                                repo_remap, only_repo_id, src_device, dry_run,
+                                live_tombstones)
             if not dry_run:
                 self.store.conn.commit()
 
     def _apply_one(self, d: dict, rec, report: dict, accepted: dict, known: dict,
                    local_ws, repo_remap: dict, only_repo_id, src_device,
-                   dry_run: bool) -> None:
+                   dry_run: bool, live_tombstones: Optional[dict] = None) -> None:
         if rec is None:
             report["rejected"] += 1
             return
@@ -743,15 +962,24 @@ class SyncEngine:
         # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
         rec.workspace_id = local_ws
         if remote_repo_id:
-            if remote_repo_id not in repo_remap:
+            if (remote_repo_id not in repo_remap
+                    or repo_remap[remote_repo_id] is None):
+                # Dry-run does not create missing repositories. A repo-scoped row whose
+                # source repo cannot be resolved must still be rejected; accepting it
+                # with repo_id=None would silently broaden visibility to the workspace.
                 report["rejected"] += 1
                 return
             rec.repo_id = repo_remap[remote_repo_id]
-            if rec.repo_id is None and only_repo_id is not None:
-                report["rejected"] += 1
-                return
         else:
             rec.repo_id = None
+        # A known repository tombstone is terminal only for that repository.  Legacy
+        # repo-less tombstones intentionally retain their historical global-id behavior.
+        tombstone = (live_tombstones or {}).get(rec.id)
+        if tombstone is not None:
+            tombstone_repo = tombstone[1] if isinstance(tombstone, tuple) else None
+            if tombstone_repo is None or tombstone_repo == rec.repo_id:
+                report["rejected"] += 1
+                return
         if only_repo_id is not None and rec.repo_id != only_repo_id:
             report["rejected"] += 1
             return
@@ -867,8 +1095,9 @@ class SyncEngine:
                         "synced record quarantined by deterministic policy",
                         commit=False,
                     )
-                known[rec.id] = rec      # write-through: a duplicate id later in this
-                                         # batch must see what we just persisted
+            # Keep the dry-run view write-through as well: duplicate ids in one
+            # bundle must be evaluated against the first row, not the pre-bundle store.
+            known[rec.id] = rec
             report["added"] += 1
             accepted[rec.id] = rec
         else:
@@ -891,7 +1120,8 @@ class SyncEngine:
                         "sync_overwrite", merged.id,
                         "content replaced by synced bundle (last-writer-wins)",
                         commit=False)
-                    known[rec.id] = merged
+                # Keep duplicate processing deterministic during dry-run too.
+                known[rec.id] = merged
                 report["updated"] += 1
                 accepted[rec.id] = merged
 
@@ -1006,6 +1236,56 @@ class SyncEngine:
         if not dry_run:
             self.store.conn.commit()
 
+    def _parse_tombstones(self, tomb_dicts: list, src_device: object) -> list[dict]:
+        """Validate + clamp untrusted bundle tombstones. Never raises.
+
+        A tombstone is ``{id, deleted_at, device, repo_id}`` — no content — so there is
+        nothing to quarantine; it is clamped like any other untrusted input and a
+        malformed entry is silently dropped (counted by the caller only for entries
+        that survive). ``deleted_at`` is bounded to ``[0, now + skew]`` so a hostile
+        far-future erasure cannot permanently tombstone a memory id. A missing
+        ``repo_id`` is a legacy global marker.
+        """
+        # Scope is part of tombstone identity now.  Keep the earliest event for
+        # each (memory id, repository) pair, but a legacy repo-less marker is
+        # global and therefore suppresses every repo-scoped marker for that id.
+        best: dict[tuple[str, Optional[str]], dict] = {}
+        positions: dict[tuple[str, Optional[str]], int] = {}
+        now = now_ts()
+        for t in tomb_dicts:
+            if not isinstance(t, dict):
+                continue
+            mid = t.get("id")
+            deleted_at = _as_float(t.get("deleted_at"), None)
+            if not isinstance(mid, str) or not mid or deleted_at is None:
+                continue
+            mid = _clamp_str(mid, 128)
+            if not mid:
+                continue
+            deleted_at = max(0.0, min(deleted_at, now + TS_FUTURE_SKEW))
+            device = _clamp_str(t.get("device"), 128) if t.get("device") else ""
+            repo_id = (
+                _clamp_str(t.get("repo_id"), 128)
+                if isinstance(t.get("repo_id"), str) and t.get("repo_id")
+                else None
+            )
+            key = (mid, repo_id)
+            previous = best.get(key)
+            if previous is not None and previous["deleted_at"] <= deleted_at:
+                continue
+            best[key] = {
+                "id": mid, "deleted_at": deleted_at,
+                "device": device or (_clamp_str(src_device, 128) if src_device else ""),
+                "repo_id": repo_id,
+            }
+            if key not in positions:
+                positions[key] = len(positions)
+        global_ids = {mid for mid, repo_id in best if repo_id is None}
+        return [
+            best[key] for key in positions
+            if key[1] is None or key[0] not in global_ids
+        ]
+
     def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
         derived state coherent: re-embed for the vector arm when an embedder is wired.
@@ -1102,7 +1382,7 @@ class SyncEngine:
         applied: list[dict] = []
         totals = {
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-            "links_added": 0, "links_updated": 0,
+            "links_added": 0, "links_updated": 0, "tombstones_applied": 0,
         }
         # Fetch each bundle inside its own try: a transport that raises while producing
         # bundle N (a relay 404 on a bundle deleted mid-round, an oversized blob) used to

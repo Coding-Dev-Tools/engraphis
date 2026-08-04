@@ -26,6 +26,7 @@ from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
 from engraphis.routes.vault import VAULT_UPLOAD_REQUEST_BYTES, router as vault_router
 from engraphis.stores import get_conn, init_db
+from engraphis.core.interfaces import SearchFilter
 
 logger = logging.getLogger("engraphis")
 
@@ -205,13 +206,20 @@ async def _lifespan(app: FastAPI):
     first), then start the background consolidation loop unless it's disabled. Shutdown:
     cancel and await the loop."""
     global _background_task
+    _background_task = None
+    background_task: Optional[asyncio.Task] = None
     init_db()
     # Warm the embedding model eagerly so the first recall call isn't paid
     # under request pressure (a cold load + concurrent call used to wedge
     # the forked PM2 worker and time out every recall).
     await asyncio.get_running_loop().run_in_executor(None, _warmup_embedder)
     if settings.loop_interval > 0:
-        _background_task = asyncio.create_task(_consciousness_loop())
+        background_task = asyncio.create_task(
+            _consciousness_loop(
+                enable_consolidation=not bool(getattr(app.state, "legacy_reference", False))
+            )
+        )
+        _background_task = background_task
         logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
     else:
         logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
@@ -223,12 +231,14 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if _background_task:
-            _background_task.cancel()
+        if background_task is not None:
+            background_task.cancel()
             try:
-                await _background_task
+                await background_task
             except asyncio.CancelledError:
                 pass
+        if _background_task is background_task:
+            _background_task = None
 
 
 def _build_legacy_reference_app() -> FastAPI:
@@ -250,6 +260,10 @@ def _build_legacy_reference_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
     )
+    # This app is the retired v1 compatibility surface.  Its lifespan still owns the
+    # legacy decay/thought loop, but it must never ask the v2 service factory to open
+    # this v1 database: MemoryService.create() would auto-migrate the file in place.
+    app.state.legacy_reference = True
 
     # Local-first CORS: loopback by default, override with ENGRAPHIS_CORS_ORIGINS.
     # Credentials are only allowed when the allow-list is explicit (never with "*").
@@ -406,12 +420,23 @@ def _build_legacy_reference_app() -> FastAPI:
     return app
 
 
-async def _consciousness_loop() -> None:
-    """Phase 2 + Phase 4 background cycle: decay → thought synthesis → reweight."""
+async def _consciousness_loop(*, enable_consolidation: bool = True) -> None:
+    """Phase 2 + Phase 4 background cycle: decay → thought synthesis → reweight.
+
+    Phase 3 (consolidation) is an opt-in extra: when ``ENGRAPHIS_LOOP_CONSOLIDATE`` is
+    set to N > 0 the loop runs one local consolidation sweep at most once every N ticks.
+    The sweep is gated behind a cheap candidate pre-check so an idle database never pays
+    for the workspace-wide cluster scan, and the expensive work itself runs in a worker
+    thread (``asyncio.to_thread``) so the event loop — and therefore every request — is
+    never blocked by it. Any consolidation failure is logged and swallowed: it must never
+    kill the loop or poison the decay/thought cadence.
+    """
     _consecutive_errors = 0
+    _ticks = 0
     while True:
         try:
             await asyncio.sleep(settings.loop_interval)
+            _ticks += 1
             touched = reweight.decay_pass(namespace=None)
             if touched:
                 logger.info("Decay pass: %d memories reweighted", touched)
@@ -426,6 +451,9 @@ async def _consciousness_loop() -> None:
                     "Thought synthesized and persisted (sources=%d)",
                     int(result.get("source_count") or 0),
                 )
+            if (enable_consolidation and settings.loop_consolidate > 0
+                    and _ticks % settings.loop_consolidate == 0):
+                await _maybe_consolidate()
             _consecutive_errors = 0
         except asyncio.CancelledError:
             raise
@@ -435,6 +463,107 @@ async def _consciousness_loop() -> None:
             logger.error("Consciousness loop error (%s), backing off %ds",
                          type(exc).__name__, backoff)
             await asyncio.sleep(backoff)
+
+
+def _loop_consolidation_candidates(engine) -> int:
+    """Cheap pre-check: count live, prompt-eligible memories a sweep could act on.
+
+    The consolidation sweep itself scans up to ``DISTILL_SCAN_LIMIT`` episodic records
+    and runs a Jaccard cluster pass — expensive work that should never run when there is
+    nothing to do. This mirrors the sweep's two inputs with two bounded COUNT(*) queries
+    (episodic records for pass 1 distillation, transient records for pass 2 archival;
+    both in the same maintenance scopes the sweep uses, prompt-only like the sweep's
+    reads). Pinned memories are ignored here on purpose: they are archival-exempt, and
+    counting them could only turn an empty sweep into a non-empty pre-check.
+    """
+    from engraphis.core.consolidate import MAINTENANCE_SCOPES, TRANSIENT_TYPES
+    from engraphis.core.interfaces import MemoryType
+
+    count = 0
+    for mtype in (MemoryType.EPISODIC, *TRANSIENT_TYPES):
+        count += store_count_prompt_eligible(
+            engine.store,
+            SearchFilter(scopes=MAINTENANCE_SCOPES, mtypes=[mtype]),
+        )
+    return count
+
+
+def store_count_prompt_eligible(store, flt: SearchFilter) -> int:
+    """Count live memories matching ``flt`` that are also prompt-eligible.
+
+    ``store.count_memories`` does not know about the provenance/review-state gate, so a
+    pending-only workspace would otherwise pass the pre-check while the sweep (whose
+    reads are ``prompt_only=True``) sees nothing. Kept as a module-level helper so tests
+    can exercise the SQL against a real store.
+    """
+    from engraphis.core.store import _row_is_prompt_eligible
+
+    where, params = store._where(flt, include_invalid=False)
+    sql = "SELECT provenance, metadata FROM memories"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = store.conn.execute(sql, params).fetchall()
+    return sum(1 for row in rows if _row_is_prompt_eligible(row["provenance"], row["metadata"]))
+
+
+def _consolidation_candidates_exist(engine) -> bool:
+    """True when at least one workspace holds consolidation-eligible memories."""
+    return _loop_consolidation_candidates(engine) > 0
+
+
+def _run_loop_consolidation(engine) -> None:
+    """One deterministic (LLM-free) consolidation sweep over every workspace.
+
+    Runs inside ``asyncio.to_thread`` from the loop. The sweep is a blocking, CPU-bound
+    scan plus SQLite writes, so it must never run on the event loop. Every workspace in
+    the database is swept with no LLM (``structured``/``profiles``/``infer`` stay off) —
+    the same conservative defaults the explicit ``scripts/consolidate.py`` uses.
+    """
+    rows = engine.store.conn.execute("SELECT id, name FROM workspaces").fetchall()
+    workspaces = [(row["id"], row["name"]) for row in rows]
+    for wid, name in workspaces:
+        try:
+            report = engine.consolidate(workspace_id=wid, dry_run=False)
+            created = len(report.get("digests_created") or [])
+            archived = len(report.get("archived") or [])
+            if created or archived:
+                logger.info(
+                    "Auto-consolidation: workspace '%s' distilled=%d archived=%d",
+                    name, created, archived,
+                )
+        except Exception as exc:  # noqa: BLE001 — one workspace must not block the rest
+            logger.error("Auto-consolidation failed for workspace '%s' (%s)",
+                         name, type(exc).__name__)
+
+
+async def _maybe_consolidate() -> None:
+    """Opt-in Phase 3: run the local consolidation sweep when candidates exist.
+
+    Fail-safe by construction: every failure path is caught and logged so an error can
+    never propagate into (and kill) ``_consciousness_loop``. The pre-check and the sweep
+    both run in worker threads — the check is cheap but still a SQL scan, and the sweep
+    is deliberately heavy.
+    """
+    try:
+        from engraphis.routes import v2_api
+
+        svc = v2_api.service()
+        engine = svc.engine
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-consolidation skipped (service unavailable: %s)",
+                       type(exc).__name__)
+        return
+    try:
+        has_candidates = await asyncio.to_thread(_consolidation_candidates_exist, engine)
+        if not has_candidates:
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Auto-consolidation pre-check failed (%s)", type(exc).__name__)
+        return
+    try:
+        await asyncio.to_thread(_run_loop_consolidation, engine)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Auto-consolidation sweep failed (%s)", type(exc).__name__)
 
 
 def _create_retired_direct_app() -> FastAPI:

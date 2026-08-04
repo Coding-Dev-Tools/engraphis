@@ -7,6 +7,8 @@ __pycache__
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.bak
 .env
 .venv
 venv
@@ -14,3 +16,50 @@ docs/_build
 *.egg-info
 build
 dist
+# Test and local tooling output.
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+.hypothesis
+.audit-venv
+models_cache
+.secrets
+internal
+.commandcode
+
+# Machine-local runtime state and credentials.
+.engraphis_processed_webhooks
+undelivered_license_keys.tsv
+automation.json
+autosync.json
+.engraphis_update_check.json
+cookies.txt
+
+# Private research and local demo material.
+/COMMERCIAL_AUDIT.md
+/COMPETITIVE_ANALYSIS.md
+/docs/COMMERCIAL_AUDIT.md
+/docs/COMPETITIVE_ANALYSIS.md
+/demo/generated/
+/demo/output/
+/demo/assets/
+/demo/*_killer.html
+/demo/*_social_demo.html
+
+# Local QA/eval/automation state — never part of the build context.
+node_modules
+integrations/pi/node_modules
+test-results
+playwright-report
+.playwright
+.private-eval
+.hosted-eval-results
+/.tmp-*/
+/.tmp_*/
+/.release-full-tmp/
+/_to_delete/
+*.log
+*.whl
+*.tar.gz

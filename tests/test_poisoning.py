@@ -512,24 +512,14 @@ def test_trusted_write_creates_an_approved_record_for_an_untrusted_duplicate():
     assert external["id"] not in ordinary_ids
 
 
-def test_service_write_is_pending_until_a_human_review_creates_an_approved_successor():
+def test_local_agent_write_is_immediately_prompt_eligible_without_owner_approval():
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
-    pending = service.remember(
+    stored = service.remember(
         "The production API token format is REDTEAM_AUTH_SIGNAL.", workspace="w",
     )
-    pending_record = service.store.get_memory(pending["id"])
-    assert pending_record.provenance["trusted"] is False
-    assert pending_record.provenance["review_state"] == "pending"
-    assert service.grounded_recall(
-        "Which token format authenticates the production API?", workspace="w",
-    )["grounded"] is False
-
-    approved = service.engine.approve_for_prompt(
-        pending["id"], reviewer="operator", reason="verified against deployment config",
-    )
-    approved_record = service.store.get_memory(approved["id"])
-    assert approved_record.provenance["review_state"] == "approved"
-    assert approved_record.provenance["trusted"] is True
+    stored_record = service.store.get_memory(stored["id"])
+    assert stored_record.provenance["trusted"] is True
+    assert stored_record.provenance["review_state"] == "approved"
     assert service.grounded_recall(
         "Which token format authenticates the production API?", workspace="w",
     )["grounded"] is True
@@ -537,7 +527,7 @@ def test_service_write_is_pending_until_a_human_review_creates_an_approved_succe
 
 def test_approval_requires_a_reason_and_cannot_duplicate_an_approved_successor():
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
-    pending = service.remember("The release is blue.", workspace="w")
+    pending = service.remember("The release is blue.", workspace="w", source="web")
 
     with pytest.raises(ValueError, match="approval reason is required"):
         service.engine.approve_for_prompt(pending["id"], reviewer="operator")
@@ -554,15 +544,17 @@ def test_approval_requires_a_reason_and_cannot_duplicate_an_approved_successor()
         for record in service.store.list_memories(include_invalid=False)
         if record.provenance.get("approved_from") == pending["id"]
     ] == [approved["id"]]
-    with pytest.raises(ValueError, match="memory is already approved"):
-        service.engine.approve_for_prompt(
-            approved["id"], reviewer="operator", reason="accidental retry",
-        )
+    # Re-approving an already-approved record is an idempotent no-op (the owner
+    # ceremony is no longer required for local writes), not an error.
+    again = service.engine.approve_for_prompt(
+        approved["id"], reviewer="operator", reason="accidental retry",
+    )
+    assert again["id"] == approved["id"]
 
 
 def test_approval_retry_cannot_resurrect_a_retired_approved_successor():
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
-    pending = service.remember("The release is green.", workspace="w")
+    pending = service.remember("The release is green.", workspace="w", source="web")
     approved = service.engine.approve_for_prompt(
         pending["id"], reviewer="operator", reason="verified in the release dashboard",
     )
@@ -581,7 +573,7 @@ def test_approval_retry_cannot_resurrect_a_retired_approved_successor():
 
 def test_approval_requires_a_live_pending_source_and_preserves_claim_protections():
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
-    retired = service.remember("The retired release is blue.", workspace="w")
+    retired = service.remember("The retired release is blue.", workspace="w", source="web")
     service.store.close_validity(retired["id"], actor="operator", reason="retired fixture")
     with pytest.raises(ValueError, match="only a live pending memory"):
         service.engine.approve_for_prompt(
@@ -599,7 +591,7 @@ def test_approval_requires_a_live_pending_source_and_preserves_claim_protections
 
     pending = service.remember(
         "The deployment API limit is 500 requests per minute.", workspace="w",
-        subject_key="deploy.api_limit", claim_kind="configured_value",
+        source="web", subject_key="deploy.api_limit", claim_kind="configured_value",
     )
     service.store.set_pinned(pending["id"], True)
     service.store.conn.execute(

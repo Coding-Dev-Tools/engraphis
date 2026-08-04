@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 from numbers import Integral
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -34,12 +34,12 @@ class DeterministicEmbedder:
 
     supports_semantic_search = False
     embedding_mode = "lexical_hashing"
-    semantic_support_reason = (
+    _DEFAULT_SEMANTIC_SUPPORT_REASON = (
         "deterministic feature hashing captures lexical overlap only; semantic vector "
         "retrieval and semantic grounding are disabled"
     )
 
-    def __init__(self, dim: int = 384) -> None:
+    def __init__(self, dim: int = 384, *, semantic_support_reason: Optional[str] = None) -> None:
         if isinstance(dim, bool) or not isinstance(dim, Integral):
             raise ValueError("embedding dimension must be a positive integer")
         dimension = int(dim)
@@ -48,6 +48,14 @@ class DeterministicEmbedder:
                 f"embedding dimension must be between 1 and {MAX_EMBEDDING_DIM}"
             )
         self._dim = dimension
+        # A factory may supply a safe, public explanation when a requested semantic
+        # backend could not load.  Keep the ordinary dependency-free constructor's
+        # capability contract unchanged.
+        self.semantic_support_reason = (
+            str(semantic_support_reason).strip()
+            if semantic_support_reason
+            else self._DEFAULT_SEMANTIC_SUPPORT_REASON
+        )
 
     @property
     def dim(self) -> int:

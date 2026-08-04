@@ -134,7 +134,7 @@ async function openGraphView(page) {
   return canvas;
 }
 
-test('Ledger bounds auto-fit zoom and keeps a dragged node under the pointer', async ({ page }) => {
+test('Ledger releases a dragged node when freeze is off', async ({ page }) => {
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
@@ -147,48 +147,85 @@ test('Ledger bounds auto-fit zoom and keeps a dragged node under the pointer', a
   await page.waitForTimeout(3000);
   const drag = await page.evaluate(() => {
     const graph = window.__fg;
-    const node = graph.graphData().nodes[0];
+    const nodes = graph.graphData().nodes;
+    const links = graph.graphData().links;
+    const node = nodes.find(candidate => links.some(link => {
+      const source = typeof link.source === 'object' ? link.source.id : link.source;
+      const target = typeof link.target === 'object' ? link.target.id : link.target;
+      return source === candidate.id || target === candidate.id;
+    })) || nodes[0];
+    const connectedIds = links.filter(link => {
+      const source = typeof link.source === 'object' ? link.source.id : link.source;
+      const target = typeof link.target === 'object' ? link.target.id : link.target;
+      return source === node.id || target === node.id;
+    }).map(link => {
+      const source = typeof link.source === 'object' ? link.source.id : link.source;
+      const target = typeof link.target === 'object' ? link.target.id : link.target;
+      return source === node.id ? target : source;
+    });
     const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const point = graph.graph2ScreenCoords(node.x, node.y);
     return {
       before: { x: node.x, y: node.y },
+      id: node.id,
+      connectedIds,
       zoom: canvas.__zoom.k,
       x: box.left + point.x,
       y: box.top + point.y,
     };
   });
   expect(drag.zoom).toBeLessThanOrEqual(4);
+  expect(drag.connectedIds.length).toBeGreaterThan(0);
   expect(Number.isFinite(drag.x) && Number.isFinite(drag.y)).toBe(true);
   await page.mouse.move(drag.x, drag.y);
   await page.waitForTimeout(100);
-  const restBeforeDrag = await page.evaluate(() => window.__fg.graphData().nodes.slice(1)
-    .map(item => ({ id: item.id, x: item.x, y: item.y })));
+  const restBeforeDrag = await page.evaluate(draggedId => window.__fg.graphData().nodes
+    .filter(item => item.id !== draggedId)
+    .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
   await page.mouse.down();
   await page.mouse.move(drag.x + 80, drag.y + 40, { steps: 8 });
+  await page.waitForTimeout(250);
+  const during = await page.evaluate(draggedId => window.__fg.graphData().nodes
+    .filter(item => item.id !== draggedId)
+    .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
+  const duringMap = new Map(during.map(item => [item.id, item]));
+  await page.waitForTimeout(2400);
+  await page.mouse.move(drag.x + 140, drag.y + 70, { steps: 8 });
+  await page.waitForTimeout(250);
+  const afterCooldownDrag = await page.evaluate(draggedId => window.__fg.graphData().nodes
+    .filter(item => item.id !== draggedId)
+    .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
   await page.mouse.up();
-  await page.waitForTimeout(100);
-  const after = await page.evaluate(() => {
+  const after = await page.evaluate(draggedId => {
     const nodes = window.__fg.graphData().nodes;
-    const node = nodes[0];
+    const node = nodes.find(item => item.id === draggedId);
     return {
       x: node.x, y: node.y, fx: node.fx, fy: node.fy,
-      otherNodes: nodes.slice(1).map(item => ({ id: item.id, x: item.x, y: item.y })),
     };
-  });
+  }, drag.id);
 
-  expect(after.x - drag.before.x).toBeCloseTo(80 / drag.zoom, 0);
-  expect(after.y - drag.before.y).toBeCloseTo(40 / drag.zoom, 0);
+  expect(after.x - drag.before.x).toBeCloseTo(140 / drag.zoom, 0);
+  expect(after.y - drag.before.y).toBeCloseTo(70 / drag.zoom, 0);
   const initial = new Map(restBeforeDrag.map(item => [item.id, item]));
-  const maximumOtherMovement = Math.max(...after.otherNodes.map(item => {
+  const connected = during.filter(item => drag.connectedIds.includes(item.id));
+  const maximumOtherMovement = Math.max(...connected.map(item => {
     const before = initial.get(item.id);
     return Math.hypot(item.x - before.x, item.y - before.y);
   }));
-  expect(maximumOtherMovement).toBeLessThan(0.5);
+  expect(maximumOtherMovement).toBeGreaterThan(0.1);
+  const postCooldownMovement = Math.max(...afterCooldownDrag
+    .filter(item => drag.connectedIds.includes(item.id)).map(item => {
+    const before = duringMap.get(item.id);
+    return Math.hypot(item.x - before.x, item.y - before.y);
+  }));
+  expect(postCooldownMovement).toBeGreaterThan(0.1);
+  expect(after.fx).toBeUndefined();
+  expect(after.fy).toBeUndefined();
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Classic keeps a dragged node under the pointer with reduced visual motion', async ({ page }) => {
+test('Classic releases a dragged node when freeze is off with reduced visual motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const session = await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
@@ -222,8 +259,8 @@ test('Classic keeps a dragged node under the pointer with reduced visual motion'
 
   expect(after.x - drag.before.x).toBeCloseTo(80 / drag.zoom, 0);
   expect(after.y - drag.before.y).toBeCloseTo(40 / drag.zoom, 0);
-  expect(after.fx).toBeCloseTo(after.x, 8);
-  expect(after.fy).toBeCloseTo(after.y, 8);
+  expect(after.fx).toBeUndefined();
+  expect(after.fy).toBeUndefined();
   expect(session.pageErrors).toEqual([]);
 });
 

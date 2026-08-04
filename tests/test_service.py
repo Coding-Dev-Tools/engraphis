@@ -5,19 +5,20 @@ scope isolation, session lifecycle, input validation, and untrusted-content sani
 (the memory-poisoning guard), plus conflict resolution, governance, and the bi-temporal
 why/timeline/proactive tools.
 """
+import numpy as np
 import pytest
 
+from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.poisoning import source_is_external
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, set_current_user
 
 
 class _ReviewedLocalService:
-    """Test facade that models a local owner approving benign fixture writes.
+    """Compatibility facade for fixtures that still exercise external review.
 
-    ``MemoryService.remember`` is public ingress and correctly creates pending
-    evidence. Most tests in this older facade suite exercise downstream recall,
-    resolution, scope, and governance behavior, so they need an explicit reviewed
-    successor instead of silently relying on pre-review prompt visibility.
+    Normal local-agent writes are approved immediately by ``MemoryService``. For
+    legacy fixtures that use a non-external source label, retain the explicit
+    successor ceremony so those tests continue to model that separate workflow.
     """
 
     def __init__(self, service: MemoryService) -> None:
@@ -161,7 +162,7 @@ def test_degraded_recall_does_not_return_a_weak_vector_neighbour():
     assert result["memories"] == []
 
 
-def test_public_review_writes_do_not_resolve_claims_before_approval():
+def test_local_agent_writes_resolve_claims_without_owner_approval():
     s = _svc()
     old_text = "The API rate limit is one hundred requests every sixty seconds."
     new_text = "Calls are capped at 500 per minute for each key."
@@ -179,11 +180,8 @@ def test_public_review_writes_do_not_resolve_claims_before_approval():
         new_text, workspace="keyed", repo="api", subject_key="api-rate-limit",
         claim_kind="configured_value",
     )
-    # Public ingress is deliberately passive pending review. An asserted claim
-    # key cannot invalidate approved knowledge until the operator chooses an
-    # explicit correction/approval workflow.
-    assert keyed_new["op"] == "add"
-    assert s.store.get_memory(keyed_old["id"]).valid_to is None
+    assert keyed_new["op"] == "invalidate"
+    assert s.store.get_memory(keyed_old["id"]).valid_to is not None
 
 
 @pytest.mark.parametrize("method", ("remember", "ingest"))
@@ -328,10 +326,9 @@ def test_stats_counts():
     s.remember("one", workspace="acme", mtype="semantic")
     s.remember("two", workspace="acme", mtype="procedural")
     st = s.stats(workspace="acme")
-    # The durable inbox preserves both pending evidence and its approved
-    # successor, so accounting includes both records.
-    assert st["memories"] == 4
-    assert st["by_type"].get("procedural") == 2
+    # Local-agent writes do not create a pending + approved duplicate pair.
+    assert st["memories"] == 2
+    assert st["by_type"].get("procedural") == 1
     assert st["schema_version"] >= 2
 
 
@@ -386,6 +383,176 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     )
 
 
+def test_update_memory_reembeds_changed_title_in_both_vector_mirrors():
+    service = MemoryService.create(":memory:")
+    created = service.remember(
+        "The release procedure uses a signed artifact.",
+        workspace="acme", title="Initial runbook",
+    )
+    mid = created["id"]
+    service.engine.embedder.model = "test-model"
+    service.update_memory(mid, workspace="acme", title="Nebula archival runbook")
+
+    row = service.store.conn.execute(
+        "SELECT dim, vector, model FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()
+    after = row["vector"]
+    expected = service.engine.embedder.embed(
+        ["Nebula archival runbook\nThe release procedure uses a signed artifact."]
+    )[0]
+    expected = expected / (float(np.linalg.norm(expected)) or 1.0)
+    stored = np.frombuffer(after, dtype=np.float32)
+    assert np.allclose(stored, expected)
+    assert row["model"] == "test-model"
+    query_vec = service.engine.embedder.embed(["Nebula archival runbook"])[0]
+    assert mid in {memory_id for memory_id, _score in service.engine.index.search(query_vec, 5)}
+    assert mid in {memory_id for memory_id, _score in service.store.fts_search(
+        "Nebula archival", 5)}
+    assert mid not in {memory_id for memory_id, _score in service.store.fts_search(
+        "Initial", 5)}
+
+
+def test_update_memory_quarantined_title_does_not_embed_or_create_vector():
+    service = MemoryService.create(":memory:")
+    wid = service.store.get_or_create_workspace("acme")
+    mid = service.store.add_memory(MemoryRecord(
+        id="", content="untrusted retained payload", title="Old title",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+        provenance={"trusted": False, "quarantined": True, "review_state": "pending"},
+    ))
+    calls = []
+
+    def forbidden_embed(_texts):
+        calls.append(True)
+        raise AssertionError("quarantined title edits must not embed")
+
+    service.engine.embedder.embed = forbidden_embed
+    out = service.update_memory(mid, workspace="acme", title="Safe title")
+
+    assert out["updated"] == ["title"]
+    assert calls == []
+    assert service.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is None
+
+def test_update_memory_secret_title_does_not_embed_or_create_vector():
+    service = MemoryService.create(":memory:")
+    wid = service.store.get_or_create_workspace("acme")
+    mid = service.store.add_memory(MemoryRecord(
+        id="", content="private but non-credential payload", title="Old title",
+        workspace_id=wid, scope=Scope.WORKSPACE, sensitivity="secret",
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    calls = []
+
+    def forbidden_embed(_texts):
+        calls.append(True)
+        raise AssertionError("secret title edits must not embed")
+
+    service.engine.embedder.embed = forbidden_embed
+    service.update_memory(mid, workspace="acme", title="Safe title")
+
+    assert calls == []
+    assert service.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is None
+
+
+
+def test_update_memory_rolls_back_title_when_index_update_fails():
+    service = MemoryService.create(":memory:")
+    created = service.remember("A durable release note.", workspace="acme", title="Old")
+    mid = created["id"]
+    before_vector = service.store.conn.execute(
+        "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()["vector"]
+    original_index = service.engine.index
+
+    class BrokenIndex:
+        dim = original_index.dim
+
+        def upsert(self, _ids, _vectors, meta=None, *, commit=True):
+            raise RuntimeError("index unavailable")
+
+        def delete(self, _ids, *, commit=True):
+            return None
+
+    service.engine.index = BrokenIndex()
+    with pytest.raises(RuntimeError, match="index unavailable"):
+        service.update_memory(mid, workspace="acme", title="New")
+    saved = service.store.get_memory(mid)
+    assert saved.title == "Old"
+    assert service.store.conn.execute(
+        "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()["vector"] == before_vector
+    assert mid in {
+        memory_id for memory_id, _score in service.store.fts_search("Old", 5)
+    }
+    assert mid not in {
+        memory_id for memory_id, _score in service.store.fts_search("New", 5)
+    }
+
+def test_update_memory_rebuilds_missing_fts_row_when_title_is_reapplied():
+    service = MemoryService.create(":memory:")
+    created = service.remember(
+        "The release procedure uses a signed artifact.",
+        workspace="acme", title="Existing runbook",
+    )
+    mid = created["id"]
+    service.store.conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+    service.store.conn.commit()
+    assert service.store.fts_search("Existing", 5) == []
+
+    service.update_memory(mid, workspace="acme", title="Existing runbook")
+
+    assert mid in {
+        memory_id for memory_id, _score in service.store.fts_search("Existing", 5)
+    }
+
+
+def test_conflict_review_hides_another_callers_session_memory():
+    service = MemoryService.create(":memory:")
+    try:
+        set_current_user({
+            "id": "usr_alice", "email": "alice@example.test", "role": "member",
+        })
+        service.create_workspace("acme", visibility="shared", confirmed=True)
+        session = service.start_session("acme", repo="web", goal="private review")
+        private = service.remember(
+            "Alice's private pending review item.",
+            workspace="acme", repo="web", session_id=session["session_id"],
+            scope="session", source="import", trusted=False,
+        )
+
+        set_current_user({
+            "id": "usr_bob", "email": "bob@example.test", "role": "member",
+        })
+        review = service.conflict_review(workspace="acme", repo="web")
+        assert private["id"] not in {item["id"] for item in review["items"]}
+    finally:
+        set_current_user(None)
+
+
+def test_conflict_review_pages_past_ineligible_newer_rows_before_limit():
+    service = MemoryService.create(":memory:")
+    wid = service.store.get_or_create_workspace("acme")
+    for index in range(120):
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"ordinary memory {index}", scope=Scope.WORKSPACE,
+            workspace_id=wid, ingested_at=1000.0 + index,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+    eligible = service.store.add_memory(MemoryRecord(
+        id="", content="old pending review evidence", scope=Scope.WORKSPACE,
+        workspace_id=wid, ingested_at=1.0,
+        provenance={"trusted": False, "review_state": "pending"},
+    ))
+
+    review = service.conflict_review(workspace="acme", limit=1)
+    assert review["count"] == 1
+    assert review["items"][0]["id"] == eligible
+
+
 def test_provenance_recorded():
     s = _svc()
     out = s.remember("traceable fact", workspace="acme", source="unit-test")
@@ -404,24 +571,24 @@ def test_remember_reports_add_op():
     assert out["op"] == "add"
 
 
-def test_public_review_writes_do_not_dedupe_before_approval():
+def test_local_agent_writes_dedupe_without_owner_approval():
     s = _svc()
     text = "We standardized on pnpm as the package manager for all frontend repos."
-    s.remember(text, workspace="acme", repo="web")
+    first = s.remember(text, workspace="acme", repo="web")
     out = s.remember(text, workspace="acme", repo="web")
-    assert out["op"] == "add"
-    assert out["id"] != out["pending_id"]
+    assert out["op"] == "noop"
+    assert out["id"] == first["id"]
 
 
-def test_public_review_writes_do_not_invalidate_before_approval():
+def test_local_agent_writes_invalidate_without_owner_approval():
     s = _svc()
     first = s.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
                        workspace="acme", repo="web")
     second = s.remember(
         "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web")
-    assert second["op"] == "add"
-    assert s.store.get_memory(first["id"]).valid_to is None
+    assert second["op"] == "invalidate"
+    assert s.store.get_memory(first["id"]).valid_to is not None
 
 
 def test_remember_resolve_conflicts_false_keeps_both():
@@ -563,8 +730,7 @@ def test_why_returns_answer_and_history():
               workspace="acme", repo="web")
     out = s.why("what is the rate limit", workspace="acme", repo="web")
     assert any("500" in m["content"] for m in out["answer"])
-    assert any("100" in m["content"] for m in out["answer"])
-    assert out["supersedes"] == []
+    assert any("100" in m["content"] for m in out["supersedes"])
 
 
 def test_why_unknown_workspace_raises():
@@ -580,8 +746,8 @@ def test_timeline_orders_chronologically():
     s.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
               workspace="acme", repo="web")
     out = s.timeline("rate limit", workspace="acme", repo="web")
-    # Each fixture write retains a pending source and creates a reviewed successor;
-    # public history is prompt-only, so it exposes the two reviewed records only.
+    # Prompt-visible local-agent history contains the active record and its
+    # bi-temporal predecessor, without a pending/approved duplicate pair.
     assert len(out["history"]) == 2
     assert out["history"][0]["valid_from"] <= out["history"][-1]["valid_from"]
 
@@ -644,7 +810,7 @@ def test_service_exposes_world_time_writes_and_point_in_time_recall():
         reinforce=False,
     )
     assert [memory["id"] for memory in before["memories"]] == [old["id"]]
-    assert {memory["id"] for memory in after["memories"]} == {old["id"], new["id"]}
+    assert {memory["id"] for memory in after["memories"]} == {new["id"]}
 
 
 @pytest.mark.parametrize(
@@ -665,7 +831,7 @@ def test_service_rejects_invalid_temporal_anchors(method, kwargs):
         getattr(s, method)(**kwargs)
 
 
-def test_public_review_write_allows_a_backdated_candidate_without_supersession():
+def test_external_backdated_candidate_remains_passive_without_supersession():
     s = _svc()
     original = s.remember(
         "The deployment window is Friday afternoon.",
@@ -676,6 +842,8 @@ def test_public_review_write_allows_a_backdated_candidate_without_supersession()
     candidate = s.remember(
         "The deployment window is Thursday afternoon.",
         workspace="acme",
+        source="web",
+        trusted=False,
         valid_from=1_000.0,
     )
 

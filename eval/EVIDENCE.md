@@ -67,3 +67,10 @@ reader, embedder, configuration, and seed metadata.
 and chunk-order metadata. If its held-out gate does not improve quality by at least three percentage
 points at three budgets without more context and within the latency bound, schema 7 is retained and
 no resource hierarchy is built.
+## Consolidation ranking preference
+
+The post-normalization consolidation bonus is measured by a deterministic paired
+fixture that compares digest-intent and source-intent rankings with and without the
+production bonus. Run `python -m eval.consolidation_ranking`; digest top-1 preference
+must not regress against the no-bonus baseline, and raw-detail/source evidence must
+remain retrievable before changing the preference or shipping a new release.

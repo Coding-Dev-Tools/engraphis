@@ -24,12 +24,14 @@ def _dataset() -> list[dict]:
             {"tag": "noise-2", "text": "The office plant watering schedule is Friday morning."},
             {"tag": "noise-3", "text": "The team lunch reservation is at noon on Thursday."},
         ],
-        "questions": [{
-            "id": "owner",
-            "q": "Who owns deployment approval?",
-            "answer": "release manager",
-            "supporting": ["policy"],
-        }] * 3,
+        "questions": [
+            {"id": "owner", "q": "Who owns deployment approval?",
+             "answer": "release manager", "supporting": ["policy"]},
+            {"id": "owner-2", "q": "Who owns deployment approval?",
+             "answer": "release manager", "supporting": ["policy"]},
+            {"id": "owner-3", "q": "Who owns deployment approval?",
+             "answer": "release manager", "supporting": ["policy"]},
+        ],
     }]
 
 

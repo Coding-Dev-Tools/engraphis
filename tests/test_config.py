@@ -124,6 +124,47 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
+def test_vector_backend_defaults_to_numpy(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_VECTOR_BACKEND", raising=False)
+    assert Settings().vector_backend == "numpy"
+
+
+def test_vector_backend_reads_env(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_VECTOR_BACKEND", "sqlite-vec")
+    assert Settings().vector_backend == "sqlite-vec"
+
+
+
+@pytest.mark.parametrize("raw", ("", "unsupported", " sqlite vec "))
+def test_vector_backend_invalid_values_fail_closed_to_numpy(monkeypatch, raw):
+    monkeypatch.setenv("ENGRAPHIS_VECTOR_BACKEND", raw)
+    assert Settings().vector_backend == "numpy"
+
+
+def test_blank_llm_provider_uses_documented_default(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LLM_PROVIDER", " ")
+    assert Settings().llm_provider == "openai"
+
+
+def test_malformed_llm_headers_are_ignored(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LLM_EXTRA_HEADERS", "[]")
+    assert Settings().llm_extra_headers == {}
+    monkeypatch.setenv("ENGRAPHIS_LLM_EXTRA_HEADERS", '{"X-Test": 1}')
+    assert Settings().llm_extra_headers == {}
+
+
+@pytest.mark.parametrize("raw", ("nan", "inf", "-inf", "not-a-number"))
+def test_nonfinite_or_malformed_decay_halflife_uses_default(monkeypatch, raw):
+    monkeypatch.setenv("ENGRAPHIS_DECAY_HALFLIFE_DAYS", raw)
+    assert Settings().decay_halflife_days == 7.0
+
+
+def test_malformed_boolean_values_use_safe_default(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", "perhaps")
+    assert Settings().llm_auto_extract is False
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "perhaps")
+    assert Settings().update_check is False
+
 @pytest.mark.parametrize("url", RETIRED_RELAY_URLS)
 def test_retired_relay_url_override_is_canonicalized(url):
     assert config.canonicalize_relay_url(url) == config.DEFAULT_RELAY_URL

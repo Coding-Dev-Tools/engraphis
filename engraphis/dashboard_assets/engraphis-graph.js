@@ -97,8 +97,15 @@
      `linkCanvasObject` does — they only appear once the user has zoomed in past this scale. */
   const LINK_LABEL_MIN_SCALE = 2.4;
 
+  function hasOwn(value, key) {
+    return value != null && Object.prototype.hasOwnProperty.call(value, key);
+  }
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
-  function nodeName(node) { return String(node.name || node.label || node.id || ''); }
+  function nodeName(node) {
+    if (node === undefined || node === null) return '';
+    if (typeof node !== 'object' && typeof node !== 'function') return String(node);
+    return String(node.name || node.label || node.id || '');
+  }
   function showRelationLabel(label) {
     return Boolean(label) && String(label).toLowerCase() !== 'co_occurs';
   }
@@ -141,11 +148,21 @@
     const radius = size * 0.45 * (0.55 + Math.min(1.6, normalized * 1.9));
     return Math.max(0.8, Math.min(size * 1.1, radius));
   }
+  function validNodeId(value) {
+    const type = typeof value;
+    return type === 'string' || type === 'boolean'
+      || (type === 'number' && Number.isFinite(value));
+  }
   function linkEndpoint(link, side) {
-    return idOf(link[side] !== undefined ? link[side] : link[side === 'source' ? 'from' : 'to']);
+    if (!link || (typeof link !== 'object' && typeof link !== 'function')) return null;
+    const value = link[side] !== undefined ? link[side] : link[side === 'source' ? 'from' : 'to'];
+    return idOf(value);
   }
   function asOfValue(value) {
-    if (value instanceof Date) return value.getTime();
+    if (value instanceof Date) {
+      const parsed = value.getTime();
+      return Number.isFinite(parsed) ? parsed : null;
+    }
     if (typeof value === 'number') return Number.isFinite(value) ? value * (value < 1e11 ? 1000 : 1) : null;
     if (typeof value === 'string' && value.trim()) {
       const numeric = Number(value);
@@ -156,9 +173,11 @@
     return null;
   }
   function temporalValue(item, key, fallback) {
+    if (!item || (typeof item !== 'object' && typeof item !== 'function')) return fallback;
     const value = item[key] !== undefined ? item[key] : item[key === 'valid_from' ? 'born' : 'closed'];
     if (value === undefined || value === null || value === '') return fallback;
-    return asOfValue(value);
+    const parsed = asOfValue(value);
+    return parsed === null ? fallback : parsed;
   }
 
   /* Node and link labels come from ingested memories, i.e. untrusted text. force-graph's
@@ -172,15 +191,21 @@
   }
 
   function hexRgb(c) {
-    if (!c) return [140, 131, 232];
-    if (c[0] === '#') {
-      const hex = c.length === 4 ? c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c.slice(1, 7);
+    const fallback = [140, 131, 232];
+    if (typeof c !== 'string') return fallback;
+    const value = c.trim();
+    if (!value) return fallback;
+    if (value[0] === '#') {
+      const hex = value.length === 4
+        ? value[1] + value[1] + value[2] + value[2] + value[3] + value[3]
+        : value.slice(1, 7);
+      if (!/^[0-9a-f]{6}$/i.test(hex)) return fallback;
       const n = parseInt(hex, 16);
-      if (!Number.isFinite(n)) return [140, 131, 232];
       return [n >> 16 & 255, n >> 8 & 255, n & 255];
     }
-    const m = c.match(/\d+/g) || [140, 131, 232];
-    return [+m[0], +m[1], +m[2]];
+    const matches = value.match(/-?\d+(?:\.\d+)?/g) || [];
+    if (matches.length < 3) return fallback;
+    return matches.slice(0, 3).map(component => Math.max(0, Math.min(255, Math.round(Number(component)))));
   }
   function alpha(c, a) { const [r, g, b] = hexRgb(c); return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')'; }
   function mixColours(a, b, amount) {
@@ -694,14 +719,14 @@
      for both. Same semantics here. */
   const CLUSTER_EXCLUDED_LABELS = { influences: true };
   function clustersAcross(link) {
-    return !!(link && CLUSTER_EXCLUDED_LABELS[link.label]);
+    return !!(link && hasOwn(CLUSTER_EXCLUDED_LABELS, link.label));
   }
 
   function communities(nodes, links) {
-    const adj = {};
+    const adj = Object.create(null);
     // Traversal adjacency (hover neighbourhood, focus depth, bridges, betweenness) keeps every
     // relation; only the community BFS below reads `clusterAdj`.
-    const clusterAdj = {};
+    const clusterAdj = Object.create(null);
     const nodesById = new Map(nodes.map(node => [node.id, node]));
     nodes.forEach(n => { adj[n.id] = []; clusterAdj[n.id] = []; });
     links.forEach(l => {
@@ -761,7 +786,7 @@
   const BETWEENNESS_PIVOTS = 220;
   const BETWEENNESS_BUDGET = 1.5e6;
   function betweenness(nodes, adj) {
-    const bc = {};
+    const bc = Object.create(null);
     nodes.forEach(n => { bc[n.id] = 0; });
     // Each pivot costs O(V) just to initialise its bookkeeping, so cap pivots by total work
     // as well as by count: without the budget a 60k-entity store blocks the main thread for
@@ -773,7 +798,8 @@
     const stride = nodes.length > pivots ? Math.ceil(nodes.length / pivots) : 1;
     for (let index = 0; index < nodes.length; index += stride) {
       const src = nodes[index];
-      const stack = [], pred = {}, sigma = {}, dist = {}, delta = {};
+      const stack = [], pred = Object.create(null), sigma = Object.create(null);
+      const dist = Object.create(null), delta = Object.create(null);
       nodes.forEach(n => { pred[n.id] = []; sigma[n.id] = 0; dist[n.id] = -1; delta[n.id] = 0; });
       sigma[src.id] = 1; dist[src.id] = 0;
       const queue = [src.id];
@@ -798,12 +824,18 @@
   }
 
   /* Bridge edges (Tarjan): removing one disconnects part of the store. */
+  function edgeKey(a, b) {
+    const left = JSON.stringify([typeof a, String(a)]);
+    const right = JSON.stringify([typeof b, String(b)]);
+    return left < right ? left + '|' + right : right + '|' + left;
+  }
   function findBridges(nodes, links, adj) {
-    const disc = {}, low = {}, parent = {}, bridges = new Set();
-    const multiplicity = {};
+    const disc = Object.create(null), low = Object.create(null);
+    const parent = Object.create(null), bridges = new Set();
+    const multiplicity = Object.create(null);
     links.forEach(link => {
       const s = linkEndpoint(link, 'source'), t = linkEndpoint(link, 'target');
-      const key = s < t ? s + '|' + t : t + '|' + s;
+      const key = edgeKey(s, t);
       multiplicity[key] = (multiplicity[key] || 0) + 1;
     });
     let timer = 0;
@@ -831,10 +863,9 @@
         const p = parent[u];
         if (p !== undefined) {
           low[p] = Math.min(low[p], low[u]);
-          const key = p < u ? p + '|' + u : u + '|' + p;
+          const key = edgeKey(p, u);
           if (low[u] > disc[p] && multiplicity[key] === 1) {
-            bridges.add(p + '|' + u);
-            bridges.add(u + '|' + p);
+            bridges.add(edgeKey(p, u));
           }
         }
       }
@@ -842,7 +873,7 @@
     nodes.forEach(n => { if (!disc[n.id]) visit(n.id); });
     links.forEach(l => {
       const s = linkEndpoint(l, 'source'), t = linkEndpoint(l, 'target');
-      l.bridge = bridges.has(s + '|' + t);
+      l.bridge = bridges.has(edgeKey(s, t));
     });
     return bridges;
   }
@@ -855,13 +886,14 @@
       // Named `styleName`, not `style`: scripts/externalize_dashboard_assets.py scans this
       // asset for runtime inline-style mutation with a text pattern, and a plain data field
       // by the shorter name reads as one. The longer name keeps that gate honest.
-      styleName: 'cyber', colorBy: 'community', palette: 'theme', overrides: {}, themeColors: {},
+      styleName: 'cyber', colorBy: 'community', palette: 'theme',
+      overrides: Object.create(null), themeColors: Object.create(null),
       settings: Object.assign({}, PRESETS.communities, { mode: 'communities', labels: false, flow: true, frozen: false }),
       minDegree: 1, showUnlinked: false, focusId: null, depth: 2, layers: { temporal: true, entity: true, causal: true, semantic: true, code: false },
       path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false,
       collapse: 'auto', renderMode: opts.renderMode === 'full' ? 'full' : 'overview'
     };
-    let raw = { nodes: [], links: [], suggestions: [] }, adj = {}, hilite = null, hoverSet = null, maxDeg = 1;
+    let raw = { nodes: [], links: [], suggestions: [] }, adj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
     // degree threshold. Keeping chosen IDs outside the paint callback bounds fillText work.
     let labelIds = new Set();
@@ -885,6 +917,53 @@
     let betweennessReady = false;
     const fg = ForceGraph()(el);
     const api = {};
+    let activeDragNode = null, activeDragLinks = [], dragFollowForce = null;
+
+    /* The ordinary link force is degree-normalised. That is useful for settling a graph, but
+       it makes a high-degree node a weak anchor during a manual drag: the centre force moves
+       the rest of the graph while each individual relation barely follows. Keep a separate,
+       drag-only one-hop force so every directly connected node follows the pointer. It pulls
+       toward the dragged node's position while preserving the configured link distance. */
+    function setActiveDragNode(node) {
+      activeDragNode = node || null;
+      if (!activeDragNode) {
+        activeDragLinks = [];
+        return;
+      }
+      const activeId = activeDragNode.id;
+      activeDragLinks = (fg.graphData().links || []).filter(link => {
+        const source = linkEndpoint(link, 'source'), target = linkEndpoint(link, 'target');
+        return source === activeId || target === activeId;
+      });
+    }
+
+    function makeDragFollowForce() {
+      const force = alpha => {
+        if (!activeDragNode || state.settings.frozen || staticFullLayout) return;
+        const nodes = fg.graphData().nodes || [];
+        const byId = new Map(nodes.map(node => [node.id, node]));
+        const targetDistance = Math.max(8, Number(state.settings.link) || 16);
+        const strength = 0.28 + Math.min(0.16, (Number(state.settings.gravity) || 0) / 500);
+        activeDragLinks.forEach(link => {
+          const source = linkEndpoint(link, 'source'), target = linkEndpoint(link, 'target');
+          const otherId = source === activeDragNode.id ? target
+            : target === activeDragNode.id ? source : null;
+          const other = otherId == null ? null : byId.get(otherId);
+          if (!other || other === activeDragNode
+            || !Number.isFinite(other.x) || !Number.isFinite(other.y)
+            || !Number.isFinite(activeDragNode.x) || !Number.isFinite(activeDragNode.y)) return;
+          const dx = activeDragNode.x - other.x, dy = activeDragNode.y - other.y;
+          const distance = Math.hypot(dx, dy);
+          const gap = distance - targetDistance;
+          if (distance < 1e-6 || gap <= 0) return;
+          const impulse = (gap / distance) * strength * (Number.isFinite(alpha) ? alpha : 1);
+          other.vx = (other.vx || 0) + dx * impulse;
+          other.vy = (other.vy || 0) + dy * impulse;
+        });
+      };
+      force.initialize = nodes => { force.nodes = nodes; };
+      return force;
+    }
 
     function autoFit(duration, padding) {
       const bbox = fg.getGraphBbox && fg.getGraphBbox();
@@ -959,20 +1038,29 @@
        the resolved values through setThemeColors() on every applyTheme()/graphRecolor();
        THEME_ETYPE stays only as the standalone-embed fallback for a caller that never does. */
     function etypeColor(type) {
-      if (state.overrides[type]) return state.overrides[type];
-      if (state.styleName !== 'classic' && STYLE_PAL[state.styleName] && STYLE_PAL[state.styleName][type]) return STYLE_PAL[state.styleName][type];
-      return state.themeColors[type] || THEME_ETYPE[type] || '#8c83e8';
+      const override = hasOwn(state.overrides, type) ? state.overrides[type] : null;
+      if (typeof override === 'string' && override) return override;
+      const stylePalette = state.styleName !== 'classic' ? STYLE_PAL[state.styleName] : null;
+      const styled = stylePalette && hasOwn(stylePalette, type) ? stylePalette[type] : null;
+      if (typeof styled === 'string' && styled) return styled;
+      const themed = hasOwn(state.themeColors, type) ? state.themeColors[type] : null;
+      if (typeof themed === 'string' && themed) return themed;
+      return hasOwn(THEME_ETYPE, type) ? THEME_ETYPE[type] : '#8c83e8';
     }
     function selectedPalette() {
-      const palette = PALETTES[state.palette];
-      return palette ? Object.values(palette) : null;
+      const palette = hasOwn(PALETTES, state.palette) ? PALETTES[state.palette] : null;
+      if (!palette) return null;
+      const values = Object.values(palette).filter(value => typeof value === 'string' && value);
+      return values.length ? values : null;
     }
     /* A palette is a colour family, not merely an entity-type override. Previously the
        default Community and Connections modes skipped `overrides`, so choosing Aurora,
        Ocean, Ember, or High contrast changed no pixels unless the user also discovered the
        separate Entity type selector. Use the selected family in every node-colour mode;
        Theme retains the active style's deliberately tuned defaults. */
-    function commPal() { return selectedPalette() || COMMUNITY_PALS[state.styleName] || COMMUNITY_PALS.classic; }
+    function commPal() {
+      return selectedPalette() || COMMUNITY_PALS[state.styleName] || COMMUNITY_PALS.classic;
+    }
     function heatColor(node) {
       const t = (node.rank || 0) / Math.max(1, raw.nodes.length - 1);
       const colors = selectedPalette() || GRAPH_HEAT;
@@ -983,7 +1071,10 @@
       if (state.colorBy === 'connections') return heatColor(node);
       return etypeColor(node.etype);
     }
-    function layerColor(layer) { return (STYLE_LAYERS[state.styleName] || STYLE_LAYERS.classic)[layer] || '#8c83e8'; }
+    function layerColor(layer) {
+      const layers = STYLE_LAYERS[state.styleName] || STYLE_LAYERS.classic;
+      return (hasOwn(layers, layer) && layers[layer]) || '#8c83e8';
+    }
 
     function born(item) { return temporalValue(item, 'valid_from', -Infinity); }
     function closed(item) { return temporalValue(item, 'valid_to', null); }
@@ -993,7 +1084,7 @@
     }
 
     function collapsedData(nodes, links) {
-      const groups = {};
+      const groups = Object.create(null);
       nodes.forEach(n => {
         const c = n.community || 0;
         if (!groups[c]) groups[c] = { id: 'cluster-' + c, cluster: true, community: c, name: (n.topic || 'Cluster ' + (c + 1)), etype: n.etype, members: 0, degree: 0, betweenness: 0 };
@@ -1002,7 +1093,7 @@
         groups[c].betweenness = Math.max(groups[c].betweenness, n.betweenness || 0);
       });
       const cnodes = Object.values(groups);
-      const seen = {};
+      const seen = Object.create(null);
       const clinks = [];
       // Indexed lookup, not Array#find per endpoint: auto-collapse fires on every zoom-out,
       // and the scan made that O(nodes x links) — a visible freeze on a real store.
@@ -1023,7 +1114,10 @@
     }
 
     function visible() {
-      const keepLayer = l => state.layers[l.layer] !== false;
+      const keepLayer = l => {
+        const layers = state.layers;
+        return !layers || !hasOwn(layers, l.layer) || layers[l.layer] !== false;
+      };
       let nodes = raw.nodes.filter(n => (n.degree > 0 && n.degree >= state.minDegree)
         || (state.showUnlinked && n.degree === 0));
       if (state.repo) {
@@ -1082,6 +1176,7 @@
         fg.d3Force('y', null);
         fg.d3Force('radial', null);
         fg.d3Force('collide', null);
+        fg.d3Force('dragFollow', null);
         return;
       }
       const s = state.settings, mode = s.mode || 'compact';
@@ -1095,19 +1190,72 @@
         link = d3.forceLink().id(node => node.id);
         fg.d3Force('link', link);
       }
-      if (charge && charge.strength) charge.strength(-s.repel);
+      if (charge && charge.strength) charge.strength(-(mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel));
       if (link && link.distance) link.distance(s.link);
       if (typeof d3 === 'undefined') return;
+      if (!dragFollowForce) {
+        dragFollowForce = makeDragFollowForce();
+        fg.d3Force('dragFollow', dragFollowForce);
+      }
       fg.d3Force('radial', null);
-      /* Community detection still controls colour and link structure, but it must not give
-         each community a separate orbit target. The default used those scattered targets and
-         made a connected graph settle as a giant ring around empty space. Every standard
-         layout now shares the origin as its gravitational centre; repulsion and link distance
-         retain the useful local separation without sacrificing a coherent overview. */
-      const centering = mode === 'radial' ? Math.max(0.04, s.gravity / 300) : s.gravity / 100;
-      fg.d3Force('x', d3.forceX(0).strength(centering));
-      fg.d3Force('y', d3.forceY(0).strength(centering));
-      if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
+      const layoutNodes = fg.graphData().nodes || [];
+      /* The layout buttons are arrangements, not just five nearby slider presets. Keep the
+         ordinary force settings as the local texture, then give each named mode its own
+         geometry so switching modes is visible even when the graph has only one component.
+         Centering must stay gentle and origin-based: a function target at a distant grid
+         slot would fight an explicit drag, and a released node must stay where the user
+         dropped it (the e2e drag-release contract). */
+      if (mode === 'communities') {
+        const communityKeys = [], seenCommunities = new Set();
+        layoutNodes.forEach(node => {
+          const key = Number.isFinite(node.community) ? node.community : 0;
+          if (!seenCommunities.has(key)) { seenCommunities.add(key); communityKeys.push(key); }
+        });
+        communityKeys.sort((a, b) => a - b);
+        const columns = Math.max(1, Math.ceil(Math.sqrt(communityKeys.length)));
+        const rows = Math.max(1, Math.ceil(communityKeys.length / columns));
+        const gap = Math.max(180, (Number(s.link) || 16) * 10);
+        const targets = new Map();
+        communityKeys.forEach((key, index) => {
+          const column = index % columns, row = Math.floor(index / columns);
+          targets.set(key, {
+            x: (column - (columns - 1) / 2) * gap,
+            y: (row - (rows - 1) / 2) * gap * 0.72,
+          });
+        });
+        /* A gentle origin-based centering keeps the layout coherent without fighting a
+           drag; the community grid is still visible through the charge/repel and link
+           structure installed above. */
+        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100);
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
+      } else if (mode === 'radial' && d3.forceRadial) {
+        const outerRadius = Math.max(180, Math.min(360, Math.sqrt(Math.max(1, layoutNodes.length)) * 18 + (Number(s.link) || 16) * 4));
+        const degreeScale = Math.max(1, maxOf(layoutNodes.map(node => node.degree || 0), 1));
+        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
+        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
+        fg.d3Force('radial', d3.forceRadial(node => {
+          const hubness = Math.max(0, Math.min(1, (node.degree || 0) / degreeScale));
+          return 34 + (outerRadius - 34) * (1 - hubness);
+        }).strength(0.72));
+      } else if (mode === 'constellation') {
+        const positions = new Map(), total = Math.max(1, layoutNodes.length - 1);
+        const reach = Math.max(160, Math.min(330, 80 + Math.sqrt(Math.max(1, layoutNodes.length)) * 10));
+        layoutNodes.forEach((node, index) => {
+          const rank = Number.isFinite(node.rank) ? node.rank : index;
+          const fraction = Math.max(0, Math.min(1, rank / total));
+          const angle = index * 2.399963229728653;
+          const radius = 48 + fraction * reach;
+          positions.set(node.id, { x: Math.cos(angle) * radius * 1.18, y: Math.sin(angle) * radius * 0.76 });
+        });
+        const target = node => positions.get(node.id) || { x: 0, y: 0 };
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18));
+      } else {
+        const centering = mode === 'compact' ? Math.max(0.24, (Number(s.gravity) || 0) / 100) : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
+      }
       /* One collision pass on a large graph, two otherwise — the classic path's
          `.iterations(GPERF.large?1:2)`. The second pass costs another full quadtree traversal
          per node on every tick, and a large store pays that on the initial layout and on every
@@ -1392,6 +1540,21 @@
       if (fg.warmupTicks) fg.warmupTicks(simulate ? (large ? 18 : 40) : 0);
     }
 
+    /* A pointer drag is an active interaction, not a normal layout run. The normal cooldown
+       protects settled graphs from repainting forever, but it also cuts off link attraction
+       after roughly two seconds while the user is still holding a node. Keep the simulation
+       alive until pointer-up, then finishNodeDrag() restores the bounded settling budget. */
+    function setDragSimulationBudget(active) {
+      if (active && !staticFullLayout && !state.settings.frozen) {
+        if (fg.cooldownTime) fg.cooldownTime(Infinity);
+        if (fg.cooldownTicks) fg.cooldownTicks(Infinity);
+        if (fg.warmupTicks) fg.warmupTicks(0);
+        if (fg.d3AlphaDecay) fg.d3AlphaDecay(0);
+        return;
+      }
+      setSimulationBudget(!state.settings.frozen);
+    }
+
     function render(fit, reheat) {
       if (destroyed) return;
       if (suspended) {
@@ -1496,6 +1659,33 @@
       if (opts.onNodeClick) opts.onNodeClick(node);
     }
 
+    /* A drag uses fx/fy while the pointer is down. Those anchors are only persistent when the
+       explicit Freeze control is on; leaving them behind in live mode makes one dragged node
+       look frozen even though the switch is off. Reheat as soon as a live drag starts too, so
+       the link force can pull connected nodes along with the pointer instead of waiting for
+       pointer-up. */
+    function reheatLiveLayout(dragging = false) {
+      if (state.settings.frozen || staticFullLayout) return;
+      applyForces();
+      if (dragging) setDragSimulationBudget(true);
+      else setSimulationBudget(true);
+      if (fg.d3AlphaDecay && !dragging) fg.d3AlphaDecay(alphaDecay());
+      if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
+    }
+
+    function finishNodeDrag(node) {
+      setActiveDragNode(null);
+      if (state.settings.frozen || staticFullLayout) {
+        node.fx = node.x;
+        node.fy = node.y;
+        node.vx = 0;
+        node.vy = 0;
+        return;
+      }
+      raw.nodes.forEach(item => { item.fx = undefined; item.fy = undefined; });
+      reheatLiveLayout();
+    }
+
     fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1)
       .enableNodeDrag(false).autoPauseRedraw(true)
       /* force-graph's default `nodeLabel`/`linkLabel` is the literal accessor "name", and its
@@ -1541,14 +1731,19 @@
         invalidate();
       })
       .onNodeClick(handleNodeClick)
-      // Kept as the pinning contract for embedders that opt back into vendor dragging;
+      // Kept as the drag contract for embedders that opt back into vendor dragging;
       // Ledger itself disables that path and uses the scoped pointer controller below.
-      .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; suppressNodeClick(); })
+      .onNodeDragEnd(node => { finishNodeDrag(node); suppressNodeClick(); })
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
         zoom = z.k || 1;
         if (state.collapse !== 'auto') return;
-        const next = zoom < 0.55;
+        /* Layout presets can legitimately occupy more of the canvas than the compact default.
+           Keep auto-collapse for true zoom-out, but do not hide a freshly selected arrangement
+           merely because its fit scale is below the old, overly eager threshold. */
+        const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
+        const canAutoCollapse = raw.nodes.length > 500;
+        const next = canAutoCollapse && zoom < collapseThreshold;
         if (next !== collapsed) {
           collapsed = next;
           render(false, true);
@@ -1556,9 +1751,19 @@
         }
       });
 
-    /* force-graph's built-in drag always reheats the entire simulation. Ledger treats manual
-       placement as a pin, so install a small scoped drag controller and leave global physics
-       changes to the explicit Reheat control. Capturing pointer-down prevents the vendor's
+    /* Some force-graph releases expose a vendor drag-start callback, while the dashboard's
+       current bundle does not. Use it only when present; Ledger's manual pointer controller
+       below remains the canonical path and does not depend on this optional API. */
+    if (typeof fg.onNodeDragStart === 'function') {
+      fg.onNodeDragStart(node => {
+        setActiveDragNode(node);
+        reheatLiveLayout(true);
+      });
+    }
+
+    /* force-graph's built-in drag always reheats the entire simulation. Ledger uses a scoped
+       controller: a frozen graph keeps a deliberate manual pin, while a live graph releases
+       the temporary drag anchor and reheats. Capturing pointer-down prevents the vendor's
        drag handler from seeing node gestures while preserving its background pan/zoom path. */
     let detachManualDrag = null;
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function'
@@ -1578,10 +1783,7 @@
         window.removeEventListener('pointerup', endManualDrag, true);
         window.removeEventListener('pointercancel', endManualDrag, true);
         if (current.dragged) {
-          current.node.fx = current.node.x;
-          current.node.fy = current.node.y;
-          current.node.vx = 0;
-          current.node.vy = 0;
+          finishNodeDrag(current.node);
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
           // Our capture listener owns the direct click. Suppress force-graph's
@@ -1596,6 +1798,7 @@
         if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
         const dx = event.clientX - manualDrag.startClientX;
         const dy = event.clientY - manualDrag.startClientY;
+        let started = false;
         if (!manualDrag.dragged) {
           if (Math.hypot(dx, dy) < 3) {
             event.preventDefault();
@@ -1603,12 +1806,17 @@
             return;
           }
           manualDrag.dragged = true;
+          started = true;
         }
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;
-        node.vx = 0;
-        node.vy = 0;
+          node.vx = 0;
+          node.vy = 0;
+        if (started) {
+          setActiveDragNode(node);
+          reheatLiveLayout(true);
+        }
         invalidate();
         event.preventDefault();
         event.stopPropagation();
@@ -1646,34 +1854,56 @@
         window.removeEventListener('pointercancel', endManualDrag, true);
       };
     }
-
     api.setData = data => {
+      if (destroyed) return;
       const inputNodes = Array.isArray(data && data.nodes) ? data.nodes : [];
-      const nodes = inputNodes
-        .filter(node => node && node.id != null)
-        .map(node => Object.assign({}, node, { name: nodeName(node) }));
-      const nodeIds = new Set(nodes.map(node => node.id));
-      const links = (Array.isArray(data && (data.links || data.edges)) ? (data.links || data.edges) : [])
+      const nodes = [], nodeIds = new Set();
+      inputNodes.forEach(node => {
+        if (!node || (typeof node !== 'object' && typeof node !== 'function')
+          || !validNodeId(node.id) || nodeIds.has(node.id)) return;
+        nodeIds.add(node.id);
+        nodes.push(Object.assign({}, node, { name: nodeName(node) }));
+      });
+      const linkInput = Array.isArray(data && data.links)
+        ? data.links
+        : (Array.isArray(data && data.edges) ? data.edges : []);
+      const links = linkInput
+        .filter(link => link && (typeof link === 'object' || typeof link === 'function'))
         .map(link => {
           const source = linkEndpoint(link, 'source'), target = linkEndpoint(link, 'target');
           return Object.assign({}, link, { source, target });
         })
-        .filter(link => link.source != null && link.target != null && nodeIds.has(link.source) && nodeIds.has(link.target));
+        .filter(link => link.source != null && link.target != null
+          && nodeIds.has(link.source) && nodeIds.has(link.target));
       const suggestions = (Array.isArray(data && data.suggestions) ? data.suggestions : [])
-        .map(link => Object.assign({}, link, { source: linkEndpoint(link, 'source'), target: linkEndpoint(link, 'target') }))
+        .filter(link => link && (typeof link === 'object' || typeof link === 'function'))
+        .map(link => Object.assign({}, link, {
+          source: linkEndpoint(link, 'source'), target: linkEndpoint(link, 'target')
+        }))
         .filter(link => link.source != null && link.target != null);
       /* A fresh payload means fresh node objects, so the cached seed is stale even when the
          ids are identical — force-graph must be re-pointed at the new objects or the render
          below would style ones nobody is painting from. */
       seeded = null;
+      fullLayoutDirty = true;
       raw = { nodes, links, suggestions };
       adj = communities(raw.nodes, raw.links);
-      const deg = {};
-      raw.links.forEach(l => { const s = linkEndpoint(l, 'source'), t = linkEndpoint(l, 'target'); deg[s] = (deg[s] || 0) + 1; deg[t] = (deg[t] || 0) + 1; });
+      const deg = Object.create(null);
+      raw.links.forEach(l => {
+        const s = linkEndpoint(l, 'source'), t = linkEndpoint(l, 'target');
+        deg[s] = (deg[s] || 0) + 1;
+        deg[t] = (deg[t] || 0) + 1;
+      });
       raw.nodes.forEach(n => { n.degree = deg[n.id] || 0; n.betweenness = 0; });
       maxDeg = maxOf(raw.nodes.map(n => n.degree), 1);
       const ranked = [...raw.nodes].sort((a, b) => b.degree - a.degree);
       ranked.forEach((n, i) => { n.rank = i; n.hub = i < 6; });
+      // A refresh can replace the workspace while a prior focus/highlight still names an old id.
+      // Drop those references before visible() so the next render cannot isolate an empty view or
+      // paint a stale hover neighbourhood.
+      if (state.focusId != null && !nodeIds.has(state.focusId)) state.focusId = null;
+      if (hilite != null && !nodeIds.has(hilite)) hilite = null;
+      hoverSet = hilite == null ? null : new Set([hilite].concat(adj[hilite] || []));
       // Bridge *edges* are cheap (linear) and feed the stats readout, so they stay eager.
       // Betweenness is not: see ensureBetweenness.
       findBridges(raw.nodes, raw.links, adj);
@@ -1694,9 +1924,20 @@
        render() applies the reduced-motion exemption (`if(layout&&!prefersReducedMotion())`). */
     const LAYOUT_KEYS = ['mode', 'repel', 'link', 'gravity', 'size'];
     api.setSettings = patch => {
-      if (LAYOUT_KEYS.some(k => patch && patch[k] !== undefined)) fullLayoutDirty = true;
-      Object.assign(state.settings, patch);
-      render(false, LAYOUT_KEYS.some(k => patch && patch[k] !== undefined));
+      const next = patch && typeof patch === 'object' ? patch : {};
+      const wasFrozen = state.settings.frozen === true;
+      const isUnfreezing = wasFrozen && next.frozen === false;
+      if (LAYOUT_KEYS.some(k => next[k] !== undefined)) fullLayoutDirty = true;
+      Object.assign(state.settings, next);
+      /* Classic synchronises the complete GSET object during a redraw. If the visible switch
+         was turned off by that sync after an earlier freeze, a plain render restores the
+         paint settings but leaves d3 at its old alpha/charge state. Route the transition
+         through the same release path as the visible control so both dashboards resume. */
+      if (isUnfreezing) {
+        api.freeze(false);
+        return;
+      }
+      render(false, LAYOUT_KEYS.some(k => next[k] !== undefined));
     };
     api.setPreset = name => {
       const p = PRESETS[name] || PRESETS.compact;
@@ -1723,38 +1964,66 @@
       fullLayoutDirty = true;
       render(true, true);
     };
-    api.setColorBy = name => { state.colorBy = name; clearMaterialCache(); refreshColors(); render(false, false); };
+    api.setColorBy = name => {
+      state.colorBy = name;
+      clearMaterialCache();
+      refreshColors();
+      render(false, false);
+    };
     api.setPalette = name => {
-      state.palette = name;
-      state.overrides = PALETTES[name] ? { ...PALETTES[name] } : {};
+      state.palette = typeof name === 'string' ? name : 'theme';
+      state.overrides = Object.create(null);
+      if (hasOwn(PALETTES, state.palette)) Object.assign(state.overrides, PALETTES[state.palette]);
       clearMaterialCache();
       refreshColors();
     };
     api.setTypeColor = (type, color) => {
-      state.overrides[type] = color;
+      if (type == null || typeof color !== 'string') return;
+      state.overrides[String(type)] = color;
       state.palette = 'custom';
       clearMaterialCache();
       refreshColors();
     };
     /* Rehydrating saved overrides is not a user edit, so it must not flip the palette
        selector to "custom" behind the user's back the way setTypeColor deliberately does. */
-    api.setTypeColors = map => { Object.assign(state.overrides, map || {}); clearMaterialCache(); refreshColors(); };
+    api.setTypeColors = map => {
+      const next = map && typeof map === 'object' ? map : {};
+      Object.keys(next).forEach(type => {
+        if (typeof next[type] === 'string') state.overrides[type] = next[type];
+      });
+      clearMaterialCache();
+      refreshColors();
+    };
     /* The active theme's resolved `--entity-*` values. Replaced wholesale rather than merged:
        a theme switch must not leave the previous theme's colour for a type the new one omits. */
     api.setThemeColors = map => {
-      state.themeColors = map && typeof map === 'object' ? { ...map } : {};
+      const next = Object.create(null);
+      if (map && typeof map === 'object') {
+        Object.keys(map).forEach(key => {
+          if (typeof map[key] === 'string') next[key] = map[key];
+        });
+      }
+      state.themeColors = next;
       clearMaterialCache();
       refreshColors();
     };
     /* One render for a whole batch of setters — see `batch`. */
-    api.apply = (fn, fit, reheat) => { batch(fn, fit, reheat); };
+    api.apply = (fn, fit, reheat) => { batch(typeof fn === 'function' ? fn : () => {}, fit, reheat); };
     api.setHighlight = id => {
       hilite = id == null ? null : id;
       hoverSet = id == null ? null : new Set([id].concat(adj[id] || []));
       invalidate();
     };
-    api.setScope = patch => { Object.assign(state, patch); render(false, true); };
-    api.setLayers = layers => { state.layers = layers; render(false, false); };
+    api.setScope = patch => {
+      if (!patch || typeof patch !== 'object') return;
+      Object.assign(state, patch);
+      if (!state.layers || typeof state.layers !== 'object') state.layers = {};
+      render(false, true);
+    };
+    api.setLayers = layers => {
+      state.layers = layers && typeof layers === 'object' ? { ...layers } : {};
+      render(false, false);
+    };
     /* `focus` remains the explicit neighbourhood-isolation action. It must not schedule a
        delayed zoom-to-fit: callers that also centre a node otherwise start two competing
        camera animations, and the late fit wins by dragging the selected entity away. */
@@ -1802,6 +2071,7 @@
       if (on) {
         const charge = fg.d3Force('charge');
         if (charge && charge.strength) charge.strength(0);
+        setSimulationBudget(true);
         fg.d3AlphaDecay(1);
         return;
       }
@@ -1884,12 +2154,15 @@
     /* The engine clusters its own copies of the nodes, so a caller that renders a cluster
        legend from the source data would otherwise report a single community. */
     api.communityMap = () => {
-      const map = {};
+      const map = Object.create(null);
       raw.nodes.forEach(n => { map[n.id] = n.community || 0; });
       return map;
     };
-    api.setGhosts = on => { state.ghost = on; render(false, false); };
-    api.setRepoFilter = repo => { state.repo = (repo || '').trim().toLowerCase(); render(false, true); };
+    api.setGhosts = on => { state.ghost = on === true; render(false, false); };
+    api.setRepoFilter = repo => {
+      state.repo = typeof repo === 'string' ? repo.trim().toLowerCase() : '';
+      render(false, true);
+    };
     api.setAsOf = date => { state.asOf = asOfValue(date); render(false, true); };
     api.setSizeBy = metric => {
       state.sizeBy = metric === 'betweenness' ? metric : 'degree';
@@ -1919,7 +2192,9 @@
     api.setSuggestions = on => { state.suggestions = on; render(false, true); };
     api.setCollapse = mode => {
       state.collapse = state.renderMode === 'full' ? false : mode;
-      const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && zoom < 0.55));
+      const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
+      const canAutoCollapse = raw.nodes.length > 500;
+      const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && canAutoCollapse && zoom < collapseThreshold));
       collapsed = next;
       render(true, true);
     };
@@ -1942,8 +2217,12 @@
     api.destroy = () => {
       if (destroyed) return;
       destroyed = true;
+      running = false;
       clearTimeout(fitTimer);
+      fitTimer = 0;
       cancelFrame(dragClickFrame);
+      dragClickFrame = 0;
+      pendingRender = null;
       try {
         if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }
         if (api._ro) { api._ro.disconnect(); api._ro = null; }
@@ -1955,7 +2234,7 @@
         el.innerHTML = '';
       } catch (e) { /* teardown is best-effort: never let it block a view change */ }
       raw = { nodes: [], links: [], suggestions: [] };
-      adj = {};
+      adj = Object.create(null);
       seeded = null;
       hilite = null;
       hoverSet = null;

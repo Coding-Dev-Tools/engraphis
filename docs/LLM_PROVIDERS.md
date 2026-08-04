@@ -1,12 +1,11 @@
-# LLM providers and Command Code
+# LLM providers and coding-agent connections
 
 Engraphis runs fully locally by default. An LLM is optional and is used only when you opt into
 LLM extraction, cited synthesis, structured consolidation, or retention supervision. Memory
 storage, local embeddings, conflict resolution, and recall do not require a provider.
 
-This is the complete provider reference. It also covers Command Code both as an MCP coding agent
-and as an optional OpenAI-compatible model provider. Command Code and Cohere Command are distinct
-products and use different setup paths.
+This is the complete provider reference. It also explains how to connect a Codex subscription
+through MCP. Codex and Cohere Command are distinct products and use different setup paths.
 
 ## Contents
 
@@ -19,6 +18,7 @@ products and use different setup paths.
 - [Ollama](#ollama)
 - [Cohere Command](#cohere-command)
 - [Other OpenAI-compatible endpoints](#other-openai-compatible-endpoints)
+- [Codex subscription](#codex-subscription)
 - [Command Code](#command-code)
 
 ## Choose a provider
@@ -64,6 +64,10 @@ supervision is enabled, the selected provider must receive the necessary text to
 Provider errors do not expose API keys, configured endpoint URLs, or raw provider responses in the
 dashboard. Features that support a local fallback degrade safely when a provider is unavailable;
 confirm a successful connection before depending on LLM extraction in a workflow.
+
+For an OpenAI Codex subscription, use the local MCP connection documented in the Codex section
+below. The subscription path does not use ``ENGRAPHIS_LLM_PROVIDER`` or an Engraphis LLM API key;
+those settings remain for optional LLM calls made by Engraphis itself.
 
 ## OpenAI
 
@@ -124,9 +128,9 @@ through a compatible proxy. If that proxy needs extra headers, set
 
 ## Ollama
 
-Ollama is a local, OpenAI-compatible endpoint. It uses `custom`, not a separate `ollama` runtime
-mode. Start Ollama and pull a chat model, then replace `<local-model>` below with an installed
-model name.
+Ollama is a local OpenAI-compatible endpoint. Configure it as `custom`, not as a separate
+provider value. Start Ollama and pull a chat model, then replace `<local-model>` with an installed
+model name:
 
 ```dotenv
 ENGRAPHIS_LLM_PROVIDER=custom
@@ -135,10 +139,10 @@ ENGRAPHIS_LLM_API_KEY=ollama
 ENGRAPHIS_LLM_BASE_URL=http://localhost:11434/v1
 ```
 
-The key must be non-empty because the custom client requires a bearer token. Default local Ollama
-does not authenticate it; use a real proxy token if you place Ollama behind an authenticated proxy.
-The base URL ends in `/v1` because Engraphis adds `/chat/completions`. Loopback `http` is allowed
-for local services; a non-loopback endpoint must use HTTPS.
+The custom client requires a non-empty key, although the default local Ollama server does not
+authenticate it; use a real proxy token if you put Ollama behind an authenticated proxy. The base
+URL ends in `/v1` because Engraphis appends `/chat/completions`. Loopback `http` is allowed for a
+local service; a non-loopback endpoint must use HTTPS.
 
 ## Cohere Command
 
@@ -178,6 +182,21 @@ The custom client sends a model, system and user messages, plus optional tempera
 limits. Endpoints that implement another protocol, such as Anthropic Messages, need a matching
 native mode or adapter. If a test fails, confirm the base URL, model, credential, required headers,
 and request and response shapes.
+
+## Codex subscription
+
+Codex subscription users connect the coding agent to Engraphis over MCP. This keeps the
+conversation and subscription inside Codex; Engraphis runs locally and receives no Codex API key.
+
+```bash
+pip install "engraphis[mcp]"
+engraphis-init
+codex mcp add engraphis -- engraphis-mcp
+```
+
+Verify the connection with ``codex mcp list`` and then call an Engraphis MCP tool from a
+tool-enabled Codex session. The MCP connection is the supported Codex-subscription path; do not
+configure a local model endpoint or invent an ``ENGRAPHIS_LLM_PROVIDER=codex`` value.
 
 ## Command Code
 

@@ -573,8 +573,14 @@ def _git_update(check_only: bool = False) -> None:
             ours=stage == "checkout" and isinstance(exc, UpdateTimeout),
         )
         manual = (
-            "Run `git -C %s checkout %s` and `%s -m pip install -e %s` to restore the "
-            "previous installation." % (project_dir, original_ref, sys.executable, project_dir)
+            "Run `%s` and `%s` to restore the previous installation." % (
+                subprocess.list2cmdline(
+                    [git, "-C", str(project_dir), "checkout", original_ref]
+                ),
+                subprocess.list2cmdline(
+                    [sys.executable, "-m", "pip", "install", "-e", str(project_dir)]
+                ),
+            )
         )
         try:
             _run([git, "-C", str(project_dir), "checkout", original_ref],
@@ -598,8 +604,34 @@ def _git_update(check_only: bool = False) -> None:
     print(f"Updated to {tag}.")
 
 
+def _installed_extras() -> str:
+    """Return a safe extras suffix for update targets.
+
+    Wheel metadata records which extras *could* install a requirement, not which
+    extras the user selected. Treating every ``extra ==`` marker as installed
+    therefore turned a core or server install into an arbitrary combination of
+    extras. Use the explicit override when supplied; otherwise install ``all`` so an
+    update never silently drops an existing optional surface. Set
+    ``ENGRAPHIS_UPDATE_EXTRAS=none`` for a deliberate base-only update.
+    """
+    raw = os.environ.get("ENGRAPHIS_UPDATE_EXTRAS")
+    if raw is not None:
+        value = raw.strip()
+        if value.casefold() in {"", "none", "base"}:
+            return ""
+        names = [part.strip() for part in value.split(",") if part.strip()]
+        if not names or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names):
+            raise ValueError(
+                "ENGRAPHIS_UPDATE_EXTRAS must be a comma-separated list of "
+                "package extras or 'none'"
+            )
+        return "[" + ",".join(sorted(set(names))) + "]"
+    return "[all]"
+
+
 def _pip_update(method: str, check_only: bool = False) -> None:
     """Update a pip install (PyPI or git)."""
+    extras = _installed_extras()
     if method == "git":
         git = shutil.which("git")
         remote = _installed_git_url()
@@ -616,12 +648,12 @@ def _pip_update(method: str, check_only: bool = False) -> None:
             return
         _run(
             [sys.executable, "-m", "pip", "install", "--upgrade",
-             f"git+{remote}@{tag}#egg=engraphis"],
+             f"git+{remote}@{tag}#egg=engraphis{extras}"],
             "Installing the update from Git", _PIP_INSTALL_TIMEOUT_S,
             check=True, capture=False)
         return
     version = LATEST_TAG[1:] if LATEST_TAG else ""
-    target = "engraphis[server]" + ("==" + version if version else "")
+    target = "engraphis" + extras + ("==" + version if version else "")
     if check_only:
         _run(
             [sys.executable, "-m", "pip", "install", "--dry-run", "--upgrade", target],
@@ -637,9 +669,10 @@ def _pip_update(method: str, check_only: bool = False) -> None:
 
 def _pipx_update(check_only: bool = False) -> None:
     """Update a pipx install."""
+    extras = _installed_extras()
     if check_only:
         if LATEST_TAG:
-            target = "engraphis[server]==" + LATEST_TAG[1:]
+            target = "engraphis" + extras + "==" + LATEST_TAG[1:]
             _run(
                 ["pipx", "runpip", "engraphis", "install", "--dry-run", "--upgrade", target],
                 "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
@@ -650,13 +683,20 @@ def _pipx_update(check_only: bool = False) -> None:
         return
     if LATEST_TAG:
         _run(
-            ["pipx", "install", "--force", "engraphis[server]==" + LATEST_TAG[1:]],
+            ["pipx", "install", "--force", "engraphis" + extras + "==" + LATEST_TAG[1:]],
             "Installing the update with pipx", _PIPX_TIMEOUT_S,
             check=True, capture=False,
         )
         return
-    _run(["pipx", "upgrade", "engraphis"], "Upgrading with pipx", _PIPX_TIMEOUT_S,
-         check=True, capture=False)
+    if extras:
+        _run(
+            ["pipx", "install", "--force", "engraphis" + extras],
+            "Installing the update with pipx", _PIPX_TIMEOUT_S,
+            check=True, capture=False,
+        )
+    else:
+        _run(["pipx", "upgrade", "engraphis"], "Upgrading with pipx", _PIPX_TIMEOUT_S,
+             check=True, capture=False)
 
 
 def _docker_update(check_only: bool = False) -> None:
@@ -716,6 +756,8 @@ def main(argv=None) -> None:
         # Say which step stalled and what to do about it. Silence here is the bug: every
         # network step used to be unbounded, so a stalled index simply never returned.
         ap.exit(1, "Error: %s\n" % exc)
+    except ValueError as exc:
+        ap.exit(2, "Error: %s\n" % exc)
 
 
 if __name__ == "__main__":
