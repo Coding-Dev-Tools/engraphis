@@ -407,7 +407,9 @@ def test_update_memory_reembeds_changed_title_in_both_vector_mirrors():
     query_vec = service.engine.embedder.embed(["Nebula archival runbook"])[0]
     assert mid in {memory_id for memory_id, _score in service.engine.index.search(query_vec, 5)}
     assert mid in {memory_id for memory_id, _score in service.store.fts_search(
-        "Nebula archival runbook", 5)}
+        "Nebula archival", 5)}
+    assert mid not in {memory_id for memory_id, _score in service.store.fts_search(
+        "Initial", 5)}
 
 
 def test_update_memory_quarantined_title_does_not_embed_or_create_vector():

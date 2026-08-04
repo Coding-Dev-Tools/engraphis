@@ -4172,6 +4172,9 @@ class MemoryService:
                     # with the current model identity so both backend paths preserve the
                     # same normalized vector and model/dimension metadata.
                     self.store.put_vector(mid, vectors[0], model=model)
+                self.store._fts_upsert(
+                    mid, row["title"] or "", row["content"] or "", kw,
+                )
 
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
