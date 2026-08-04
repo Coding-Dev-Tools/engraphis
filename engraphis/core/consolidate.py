@@ -203,29 +203,44 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
                         batch_size: int, prompt_only: bool = False,
                         max_records: Optional[int] = None,
                         exclude_relation: Optional[str] = None,
-                        start_after_id: str = "") -> tuple[list[MemoryRecord], str]:
+                        start_after_id: str = "", overlap: int = 0,
+                        advance_records: Optional[int] = None,
+                        ) -> tuple[list[MemoryRecord], str]:
     """Read one bounded keyset window and return its next persistent cursor.
 
     ``Store.list_memories_page`` orders by id.  When a bounded window reaches the
     end, the empty cursor deliberately makes the *next* sweep wrap to the start;
     this rotates maintenance over all eligible rows without materializing or
-    clustering the full population on every run.
+    clustering the full population on every run.  ``overlap`` retains a bounded
+    suffix of the raw keyset window for the next sweep, which keeps clusters that
+    straddle a maintenance boundary intact.  ``advance_records`` is a raw-row
+    progress floor used when filtering leaves fewer than ``max_records`` eligible
+    rows; it prevents a bounded sweep from pinning its cursor on an excluded page.
     """
     size = max(1, int(batch_size))
     cap = None if max_records is None else max(0, int(max_records))
+    advance_cap = (
+        None if advance_records is None else max(0, int(advance_records))
+    )
     if cap == 0:
         return [], str(start_after_id or "")
     after_id = str(start_after_id or "")
     records: list[MemoryRecord] = []
+    window_ids: list[str] = []
     scoped = _replace(flt, mtypes=mtypes)
     next_cursor = ""
     while True:
-        page = store.list_memories_page(scoped, after_id=after_id, limit=size)
+        remaining = None if cap is None else max(1, cap - len(records))
+        page_limit = size if remaining is None else min(size, remaining)
+        page = store.list_memories_page(
+            scoped, after_id=after_id, limit=page_limit,
+        )
         if not page:
             # The persisted cursor was at the end of the keyspace. Start the next
             # sweep from the beginning instead of retrying an empty tail forever.
             break
         next_after = page[-1].id
+        window_ids.extend(memory.id for memory in page)
         page_size = len(page)
         if exclude_relation:
             excluded = _linked_memory_ids(
@@ -240,12 +255,26 @@ def _scan_memory_window(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         else:
             records.extend(page)
         if cap is not None and len(records) >= cap:
-            next_cursor = next_after
+            retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
+            next_cursor = (
+                window_ids[len(window_ids) - retained - 1]
+                if retained else next_after
+            )
             break
-        if next_after == after_id or page_size < size:
+        if next_after == after_id or page_size < page_limit:
             # End-of-keyspace: clear the cursor for the next invocation.
             break
         after_id = next_after
+    if (
+        not next_cursor
+        and advance_cap is not None
+        and len(window_ids) >= advance_cap
+    ):
+        retained = min(max(0, int(overlap)), max(0, len(window_ids) - 1))
+        next_cursor = (
+            window_ids[len(window_ids) - retained - 1]
+            if retained else window_ids[advance_cap - 1]
+        )
     records.sort(
         key=lambda memory: (
             memory.ingested_at if memory.ingested_at is not None else float("-inf"),
@@ -690,12 +719,15 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     distill_cursor = store.get_maintenance_cursor(
         workspace_id, repo_id, DISTILL_CURSOR_NAME,
     )
+    distill_overlap = max(0, int(min_cluster) - 1)
     episodic, next_distill_cursor = _scan_memory_window(
         store, flt, mtypes=[MemoryType.EPISODIC],
         batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
-        max_records=DISTILL_CLUSTER_LIMIT,
+        max_records=DISTILL_CLUSTER_LIMIT + distill_overlap,
         exclude_relation="consolidates",
         start_after_id=distill_cursor,
+        overlap=distill_overlap,
+        advance_records=DISTILL_CLUSTER_LIMIT,
     )
     if not dry_run:
         store.set_maintenance_cursor(
@@ -1424,11 +1456,15 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     profile_cursor = store.get_maintenance_cursor(
         workspace_id, repo_id, PROFILE_CURSOR_NAME,
     )
+    profile_overlap = max(0, int(min_mentions) - 1)
     profile_memories, next_profile_cursor = _scan_memory_window(
         store, flt, mtypes=DURABLE_TYPES,
         batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
-        max_records=PROFILE_MEMORY_LIMIT, exclude_relation=PROFILE_RELATION,
+        max_records=PROFILE_MEMORY_LIMIT + profile_overlap,
+        exclude_relation=PROFILE_RELATION,
         start_after_id=profile_cursor,
+        overlap=profile_overlap,
+        advance_records=PROFILE_MEMORY_LIMIT,
     )
     if not dry_run:
         store.set_maintenance_cursor(

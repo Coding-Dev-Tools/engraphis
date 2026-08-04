@@ -11,12 +11,14 @@ Run offline with::
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from engraphis.core.consolidate import consolidate
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, SearchFilter
+from engraphis.core.recall import CONSOLIDATION_BONUS
 
 
 DATASET = Path(__file__).with_name("datasets") / "consolidation_ranking.jsonl"
@@ -40,6 +42,24 @@ def load_cases(path: Path = DATASET) -> list[dict[str, Any]]:
         context = case.get("context", [])
         if not isinstance(context, list):
             raise ValueError(f"case {case['id']} context must be a list")
+        probes = case.get("bonus_probes", [])
+        if not isinstance(probes, list):
+            raise ValueError(f"case {case['id']} bonus_probes must be a list")
+        for probe in probes:
+            if (
+                not isinstance(probe, dict)
+                or not isinstance(probe.get("id"), str)
+                or probe.get("expected") not in {"source", "digest"}
+            ):
+                raise ValueError(f"case {case['id']} has an invalid bonus probe")
+            for field in ("source_score", "digest_score"):
+                value = probe.get(field)
+                if (
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                ):
+                    raise ValueError(f"case {case['id']} has an invalid probe {field}")
         expected = case.get("expected")
         if not isinstance(expected, (str, dict)):
             raise ValueError(f"case {case['id']} needs an expected ranking target")
@@ -163,11 +183,42 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _evaluate_bonus_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the exact post-normalization bonus at a controlled boundary."""
+    baseline_scores = {
+        "source": float(probe["source_score"]),
+        "digest": float(probe["digest_score"]),
+    }
+    policy_scores = dict(baseline_scores)
+    policy_scores["digest"] += CONSOLIDATION_BONUS
+    baseline = sorted(baseline_scores, key=lambda kind: (-baseline_scores[kind], kind))
+    policy = sorted(policy_scores, key=lambda kind: (-policy_scores[kind], kind))
+    expected = str(probe["expected"])
+    return {
+        "id": probe["id"],
+        "expected": expected,
+        "baseline_top": baseline[0],
+        "policy_top": policy[0],
+        "baseline_hit_at_1": baseline[0] == expected,
+        "policy_hit_at_1": policy[0] == expected,
+        "ranking_changed": baseline != policy,
+    }
+
+
 def evaluate(path: Path = DATASET) -> dict[str, Any]:
     """Return ranking preference and raw-evidence retention metrics."""
-    results = [evaluate_case(case) for case in load_cases(path)]
+    cases = load_cases(path)
+    results = [evaluate_case(case) for case in cases]
+    bonus_probes = [
+        _evaluate_bonus_probe(probe)
+        for case in cases for probe in case.get("bonus_probes", [])
+    ]
     summary = [item for item in results if item["expected_role"] == "digest"]
     details = [item for item in results if item["expected_role"] == "raw"]
+    source_regressions = [
+        item["id"] for item in bonus_probes
+        if item["expected"] == "source" and not item["policy_hit_at_1"]
+    ]
     return {
         "cases": len(results),
         "summary_digest_top1_rate": (
@@ -178,7 +229,31 @@ def evaluate(path: Path = DATASET) -> dict[str, Any]:
             sum(item["baseline_top"] == item["expected_id"] for item in summary)
             / len(summary)
         ),
-        "ranking_changed_rate": sum(item["ranking_changed"] for item in results) / len(results),
+        "production_trace_ranking_changed_rate": (
+            sum(item["ranking_changed"] for item in results) / len(results)
+        ),
+        "bonus_probe_count": len(bonus_probes),
+        "ranking_changed_rate": (
+            sum(item["ranking_changed"] for item in bonus_probes) / len(bonus_probes)
+            if bonus_probes else 0.0
+        ),
+        "bonus_probe_digest_top1_rate": (
+            sum(item["policy_hit_at_1"] for item in bonus_probes
+                if item["expected"] == "digest")
+            / max(1, sum(item["expected"] == "digest" for item in bonus_probes))
+        ),
+        "baseline_bonus_probe_digest_top1_rate": (
+            sum(item["baseline_hit_at_1"] for item in bonus_probes
+                if item["expected"] == "digest")
+            / max(1, sum(item["expected"] == "digest" for item in bonus_probes))
+        ),
+        "bonus_probe_source_top1_rate": (
+            sum(item["policy_hit_at_1"] for item in bonus_probes
+                if item["expected"] == "source")
+            / max(1, sum(item["expected"] == "source" for item in bonus_probes))
+        ),
+        "bonus_probe_source_regressions": source_regressions,
+        "bonus_probes": bonus_probes,
         "expected_hit_at_k": sum(item["expected_hit_at_k"] for item in results) / len(results),
         "raw_detail_hit_at_k": (
             sum(item["expected_hit_at_k"] for item in details) / len(details)

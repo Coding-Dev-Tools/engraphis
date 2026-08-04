@@ -600,6 +600,44 @@ def test_profiles_rotate_bounded_memory_window(monkeypatch):
         for link in eng.store.get_links(profile_id)
     ) == 3
 
+def test_profiles_overlap_entity_boundary(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+    from engraphis.core.interfaces import Node
+
+    monkeypatch.setattr(consolidate_module, "PROFILE_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "PROFILE_MEMORY_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    texts = [
+        "Unrelated deployment note one.",
+        "Unrelated deployment note two.",
+        "Unrelated deployment note three.",
+        "Aurora owns the deployment runbook section one.",
+        "Aurora owns the deployment runbook section two.",
+        "Aurora owns the deployment runbook section three.",
+    ]
+    for text in texts:
+        eng.remember(
+            text, workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.SEMANTIC, resolve_conflicts=False,
+        )
+    eng.store.upsert_entity(
+        Node(id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid)
+    )
+
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert first["profiles_created"] == []
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert len(second["profiles_created"]) == 1
+    profile_id = second["profiles_created"][0]["id"]
+    assert sum(
+        link["relation"] == "profiles"
+        for link in eng.store.get_links(profile_id)
+    ) == 3
+
 def test_profile_retry_completes_an_interrupted_link_set(monkeypatch):
     from engraphis.core.consolidate import consolidate_profiles
 
@@ -893,6 +931,61 @@ def test_distill_cursor_rotates_past_unclusterable_window(monkeypatch):
 
     assert len(second["digests_created"]) == 1
     assert set(second["digests_created"][0]["consolidates"]) == set(source_ids)
+
+
+def test_distill_cursor_overlaps_cluster_boundary(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "DISTILL_CLUSTER_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for index in range(9):
+        eng.remember(
+            f"Placeholder episodic note {index}.", workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    first_page = eng.store.list_memories_page(flt, after_id="", limit=3)
+    second_page = eng.store.list_memories_page(
+        flt, after_id=first_page[-1].id, limit=3,
+    )
+    third_page = eng.store.list_memories_page(
+        flt, after_id=second_page[-1].id, limit=3,
+    )
+    assert len(first_page) == len(second_page) == len(third_page) == 3
+    recurring = (
+        "Recurring deploy failure during the integration test, run 1.",
+        "Recurring deploy failure during the integration test, run 2.",
+        "Recurring deploy failure during the integration test, run 3.",
+    )
+    replacements = {
+        first_page[0].id: "Unrelated maintenance observation.",
+        second_page[0].id: "Unrelated release note.",
+        second_page[1].id: recurring[0],
+        second_page[2].id: recurring[1],
+        third_page[0].id: recurring[2],
+        third_page[1].id: "Unrelated incident note.",
+        third_page[2].id: "Unrelated audit note.",
+    }
+    for memory_id, content in replacements.items():
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?", (content, memory_id),
+        )
+    eng.store.conn.commit()
+
+    first = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
+    assert first["digests_created"] == []
+    assert eng.store.get_maintenance_cursor(
+        wid, rid, consolidate_module.DISTILL_CURSOR_NAME,
+    )
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
+    assert len(second["digests_created"]) == 1
+    assert set(second["digests_created"][0]["consolidates"]) == {
+        second_page[1].id, second_page[2].id, third_page[0].id,
+    }
 
 
 def test_scan_advances_past_a_fully_excluded_page():
