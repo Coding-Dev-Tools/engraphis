@@ -736,12 +736,19 @@ class SyncEngine:
         if dry_run:
             row = self.store.conn.execute(
                 "SELECT id FROM workspaces WHERE name=?", (ws_name,)).fetchone()
-            local_ws = row["id"] if row else None
+            # Use non-persisted scope sentinels when the target does not exist yet.
+            # Dry-run must evaluate the same repo-scoped acceptance path as a real
+            # apply; ``None`` would incorrectly reject rows that the real apply would
+            # accept after creating the workspace/repository.
+            local_ws = row["id"] if row else f"__dry_run_workspace__:{ws_name}"
             for rid, rname in valid_remote_repos.items():
                 repo_row = (self.store.conn.execute(
                     "SELECT id FROM repos WHERE workspace_id=? AND name=?",
-                    (local_ws, rname)).fetchone() if local_ws is not None else None)
-                repo_remap[rid] = repo_row["id"] if repo_row else None
+                    (row["id"], rname)).fetchone() if row else None)
+                repo_remap[rid] = (
+                    repo_row["id"] if repo_row
+                    else f"__dry_run_repo__:{ws_name}:{rid}"
+                )
         else:
             local_ws = self.store.get_or_create_workspace(ws_name)
             for rid, rname in valid_remote_repos.items():

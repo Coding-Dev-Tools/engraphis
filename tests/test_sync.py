@@ -625,6 +625,23 @@ def test_dry_run_resolves_remote_repo_by_name_without_mutating():
     assert store.get_memory("mem_a") is None
 
 
+def test_dry_run_simulates_missing_workspace_and_repo_without_mutating():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "new-workspace",
+        "repos": {"remote_repo": "new-repo"},
+        "memories": [{"id": "mem_a", "content": "one", "repo_id": "remote_repo"}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle, dry_run=True)
+
+    assert report["added"] == 1 and report["rejected"] == 0
+    assert store.get_memory("mem_a") is None
+    assert store.conn.execute("SELECT COUNT(*) c FROM workspaces").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM repos").fetchone()["c"] == 0
+
+
 def test_bundle_links_must_reference_accepted_bundle_memories():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("w")
