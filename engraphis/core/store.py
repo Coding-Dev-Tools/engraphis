@@ -3019,14 +3019,17 @@ class Store:
         name = (name or "").strip()
         if len(name) < 2:
             return
-        scope_sql = "repo_id IS NULL"
-        scope_params: list[Any] = []
-        if repo_id is not None:
-            # A contextual repo read includes its workspace/user ancestors.  Do not
-            # lose a legacy workspace mention merely because the matching entity was
-            # introduced later in a repository; sibling repositories stay isolated.
+        if repo_id is None:
+            # A workspace-owned entity is the shared identity across its repositories.
+            # Include every repo-owned memory in this workspace, then partition profile
+            # writes by the memory owner so a workspace sweep remains repo-isolated.
+            scope_sql = "1=1"
+            scope_params: list[Any] = []
+        else:
+            # A repo-owned entity may use workspace-level memories as shared evidence,
+            # but must not reach a sibling repository.
             scope_sql = "(repo_id=? OR repo_id IS NULL)"
-            scope_params.append(repo_id)
+            scope_params = [repo_id]
         rows = self.conn.execute(
             "SELECT id, title, content, workspace_id, repo_id, valid_from, valid_to, "
             "valid_to_recorded_at, ingested_at, expired_at FROM memories "

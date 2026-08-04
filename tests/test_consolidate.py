@@ -807,6 +807,52 @@ def test_distill_batches_all_eligible_episodes(monkeypatch):
     assert report["errors"] == []
 
 
+def test_scan_advances_past_a_fully_excluded_page():
+    from engraphis.core import consolidate as consolidate_module
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source_ids = [
+        eng.remember(
+            f"Recurring maintenance event {index}.", workspace_id=wid, repo_id=rid,
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(4)
+    ]
+    flt = SearchFilter(
+        workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC],
+    )
+    first_page = eng.store.list_memories_page(flt, limit=2)
+    assert len(first_page) == 2
+    for memory in first_page:
+        eng.store.add_link("derived-row", memory.id, "consolidates")
+
+    scanned = consolidate_module._scan_memories(
+        eng.store, flt, mtypes=[MemoryType.EPISODIC], batch_size=2,
+        exclude_relation="consolidates",
+    )
+
+    assert {memory.id for memory in scanned} == set(source_ids) - {
+        memory.id for memory in first_page
+    }
+
+
+def test_linked_memory_ids_respects_sqlite_bind_limit():
+    from engraphis.core import consolidate as consolidate_module
+
+    eng = MemoryEngine.create(":memory:")
+    source_ids = [f"source-{index}" for index in range(500)]
+    for source_id in source_ids:
+        eng.store.add_link("derived-row", source_id, "consolidates")
+
+    linked = consolidate_module._linked_memory_ids(
+        eng.store, source_ids, relation="consolidates",
+    )
+
+    assert linked == set(source_ids)
+
+
 def test_archive_batches_all_eligible_transients(monkeypatch):
     from engraphis.core import consolidate as consolidate_module
 
