@@ -5,6 +5,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-08-04
+
+Patch release for the governed recall/write hardening, schema 9 migration and tombstone
+handling, Smart MCP gateway fixes, and credential-safe evaluation capture included in PR #111.
+
 ## [1.4.0] - 2026-08-02
 
 Engraphis 1.4 makes the compact Smart MCP gateway the default agent interface while preserving
