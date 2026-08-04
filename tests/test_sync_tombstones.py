@@ -49,6 +49,30 @@ def test_secure_erase_propagates_tombstone_so_peer_does_not_resurrect():
     assert any(t["id"] == mid for t in syncer_b.export_bundle(bw)["tombstones"])
 
 
+def test_secure_erase_rolls_back_delete_when_tombstone_write_fails(monkeypatch):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="secret plan", workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+    ))
+    assert store.get_sync_state("device_id") is None
+
+    def fail_tombstone(*args, **kwargs):
+        raise RuntimeError("tombstone unavailable")
+
+    monkeypatch.setattr(store, "add_memory_tombstone", fail_tombstone)
+    with pytest.raises(RuntimeError, match="tombstone unavailable"):
+        store.secure_erase_memory(memory_id)
+
+    # The device marker may be minted before the destructive transaction, but the
+    # memory and its erase audit must remain intact when the terminal marker fails.
+    assert store.get_sync_state("device_id")
+    assert store.get_memory(memory_id) is not None
+    assert store.list_memory_tombstones() == []
+    assert store.conn.in_transaction is False
+
+
 def test_unpin_propagates_and_beats_a_peers_stale_pin(monkeypatch):
     """A local unpin must beat a peer's stale pinned=True via the marker lattice."""
     a, b, aw, bw = _two_devices()

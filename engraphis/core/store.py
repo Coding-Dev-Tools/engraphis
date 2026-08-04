@@ -2812,23 +2812,35 @@ class Store:
         and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
         peers, and a process that already read the secret cannot be recalled or erased.
         """
-        current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
-        if not current["present"]:
-            raise KeyError(f"no memory with id '{memory_id}'")
-        # Durable sync tombstone: the local row is hard-deleted, but the *deletion*
-        # must survive in sync state so a peer that still holds the row is told this
-        # id is dead instead of re-adding it on the next round. No content travels —
-        # only the id, the erasure time, and this device's id. Scope is captured from
-        # the erased row so an export restricted to a repo still tells that repo's
-        # peers the id is gone (a tombstone scoped to the workspace is never
-        # exported, mirroring how an erased row can no longer be scoped).
-        self.add_memory_tombstone(
-            memory_id, deleted_at=now_ts(),
-            device_id=self.device_id(),
-            workspace_id=current.get("workspace_id"),
-            repo_id=current.get("repo_id"),
-        )
-        self.conn.commit()
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            # Mint the origin before opening the erase transaction.  ``device_id`` may
+            # need to write sync metadata on a new database; keeping that write outside
+            # the destructive transaction means the deletion and terminal tombstone
+            # commit (or roll back) as one unit.
+            device_id = self.device_id()
+            current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
+            if not current["present"]:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            # Durable sync tombstone: the local row is hard-deleted, but the *deletion*
+            # must survive in sync state so a peer that still holds the row is told this
+            # id is dead instead of re-adding it on the next round. No content travels —
+            # only the id, the erasure time, and this device's id. Scope is captured from
+            # the erased row so an export restricted to a repo still tells that repo's
+            # peers the id is gone (a tombstone scoped to the workspace is never
+            # exported, mirroring how an erased row can no longer be scoped).
+            self.add_memory_tombstone(
+                memory_id, deleted_at=now_ts(),
+                device_id=device_id,
+                workspace_id=current.get("workspace_id"),
+                repo_id=current.get("repo_id"),
+            )
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.commit()
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
         durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
         maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
 
@@ -2926,11 +2938,11 @@ class Store:
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
         """Persist an entity and its derived incidence atomically."""
-        started_transaction = not self.conn.in_transaction
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
             return self._upsert_entity_impl(node, commit=commit)
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -3277,11 +3289,11 @@ class Store:
         roll back a transaction opened by this call so a partial edge cannot remain
         pending on the shared connection.
         """
-        started_transaction = not self.conn.in_transaction
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
             return self._upsert_edge_impl(edge, commit=commit)
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -3535,14 +3547,14 @@ class Store:
                          ingested_at: Optional[float] = None,
                          commit: bool = True) -> None:
         """Record support and edge provenance as one write unit."""
-        started_transaction = not self.conn.in_transaction
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
             self._add_edge_support_impl(
                 edge_id, provenance, valid_from=valid_from,
                 ingested_at=ingested_at, commit=commit,
             )
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -5322,13 +5334,14 @@ class Store:
         row = self.conn.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
-    def set_sync_state(self, key: str, value: str) -> None:
+    def set_sync_state(self, key: str, value: str, *, commit: bool = True) -> None:
         self.conn.execute(
             "INSERT INTO sync_state(key, value, updated_at) VALUES (?,?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             (key, value, now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     # ── sync tombstones (durable deletion markers that propagate) ───────────────
     def add_memory_tombstone(self, memory_id: str, *, deleted_at: Optional[float] = None,
@@ -5440,10 +5453,11 @@ class Store:
         sync bundles to their origin device so a store never re-applies its own
         writes; it is local metadata, never memory, and only ever leaves the machine
         inside a bundle header."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
         did = self.get_sync_state("device_id")
         if not did:
             did = ids.new_id("device")
-            self.set_sync_state("device_id", did)
+            self.set_sync_state("device_id", did, commit=owns_transaction)
         return did
 
     # ── helpers ───────────────────────────────────────────────────────────────

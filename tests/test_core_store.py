@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -221,6 +222,57 @@ def test_upsert_entity_backfill_failure_rolls_back_entity(store, monkeypatch):
 
     monkeypatch.undo()
     assert store.upsert_entity(node) == node.id
+
+
+def test_upsert_entity_failure_after_waiting_for_other_transaction_releases_lock(
+    store, monkeypatch,
+):
+    wid = store.get_or_create_workspace("w")
+    node = Node(
+        id="entity-waiting-failure", name="Waiting Failure",
+        ntype="person", workspace_id=wid,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    outcome = []
+
+    def hold_transaction():
+        store.conn.execute("BEGIN IMMEDIATE")
+        entered.set()
+        release.wait(timeout=5)
+        store.conn.rollback()
+
+    holder = threading.Thread(target=hold_transaction)
+    holder.start()
+    assert entered.wait(timeout=5)
+
+    def fail_backfill(*args, **kwargs):
+        raise RuntimeError("incidence unavailable")
+
+    monkeypatch.setattr(store, "_backfill_entity_text_mentions", fail_backfill)
+
+    def attempt_upsert():
+        try:
+            store.upsert_entity(node)
+        except BaseException as exc:  # communicate the worker failure to the test thread
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt_upsert)
+    worker.start()
+    assert not release.wait(timeout=0.05)
+    release.set()
+    holder.join(timeout=5)
+    worker.join(timeout=5)
+
+    assert not holder.is_alive()
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], RuntimeError)
+    assert store.conn.in_transaction is False
+    assert store.conn.transaction_owned_by_current_thread() is False
+    assert store.conn.execute(
+        "SELECT 1 FROM entities WHERE id=?", (node.id,)
+    ).fetchone() is None
 
 
 def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch):
