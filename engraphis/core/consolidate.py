@@ -57,6 +57,9 @@ PROFILE_QUOTES = 6
 # Python afterwards silently returns *zero* candidates as soon as the newest ``n`` rows
 # happen to be of the wrong type, which reads as "nothing to consolidate" in the report.
 DISTILL_SCAN_LIMIT = 2000
+# Bound the population that reaches the quadratic fallback clustering pass while
+# allowing the storage scan to page in smaller batches and skip pending rows.
+DISTILL_CLUSTER_LIMIT = 2000
 PROFILE_SCAN_LIMIT = 5000
 # Transient types eligible for archival (pass 2).
 TRANSIENT_TYPES = [MemoryType.WORKING, MemoryType.EPISODIC]
@@ -103,7 +106,8 @@ def _compaction(tokens_before: int, tokens_after: int, units: int) -> dict:
 
 
 def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
-                   batch_size: int, prompt_only: bool = False) -> list[MemoryRecord]:
+                   batch_size: int, prompt_only: bool = False,
+                   max_records: Optional[int] = None) -> list[MemoryRecord]:
     """Read every matching row in deterministic keyset batches.
 
     ``Store.list_memories(limit=...)`` deliberately limits the result after ordering by
@@ -112,6 +116,9 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
     Keyset pagination is stable while the caller performs writes between passes.
     """
     size = max(1, int(batch_size))
+    cap = None if max_records is None else max(0, int(max_records))
+    if cap == 0:
+        return []
     after_id = ""
     records: list[MemoryRecord] = []
     scoped = _replace(flt, mtypes=mtypes)
@@ -126,6 +133,8 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
             )
         else:
             records.extend(page)
+        if cap is not None and len(records) >= cap:
+            break
         next_after = page[-1].id
         if next_after == after_id or len(page) < size:
             break
@@ -137,7 +146,7 @@ def _scan_memories(store, flt: SearchFilter, *, mtypes: list[MemoryType],
         ),
         reverse=True,
     )
-    return records
+    return records[:cap] if cap is not None else records
 
 
 def _derived_memory_for_sources(store, first: MemoryRecord, source_ids: set[str],
@@ -350,6 +359,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     episodic = _scan_memories(
         store, flt, mtypes=[MemoryType.EPISODIC],
         batch_size=DISTILL_SCAN_LIMIT, prompt_only=True,
+        max_records=DISTILL_CLUSTER_LIMIT,
     )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
