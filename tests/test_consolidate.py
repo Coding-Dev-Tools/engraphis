@@ -549,6 +549,57 @@ def test_profiles_batch_all_eligible_memories(monkeypatch):
     assert report["profiles_created"][0]["entity"] == name
     assert report["profiles_created"][0]["mentions"] == 8
 
+def test_profiles_rotate_bounded_memory_window(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+    from engraphis.core.consolidate import consolidate_profiles
+    from engraphis.core.interfaces import Node
+
+    monkeypatch.setattr(consolidate_module, "PROFILE_SCAN_LIMIT", 3)
+    monkeypatch.setattr(consolidate_module, "PROFILE_MEMORY_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for index in range(6):
+        eng.remember(
+            f"Maintenance note placeholder {index}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
+            resolve_conflicts=False,
+        )
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    first_page = eng.store.list_memories_page(flt, after_id="", limit=3)
+    second_page = eng.store.list_memories_page(
+        flt, after_id=first_page[-1].id, limit=3,
+    )
+    assert len(first_page) == len(second_page) == 3
+    for memory in first_page:
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            ("Unrelated maintenance note.", memory.id),
+        )
+    for index, memory in enumerate(second_page):
+        eng.store.conn.execute(
+            "UPDATE memories SET content=? WHERE id=?",
+            (f"Aurora owns the deployment runbook section {index}.", memory.id),
+        )
+    eng.store.conn.commit()
+    eng.store.upsert_entity(
+        Node(id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid)
+    )
+
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert first["profiles_created"] == []
+    assert eng.store.get_maintenance_cursor(
+        wid, rid, consolidate_module.PROFILE_CURSOR_NAME,
+    )
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+    assert len(second["profiles_created"]) == 1
+    profile_id = second["profiles_created"][0]["id"]
+    assert sum(
+        link["relation"] == "profiles"
+        for link in eng.store.get_links(profile_id)
+    ) == 3
+
 def test_profile_retry_completes_an_interrupted_link_set(monkeypatch):
     from engraphis.core.consolidate import consolidate_profiles
 
@@ -1005,6 +1056,43 @@ def test_digest_resume_reapplies_source_safety_after_partial_write(monkeypatch):
         "SELECT COUNT(*) FROM audit WHERE actor='consolidation' AND action='distill'"
     ).fetchone()[0] == 1
 
+
+def test_completed_digest_safety_is_repaired_after_source_tightening():
+    eng, wid, rid = _engine_with_repeats()
+    first = consolidate(eng, workspace_id=wid, repo_id=rid)
+    digest_id = first["digests_created"][0]["id"]
+    source_id = first["digests_created"][0]["consolidates"][0]
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source_id,)
+    )
+    eng.store.conn.commit()
+
+    second = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert eng.store.get_memory(digest_id).sensitivity == "secret"
+
+
+def test_completed_profile_safety_is_repaired_after_source_tightening():
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, _name = _engine_with_entity_mentions()
+    first = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+    profile_id = first["profiles_created"][0]["id"]
+    source_id = next(
+        link["b"] if link["a"] == profile_id else link["a"]
+        for link in eng.store.get_links(profile_id)
+        if link["relation"] == "profiles"
+    )
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (source_id,)
+    )
+    eng.store.conn.commit()
+
+    second = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    assert second["errors"] == []
+    assert eng.store.get_memory(profile_id).sensitivity == "secret"
 
 def test_profile_resume_reapplies_source_safety_after_partial_write(monkeypatch):
     from engraphis.core import consolidate as consolidate_module

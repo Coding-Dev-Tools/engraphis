@@ -65,6 +65,8 @@ DISTILL_CURSOR_NAME = "episodic-consolidation"
 
 PROFILE_SCAN_LIMIT = 5000
 PROFILE_MEMORY_LIMIT = 5000
+# Cursor name for the bounded profile-memory sweep; scoped by workspace/repo.
+PROFILE_CURSOR_NAME = "profile-consolidation"
 PROFILE_ENTITY_LIMIT = 2000
 # Transient types eligible for archival (pass 2).
 TRANSIENT_TYPES = [MemoryType.WORKING, MemoryType.EPISODIC]
@@ -429,6 +431,92 @@ def _count_completed_derived(store, flt: SearchFilter, *, source: str,
             count += 1
     return count
 
+def _derived_cited_ids(derived: MemoryRecord, relation: str) -> set[str]:
+    """Return source ids recorded by a derived row's dedicated or legacy provenance."""
+    metadata = derived.metadata if isinstance(derived.metadata, dict) else {}
+    nested = metadata.get("provenance")
+    nested = nested if isinstance(nested, dict) else {}
+    provenance = derived.provenance if isinstance(derived.provenance, dict) else {}
+    key = "profiles" if relation == PROFILE_RELATION else "consolidates"
+    for container in (provenance, nested):
+        values = container.get(key) or container.get("source_ids") or []
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, (list, tuple, set)):
+            return {str(source_id) for source_id in values if source_id}
+    return set()
+
+
+def _derived_safety_is_current(
+    derived: MemoryRecord, sources: list[MemoryRecord],
+) -> bool:
+    """Whether a complete derived row still reflects its source safety labels."""
+    from engraphis.core.engine import _SENSITIVITY_RANK
+
+    current_sensitivity = derived.sensitivity or "normal"
+    expected_sensitivity = max(
+        [current_sensitivity] + [(source.sensitivity or "normal") for source in sources],
+        key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
+    )
+    if current_sensitivity != expected_sensitivity:
+        return False
+    # Inheritance is tightening-only: an already-untrusted derived row remains
+    # untrusted even after all of its sources are later approved.
+    return not (
+        prompt_eligible(derived.provenance, derived.metadata)
+        and not _sources_are_trusted(sources)
+    )
+
+
+def _repair_derived_safety(
+    engine, flt: SearchFilter, *, provenance_source: str, relation: str,
+) -> list[dict]:
+    """Repair safety on fully linked derived rows before source scans can skip them."""
+    from engraphis.core.store import memory_matches_filter
+
+    store = engine.store
+    derived_filter = _replace(flt, mtypes=[MemoryType.SEMANTIC])
+    errors: list[dict] = []
+    for derived in store.list_memories(derived_filter, include_invalid=True):
+        metadata = derived.metadata if isinstance(derived.metadata, dict) else {}
+        nested = metadata.get("provenance")
+        nested = nested if isinstance(nested, dict) else {}
+        provenance = derived.provenance if isinstance(derived.provenance, dict) else {}
+        if str(
+            provenance.get("source") or nested.get("source") or ""
+        ) != provenance_source:
+            continue
+        cited = _derived_cited_ids(derived, relation)
+        if not cited:
+            continue
+        attached = {
+            str(link["b"] if str(link["a"]) == derived.id else link["a"])
+            for link in store.get_links(derived.id)
+            if link["relation"] == relation
+        }
+        if not cited <= attached:
+            continue
+        sources = []
+        for source_id in sorted(cited):
+            source = store.get_memory(source_id)
+            if source is None or not memory_matches_filter(
+                source, flt, include_invalid=True,
+            ):
+                break
+            sources.append(source)
+        if len(sources) != len(cited) or _derived_safety_is_current(derived, sources):
+            continue
+        try:
+            sensitivity, trusted = _inherit_safety(engine, derived.id, sources)
+            store.audit(
+                "consolidation", "safety_repair", derived.id,
+                f"repaired {relation} safety for {len(sources)} sources "
+                f"(sensitivity={sensitivity}, trusted={trusted})",
+            )
+        except Exception as exc:
+            errors.append(_error_entry(sources, exc))
+    return errors
+
 
 def _audit_consolidation_once(engine, action: str, target: str, detail: str) -> None:
     """Record one completion audit even when a derived write was resumed."""
@@ -579,6 +667,12 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "clusters_found": 0, "digests_created": [], "archived": [],
                     "skipped_already_consolidated": 0, "errors": []}
+    if not dry_run:
+        for provenance_source in ("consolidation", "structured_consolidation"):
+            report["errors"].extend(_repair_derived_safety(
+                engine, flt, provenance_source=provenance_source,
+                relation="consolidates",
+            ))
     if not dry_run:
         report["skipped_already_consolidated"] = _count_completed_derived(
             store, flt, source="consolidation", relation="consolidates",
@@ -1321,13 +1415,27 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "entities_considered": 0, "profiles_created": [], "skipped_existing": 0,
                     "errors": []}
+    if not dry_run:
+        report["errors"].extend(_repair_derived_safety(
+            engine, flt, provenance_source="profile_consolidation",
+            relation=PROFILE_RELATION,
+        ))
 
-    live = [
-        memory for memory in _scan_memories(
-            store, flt, mtypes=DURABLE_TYPES,
-            batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
-            max_records=PROFILE_MEMORY_LIMIT, exclude_relation=PROFILE_RELATION,
+    profile_cursor = store.get_maintenance_cursor(
+        workspace_id, repo_id, PROFILE_CURSOR_NAME,
+    )
+    profile_memories, next_profile_cursor = _scan_memory_window(
+        store, flt, mtypes=DURABLE_TYPES,
+        batch_size=PROFILE_SCAN_LIMIT, prompt_only=True,
+        max_records=PROFILE_MEMORY_LIMIT, exclude_relation=PROFILE_RELATION,
+        start_after_id=profile_cursor,
+    )
+    if not dry_run:
+        store.set_maintenance_cursor(
+            workspace_id, repo_id, PROFILE_CURSOR_NAME, next_profile_cursor,
         )
+    live = [
+        memory for memory in profile_memories
         if memory.metadata.get("provenance", {}).get("source")
         != "profile_consolidation"
     ]

@@ -274,6 +274,60 @@ def test_upsert_entity_failure_after_waiting_for_other_transaction_releases_lock
         "SELECT 1 FROM entities WHERE id=?", (node.id,)
     ).fetchone() is None
 
+@pytest.mark.parametrize("method_name", ("add_link", "add_link_version"))
+def test_link_writes_release_transaction_after_waiting_for_other_thread(
+    store, monkeypatch, method_name,
+):
+    entered = threading.Event()
+    release = threading.Event()
+    outcome = []
+
+    def hold_transaction():
+        store.conn.execute("BEGIN IMMEDIATE")
+        entered.set()
+        release.wait(timeout=5)
+        store.conn.rollback()
+
+    holder = threading.Thread(target=hold_transaction)
+    holder.start()
+    assert entered.wait(timeout=5)
+
+    def fail_commit(_connection):
+        raise RuntimeError("commit unavailable")
+
+    monkeypatch.setattr(type(store.conn), "commit", fail_commit)
+
+    def attempt_link():
+        try:
+            getattr(store, method_name)("link-a", "link-b", relation="related")
+        except BaseException as exc:  # communicate the worker failure to the test thread
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt_link)
+    worker.start()
+    assert not release.wait(timeout=0.05)
+    release.set()
+    holder.join(timeout=5)
+    worker.join(timeout=5)
+    monkeypatch.undo()
+
+    assert not holder.is_alive()
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], RuntimeError)
+    assert store.conn.in_transaction is False
+    assert store.conn.transaction_owned_by_current_thread() is False
+    assert store.conn.execute(
+        "SELECT 1 FROM mem_links WHERE a=? AND b=?",
+        ("link-a", "link-b"),
+    ).fetchone() is None
+
+    if method_name == "add_link_version":
+        assert store.add_link_version("link-a", "link-b", relation="related") is True
+    else:
+        store.add_link("link-a", "link-b", relation="related")
+    assert store.get_links("link-a")
+
 
 def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch):
     edge = Edge(id="edge-existing", src="source", dst="target", relation="related")

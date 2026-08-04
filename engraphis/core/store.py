@@ -3824,8 +3824,8 @@ class Store:
             if layer is not None else None
         )
         graph_layer = requested_layer or normalize_graph_layer(None, relation).value
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
             # A sync bundle may carry a closed link interval.  It has no live row to
@@ -3843,7 +3843,7 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if started_transaction:
+                if owns_transaction:
                     self.conn.commit()
                 return
             existing = self.conn.execute(
@@ -3896,7 +3896,7 @@ class Store:
                     )
                     if commit:
                         self.conn.commit()
-                elif started_transaction:
+                elif owns_transaction:
                     # The pre-read reservation has no write to batch. Release it even
                     # for ``commit=False``; the old no-op path never opened a transaction.
                     self.conn.commit()
@@ -3915,7 +3915,7 @@ class Store:
             if commit:
                 self.conn.commit()
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -3939,8 +3939,8 @@ class Store:
         stamp = now_ts()
         world_start = stamp if valid_from is None else valid_from
         system_start = stamp if ingested_at is None else ingested_at
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
             exact = self.conn.execute(
@@ -3955,7 +3955,7 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if started_transaction:
+                if owns_transaction:
                     self.conn.commit()
                 return False
             self.conn.execute(
@@ -3970,7 +3970,7 @@ class Store:
                 self.conn.commit()
             return True
         except BaseException:
-            if started_transaction and self.conn.in_transaction:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
