@@ -39,6 +39,7 @@ from engraphis.core.interfaces import (
     RetentionDecision,
     Scope,
     SearchFilter,
+    embedder_capabilities,
     embedding_space_fingerprint,
     vector_index_requires_sync,
 )
@@ -53,6 +54,7 @@ from engraphis.core.poisoning import (
     prompt_eligible,
     provenance_is_approved,
 )
+
 from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.retrieval_policy import (
     CANDIDATE_DEPTH_MODES,
@@ -69,6 +71,21 @@ from engraphis.core.resolve import (
 from engraphis.core.secrets import reject_secrets
 from engraphis.core.store import Store, _dumps, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
+
+
+def _safe_upsert(index, ids, vecs, meta=None, *, commit=True):
+    """Call ``index.upsert`` with backward-compatible metadata handling.
+
+    Older third-party ``VectorIndex`` implementations may predate the optional
+    ``meta`` positional argument and accept only ``(ids, vecs, *, commit)``.
+    Passing metadata positionally would raise ``TypeError`` and abort engine
+    creation.  This shim tries the full signature first and falls back to the
+    legacy shape when needed.
+    """
+    try:
+        index.upsert(ids, vecs, meta, commit=commit)
+    except TypeError:
+        index.upsert(ids, vecs, commit=commit)
 
 logger = logging.getLogger("engraphis.core.engine")
 
@@ -478,6 +495,31 @@ class MemoryEngine:
             self._hydrate_separate_vector_index(fingerprint)
             return
 
+        # Guard: never let a degraded/fallback embedder overwrite a semantic space
+        # that was previously built by a real semantic model.  A transient missing
+        # dependency, model download failure, or provider outage must not
+        # permanently downgrade semantic recall to lexical hashing.
+        #
+        # Legacy markers (e.g. ``"legacy-unverified"``) are excluded: they indicate
+        # vectors from before proper model tracking, so rebuilding them with the
+        # current deterministic version is the intended upgrade path — there is no
+        # semantic information to lose.
+        active = self.store.active_embedding_space()
+        if (
+            active
+            and active != fingerprint
+            and active.startswith("emb:v1:")
+        ):
+            caps = embedder_capabilities(self.embedder)
+            if caps.get("degraded_mode"):
+                logger.warning(
+                    "skipping embedding rebuild: active space %s was built by a "
+                    "semantic embedder but the current embedder is degraded (%s); "
+                    "vector recall remains available under the existing space",
+                    active, caps.get("degraded_reason", "unknown"),
+                )
+                return
+
         self.store.begin_embedding_rebuild(fingerprint)
         rebuilt = 0
         removed = 0
@@ -544,7 +586,7 @@ class MemoryEngine:
                     for record, vector in zip(eligible, vectors):
                         self.store.put_vector(record.id, vector, model=fingerprint)
                     if vector_index_requires_sync(self.index, self.store):
-                        self.index.upsert(ids, vectors, metadata, commit=False)
+                        _safe_upsert(self.index, ids, vectors, metadata, commit=False)
                 self.store.conn.commit()
                 removed += len(excluded_ids)
                 rebuilt += len(eligible)
@@ -588,26 +630,37 @@ class MemoryEngine:
             )
 
     def _hydrate_separate_vector_index(self, fingerprint: str) -> None:
-        """Repair a separate ANN backend from the canonical Store mirror."""
+        """Repair a separate ANN backend from the canonical Store mirror.
+
+        Historical/superseded vectors intentionally retained in ``mem_vectors``
+        for ``valid_at``/``as_of`` recall must also be hydrated into separate
+        indexes like sqlite-vec.  Using ``include_invalid=False`` would omit
+        closed-but-inspection-eligible memories, making historical semantic
+        recall through the separate index incomplete until a full rebuild.
+        """
         if not vector_index_requires_sync(self.index, self.store):
             return
         ids: list[str] = []
         vectors: list[np.ndarray] = []
         for memory_id, vector in self.store.iter_vectors(
-                include_invalid=False, dim=int(self.embedder.dim)):
+                include_invalid=True, dim=int(self.embedder.dim)):
             ids.append(memory_id)
             vectors.append(vector)
             if len(ids) < EMBEDDING_REBUILD_BATCH:
                 continue
-            self.index.upsert(
+            _safe_upsert(
+                self.index,
                 ids, np.asarray(vectors, dtype=np.float32),
                 [{"model": fingerprint} for _ in ids],
+                commit=True,
             )
             ids, vectors = [], []
         if ids:
-            self.index.upsert(
+            _safe_upsert(
+                self.index,
                 ids, np.asarray(vectors, dtype=np.float32),
                 [{"model": fingerprint} for _ in ids],
+                commit=True,
             )
 
     # ── write ─────────────────────────────────────────────────────────────────

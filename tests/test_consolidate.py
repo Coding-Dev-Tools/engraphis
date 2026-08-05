@@ -447,6 +447,7 @@ def test_structured_consolidation_rejects_facts_without_prompt_sources():
 
 
 def test_structured_consolidation_does_not_trust_invented_claim_with_valid_sources():
+    pytest.importorskip("pydantic")
     class HallucinatedClaimLLM:
         def extract_json(self, prompt, schema):
             source_ids = re.findall(r"ID: (mem_[A-Z0-9]+)", prompt)
@@ -1225,16 +1226,25 @@ def test_distill_cursor_drops_closed_partial_cluster_sources(monkeypatch):
         )
         for index in range(9)
     ]
-    for index in (0, 3, 6):
+    # The maintenance cursor is a keyset cursor over sorted ULIDs.  Several writes
+    # can share a millisecond, so insertion order is not a stable proxy for page
+    # order.  Use the actual keyset order to pick recurring targets deterministically.
+    ordered_ids = [
+        memory.id for memory in eng.store.list_memories_page(
+            SearchFilter(workspace_id=wid, repo_id=rid), limit=len(source_ids),
+        )
+    ]
+    recurring_indices = (0, 3, 6)
+    for index in recurring_indices:
         eng.store.conn.execute(
             "UPDATE memories SET content=? WHERE id=?",
-            (f"Recurring deploy failure during run {index}.", source_ids[index]),
+            (f"Recurring deploy failure during run {index}.", ordered_ids[index]),
         )
     eng.store.conn.commit()
 
     first = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
     assert first["digests_created"] == []
-    eng.store.close_validity(source_ids[0], at=time.time())
+    eng.store.close_validity(ordered_ids[0], at=time.time())
 
     second = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=3)
 
