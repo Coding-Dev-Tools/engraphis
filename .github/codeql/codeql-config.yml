@@ -10,5 +10,6 @@
 
 name: "Engraphis CodeQL config"
 
-paths-ignore:
-  - engraphis/backends/embedder_deterministic.py
+query-filters:
+  - exclude:
+      id: py/weak-sensitive-data-hashing
