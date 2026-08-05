@@ -24,7 +24,7 @@ FORMAT = "engraphis-release-evidence/2"
 PACKAGE = "engraphis"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)\Z")
+_TAG = re.compile(r"v([0-9]+\.[0-9]+(?:\.[0-9]+)?)\Z")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _SECRET_NAME = re.compile(
     r"(?:secret|token|password|credential|api[-_]?key|private[-_]?key)", re.IGNORECASE
@@ -105,7 +105,7 @@ def project_version(root: Path) -> str:
             version = match.group(1)
     except (KeyError, OSError, ValueError) as exc:
         raise EvidenceError("pyproject project.version is required") from exc
-    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
         raise EvidenceError("project.version must use stable semantic version syntax")
     return version
 
