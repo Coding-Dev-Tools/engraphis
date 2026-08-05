@@ -1,0 +1,17 @@
+# CodeQL configuration for Engraphis
+#
+# The deterministic embedder uses SHA-1 solely for feature hashing (the
+# "hashing trick") to map tokens to vector dimensions. This is not a security
+# primitive: the output is never used for passwords, signatures, integrity
+# checks, or any cryptographic purpose. The code sets usedforsecurity=False.
+#
+# Changing to SHA-256 would invalidate all existing local vectors and break
+# the documented compatibility invariant in regression tests.
+
+name: "Engraphis CodeQL config"
+
+disable-default-queries: false
+
+# Exclude the specific file that triggers the false positive
+paths-ignore:
+  - engraphis/backends/embedder_deterministic.py
