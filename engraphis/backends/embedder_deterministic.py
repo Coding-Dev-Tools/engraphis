@@ -27,12 +27,12 @@ MAX_EMBEDDING_DIM = 65_536
 def _feature_hash(data: bytes) -> bytes:
     """Feature hashing only — never used for security.
 
-    Returns a SHA-1 digest used solely to map tokens to deterministic vector
+    Returns a SHA-256 digest used solely to map tokens to deterministic vector
     dimensions (the "hashing trick"). This is not a security primitive: the
     output is never used for passwords, signatures, integrity checks, or any
     other cryptographic purpose.
     """
-    return hashlib.sha1(data, usedforsecurity=False).digest()  # lgtm[py/weak-sensitive-data-hashing]
+    return hashlib.sha256(data, usedforsecurity=False).digest()
 
 class DeterministicEmbedder:
     """Deterministic lexical feature hashing for offline operation.
