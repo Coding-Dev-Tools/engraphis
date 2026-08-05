@@ -81,7 +81,9 @@ selected layers are never reclassified when a database is reopened.
 `sqlite-vec` is installed, so the default remains portable and deterministic. `sqlite-vec` and
 SQLCipher load incompatible SQLite native libraries in one process: with `vector_backend="auto"`
 Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails with an actionable
-error. Run accelerated search in a fresh process when using the SQLCipher extra.
+error. Packaged dashboard, REST, and MCP entrypoints use the `auto` setting, so an installed
+`vector` extra is selected without changing the deterministic constructor contract. Run accelerated
+search in a fresh process when using the SQLCipher extra.
 
 ## Query planning
 

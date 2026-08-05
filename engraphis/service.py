@@ -44,7 +44,9 @@ from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import (
-    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter, embedder_capabilities,
+    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    embedder_capabilities, embedding_space_fingerprint,
+    vector_index_requires_sync,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -114,10 +116,36 @@ def _recall_score_semantics(capabilities: dict) -> dict:
         )
     return semantics
 
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    """Coerce persisted numeric fields without exposing NaN/Infinity downstream."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
 
-def _with_retrieval_capabilities(payload: dict, embedder) -> dict:
+
+
+def _with_retrieval_capabilities(payload: dict, embedder, store=None) -> dict:
     """Add the stable degraded-mode contract to a public recall-shaped payload."""
     capabilities = embedder_capabilities(embedder)
+    persistent_store = (
+        store is not None
+        and store.path != ":memory:"
+        and not str(store.path).startswith("file::memory:")
+    )
+    if capabilities["semantic_support"] and persistent_store:
+        fingerprint = embedding_space_fingerprint(embedder)
+        if not fingerprint or not store.embedding_space_ready(fingerprint):
+            capabilities.update({
+                "degraded_mode": True,
+                "semantic_support": False,
+                "degraded_reason": (
+                    "semantic vector retrieval is disabled because stored vectors "
+                    "do not match the configured embedding space"
+                ),
+                "vector_search_ready": False,
+            })
     payload.update(capabilities)
     payload["score_semantics"] = _recall_score_semantics(capabilities)
     return payload
@@ -308,7 +336,8 @@ def _rollback_service_transaction(method):
         try:
             if owns_transaction:
                 conn.execute("BEGIN IMMEDIATE")
-            result = method(self, *args, **kwargs)
+            with conn.defer_commits():
+                result = method(self, *args, **kwargs)
             if owns_transaction and conn.transaction_owned_by_current_thread():
                 conn.commit()
             return result
@@ -444,7 +473,9 @@ def _strict_bool(value: Any, *, field: str) -> bool:
     return value
 
 
-def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) -> dict:
+def _canonical_write_provenance(
+    source: Any, trusted: Any, *, raw_ingest: bool, ingress: str = "service"
+) -> dict:
     """Create provenance at the service boundary, never from caller metadata.
 
     Normal local-agent memory creation is intentionally immediate: agents should not
@@ -459,8 +490,17 @@ def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) 
         source, field="source", max_chars=MAX_NAME_CHARS, required=False
     ) or "agent"
     requested = _strict_bool(trusted, field="trusted")
+    ingress_name = _clean_text(
+        ingress, field="ingress", max_chars=MAX_NAME_CHARS, required=False
+    ) or "service"
     external = source_is_external(source_name)
-    local_agent = source_name.casefold() in LOCAL_AGENT_SOURCES
+    # Transport labels are not capabilities.  HTTP and MCP callers must use the
+    # explicit loopback attestation below; otherwise a remote caller could simply
+    # submit source="agent" and self-approve prompt-visible content.
+    local_agent = (
+        source_name.casefold() in LOCAL_AGENT_SOURCES
+        and ingress_name.casefold() not in {"http", "mcp", "remote"}
+    )
     provenance = {
         "source": source_name,
         "trusted": local_agent,
@@ -470,6 +510,8 @@ def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) 
             if local_agent else
             "external_ingress" if (external or raw_ingest) else "service_review_gate"
         ),
+        "writer_policy": "service-v11",
+        "ingress": ingress_name,
     }
     if requested and not local_agent:
         # An auditable code, not a copy of source content or a caller-controlled
@@ -484,14 +526,50 @@ def _local_cli_provenance() -> dict:
 
     A terminal command entered on the device that owns the database is an intentional
     local capability, like a direct ``MemoryEngine`` call. It is not a transport
-    assertion: HTTP, dashboard, import, and MCP entry points continue to use
-    ``_canonical_write_provenance`` and therefore cannot self-approve content.
+    assertion and no HTTP, dashboard, import, or MCP caller can select it. Those
+    boundaries use canonical ingress policy or their separate, binding-attested
+    local-agent capability.
     """
     return {
         "source": "cli",
         "trusted": True,
         "review_state": REVIEW_APPROVED,
         "trust_origin": "local_cli_operator",
+        "writer_policy": "service-v11",
+        "ingress": "cli",
+    }
+
+
+def _local_agent_provenance(source: Any, *, ingress: str) -> Optional[dict]:
+    """Return approved provenance only for an operator-attested local binding.
+
+    ``_local_agent_operator`` is a private capability supplied by the HTTP or MCP
+    binding after that binding's own authorization check.  Keep the accepted ingress
+    names explicit so an accidental call-site cannot turn an arbitrary transport label
+    into approval authority.
+    """
+    source_name = _clean_text(
+        source, field="source", max_chars=MAX_NAME_CHARS, required=False
+    ) or "agent"
+    if source_name.casefold() not in LOCAL_AGENT_SOURCES:
+        return None
+    ingress_name = _clean_text(
+        ingress, field="ingress", max_chars=MAX_NAME_CHARS, required=False
+    ).casefold()
+    attested_boundary = {
+        "http": ("local_loopback_agent", "http_loopback"),
+        "mcp": ("local_mcp_agent", "mcp_operator"),
+    }.get(ingress_name)
+    if attested_boundary is None:
+        return None
+    trust_origin, recorded_ingress = attested_boundary
+    return {
+        "source": source_name,
+        "trusted": True,
+        "review_state": REVIEW_APPROVED,
+        "trust_origin": trust_origin,
+        "writer_policy": "service-v11",
+        "ingress": recorded_ingress,
     }
 
 
@@ -640,7 +718,7 @@ def _optional_timestamp(value: Any, *, field: str) -> Optional[float]:
         raise ValidationError(f"{field} must be a finite timestamp")
     try:
         timestamp = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValidationError(f"{field} must be a finite timestamp") from exc
     if not math.isfinite(timestamp):
         raise ValidationError(f"{field} must be a finite timestamp")
@@ -892,8 +970,10 @@ class MemoryService:
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_revision: Optional[str] = None,
+               require_immutable_models: bool = False,
                embed_dim: int = 384, vector_backend: str = "numpy",
                rerank_model: Optional[str] = None,
+               rerank_revision: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
                extractor: Optional[str] = None,
                graph_extractor: Optional[str] = None,
@@ -927,8 +1007,10 @@ class MemoryService:
         connect = connector_from_env()
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_revision=embed_revision,
+            require_immutable_models=require_immutable_models,
             embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
+            rerank_revision=rerank_revision,
             extractor=extractor, graph_extractor=graph_extractor,
             retention_supervisor=retention_supervisor, connect=connect,
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
@@ -988,27 +1070,38 @@ class MemoryService:
         return ws
 
     def _workspace_visibility(self, ws: str) -> tuple[str, str]:
-        """Return ``(visibility, owner)`` for an existing workspace, read from its
-        ``settings`` JSON. Folders created before per-folder access controls have no
-        visibility recorded and remain shared for compatibility; all new team folders are
-        written explicitly as personal unless their creator deliberately shares them.
-        Never raises: a missing row or malformed settings is treated as shared, so a bad
-        settings payload cannot turn into an accidental denial of service."""
-        try:
-            row = self.store.conn.execute(
-                "SELECT settings FROM workspaces WHERE name=?", (ws,)).fetchone()
-        except Exception:  # noqa: BLE001 — treat any lookup failure as unrestricted-shared
-            return ("shared", "")
+        """Return ``(visibility, owner)`` for an existing workspace.
+
+        Access-control metadata is part of the authorization boundary, so lookup and
+        parsing failures must not be treated as a shared workspace.  A missing settings
+        value remains the legacy shared default; an explicitly malformed or incomplete
+        personal declaration fails closed instead of allowing every authenticated user in.
+        """
+        row = self.store.conn.execute(
+            "SELECT settings FROM workspaces WHERE name=?", (ws,)).fetchone()
         if row is None or not row["settings"]:
             return ("shared", "")
         try:
-            s = json.loads(row["settings"])
-        except Exception:  # noqa: BLE001
+            settings = json.loads(row["settings"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ValidationError("workspace access settings are invalid") from exc
+        if not isinstance(settings, dict):
+            raise ValidationError("workspace access settings are invalid")
+        visibility = settings.get("visibility")
+        if visibility is None:
             return ("shared", "")
-        if not isinstance(s, dict):
-            return ("shared", "")
-        vis = s.get("visibility") or "shared"
-        return (vis if vis == "personal" else "shared", s.get("owner") or "")
+        if visibility == "shared":
+            # A shared workspace's owner is its controller/original sharer, not an
+            # access restriction. Preserve a valid controller so they can reverse
+            # their own sharing decision; malformed legacy values grant no control.
+            owner = settings.get("owner")
+            return ("shared", owner.strip() if isinstance(owner, str) else "")
+        if visibility != "personal":
+            raise ValidationError("workspace access settings are invalid")
+        owner = settings.get("owner")
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValidationError("personal workspace has no valid owner")
+        return ("personal", owner.strip())
 
     def _authorize_workspace_control(self, ws: str) -> None:
         """Require the original sharer or an admin for whole-workspace mutations."""
@@ -1149,7 +1242,9 @@ class MemoryService:
                  retention_reason: str = "",
                  valid_from: Optional[float] = None,
                  subject_key: str = "", claim_kind: str = "",
-                 _local_cli_operator: bool = False) -> dict:
+                 _local_cli_operator: bool = False,
+                 _local_agent_operator: bool = False,
+                 _ingress: str = "service") -> dict:
         """Store one memory. Returns its id, resolved scope, and the resolution
         outcome (``op``: add/noop/invalidate/relate — see
         ``MemoryEngine.remember_with_resolution``).
@@ -1160,10 +1255,18 @@ class MemoryService:
             ("content", content), ("title", title), ("keywords", keywords),
             ("metadata", metadata), ("subject_key", subject_key), ("claim_kind", claim_kind),
         ))
+        local_agent_provenance = (
+            _local_agent_provenance(source, ingress=_ingress)
+            if _local_agent_operator else None
+        )
         provenance = (
             _local_cli_provenance()
             if _local_cli_operator else
-            _canonical_write_provenance(source, trusted, raw_ingest=False)
+            local_agent_provenance
+            if local_agent_provenance is not None else
+            _canonical_write_provenance(
+                source, trusted, raw_ingest=False, ingress=_ingress
+            )
         )
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
@@ -1197,7 +1300,7 @@ class MemoryService:
             meta = {**meta, "retention_supervision": retention}
         try:
             importance = float(importance)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("importance must be a number")
         if not math.isfinite(importance):
             raise ValidationError("importance must be finite")
@@ -1294,7 +1397,9 @@ class MemoryService:
                session_id: Optional[str] = None, mtype: str = "semantic",
                scope: Optional[str] = None, metadata: Optional[dict] = None,
                source: str = "agent", trusted: bool = False,
-               kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
+               kind: Optional[str] = None, resolve_conflicts: bool = True,
+               _local_agent_operator: bool = False,
+               _ingress: str = "service") -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
         the text is first distilled into discrete typed facts; without one this behaves
         exactly like ``remember``. Normal local-agent ingest is prompt-visible after
@@ -1302,7 +1407,13 @@ class MemoryService:
         are quarantined before they can surface."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         _reject_secret_capture((("content", content), ("metadata", metadata)))
-        provenance = _canonical_write_provenance(source, trusted, raw_ingest=True)
+        local_agent_provenance = (
+            _local_agent_provenance(source, ingress=_ingress)
+            if _local_agent_operator else None
+        )
+        provenance = local_agent_provenance or _canonical_write_provenance(
+            source, trusted, raw_ingest=True, ingress=_ingress
+        )
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
@@ -1369,7 +1480,9 @@ class MemoryService:
                         retention_class: Optional[str] = None,
                          retention_reason: str = "",
                          valid_from: Optional[float] = None,
-                         subject_key: str = "", claim_kind: str = "") -> dict:
+                         subject_key: str = "", claim_kind: str = "",
+                         _local_agent_operator: bool = False,
+                         _ingress: str = "intent_api") -> dict:
         out = self.remember(
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
@@ -1379,6 +1492,7 @@ class MemoryService:
             # remain review-gated by the canonical service boundary.
             valid_from=valid_from, subject_key=subject_key, claim_kind=claim_kind,
             source="intent_api", trusted=False,
+            _local_agent_operator=_local_agent_operator, _ingress=_ingress,
         )
         return {"operation": "remember", **out}
 
@@ -1872,7 +1986,7 @@ class MemoryService:
             min_cluster = max(2, min(20, int(min_cluster)))
             archive_below = float(archive_below)
             min_mentions = max(2, min(50, int(min_mentions)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("min_cluster/min_mentions must be integers and "
                                   "archive_below a number")
         if not math.isfinite(archive_below):
@@ -1921,7 +2035,7 @@ class MemoryService:
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         try:
             k = int(k)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("k must be an integer")
         k = max(1, min(MAX_K, k))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
@@ -1940,7 +2054,7 @@ class MemoryService:
                 self.engine.recall_engine.token_budget
                 if token_budget is None else int(token_budget)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("token_budget must be an integer")
         token_budget = max(0, min(MAX_TOKEN_BUDGET, token_budget))
         retrieval_profile = str(retrieval_profile or "balanced").strip().casefold()
@@ -1975,7 +2089,7 @@ class MemoryService:
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
-                ), self.engine.embedder)
+                ), self.engine.embedder, self.store)
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
@@ -1987,7 +2101,7 @@ class MemoryService:
                         valid_at=valid_at,
                         known_at=known_at,
                         note=f"no repo named '{rp}' in workspace '{ws}' yet",
-                    ), self.engine.embedder)
+                    ), self.engine.embedder, self.store)
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
@@ -2000,7 +2114,7 @@ class MemoryService:
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
-                    ), self.engine.embedder)
+                    ), self.engine.embedder, self.store)
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -2009,12 +2123,13 @@ class MemoryService:
         elif session_id:
             raise ValidationError("session_id requires workspace")
 
+        recall_filter = _filter(
+            wid, rid, mts, as_of, layers, session_id=sid,
+            valid_at=valid_at, known_at=known_at,
+        )
         result = self.engine.recall_engine.recall(
             query,
-            _filter(
-                wid, rid, mts, as_of, layers, session_id=sid,
-                valid_at=valid_at, known_at=known_at,
-            ),
+            recall_filter,
             k=k, reinforce=reinforce,
             token_budget=token_budget,
             retrieval_profile=retrieval_profile,
@@ -2061,7 +2176,13 @@ class MemoryService:
             "truncated": packed.truncated,
             "reason": packed.reason,
         } for packed in result.packed_chunks]
-        capabilities = embedder_capabilities(self.engine.embedder)
+        capabilities = {
+            "degraded_mode": result.degraded_mode,
+            "semantic_support": result.semantic_support,
+            "embedding_mode": result.embedding_mode,
+            "degraded_reason": result.degraded_reason,
+            "vector_search_ready": result.vector_search_ready,
+        }
         out = {
             "query": query, "count": result.count,
             "context": result.context, "memories": memories,
@@ -2083,6 +2204,21 @@ class MemoryService:
             "score_semantics": _recall_score_semantics(capabilities),
             **capabilities,
         }
+        if result.count == 0:
+            eligibility = self.store.prompt_eligibility_counts(recall_filter)
+            if (
+                not include_untrusted
+                and eligibility["total"] > 0
+                and eligibility["prompt_eligible"] == 0
+            ):
+                out["note"] = (
+                    "memories exist in this scope, but none are approved for prompt "
+                    "recall; use 'engraphis-cli review list' and the governed bulk "
+                    "approval workflow"
+                )
+                out["eligibility"] = eligibility
+            elif eligibility["total"] > 0 and not result.vector_search_ready:
+                out["note"] = result.degraded_reason
         if diagnostics:
             out["retrieval_trace"] = result.retrieval_trace or []
             out["planning_details"] = result.planning_details or {}
@@ -2151,14 +2287,14 @@ class MemoryService:
             raise ValidationError("k must be an integer")
         try:
             k = int(k)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValidationError("k must be an integer") from exc
         k = max(1, min(MAX_K, k))
         if isinstance(max_context_tokens, bool):
             raise ValidationError("max_context_tokens must be an integer")
         try:
             max_context_tokens = int(max_context_tokens)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValidationError("max_context_tokens must be an integer") from exc
         if not 0 <= max_context_tokens <= MAX_TOKEN_BUDGET:
             raise ValidationError(
@@ -2169,7 +2305,7 @@ class MemoryService:
                 raise ValidationError("retrieval_token_budget must be an integer")
             try:
                 retrieval_token_budget = int(retrieval_token_budget)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise ValidationError("retrieval_token_budget must be an integer") from exc
             if not 0 <= retrieval_token_budget <= max_context_tokens:
                 raise ValidationError(
@@ -2308,12 +2444,12 @@ class MemoryService:
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         try:
             k = int(k)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("k must be an integer")
         k = max(1, min(MAX_K, k))
         try:
             max_citations = int(max_citations)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("max_citations must be an integer")
         max_citations = max(1, min(MAX_K, max_citations))
         as_of = _optional_timestamp(as_of, field="as_of")
@@ -2327,7 +2463,7 @@ class MemoryService:
                 self.engine.recall_engine.token_budget
                 if token_budget is None else int(token_budget)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("token_budget must be an integer")
         token_budget = max(0, min(MAX_TOKEN_BUDGET, token_budget))
         retrieval_profile = str(retrieval_profile or "balanced").strip().casefold()
@@ -2345,7 +2481,7 @@ class MemoryService:
         if min_support is not None:
             try:
                 min_support = float(min_support)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ValidationError("min_support must be a number")
             if not math.isfinite(min_support):
                 raise ValidationError("min_support must be finite")
@@ -2369,7 +2505,7 @@ class MemoryService:
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at,
-                ), self.engine.embedder)
+                ), self.engine.embedder, self.store)
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
@@ -2382,7 +2518,7 @@ class MemoryService:
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
-                    ), self.engine.embedder)
+                    ), self.engine.embedder, self.store)
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
@@ -2396,7 +2532,7 @@ class MemoryService:
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
-                    ), self.engine.embedder)
+                    ), self.engine.embedder, self.store)
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -2712,7 +2848,7 @@ class MemoryService:
                 raise ValidationError("token_budget must be an integer")
             try:
                 token_budget = int(token_budget)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise ValidationError("token_budget must be an integer") from exc
             if not 0 <= token_budget <= MAX_TOKEN_BUDGET:
                 raise ValidationError(
@@ -2874,6 +3010,7 @@ class MemoryService:
         reason = _clean_text(
             reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
         )
+        _reject_secret_capture((("link reason", reason),))
         graph_layer = normalize_graph_layer(
             _enum(layer, GraphLayer, "layer") if layer else None, relation
         )
@@ -2975,7 +3112,7 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         try:
             max_depth = max(1, min(32, int(max_depth)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("max_depth must be an integer")
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
@@ -3064,14 +3201,18 @@ class MemoryService:
             if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
                 continue
             try:
+                _vis, _owner = self._workspace_visibility(r["name"])
+            except ValidationError:
+                # A malformed access envelope is not a shared-folder declaration. Do not
+                # list it as readable/selectable; repair requires an explicit operator action.
+                continue
+            try:
                 _s = json.loads(r["settings"]) if r["settings"] else {}
                 if not isinstance(_s, dict):
                     _s = {}
-            except Exception:
+            except (TypeError, ValueError, RecursionError):
                 _s = {}
             _desc = _s.get("description") or ""
-            _vis = "personal" if _s.get("visibility") == "personal" else "shared"
-            _owner = _s.get("owner") or ""
             _owner_normalized = str(_owner).casefold()
             # Hide other users' personal folders from the listing (team mode only).
             if (user and _vis == "personal" and _owner
@@ -3290,7 +3431,7 @@ class MemoryService:
         try:
             c.execute(f"DELETE FROM mem_vec_ann WHERE id IN {msub}", (wid,))
         except Exception:
-            pass  # sqlite-vec ANN table only present when that backend is active
+            pass  # sqlite-vec vector table only present when that backend is active
         c.execute(f"DELETE FROM mem_links WHERE a IN {msub} OR b IN {msub}", (wid, wid))
         c.execute("DELETE FROM memories WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM entities WHERE workspace_id=?", (wid,))
@@ -3920,7 +4061,7 @@ class MemoryService:
                     c.execute("INSERT INTO mem_vec_ann(id, embedding) VALUES (?,?)",
                              (nmid, ann_row["embedding"]))
             except Exception:
-                pass  # sqlite-vec ANN table only present when that backend is active
+                pass  # sqlite-vec vector table only present when that backend is active
 
         # 6) Cross-memory links where *both* endpoints were copied — a link to a memory
         #    outside this workspace can't be meaningfully cloned, so those are dropped.
@@ -4092,7 +4233,7 @@ class MemoryService:
         if importance is not None:
             try:
                 importance = float(importance)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ValidationError("importance must be a number")
             if not math.isfinite(importance):
                 raise ValidationError("importance must be finite")
@@ -4114,9 +4255,6 @@ class MemoryService:
                 pass
             if title_changed:
                 text = f"{row['title']}\n{row['content']}" if row["title"] else row["content"]
-                vector_row = self.store.conn.execute(
-                    "SELECT model FROM mem_vectors WHERE id=?", (mid,)
-                ).fetchone()
                 # Quarantined records and explicitly secret records are retained for
                 # local governance only. A metadata edit must not turn either into a
                 # semantic candidate or send its payload to an embedder.
@@ -4125,11 +4263,24 @@ class MemoryService:
                     or not inspection_eligible(existing.provenance, existing.metadata)
                 ):
                     self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
-                    self.engine.index.delete([mid], commit=False)
+                    if vector_index_requires_sync(self.engine.index, self.store):
+                        self.engine.index.delete([mid], commit=False)
                 else:
                     # Existing rows may predate the write-path secret guard.  Do not send
                     # such content to a remote embedder while changing unrelated metadata.
                     _reject_secret_capture((("content", row["content"]),))
+                    model = self.engine.embedding_space
+                    persistent_store = (
+                        self.store.path != ":memory:"
+                        and not self.store.path.startswith("file::memory:")
+                    )
+                    if persistent_store and (
+                        not model or not self.store.embedding_space_ready(model)
+                    ):
+                        raise ValidationError(
+                            "the configured embedding space is not active; restart "
+                            "Engraphis to complete the guarded rebuild"
+                        )
                     try:
                         vectors = np.asarray(
                             self.engine.embedder.embed([text]), dtype=np.float32,
@@ -4146,31 +4297,24 @@ class MemoryService:
                         or not np.isfinite(vectors).all()
                     ):
                         raise ValidationError("embedder returned an invalid vector")
-                    try:
-                        self.engine.index.upsert([mid], vectors, commit=False)
-                    except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
-                        logger.warning("vector-index upsert failed for title update %s (%s)",
-                                       mid, type(exc).__name__)
+                    if vector_index_requires_sync(self.engine.index, self.store):
                         try:
-                            self.store.audit(
-                                "engine", "index_upsert_failed", mid,
-                                "failure_type=%s" % type(exc).__name__, commit=False,
+                            self.engine.index.upsert(
+                                [mid], vectors, [{"model": model}], commit=False
                             )
-                        except Exception:
-                            pass
-                        raise
-                    old_model = (
-                        vector_row["model"] if vector_row is not None else ""
-                    )
-                    current_model = getattr(self.engine.embedder, "model_name", None)
-                    if not isinstance(current_model, str) or not current_model:
-                        current_model = getattr(self.engine.embedder, "model", "")
-                    if not isinstance(current_model, str):
-                        current_model = ""
-                    model = current_model or str(old_model or "")
-                    # NumPy's index writes the portable row itself; write it once more
-                    # with the current model identity so both backend paths preserve the
-                    # same normalized vector and model/dimension metadata.
+                        except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
+                            logger.warning("vector-index upsert failed for title update %s (%s)",
+                                           mid, type(exc).__name__)
+                            try:
+                                self.store.audit(
+                                    "engine", "index_upsert_failed", mid,
+                                    "failure_type=%s" % type(exc).__name__, commit=False,
+                                )
+                            except Exception:
+                                pass
+                            raise
+                    # Store owns the portable mirror for every backend. A separate
+                    # index was synchronized above; NumPy searches this row directly.
                     self.store.put_vector(mid, vectors[0], model=model)
                 self.store._fts_upsert(
                     mid, row["title"] or "", row["content"] or "", kw,
@@ -4246,7 +4390,7 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         try:
             limit = int(limit)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValidationError("limit must be an integer") from None
         limit = max(1, min(100, limit))
         params: list[Any] = [wid]
@@ -5141,7 +5285,7 @@ class MemoryService:
         ).fetchone()
         if stale is None:
             return 0
-        owns_transaction = not self.store.conn.in_transaction
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
         if owns_transaction:
             self.store.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -5170,10 +5314,10 @@ class MemoryService:
                     "WHERE workspace_id=? AND active_job_id=?",
                     (now, row["workspace_id"], row["id"]),
                 )
-            if owns_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.commit()
         except BaseException:
-            if owns_transaction and self.store.conn.in_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.rollback()
             raise
         return len(rows)
@@ -5265,7 +5409,7 @@ class MemoryService:
     def graph_index_status(self, *, workspace: str) -> dict:
         wid, _rid = self._require_scope(workspace, None)
         self._recover_stale_graph_jobs(wid)
-        owns_transaction = not self.store.conn.in_transaction
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
         if owns_transaction:
             self.store.conn.execute("BEGIN")
         try:
@@ -5280,11 +5424,11 @@ class MemoryService:
                 "index": info,
                 "job": self._graph_job_dict(row) if row is not None else None,
             }
-            if owns_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.commit()
             return result
         except BaseException:
-            if owns_transaction and self.store.conn.in_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.rollback()
             raise
 
@@ -5427,7 +5571,7 @@ class MemoryService:
                     )
                 self.store.conn.commit()
             except BaseException:
-                if self.store.conn.in_transaction:
+                if self.store.conn.transaction_owned_by_current_thread():
                     self.store.conn.rollback()
                 raise
             worker = threading.Thread(
@@ -5649,7 +5793,8 @@ class MemoryService:
                             stop = True
                             break
                     except Exception as exc:  # noqa: BLE001 - isolate one bad memory
-                        if transaction_started or self.store.conn.in_transaction:
+                        if (transaction_started
+                                or self.store.conn.transaction_owned_by_current_thread()):
                             self.store.conn.rollback()
                         counts["error_count"] += 1
                         if len(errors) < 25:
@@ -5766,7 +5911,7 @@ class MemoryService:
         workspace_id = self._lookup_workspace(clean_workspace)
         if workspace_id:
             self._recover_stale_graph_jobs(workspace_id)
-        owns_transaction = not self.store.conn.in_transaction
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
         if owns_transaction:
             self.store.conn.execute("BEGIN")
         try:
@@ -5791,11 +5936,11 @@ class MemoryService:
                 "updated_at": None,
                 "last_error": "",
             }
-            if owns_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.commit()
             return (*rows, index_info)
         except BaseException:
-            if owns_transaction and self.store.conn.in_transaction:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.rollback()
             raise
 
@@ -7199,7 +7344,7 @@ class MemoryService:
                 "memory_id": row["id"], "title": row["title"] or "",
                 "excerpt": str(row["content"] or "")[:500],
                 "memory_type": row["mtype"], "source_kind": "graph_support",
-                "confidence": float(row["confidence"] or 0.0),
+                "confidence": max(0.0, min(1.0, _finite_float(row["confidence"], 0.0))),
                 "valid_from": row["valid_from"], "valid_to": row["valid_to"],
                 "valid_to_recorded_at": row["valid_to_recorded_at"],
                 "ingested_at": row["ingested_at"], "expired_at": row["expired_at"],
@@ -7767,11 +7912,11 @@ class MemoryService:
         for row in rows:
             try:
                 meta = _json.loads(row["metadata"] or "{}")
-            except ValueError:
+            except (TypeError, ValueError, RecursionError):
                 continue
             try:
                 provenance = _json.loads(row["provenance"] or "{}")
-            except ValueError:
+            except (TypeError, ValueError, RecursionError):
                 provenance = meta.get("provenance") if isinstance(meta, dict) else {}
             if not prompt_eligible(provenance, meta):
                 continue
@@ -7806,11 +7951,11 @@ class MemoryService:
         for r in rows:
             try:
                 meta = _json.loads(r["metadata"] or "{}")
-            except ValueError:
+            except (TypeError, ValueError, RecursionError):
                 meta = {}
             try:
                 provenance = _json.loads(r["provenance"] or "{}")
-            except ValueError:
+            except (TypeError, ValueError, RecursionError):
                 provenance = meta.get("provenance") if isinstance(meta, dict) else {}
             if not prompt_eligible(provenance, meta):
                 continue
@@ -7886,11 +8031,21 @@ class MemoryService:
                     "WHERE workspace_id=? AND user_id=?",
                     (wid, user["id"]),
                 ).fetchone()["n"]
+        eligibility_filter = SearchFilter(
+            workspace_id=wid,
+            scopes=[Scope.WORKSPACE, Scope.REPO, Scope.USER],
+        )
+        eligibility = self.store.prompt_eligibility_counts(eligibility_filter)
+        embedding = self.store.embedding_space_health(
+            embedding_space_fingerprint(self.engine.embedder)
+        )
         return {
             "workspace": workspace, "memories": int(total), "by_type": by_type,
             "total_rows": int(total_rows),   # live + superseded history (never deleted)
             "workspaces": int(workspaces), "sessions": int(sessions),
             "schema_version": self.store.schema_version,
+            "prompt_eligibility": eligibility,
+            "embedding": embedding,
         }
 
 

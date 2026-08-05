@@ -69,6 +69,69 @@ def test_repo_memory_links_existing_workspace_entity_on_write():
     }
 
 
+def test_link_memory_entities_commits_a_standalone_enrichment():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    memory_id = eng.remember(
+        "This note predates its named entity.",
+        workspace_id=wid,
+        resolve_conflicts=False,
+    )
+    entity_id = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+
+    eng._link_memory_entities(
+        memory_id,
+        "Apollo now owns the launch.",
+        workspace_id=wid,
+        repo_id=None,
+        valid_from=None,
+    )
+
+    assert eng.store.conn.in_transaction is False
+    assert (memory_id, entity_id) in {
+        (row["memory_id"], row["entity_id"])
+        for row in eng.store.list_memory_entities(SearchFilter(workspace_id=wid))
+    }
+
+
+def test_link_memory_entities_does_not_commit_a_caller_transaction():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    memory_id = eng.remember(
+        "This note predates its named entity.",
+        workspace_id=wid,
+        resolve_conflicts=False,
+    )
+    entity_id = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+
+    eng.store.conn.execute("BEGIN IMMEDIATE")
+    eng._link_memory_entities(
+        memory_id,
+        "Apollo now owns the launch.",
+        workspace_id=wid,
+        repo_id=None,
+        valid_from=None,
+    )
+
+    assert eng.store.conn.transaction_owned_by_current_thread()
+    assert eng.store.conn.in_transaction is True
+    pending = eng.store.conn.execute(
+        "SELECT 1 FROM memory_entities WHERE memory_id=? AND entity_id=?",
+        (memory_id, entity_id),
+    ).fetchone()
+    assert pending is not None
+    eng.store.conn.rollback()
+    assert eng.store.conn.in_transaction is False
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM memory_entities WHERE memory_id=? AND entity_id=?",
+        (memory_id, entity_id),
+    ).fetchone() is None
+
+
 def test_engine_recall_requires_explicit_reinforcement_signal():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -114,6 +177,179 @@ def test_index_upsert_failure_preserves_memory_and_audits(caplog):
     }
     assert "simulated index outage" not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_graph_extraction_failure_is_nonfatal_and_redacted(caplog):
+    class BrokenGraphExtractor:
+        def extract(self, _content, *, title=""):
+            raise RuntimeError("private graph payload detail")
+
+    eng = MemoryEngine.create(":memory:", graph_extractor="none", auto_evolve=False)
+    eng.graph_extractor = BrokenGraphExtractor()
+    wid = eng.store.get_or_create_workspace("w")
+
+    with caplog.at_level("WARNING", logger="engraphis.core.engine"):
+        memory_id = eng.remember(
+            "The confidential project marker is indigo.",
+            workspace_id=wid,
+            resolve_conflicts=False,
+        )
+
+    assert eng.store.get_memory(memory_id).content == (
+        "The confidential project marker is indigo."
+    )
+    assert "graph extraction failed (RuntimeError)" in caplog.text
+    assert "private graph payload detail" not in caplog.text
+    assert "confidential project marker" not in caplog.text
+    assert memory_id not in caplog.text
+
+
+def test_best_effort_failure_warnings_are_per_operation_and_rate_limited(caplog):
+    class Clock:
+        value = 100.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    eng._failure_warning_clock = clock
+
+    with caplog.at_level("WARNING", logger="engraphis.core.engine"):
+        eng._warn_redacted_failure("graph extraction", RuntimeError("first-secret"))
+        eng._warn_redacted_failure("graph extraction", RuntimeError("second-secret"))
+        eng._warn_redacted_failure("memory evolution", KeyError("other-secret"))
+        clock.value += 60.0
+        eng._warn_redacted_failure("graph extraction", ValueError("summary-secret"))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "graph extraction failed (RuntimeError)",
+        "memory evolution failed (KeyError)",
+        "graph extraction failed (ValueError); suppressed 1 similar failures",
+    ]
+    assert "secret" not in caplog.text
+
+
+def test_best_effort_failure_warning_limits_are_independent_per_engine(caplog):
+    class Clock:
+        def __call__(self):
+            return 100.0
+
+    first = MemoryEngine.create(":memory:", auto_evolve=False)
+    second = MemoryEngine.create(":memory:", auto_evolve=False)
+    first._failure_warning_clock = Clock()
+    second._failure_warning_clock = Clock()
+
+    with caplog.at_level("WARNING", logger="engraphis.core.engine"):
+        first._warn_redacted_failure("graph extraction", RuntimeError("first-secret"))
+        first._warn_redacted_failure("graph extraction", RuntimeError("second-secret"))
+        second._warn_redacted_failure("graph extraction", RuntimeError("third-secret"))
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "graph extraction failed (RuntimeError)",
+        "graph extraction failed (RuntimeError)",
+    ]
+    assert "secret" not in caplog.text
+
+
+def test_resolution_index_failure_uses_canonical_vectors_and_audits(caplog):
+    eng = MemoryEngine.create(":memory:", vector_backend="numpy", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The release marker is indigo.",
+        workspace_id=wid,
+    )
+    delegate = eng.index
+
+    class BrokenSearchIndex:
+        def search(self, _vec, _k, *, filter=None):
+            raise RuntimeError("sensitive-provider-detail")
+
+        def upsert(self, ids, vecs, meta=None, *, commit=True):
+            return delegate.upsert(ids, vecs, meta, commit=commit)
+
+        def delete(self, ids, *, commit=True):
+            return delegate.delete(ids, commit=commit)
+
+    eng.index = BrokenSearchIndex()
+    with caplog.at_level("WARNING"):
+        repeated = eng.remember_with_resolution(
+            "The release marker is indigo.",
+            workspace_id=wid,
+        )
+
+    assert repeated["op"] == "noop"
+    assert repeated["id"] == first["id"]
+    assert eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+    audit = eng.store.conn.execute(
+        "SELECT actor, action, target, detail FROM audit "
+        "WHERE action='index_search_fallback'"
+    ).fetchone()
+    assert dict(audit) == {
+        "actor": "resolver",
+        "action": "index_search_fallback",
+        "target": wid,
+        "detail": "failure_type=RuntimeError",
+    }
+    assert "sensitive-provider-detail" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_resolution_empty_index_uses_canonical_vectors():
+    eng = MemoryEngine.create(":memory:", vector_backend="numpy", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The empty index must not hide an existing release marker.",
+        workspace_id=wid,
+    )
+    delegate = eng.index
+
+    class EmptySearchIndex:
+        def search(self, _vec, _k, *, filter=None):
+            return []
+
+        def upsert(self, ids, vecs, meta=None, *, commit=True):
+            return delegate.upsert(ids, vecs, meta, commit=commit)
+
+        def delete(self, ids, *, commit=True):
+            return delegate.delete(ids, commit=commit)
+
+    eng.index = EmptySearchIndex()
+    repeated = eng.remember_with_resolution(
+        "The empty index must not hide an existing release marker.",
+        workspace_id=wid,
+    )
+
+    assert repeated["op"] == "noop"
+    assert repeated["id"] == first["id"]
+    assert eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+
+def test_resolution_aborts_before_write_when_index_and_canonical_scan_fail(
+        monkeypatch, caplog):
+    eng = MemoryEngine.create(":memory:", vector_backend="numpy", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    eng.remember("Existing fact.", workspace_id=wid, resolve_conflicts=False)
+
+    def fail_search(_vec, _k, *, filter=None):
+        raise RuntimeError("provider-secret")
+
+    def fail_scan(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("database-secret")
+
+    monkeypatch.setattr(eng.index, "search", fail_search)
+    monkeypatch.setattr(eng.store, "iter_vectors", fail_scan)
+    before = eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="vector neighbor resolution unavailable"):
+            eng.remember_with_resolution("New fact.", workspace_id=wid)
+
+    assert eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == before
+    assert "provider-secret" not in caplog.text
+    assert "database-secret" not in caplog.text
+    assert eng.store.conn.in_transaction is False
 
 
 def test_engine_infers_scope_and_rejects_impossible_parents():
@@ -240,6 +476,46 @@ def test_remember_invalidates_superseded_fact():
     assert new["superseded"] == [old["id"]]
     live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid, repo_id=rid))]
     assert old["id"] not in live_ids and new["id"] in live_ids
+
+
+def test_keyed_supersession_rolls_back_if_predecessor_close_fails(monkeypatch):
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    old = eng.remember_with_resolution(
+        "The deployment region is us-east-1.",
+        workspace_id=wid,
+        subject_key="deployment.region",
+        claim_kind="configured_value",
+        resolve_conflicts=False,
+    )
+    index_upserts = []
+
+    class _TrackingIndex:
+        def search(self, _vec, _k, *, filter=None):
+            return []
+
+        def upsert(self, ids, _vecs, meta=None):
+            index_upserts.extend(ids)
+
+    def fail_close(_memory_id, **kwargs):
+        assert kwargs["commit"] is False
+        raise RuntimeError("injected predecessor close failure")
+
+    eng.index = _TrackingIndex()
+    monkeypatch.setattr(eng.store, "close_validity", fail_close)
+
+    with pytest.raises(RuntimeError, match="injected predecessor close failure"):
+        eng.remember_with_resolution(
+            "The deployment region is now eu-west-1.",
+            workspace_id=wid,
+            subject_key="deployment.region",
+            claim_kind="configured_value",
+        )
+
+    assert eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+    assert eng.store.conn.execute("SELECT COUNT(*) FROM mem_vectors").fetchone()[0] == 1
+    assert eng.store.get_memory(old["id"]).valid_to is None
+    assert index_upserts == []
 
 
 def test_keyed_reworded_update_outranks_vector_top_k_distractors():

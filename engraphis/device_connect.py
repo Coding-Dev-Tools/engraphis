@@ -790,12 +790,10 @@ def connect(token: object, *, control_url: Optional[str] = None,
         workspace_id=workspace_id,
         timeout=timeout,
     )
-    # ``text_field`` and not ``str(... or "")``: a JSON array or object arrives as a Python
-    # ``list``/``dict`` whose ``repr`` is truthy and non-empty, so the coercion accepted a
-    # credential that is not a credential, wrote it, and reported a connection that could
-    # never refresh.  Checked with the same helper the writer uses so the two cannot
-    # disagree about what counts as present.
-    if not cloud_session.text_field(response, "refresh_credential"):
+    # ``credential_field`` applies the same HTTP-safe validation as ``save_bootstrap``:
+    # a provider-controlled control character must not be mistaken for a usable
+    # credential and then reach the post-redemption persistence error path.
+    if not cloud_session.credential_field(response, "refresh_credential"):
         # Reaching here means a 200 was parsed, and the control plane consumes the
         # single-use connect token as it writes one.  So "try again" would be actively
         # wrong: re-running the same command deterministically returns 401 and still leaves

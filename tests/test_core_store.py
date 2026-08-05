@@ -1,5 +1,9 @@
+import gc
 import json
+import math
+import sqlite3
 import threading
+import weakref
 
 import pytest
 
@@ -12,6 +16,9 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
+from engraphis.core import scoring
+from engraphis.core.retention_policy import MAX_STABILITY_DAYS
+from engraphis.core.schema import SCHEMA_VERSION
 from engraphis.core.store import Store, normalize_entity_name
 
 
@@ -23,7 +30,139 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 9
+    assert store.schema_version == SCHEMA_VERSION
+
+
+def test_temporal_mutations_reject_inverted_intervals(store):
+    workspace_id = store.get_or_create_workspace("intervals")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="future fact", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, valid_from=100.0,
+    ))
+    with pytest.raises(ValueError, match="valid_to cannot predate"):
+        store.close_validity(memory_id, at=99.0)
+
+    with pytest.raises(ValueError, match="link valid_to cannot predate"):
+        store.add_link_version(
+            memory_id, "mem_other", valid_from=100.0, valid_to=99.0
+        )
+
+    with pytest.raises(ValueError, match="edge valid_to cannot predate"):
+        store.upsert_edge(Edge(
+            id="", workspace_id=workspace_id, src="ent_a", dst="ent_b",
+            relation="related", valid_from=100.0, valid_to=99.0,
+        ))
+
+
+class _TrackedConnection(sqlite3.Connection):
+    close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+        return super().close()
+
+
+def _tracked_store():
+    opened = []
+
+    def connect(_path):
+        connection = sqlite3.connect(
+            ":memory:", check_same_thread=False, factory=_TrackedConnection
+        )
+        connection.row_factory = sqlite3.Row
+        opened.append(connection)
+        return connection
+
+    return Store(":memory:", connect=connect), opened
+
+
+def test_store_close_is_idempotent_and_context_managed():
+    store, opened = _tracked_store()
+
+    with store:
+        assert store.schema_version == SCHEMA_VERSION
+
+    store.close()
+    assert opened[0].close_calls == 1
+
+
+def test_store_finalizer_closes_an_abandoned_connection():
+    store, opened = _tracked_store()
+    store_ref = weakref.ref(store)
+
+    del store
+    gc.collect()
+
+    assert store_ref() is None
+    assert opened[0].close_calls == 1
+
+
+def test_store_close_is_atomic_across_threads():
+    entered = threading.Event()
+    release = threading.Event()
+    opened = []
+    errors = []
+
+    class BlockingCloseConnection(_TrackedConnection):
+        def close(self):
+            self.close_calls += 1
+            entered.set()
+            assert release.wait(timeout=5)
+            return sqlite3.Connection.close(self)
+
+    def connect(_path):
+        connection = sqlite3.connect(
+            ":memory:", check_same_thread=False, factory=BlockingCloseConnection
+        )
+        connection.row_factory = sqlite3.Row
+        opened.append(connection)
+        return connection
+
+    store = Store(":memory:", connect=connect)
+
+    def close_store():
+        try:
+            store.close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=close_store)
+    second = threading.Thread(target=close_store)
+    first.start()
+    assert entered.wait(timeout=5)
+    second.start()
+    assert second.is_alive()
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not errors
+    assert opened[0].close_calls == 1
+
+
+def test_store_closes_immediately_when_first_connection_setup_fails():
+    opened = []
+
+    class FailingSetupConnection(_TrackedConnection):
+        def execute(self, sql, *args, **kwargs):
+            if str(sql).strip().casefold() == "pragma foreign_keys=on":
+                raise RuntimeError("foreign-key setup unavailable")
+            return super().execute(sql, *args, **kwargs)
+
+    def connect(_path):
+        connection = sqlite3.connect(
+            ":memory:", check_same_thread=False, factory=FailingSetupConnection
+        )
+        connection.row_factory = sqlite3.Row
+        opened.append(connection)
+        return connection
+
+    with pytest.raises(RuntimeError, match="foreign-key setup unavailable"):
+        Store(":memory:", connect=connect)
+
+    assert opened[0].close_calls == 1
 
 
 def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
@@ -411,6 +550,113 @@ def test_wrapper_rolls_back_and_releases_on_constraint_violation(tmp_path):
     store.close()
 
 
+def test_failed_deferred_commit_retains_transaction_ownership_until_rollback(tmp_path):
+    store = Store(str(tmp_path / "deferred-commit.db"))
+    conn = store.conn
+    conn.execute("CREATE TABLE deferred_parent(id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE deferred_child(parent_id INTEGER REFERENCES deferred_parent(id) "
+        "DEFERRABLE INITIALLY DEFERRED)"
+    )
+    conn.commit()
+    conn.execute("BEGIN")
+    conn.execute("INSERT INTO deferred_child(parent_id) VALUES (1)")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.commit()
+
+    assert conn.in_transaction is True
+    assert conn.transaction_owned_by_current_thread() is True
+
+    started = threading.Event()
+    finished = threading.Event()
+    rows = []
+    errors = []
+
+    def wait_for_connection():
+        started.set()
+        try:
+            rows.append(conn.execute("SELECT 1").fetchone()[0])
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    waiter = threading.Thread(target=wait_for_connection)
+    waiter.start()
+    assert started.wait(timeout=5)
+    assert not finished.wait(timeout=0.05)
+
+    conn.rollback()
+    waiter.join(timeout=5)
+
+    assert not waiter.is_alive()
+    assert not errors
+    assert rows == [1]
+    assert conn.in_transaction is False
+    store.close()
+
+
+def test_query_cursor_is_materialized_before_the_connection_lock_is_released(tmp_path):
+    store = Store(str(tmp_path / "query-snapshot.db"))
+    conn = store.conn
+    conn.execute("CREATE TABLE snapshot_rows(value INTEGER NOT NULL)")
+    conn.executemany("INSERT INTO snapshot_rows(value) VALUES (?)", [(0,), (1,)])
+    conn.commit()
+
+    reader_entered = threading.Event()
+    release_reader = threading.Event()
+    writer_finished = threading.Event()
+    reader_rows = []
+    errors = []
+
+    def gate(value):
+        if value == 1:
+            reader_entered.set()
+            assert release_reader.wait(timeout=5)
+        return value
+
+    conn.create_function("gate_snapshot", 1, gate)
+
+    def read_rows():
+        try:
+            reader_rows.extend(
+                row[0] for row in conn.execute(
+                    "SELECT gate_snapshot(value) FROM snapshot_rows ORDER BY value"
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def write_row():
+        try:
+            conn.execute("INSERT INTO snapshot_rows(value) VALUES (2)")
+            conn.commit()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    reader = threading.Thread(target=read_rows)
+    writer = threading.Thread(target=write_row)
+    reader.start()
+    assert reader_entered.wait(timeout=5)
+    writer.start()
+    assert not writer_finished.wait(timeout=0.05)
+    release_reader.set()
+    reader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert not errors
+    assert reader_rows == [0, 1]
+    assert [row[0] for row in conn.execute(
+        "SELECT value FROM snapshot_rows ORDER BY value"
+    )] == [0, 1, 2]
+    store.close()
+
+
 def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     db = tmp_path / "v2.db"
     original = Store(str(db))
@@ -431,7 +677,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 9
+    assert migrated.schema_version == SCHEMA_VERSION
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"
@@ -869,15 +1115,31 @@ def test_memory_links_infer_and_filter_graph_layers(store):
     assert store.links_among([a, b], layers=[GraphLayer.TEMPORAL]) == []
 
 
-def test_reinforce_increases_stability_and_count(store):
+def test_reinforce_is_finite_bounded_and_logarithmic(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     mid = store.add_memory(MemoryRecord(id="", content="reinforce me", workspace_id=wid, repo_id=rid))
-    before = store.get_memory(mid)
-    store.reinforce(mid)
+    for _ in range(1000):
+        store.reinforce(mid, boost=scoring.INTERACTION_BOOST["recall"])
     after = store.get_memory(mid)
-    assert after.access_count == before.access_count + 1
-    assert after.stability > before.stability
+    assert after.access_count == 1000
+    assert after.stability == pytest.approx(1.0 + 0.45 * math.log1p(1000))
+    assert math.isfinite(after.stability)
+    assert after.stability <= MAX_STABILITY_DAYS
+
+
+def test_add_memory_canonicalizes_retention_state(store):
+    from engraphis.core.retention_policy import MAX_ACCESS_COUNT
+
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="bounded state", workspace_id=wid,
+        stability=float("inf"), access_count=MAX_ACCESS_COUNT + 5,
+    ))
+
+    stored = store.get_memory(mid)
+    assert stored.stability == 1.0
+    assert stored.access_count == MAX_ACCESS_COUNT
 
 
 def test_zero_temporal_anchors_round_trip_without_becoming_present_time(store):
@@ -1391,6 +1653,31 @@ def test_prompt_neighbors_filter_unapproved_edges_before_limit(store):
 
     edges = store.neighbors(["seed"], limit=1, prompt_only=True)
     assert [edge.id for edge in edges] == ["edg_approved"]
+
+
+def test_prompt_neighbors_reject_explicitly_untrusted_direct_edges(store):
+    wid = store.get_or_create_workspace("w")
+    cases = {
+        "edg_legacy": {},
+        "edg_approved": {"trusted": True, "review_state": "approved"},
+        "edg_untrusted": {"trusted": False},
+        "edg_pending": {"trusted": True, "review_state": "pending"},
+        "edg_quarantined": {"quarantined": True},
+        "edg_nested_quarantine": {"quarantine": {"state": "quarantined"}},
+    }
+    for edge_id, provenance in cases.items():
+        store.upsert_edge(Edge(
+            id=edge_id,
+            src="seed",
+            dst=edge_id,
+            relation="uses",
+            workspace_id=wid,
+            provenance=provenance,
+        ))
+
+    edges = store.neighbors(["seed"], prompt_only=True)
+
+    assert {edge.id for edge in edges} == {"edg_legacy", "edg_approved"}
 
 
 def test_prompt_links_touching_filters_unapproved_endpoints_before_limit(store):

@@ -34,6 +34,26 @@ def _module_with_memory_db(monkeypatch):
     return srv
 
 
+def test_lazy_mcp_factory_forwards_configured_embedding_backend(monkeypatch):
+    import engraphis.mcp_server as srv
+
+    captured = {}
+    sentinel = object()
+
+    def create(*args, **kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(srv.MemoryService, "create", create)
+    monkeypatch.setattr(srv, "_service", None)
+    monkeypatch.setattr(srv.settings, "embed_dim", 768)
+    monkeypatch.setattr(srv.settings, "vector_backend", "auto")
+
+    assert srv.service() is sentinel
+    assert captured["embed_dim"] == 768
+    assert captured["vector_backend"] == "auto"
+
+
 def _approved_successor(srv, result):
     """Return a normal local-agent write; no owner ceremony is required."""
     return json.loads(result) if isinstance(result, str) else dict(result)
@@ -405,6 +425,33 @@ def test_public_mcp_writes_resolve_without_owner_approval(monkeypatch):
     assert first["op"] == "add"
     assert second["op"] == "noop"
     assert second["id"] == first["id"]
+    record = srv.service().store.get_memory(first["id"])
+    assert record.provenance["trust_origin"] == "local_mcp_agent"
+    assert record.provenance["ingress"] == "mcp_operator"
+    recalled = json.loads(srv.engraphis_recall(
+        query="Which package manager do frontend repositories use?",
+        workspace="acme",
+        repo="web",
+    ))
+    assert first["id"] in {item["id"] for item in recalled["memories"]}
+
+
+def test_mcp_external_source_cannot_self_approve(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    stored = json.loads(srv.engraphis_remember(
+        content="An imported note says the release color is amber.",
+        workspace="acme",
+        source="import",
+        trusted=True,
+    ))
+    record = srv.service().store.get_memory(stored["id"])
+    assert record.provenance["trusted"] is False
+    assert record.provenance["review_state"] == "pending"
+    assert record.provenance["ingress"] == "mcp"
+    recalled = json.loads(srv.engraphis_recall(
+        query="What is the release color?", workspace="acme",
+    ))
+    assert stored["id"] not in {item["id"] for item in recalled["memories"]}
 
 
 def test_mcp_ingest_creates_prompt_visible_memory_without_owner_approval(monkeypatch):
@@ -418,6 +465,8 @@ def test_mcp_ingest_creates_prompt_visible_memory_without_owner_approval(monkeyp
     record = srv.service().store.get_memory(memory_id)
     assert record.provenance["trusted"] is True
     assert record.provenance["review_state"] == "approved"
+    assert record.provenance["trust_origin"] == "local_mcp_agent"
+    assert record.provenance["ingress"] == "mcp_operator"
     recalled = json.loads(srv.engraphis_recall(
         query="When is the deployment window?", workspace="acme", repo="web",
     ))

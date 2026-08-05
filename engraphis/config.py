@@ -626,20 +626,27 @@ class Settings:
             "sentence-transformers/all-MiniLM-L6-v2",
         )
     )
+    # Optional immutable Hugging Face commit for ENGRAPHIS_EMBED_MODEL. Empty preserves
+    # normal tag/branch resolution unless strict model provenance is enabled below.
+    embed_revision: str = field(default_factory=lambda: _env("ENGRAPHIS_EMBED_REVISION", ""))
+    # When enabled, remote embedding/reranker/tokenizer sources must supply lowercase
+    # 40-hex commits before their optional loaders import or contact the Hub. Local paths remain valid.
+    require_immutable_models: bool = field(
+        default_factory=lambda: _env_bool("ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS", False)
+    )
     embed_dim: Optional[int] = field(
         default_factory=lambda: (
             _env_int("ENGRAPHIS_EMBED_DIM", 384) or None
         )
     )
 
-    # Vector index backend for the v2 engine: "numpy" (default — deterministic,
-    # offline reference index), "sqlite-vec" (require the accelerated ANN backend),
-    # or "auto" (use sqlite-vec when available, fall back to NumPy). The server
-    # entrypoints honor this so a self-host can opt into the accelerated path
-    # without touching code; the constructor default stays "numpy" for determinism.
+    # Vector index backend for server entrypoints: "auto" (default; use sqlite-vec
+    # when installed and compatible, otherwise NumPy), "sqlite-vec" (require the
+    # native exact-KNN backend), or "numpy" (force the deterministic offline
+    # reference). MemoryEngine/MemoryService constructor defaults stay "numpy".
     vector_backend: str = field(
         default_factory=lambda: _parse_vector_backend(
-            _env("ENGRAPHIS_VECTOR_BACKEND", "numpy")
+            _env("ENGRAPHIS_VECTOR_BACKEND", "auto")
         )
     )
 
@@ -671,6 +678,9 @@ class Settings:
 
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
     rerank_model: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_MODEL", ""))
+    # Optional immutable Hugging Face commit for ENGRAPHIS_RERANK_MODEL. Strict mode
+    # requires this for remote rerankers; empty retains ordinary tag/branch behavior.
+    rerank_revision: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_REVISION", ""))
 
     # Graph extractor for the knowledge-graph tab: "regex" (default) = dependency-free
     # heuristic NER, no API key, populated on every ingest; "none" disables graph

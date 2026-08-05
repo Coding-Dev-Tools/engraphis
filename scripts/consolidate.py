@@ -24,7 +24,25 @@ import argparse
 import json
 import sys
 
+from engraphis.config import settings
 from engraphis.core.engine import MemoryEngine
+from engraphis.service import MemoryService
+
+
+def _service(db_path: str) -> MemoryService:
+    """Open the operational database through the configured application factory."""
+    return MemoryService.create(
+        db_path,
+        embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+        embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
+        allowed_workspaces=settings.allowed_workspaces,
+    )
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Run one Engraphis consolidation sweep.")
@@ -56,7 +74,14 @@ def main(argv=None) -> int:
         print("error: --supersede-sources requires --structured", file=sys.stderr)
         return 2
 
-    engine = MemoryEngine.create(args.db)
+    service = _service(args.db)
+    try:
+        return _consolidate(args, service.engine)
+    finally:
+        service.store.close()
+
+
+def _consolidate(args: argparse.Namespace, engine: MemoryEngine) -> int:
     wid_row = engine.store.conn.execute(
         "SELECT id FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
     if not wid_row:

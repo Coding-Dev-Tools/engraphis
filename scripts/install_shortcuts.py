@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,19 @@ from pathlib import Path
 
 def _icon_path(base: str) -> str:
     return str(Path(base) / "engraphis" / "static" / "engraphis.ico")
+
+
+def _validated_icon_path(value: object) -> str:
+    """Return a printable icon path safe for terminal and launcher-file boundaries."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(not character.isprintable() for character in value)
+    ):
+        raise ValueError(
+            "icon path must be a non-empty printable string without control characters"
+        )
+    return value
 
 
 def _desktop_path(system: str, home: Path) -> Path:
@@ -87,7 +101,8 @@ def _remove_shortcuts(system: str, desktop: Path, start_menu: Path, *, home: Pat
 
 
 def _windows(desktop: Path, start_menu: Path, args: argparse.Namespace) -> None:
-    ps_cmd = f"""
+    icon = _validated_icon_path(args.icon)
+    ps_cmd = """
 #Requires -Version 5.1
 $WshShell = New-Object -ComObject WScript.Shell
 
@@ -99,31 +114,36 @@ $lnk = $WshShell.CreateShortcut((Join-Path $desktop "Engraphis Dashboard.lnk"))
 $lnk.TargetPath = "engraphis-dashboard.exe"    # resolved via PATH
 $lnk.Arguments = ""
 $lnk.WorkingDirectory = (Get-Location).Path
-$lnk.IconLocation = "{args.icon}"
+$lnk.IconLocation = $env:ENGRAPHIS_SHORTCUT_ICON
 $lnk.Description = "Engraphis Dashboard WebUI — local AI memory engine"
 $lnk.Save()
 Write-Host "  Desktop shortcut created."
 
 # Start Menu shortcut (per-user)
 $smDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Engraphis"
-if (!(Test-Path $smDir)) {{ New-Item -ItemType Directory -Path $smDir | Out-Null }}
+if (!(Test-Path $smDir)) { New-Item -ItemType Directory -Path $smDir | Out-Null }
 $lnk2 = $WshShell.CreateShortcut((Join-Path $smDir "Engraphis Dashboard.lnk"))
 $lnk2.TargetPath = "engraphis-dashboard.exe"
 $lnk2.Arguments = ""
 $lnk2.WorkingDirectory = (Get-Location).Path
-$lnk2.IconLocation = "{args.icon}"
+$lnk2.IconLocation = $env:ENGRAPHIS_SHORTCUT_ICON
 $lnk2.Description = "Engraphis Dashboard WebUI"
 $lnk2.Save()
 Write-Host "  Start Menu shortcut created."
 """
+    child_env = os.environ.copy()
+    child_env["ENGRAPHIS_SHORTCUT_ICON"] = icon
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-            check=True, capture_output=True, text=True)
+            check=True, capture_output=True, text=True, env=child_env)
         print("  Desktop shortcut created.")
         print("  Start Menu shortcut created.")
-    except subprocess.CalledProcessError as exc:
-        print(f"  ⚠ PowerShell shortcut creation failed: {exc.stderr.strip()}", file=sys.stderr)
+    except (OSError, subprocess.CalledProcessError):
+        # Do not echo an exception or captured stderr here: either can include
+        # environment-specific paths or child-process output. The fallback is
+        # deliberately useful even when PowerShell itself cannot be launched.
+        print("  ⚠ PowerShell shortcut creation failed.", file=sys.stderr)
         print("  Falling back to a simple .bat launcher on Desktop.", file=sys.stderr)
         # Don't `start` the URL here — engraphis-dashboard already opens the
         # browser itself once the server is actually ready. Doing both opens
@@ -135,6 +155,7 @@ Write-Host "  Start Menu shortcut created."
 
 
 def _macos(desktop: Path, args: argparse.Namespace) -> None:
+    icon = _validated_icon_path(args.icon)
     app_dir = Path.home() / "Applications" / "Engraphis Dashboard.app"
     contents = app_dir / "Contents"
     macos_dir = contents / "MacOS"
@@ -147,14 +168,15 @@ def _macos(desktop: Path, args: argparse.Namespace) -> None:
     resources.mkdir(parents=True, exist_ok=True)
 
     launcher = macos_dir / "engraphis-dashboard"
+    working_directory = shlex.quote(str(Path.cwd()))
     launcher.write_text(f"""#!/bin/bash
-    cd "{Path.cwd()}"
-    engraphis-dashboard
+    cd -- {working_directory}
+    exec engraphis-dashboard
 """)
     launcher.chmod(0o755)
 
     # Copy icon
-    ico_src = Path(args.icon)
+    ico_src = Path(icon)
     if ico_src.exists():
         shutil.copy2(ico_src, resources / "engraphis.icns")
 
@@ -193,6 +215,11 @@ def _macos(desktop: Path, args: argparse.Namespace) -> None:
 
 
 def _linux(desktop: Path, args: argparse.Namespace) -> None:
+    # Desktop-entry values are line-oriented.  Unlike command arguments, an Icon value
+    # is copied into the file rather than passed through a shell, so reject controls
+    # before writing anything rather than attempting incomplete escaping.
+    icon = _validated_icon_path(args.icon)
+
     desktop_file_path = desktop / "engraphis-dashboard.desktop"
     app_dir = Path.home() / ".local" / "share" / "applications"
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +229,7 @@ Type=Application
 Name=Engraphis Dashboard
 Comment=Local AI memory engine WebUI
 Exec=engraphis-dashboard
-Icon={args.icon}
+Icon={icon}
 Terminal=false
 Categories=Development;Utility;
 Keywords=AI;memory;agent;dashboard;
@@ -210,12 +237,16 @@ StartupWMClass=engraphis-dashboard
 """
 
     desktop_file_path.write_text(desktop_file)
+    # Desktop shells commonly require the executable bit before offering a launcher
+    # from the user's Desktop.  This copy intentionally remains user-launchable.
     desktop_file_path.chmod(0o755)
 
     # Also install to applications directory for Start Menu
     app_entry = app_dir / "engraphis-dashboard.desktop"
     shutil.copy2(desktop_file_path, app_entry)
-    os.chmod(app_entry, 0o755)
+    # XDG application entries are data read by the menu, not executable launchers.
+    # Keeping this non-executable avoids expanding the executable surface in $HOME.
+    os.chmod(app_entry, 0o644)
 
     print(f"  Desktop shortcut created: {desktop_file_path}")
     print(f"  Application menu entry created: {app_entry}")
@@ -248,6 +279,9 @@ def main() -> None:
         else:
             print("  No Engraphis shortcuts were found.")
         return
+
+    # Validate before echoing the value to a terminal or mutating any launcher files.
+    args.icon = _validated_icon_path(args.icon)
 
     if not desktop.exists():
         desktop = home / "Desktop"

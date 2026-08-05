@@ -174,11 +174,15 @@ def _plan_resolution_isolation(monkeypatch):
     monkeypatch.setattr(v2_api, "_entitlement_refreshing", False, raising=False)
     monkeypatch.setattr(v2_api, "_entitlement_retry_after", 0.0, raising=False)
     monkeypatch.setattr(v2_api, "_entitlement_refresh_failures", 0, raising=False)
+    monkeypatch.setattr(v2_api, "_authoritative_denial_at", 0.0, raising=False)
+    v2_api._AUTHORITATIVE_DENIAL_PENDING.clear()
     yield
     _drain_refresh()
     v2_api._entitlement_refreshing = False
     v2_api._entitlement_retry_after = 0.0
     v2_api._entitlement_refresh_failures = 0
+    v2_api._authoritative_denial_at = 0.0
+    v2_api._AUTHORITATIVE_DENIAL_PENDING.clear()
 
 
 def _connect(monkeypatch, *, pinned_token: bool = True) -> None:
@@ -506,7 +510,11 @@ def test_a_cloud_failure_never_reaches_the_dashboard(monkeypatch, failure) -> No
     payload = _settled_license(monkeypatch)
 
     assert payload["plan"] == "pro"  # the connected fallback, not an exception
-    assert payload["features"]
+    if isinstance(failure, urllib.error.HTTPError) and failure.code in {401, 402, 403}:
+        assert payload["features"] == []
+        assert payload["cloud_access_active"] is False
+    else:
+        assert payload["features"]
     assert v2_api._read_entitlement_cache() == {}
 
 
@@ -1001,8 +1009,93 @@ def test_a_billing_denial_stops_the_session_claiming_paid_access(monkeypatch) ->
     assert payload["features"] == []
 
 
+def test_authoritative_denial_write_failure_is_fail_closed_for_process(
+    monkeypatch,
+) -> None:
+    """A broken state mount cannot resurrect a control-plane denial in this process."""
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("team"),
+        registration=_registration_entitlement("team"),
+    ))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+
+    def _write_failed():
+        raise OSError("state mount is read-only")
+
+    monkeypatch.setattr(cloud_session, "record_billing_denial", _write_failed)
+    monkeypatch.setattr(v2_api, "_deny_entitlement_cache", lambda: False)
+
+    v2_api._record_authoritative_denial()
+
+    assert cloud_session.saved_entitlement()["cloud_access_active"] is True
+    payload = v2_api.get_license()
+    assert payload["plan"] == "team"
+    assert payload["cloud_access_active"] is False
+    assert payload["features"] == []
+    assert payload["access_state"] == "lapsed"
+    assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+
+
+def test_newer_active_session_clears_the_process_denial_guard(monkeypatch) -> None:
+    """A successful later reconnect supersedes, rather than permanently sticking, a denial."""
+
+    _connect(monkeypatch, pinned_token=False)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    v2_api._mark_authoritative_denial()
+    response = {
+        "refresh_credential": "engr_rt_reconnected",
+        "organization_id": ORGANIZATION,
+        "token_subject": "member",
+    }
+    response.update(_registration_entitlement("team"))
+    cloud_session.save_bootstrap(response, control_url=CONTROL_URL)
+
+    payload = v2_api.get_license()
+
+    assert payload["plan"] == "team"
+    assert payload["cloud_access_active"] is True
+    assert "team" in payload["features"]
+    assert not v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+
+
+def test_denial_guard_precedes_a_blocked_persistence_write(monkeypatch) -> None:
+    """Readers fail closed while the durable denial write is still blocked."""
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("team"),
+        registration=_registration_entitlement("team"),
+    ))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_write():
+        entered.set()
+        assert release.wait(timeout=5.0)
+        return True
+
+    monkeypatch.setattr(cloud_session, "record_billing_denial", _blocked_write)
+    monkeypatch.setattr(v2_api, "_deny_entitlement_cache", lambda: True)
+    worker = threading.Thread(target=v2_api._record_authoritative_denial)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    try:
+        payload = v2_api.get_license()
+        assert payload["cloud_access_active"] is False
+        assert payload["features"] == []
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
 def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -> None:
-    """Only 402 clears access. An outage must never look like a cancellation."""
+    """Only an authoritative 401/402/403 clears access; an outage must not."""
 
     _connect(monkeypatch, pinned_token=False)
     _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),

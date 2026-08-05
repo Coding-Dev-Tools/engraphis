@@ -62,13 +62,23 @@ These are the properties that matter when you're deciding how to use it well:
 
 ### 2.2 How recall actually works (so you know what you're getting)
 
-When the agent calls `engraphis_recall`, the query runs through three retrieval arms **in parallel**, which are then fused:
+When the agent calls `engraphis_recall`, the query runs through four deterministic retrieval
+arms, then fuses their candidates:
 
-- **Vector**: cosine similarity over local embeddings.
+- **Vector**: cosine similarity over local embeddings (disabled while the configured embedding
+  space is rebuilding or does not match stored vectors).
 - **Lexical**: FTS5/BM25 full-text (with a `LIKE` fallback on SQLite builds without FTS5).
 - **Graph**: Personalized PageRank over an entity/link graph.
+- **Code**: symbol/file/call-graph matches bridged to approved repository memories when a code
+  index is available.
 
-The three are combined with Reciprocal Rank Fusion, then ordinary query recall is scored from **retention, semantic similarity, lexical match, graph centrality, and importance** (minus a staleness penalty), before the top results are reranked and packed into a token budget. Retention measures time since reinforcement; it intentionally does not apply a second age-based recency penalty. Recency is reserved for the separate queryless proactive agenda. The upshot: recall is hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this; it's what `engraphis_recall` does by default.
+The four arms are combined with Reciprocal Rank Fusion, then ordinary query recall is scored from
+**retention, semantic similarity, lexical match, graph centrality, and importance** (minus a
+staleness penalty), before the top results are reranked and packed into a token budget. Retention
+measures time since reinforcement; it intentionally does not apply a second age-based recency
+penalty. Recency is reserved for the separate queryless proactive agenda. The upshot: recall is
+hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this;
+it's what `engraphis_recall` does by default.
 
 ---
 

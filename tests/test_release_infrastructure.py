@@ -161,8 +161,12 @@ def test_ci_and_release_audit_production_image_dependencies():
         assert "env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet" in workflow
         assert "ENGRAPHIS_API_TOKEN: ci-lan-overlay-token" in workflow
         assert "Validate token-protected LAN Compose overlay" in workflow
-    assert 'build twine pip-audit ".[all,test]"' in release_build
+    assert 'pip setuptools wheel build twine pip-audit ".[all,test]"' in release_build
     assert "python -m pip_audit --local" in release_build
+    assert "python scripts/normalize_sdist.py dist/*.tar.gz" in release_build
+    assert "python scripts/normalize_sdist.py dist-repeat/*.tar.gz" in release_build
+    assert "engine.store.close()" in release_build
+    assert "engine.close()" not in release_build
     assert "docker build -t engraphis:release ." in release_docker
     assert "Validate Compose configuration" in release_docker
     assert "docker compose config --quiet" in release_docker
@@ -171,7 +175,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert 'docker create --name "$container" engraphis:release' in release_docker
     assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in release_docker
     assert 'python -m pip_audit --path "$audit_dir"' in release_docker
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release_evidence
+    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release_evidence
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
@@ -212,7 +216,7 @@ def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
         assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
 
     release = _text(".github/workflows/release.yml")
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
+    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -231,11 +235,14 @@ def test_release_builds_one_portable_open_core_wheel():
     assert not (ROOT / ".github/workflows/build-compiled-wheels.yml").exists()
     assert "cython" not in pyproject.lower()
     assert "cibuildwheel" not in release
-    assert release.count("python -m build") == 1
+    assert release.count("python -m build") == 2
+    assert "python -m build --outdir dist-repeat" in release
+    assert "<(cd dist && sha256sum * | sort)" in release
+    assert "<(cd dist-repeat && sha256sum * | sort)" in release
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
-    assert "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]" in release
+    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release
     assert "  release-evidence:\n" in release
     assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release
@@ -279,6 +286,66 @@ def test_codeql_workflow_fails_when_sarif_contains_findings():
     ) in workflow
 
 
+def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes():
+    ci = _text(".github/workflows/ci.yml")
+    release = _text(".github/workflows/release.yml")
+    constraints = _text(".github/release-constraints.txt")
+    codeql = release.split("  code-security:\n", 1)[1].split(
+        "  release-evidence:\n", 1
+    )[0]
+    build = release.split("  build:\n", 1)[1].split("  python-matrix:\n", 1)[0]
+    evidence = release.split("  release-evidence:\n", 1)[1].split(
+        "  publish:\n", 1
+    )[0]
+
+    assert "PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt" in build
+    assert "PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt" in build
+    for pin in (
+        "pip==26.2",
+        "setuptools==83.0.0",
+        "wheel==0.47.0",
+        "build==1.5.0",
+        "twine==6.2.0",
+        "pip-audit==2.10.1",
+    ):
+        assert pin in constraints
+    assert 'language: ["python", "javascript-typescript"]' in codeql
+    assert 'CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"' in codeql
+    assert "github/codeql-action/init@" in codeql
+    assert "github/codeql-action/analyze@" in codeql
+    assert "upload: never" in codeql
+    assert "scripts/check_codeql_sarif.py" in codeql
+    assert "Smoke installed wheel and source distribution" in build
+    assert '"$venv/bin/python" -m scripts.smoke_entry_points --timeout 20' in build
+    assert "pathlib.Path(sys.prefix).resolve() in package.parents" in build
+    assert "Python 3.9 installed release artifacts" in release
+    py39_artifacts = release.split("  artifact-core-py39:\n", 1)[1].split(
+        "  encryption:\n", 1
+    )[0]
+    assert "needs: build" in py39_artifacts
+    assert 'python-version: "3.9"' in py39_artifacts
+    assert "Download exact release distributions" in py39_artifacts
+    assert "name: python-package-distributions" in py39_artifacts
+    assert '"$venv/bin/python" -m pip install --disable-pip-version-check "$artifact"' in py39_artifacts
+    assert '"$venv/bin/python" -m pip check' in py39_artifacts
+    assert '"$venv/bin/engraphis-cli" --help' in py39_artifacts
+    assert "--verified-check codeql" in evidence
+    assert "--verified-check reproducible-distributions" in evidence
+    assert "--verified-check installed-artifact-smoke" in evidence
+    assert "--verified-check installed-artifact-smoke-py39" in evidence
+    ci_build = ci.split("  build:\n", 1)[1]
+    assert "Install pinned build and audit tooling" in ci_build
+    assert '"build==1.5.0" "pip-audit==2.10.1"' in ci_build
+    ci_docker = ci.split("  docker-smoke:\n", 1)[1].split("  build:\n", 1)[0]
+    assert "python -m pip install --disable-pip-version-check --no-cache-dir" in ci_docker
+    assert "pip-audit==2.10.1" in ci_docker
+    ci_py39 = ci.split("  core-py39:\n", 1)[1].split("  coverage:\n", 1)[0]
+    assert "Build and smoke installed core artifacts" in ci_py39
+    assert '"build==1.2.2"' in ci_py39
+    assert '"$venv/bin/python" -m pip install --disable-pip-version-check "$artifact"' in ci_py39
+    assert '"$venv/bin/python" -m pip check' in ci_py39
+
+
 def test_ci_linter_is_bounded_to_the_verified_release_series():
     pyproject = _text("pyproject.toml")
 
@@ -289,6 +356,25 @@ def test_ci_linter_is_bounded_to_the_verified_release_series():
     assert pyproject.count('"ruff>=0.15.22,<0.17"') == 2
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
 
+
+def test_pyright_core_backend_ratchet_is_pinned_and_runs_in_ci_and_release():
+    pyproject = _text("pyproject.toml")
+    ci = _text(".github/workflows/ci.yml")
+    release = _text(".github/workflows/release.yml")
+
+    assert pyproject.count('"pyright==1.1.411"') == 2
+    assert '"engraphis/core",\n    "engraphis/backends",' in pyproject
+    assert '"eval/harness.py",\n    "eval/external.py",' in pyproject
+    assert 'pythonVersion = "3.9"' in pyproject
+    assert 'typeCheckingMode = "basic"' in pyproject
+    typecheck = ci.split("  typecheck:\n", 1)[1].split("  encryption:\n", 1)[0]
+    assert "core + backends typecheck (Python 3.11)" in typecheck
+    assert 'python-version: "3.11"' in typecheck
+    assert 'pip install -e ".[test]"' in typecheck
+    assert "run: pyright" in typecheck
+    build = release.split("  build:\n", 1)[1].split("  python-matrix:\n", 1)[0]
+    assert "          pyright" in build
+    assert "--verified-check pyright-core-backends" in release
 
 def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_identity():
     repair = _text(".github/workflows/release.yml").split(
@@ -342,7 +428,9 @@ def test_primary_github_release_targets_repository_without_checkout():
     repair_job = _text(".github/workflows/release.yml").split(
         "github-release-repair:", 1
     )[1]
-    assert 'gh release upload "$RELEASE_TAG" dist/*' in repair_job
+    assert 'gh release upload "$RELEASE_TAG" verified-dist/*' in repair_job
+    assert 'gh release create "$RELEASE_TAG" verified-dist/*' in repair_job
+    assert '"$RELEASE_TAG" dist/*' not in repair_job
     assert "--clobber" in repair_job
 
 

@@ -1,4 +1,4 @@
-"""The real sqlite-vec ANN backend: KNN, widening, resolution, and concurrency.
+"""The real sqlite-vec native KNN backend: widening, resolution, and concurrency.
 
 The 0.9.7 batch changed the KNN query from ``LIMIT ?`` to vec0's ``k = ?`` constraint
 (SQLite < 3.41 never passes LIMIT to xBestIndex, and the resolve path SWALLOWS the
@@ -9,6 +9,7 @@ coverage because sqlite-vec wasn't a test dependency; now it is.
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import pytest
 
 from engraphis.backends import DeterministicEmbedder
@@ -26,7 +27,7 @@ DIM = 64
 
 
 def _make(store, index, emb, wid, rid, text):
-    """Insert a memory AND its ANN row — unlike the store-backed numpy index, the
+    """Insert a memory and its native vector-index row — unlike the store-backed NumPy index, the
     sqlite-vec backend only sees vectors explicitly upserted (as the engine does)."""
     vec = emb.embed([text])[0]
     mid = store.add_memory(MemoryRecord(id="", content=text, scope=Scope.REPO,
@@ -63,13 +64,88 @@ def test_k_larger_than_index_is_capped_not_an_error():
     store.close()
 
 
+def test_equal_distance_boundary_uses_memory_id_as_stable_secondary_order():
+    store, wid, rid, emb, index = _fixture()
+    vector = emb.embed(["identical vector for deterministic tie ordering"])[0]
+    ids = ["mem_tie_z", "mem_tie_a", "mem_tie_m"]
+    for memory_id in ids:
+        store.add_memory(MemoryRecord(
+            id=memory_id,
+            content="identical vector for deterministic tie ordering",
+            workspace_id=wid,
+            repo_id=rid,
+            scope=Scope.REPO,
+            embedding=vector,
+        ))
+    index.upsert(ids, np.vstack([vector, vector, vector]))
+
+    hits = index.search(vector, k=2)
+
+    assert [memory_id for memory_id, _ in hits] == ["mem_tie_a", "mem_tie_m"]
+    store.close()
+
+
+def test_native_upsert_failure_rolls_back_the_whole_owned_batch(monkeypatch):
+    store, wid, rid, emb, index = _fixture()
+    vector = emb.embed(["atomic native batch"])[0]
+    ids = [
+        store.add_memory(MemoryRecord(
+            id="", content=f"native {position}", workspace_id=wid, repo_id=rid,
+            scope=Scope.REPO, embedding=vector,
+        ))
+        for position in range(2)
+    ]
+    connection_type = type(store.conn)
+    original_execute = connection_type.execute
+    inserts = 0
+
+    def fail_second_insert(connection, statement, *args, **kwargs):
+        nonlocal inserts
+        if "INSERT OR REPLACE INTO mem_vec_ann" in str(statement):
+            inserts += 1
+            if inserts == 2:
+                raise RuntimeError("native index unavailable")
+        return original_execute(connection, statement, *args, **kwargs)
+
+    monkeypatch.setattr(connection_type, "execute", fail_second_insert)
+
+    with pytest.raises(RuntimeError, match="native index unavailable"):
+        index.upsert(ids, np.vstack([vector, vector]))
+
+    assert store.conn.in_transaction is False
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM mem_vec_ann WHERE id IN (?, ?)", ids,
+    ).fetchone()[0] == 0
+    store.close()
+
+
+def test_native_upsert_does_not_commit_a_caller_owned_transaction():
+    store, wid, rid, emb, index = _fixture()
+    vector = emb.embed(["caller-owned native batch"])[0]
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="caller-owned native vector", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO, embedding=vector,
+    ))
+    store.conn.execute("BEGIN IMMEDIATE")
+
+    index.upsert([memory_id], vector.reshape(1, -1))
+
+    assert store.conn.in_transaction is True
+    assert store.conn.transaction_owned_by_current_thread() is True
+    store.conn.rollback()
+    assert store.conn.execute(
+        "SELECT 1 FROM mem_vec_ann WHERE id=?", (memory_id,)
+    ).fetchone() is None
+    store.close()
+
+
 def test_filtered_search_widens_past_invisible_rows_to_full_scan():
     """A workspace dense with rows the filter hides forces the widening loop all the
     way to its full-scan cap — the k visible hits must still all be found."""
     store, wid, rid, emb, index = _fixture()
     other_wid = store.get_or_create_workspace("other")
     other_rid = store.get_or_create_repo(other_wid, "r2")
-    # 40 invisible (other workspace) rows crowd the ANN neighborhood…
+    # 40 invisible (other workspace) rows crowd the exact-KNN neighborhood…
     for i in range(40):
         _make(store, index, emb, other_wid, other_rid, f"decoy fact number {i} about deploys")
     # …and 3 visible rows sit behind them.
@@ -81,6 +157,39 @@ def test_filtered_search_widens_past_invisible_rows_to_full_scan():
     store.close()
 
 
+def test_filtered_search_batches_visibility_lookups(monkeypatch):
+    store, wid, rid, emb, index = _fixture()
+    for i in range(8):
+        _make(store, index, emb, wid, rid, f"visible batch fact {i}")
+    calls = 0
+    original = store.get_memories
+
+    def batched(memory_ids):
+        nonlocal calls
+        calls += 1
+        return original(memory_ids)
+
+    monkeypatch.setattr(store, "get_memories", batched)
+    monkeypatch.setattr(
+        store,
+        "get_memory",
+        lambda _memory_id: (_ for _ in ()).throw(AssertionError("N+1 lookup")),
+    )
+
+    hits = index.search(
+        emb.embed(["visible batch fact"])[0],
+        k=5,
+        filter=SearchFilter(workspace_id=wid),
+    )
+
+    assert len(hits) == 5
+    # One query is typical; an equal-distance kth boundary may require one
+    # deterministic tie-expansion query. Either way visibility remains batched,
+    # never an N+1 get_memory loop.
+    assert 1 <= calls <= 2
+    store.close()
+
+
 def test_empty_index_returns_empty():
     store, _, _, emb, index = _fixture()
     assert index.search(emb.embed(["anything"])[0], k=5) == []
@@ -88,7 +197,7 @@ def test_empty_index_returns_empty():
 
 
 def test_engine_resolution_preserves_historical_sqlitevec_rows_and_filters_them():
-    """INVALIDATE must retain the historical ANN row without leaking it into live recall."""
+    """INVALIDATE retains the historical index row without leaking it into live recall."""
     eng = MemoryEngine.create(
         ":memory:", embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False
     )

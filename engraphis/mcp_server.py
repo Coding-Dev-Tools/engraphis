@@ -101,8 +101,13 @@ def service() -> MemoryService:
         _service = MemoryService.create(
             settings.db_path,
             embed_model=settings.embed_model or None,
+            embed_revision=getattr(settings, "embed_revision", "") or None,
+            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+            embed_dim=settings.embed_dim or 384,
             allowed_workspaces=settings.allowed_workspaces,
             vector_backend=settings.vector_backend,
+            rerank_model=getattr(settings, "rerank_model", "") or None,
+            rerank_revision=getattr(settings, "rerank_revision", "") or None,
             extractor=settings.extractor,
         )
     return _service
@@ -262,6 +267,12 @@ def engraphis_remember(
             valid_from=valid_from,
             subject_key=subject_key, claim_kind=claim_kind,
             resolve_conflicts=dedupe,
+            # Stdio is an operator-launched local capability. The dashboard's
+            # MCP-over-HTTP mount is protected by its loopback/token/role gate before
+            # FastMCP dispatches this binding. The service still checks the narrow
+            # local-agent source allow-list, so imported/external labels stay pending.
+            _local_agent_operator=bool(trusted),
+            _ingress="mcp",
         ))
     except Exception as exc:  # noqa: BLE001 - surface a safe, actionable message
         return _err(exc)
@@ -818,7 +829,7 @@ def engraphis_secure_erase(
 ) -> str:
     """Irreversibly remove one accidentally stored secret from local persistence.
 
-    Unlike retirement, this removes the memory, FTS/vector/ANN and derived graph/link
+    Unlike retirement, this removes the memory, FTS/vector-index and derived graph/link
     rows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised
     local SQLite recovery backups. It cannot erase copied exports, snapshots, remote
     peers, or data already read by a compromised/running agent; rotate the credential.
@@ -1450,6 +1461,8 @@ def engraphis_ingest(
             # service gives this local-agent source immediate prompt eligibility;
             # explicitly external sources and detector matches remain contained.
             mtype=mtype, scope=scope, source="agent", trusted=False,
+            _local_agent_operator=True,
+            _ingress="mcp",
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

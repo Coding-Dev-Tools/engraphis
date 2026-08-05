@@ -383,7 +383,7 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     )
 
 
-def test_update_memory_reembeds_changed_title_in_both_vector_mirrors():
+def test_update_memory_reembeds_changed_title_in_both_vector_mirrors(monkeypatch):
     service = MemoryService.create(":memory:")
     created = service.remember(
         "The release procedure uses a signed artifact.",
@@ -391,8 +391,17 @@ def test_update_memory_reembeds_changed_title_in_both_vector_mirrors():
     )
     mid = created["id"]
     service.engine.embedder.model = "test-model"
+    calls = []
+    original = service.store.put_vector
+
+    def traced_put_vector(memory_id, vector, *, model=""):
+        calls.append(memory_id)
+        return original(memory_id, vector, model=model)
+
+    monkeypatch.setattr(service.store, "put_vector", traced_put_vector)
     service.update_memory(mid, workspace="acme", title="Nebula archival runbook")
 
+    assert calls == [mid]
     row = service.store.conn.execute(
         "SELECT dim, vector, model FROM mem_vectors WHERE id=?", (mid,)
     ).fetchone()
@@ -403,7 +412,7 @@ def test_update_memory_reembeds_changed_title_in_both_vector_mirrors():
     expected = expected / (float(np.linalg.norm(expected)) or 1.0)
     stored = np.frombuffer(after, dtype=np.float32)
     assert np.allclose(stored, expected)
-    assert row["model"] == "test-model"
+    assert row["model"] == service.engine.embedding_space
     query_vec = service.engine.embedder.embed(["Nebula archival runbook"])[0]
     assert mid in {memory_id for memory_id, _score in service.engine.index.search(query_vec, 5)}
     assert mid in {memory_id for memory_id, _score in service.store.fts_search(
@@ -561,6 +570,24 @@ def test_provenance_recorded():
     assert pending.metadata.get("provenance", {}).get("source") == "unit-test"
     assert approved.provenance["source"] == "human_review"
     assert approved.provenance["approved_from"] == pending.id
+
+
+def test_mcp_operator_attestation_does_not_approve_external_ingest():
+    service = MemoryService.create(":memory:")
+    result = service.ingest(
+        "Imported release notes mention an amber rollout marker.",
+        workspace="acme",
+        source="import",
+        trusted=True,
+        _local_agent_operator=True,
+        _ingress="mcp",
+    )
+    record = service.store.get_memory(result["facts"][0]["id"])
+    assert record.provenance["trusted"] is False
+    assert record.provenance["review_state"] == "pending"
+    assert record.provenance["ingress"] == "mcp"
+    recalled = service.recall("amber rollout marker", workspace="acme")
+    assert record.id not in {item["id"] for item in recalled["memories"]}
 
 
 # ── conflict resolution on the write path ───────────────────────────────────────
@@ -1160,3 +1187,35 @@ def test_import_files_rejects_non_list():
     s = _svc()
     with pytest.raises(ValidationError):
         s.import_files(workspace="acme", files={"name": "a.md", "content": "x"})
+
+
+def test_import_files_failure_preserves_caller_owned_transaction(monkeypatch):
+    service = MemoryService.create(":memory:")
+    created = service.create_workspace("caller-owned-import")
+    conn = service.store.conn
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE workspaces SET settings=? WHERE id=?",
+        ('{"outer":"preserved"}', created["id"]),
+    )
+
+    def fail_fts(*args, **kwargs):
+        raise RuntimeError("fts unavailable")
+
+    monkeypatch.setattr(service.store, "_fts_upsert", fail_fts)
+
+    with pytest.raises(RuntimeError, match="fts unavailable"):
+        service.import_files(
+            workspace="caller-owned-import",
+            files=[{"name": "fact.md", "content": "A durable imported fact."}],
+        )
+
+    assert conn.in_transaction is True
+    assert conn.transaction_owned_by_current_thread() is True
+    assert conn.execute(
+        "SELECT settings FROM workspaces WHERE id=?", (created["id"],)
+    ).fetchone()["settings"] == '{"outer":"preserved"}'
+    assert conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE workspace_id=?", (created["id"],)
+    ).fetchone()[0] == 0
+    conn.rollback()

@@ -4,9 +4,28 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
 from fastapi.testclient import TestClient
 
+from engraphis.config import settings
 from engraphis.read_only_api import create_read_only_app
 from engraphis.service import MemoryService
 from engraphis.backends.graph_extractor import RegexGraphExtractor
+
+
+def test_read_only_factory_forwards_configured_vector_backend(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def create(*args, **kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(MemoryService, "create", create)
+    monkeypatch.setattr(settings, "vector_backend", "auto")
+    monkeypatch.setattr(settings, "embed_dim", 768)
+
+    create_read_only_app()
+
+    assert captured["vector_backend"] == "auto"
+    assert captured["embed_dim"] == 768
 
 
 def test_read_only_api_requires_token_and_does_not_reinforce():

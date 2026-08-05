@@ -1,4 +1,5 @@
 import importlib
+import json
 import re
 import time
 
@@ -243,6 +244,16 @@ def test_consolidate_uses_llm_summary_when_available():
     report = consolidate(eng, workspace_id=wid, repo_id=rid, llm=FakeLLM())
     digest = eng.store.get_memory(report["digests_created"][0]["id"])
     assert digest.content.startswith("CI is flaky")
+    assert digest.provenance["trusted"] is False
+    assert digest.provenance["review_state"] == "pending"
+    assert digest.provenance["derived_by_llm"] is True
+    assert digest.metadata["llm_consolidation"]["review_required"] is True
+    prompt_ids = {
+        memory.id for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid), prompt_only=True,
+        )
+    }
+    assert digest.id not in prompt_ids
 
 
 def test_consolidate_llm_failure_falls_back_to_deterministic():
@@ -254,6 +265,8 @@ def test_consolidate_llm_failure_falls_back_to_deterministic():
     report = consolidate(eng, workspace_id=wid, repo_id=rid, llm=BrokenLLM())
     digest = eng.store.get_memory(report["digests_created"][0]["id"])
     assert "Recurring pattern" in digest.content
+    assert digest.provenance["trusted"] is True
+    assert digest.provenance["review_state"] == "approved"
 
 
 # ── structured LLM consolidation (schema-first, graph-fed, safe fallback) ─────
@@ -297,14 +310,10 @@ def _engine_with_auth_repeats():
     return eng, wid, rid
 
 
-def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sources():
+def test_structured_consolidation_keeps_llm_fact_graph_and_supersession_pending():
     pytest.importorskip("pydantic")
     eng, wid, rid = _engine_with_auth_repeats()
     llm = _StructuredConsolidationLLM()
-    # Called as the module function on purpose: the entities/relations below survive only
-    # because _write_structured_digests vouches for them explicitly (_trusted_graph_keys).
-    # If that vouch is ever dropped, the engine demotes them as caller-supplied metadata
-    # and the graph assertions below fail — see core/engine.py::_rehome_untrusted_graph_hints.
     report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
                          supersede_sources=True, llm=llm)
 
@@ -315,36 +324,43 @@ def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sour
     digest = eng.store.get_memory(entry["id"])
     assert digest.mtype == MemoryType.SEMANTIC
     assert digest.metadata["provenance"]["source"] == "structured_consolidation"
+    assert digest.provenance["trusted"] is False
+    assert digest.provenance["review_state"] == "pending"
+    assert digest.provenance["derived_by_llm"] is True
     assert digest.metadata["structured_consolidation"]["confidence"] == 0.91
-    assert digest.confidence == 0.91      # promoted from metadata to the first-class field
-    assert digest.metadata["entities"] == ["Acme API", "PASETO", "JWT"]
-    assert digest.metadata["relations"][0]["relation"] == "uses"
+    assert digest.confidence == 0.91
+    deferred_graph = digest.metadata["unverified_derived_graph"]
+    assert deferred_graph["entities"] == ["Acme API", "PASETO", "JWT"]
+    assert deferred_graph["relations"][0]["relation"] == "uses"
     assert "source_ids" in digest.metadata["provenance"]
     llm_audit = digest.metadata["structured_consolidation"]["llm"]
     assert len(llm_audit["prompt_sha256"]) == 64
     assert len(llm_audit["response_sha256"]) == 64
 
-    # Structured metadata feeds graph nodes/edges even without the regex graph extractor.
-    ents = {e.name: e.id for e in eng.store.list_entities(
-        SearchFilter(workspace_id=wid, repo_id=rid))}
-    assert {"Acme API", "PASETO", "JWT"} <= set(ents)
-    edges = eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid))
-    assert any(e.src == ents["Acme API"] and e.dst == ents["PASETO"]
-               and e.relation == "uses" for e in edges)
-
-    # Supersession is explicit and opt-in: source episodes leave live recall but remain
-    # inspectable in history.
+    # Valid source IDs prove lineage, not entailment. The fact and graph hints remain
+    # pending, and a supersession request is deferred until governed human verification.
+    assert eng.store.list_entities(SearchFilter(workspace_id=wid, repo_id=rid)) == []
+    assert eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid)) == []
+    prompt_ids = {
+        memory.id for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid), prompt_only=True,
+        )
+    }
+    assert digest.id not in prompt_ids
+    assert entry["supersession_deferred"]
+    assert report["structured"]["sources_superseded"] == 0
+    assert report["structured"]["supersessions_deferred"] == 2
     live_ids = {m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid), limit=20)}
-    for source_id in entry["superseded_sources"]:
-        assert source_id not in live_ids
-        assert eng.store.get_memory(source_id).valid_to is not None
+    for source_id in entry["supersession_deferred"]:
+        assert source_id in live_ids
+        assert eng.store.get_memory(source_id).valid_to is None
     episodes = [
         memory for memory in eng.store.list_memories(
             SearchFilter(workspace_id=wid), include_invalid=True, limit=20)
         if memory.mtype == MemoryType.EPISODIC
     ]
-    assert len(entry["superseded_sources"]) == 2
-    assert sum(memory.valid_to is None for memory in episodes) == 1
+    assert len(entry["supersession_deferred"]) == 2
+    assert sum(memory.valid_to is None for memory in episodes) == 3
 
 
 def test_structured_consolidation_blocks_graph_writes_for_untrusted_sources():
@@ -428,6 +444,124 @@ def test_structured_consolidation_rejects_facts_without_prompt_sources():
     assert report["structured"]["fallbacks"] == 1
     digest = eng.store.get_memory(report["digests_created"][0]["id"])
     assert digest.metadata["provenance"]["source"] == "consolidation"
+
+
+def test_structured_consolidation_does_not_trust_invented_claim_with_valid_sources():
+    class HallucinatedClaimLLM:
+        def extract_json(self, prompt, schema):
+            source_ids = re.findall(r"ID: (mem_[A-Z0-9]+)", prompt)
+            return {
+                "subject": "invented deployment",
+                "facts": [{
+                    "content": "Acme API stores production keys on a lunar relay.",
+                    "title": "Invented lunar relay",
+                    "confidence": 0.99,
+                    "entities": ["Acme API", "Lunar Relay"],
+                    "relations": [{
+                        "source": "Acme API",
+                        "relation": "stores_keys_on",
+                        "target": "Lunar Relay",
+                        "confidence": 0.99,
+                    }],
+                    "source_ids": source_ids[:2],
+                }],
+            }
+
+    eng, wid, rid = _engine_with_auth_repeats()
+    report = consolidate(
+        eng,
+        workspace_id=wid,
+        repo_id=rid,
+        structured=True,
+        supersede_sources=True,
+        llm=HallucinatedClaimLLM(),
+    )
+
+    entry = report["digests_created"][0]
+    digest = eng.store.get_memory(entry["id"])
+    assert digest.provenance["trusted"] is False
+    assert digest.provenance["review_state"] == "pending"
+    assert entry["supersession_deferred"] == digest.provenance["source_ids"]
+    assert eng.store.list_entities(SearchFilter(workspace_id=wid, repo_id=rid)) == []
+    assert eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid)) == []
+    assert all(
+        eng.store.get_memory(source_id).valid_to is None
+        for source_id in digest.provenance["source_ids"]
+    )
+
+
+def test_consolidation_repairs_already_open_legacy_structured_graph_state():
+    from engraphis.core.interfaces import Edge, Node
+
+    eng, wid, rid = _engine_with_auth_repeats()
+    sources = [
+        memory for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid)
+        )
+        if memory.mtype == MemoryType.EPISODIC
+    ]
+    legacy_id = eng.remember(
+        "A governed legacy structured claim.", workspace_id=wid, repo_id=rid,
+        mtype=MemoryType.SEMANTIC, resolve_conflicts=False,
+    )
+    provenance = {
+        "source": "structured_consolidation",
+        "trusted": True,
+        "review_state": "approved",
+        "source_ids": [sources[0].id],
+        "consolidates": [sources[0].id],
+    }
+    metadata = {
+        "provenance": provenance,
+        "entities": ["Acme API", "Lunar Relay"],
+        "relations": [{
+            "source": "Acme API", "relation": "stores_keys_on",
+            "target": "Lunar Relay",
+        }],
+    }
+    eng.store.conn.execute(
+        "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+        (json.dumps(provenance), json.dumps(metadata), legacy_id),
+    )
+    eng.store.conn.commit()
+    eng.store.add_link(legacy_id, sources[0].id, "consolidates")
+    eng.store.add_link(legacy_id, sources[1].id, "related")
+    api_id = eng.store.upsert_entity(Node(
+        id="", name="Acme API", workspace_id=wid, repo_id=rid,
+    ))
+    relay_id = eng.store.upsert_entity(Node(
+        id="", name="Lunar Relay", workspace_id=wid, repo_id=rid,
+    ))
+    edge_id = eng.store.upsert_edge(Edge(
+        id="", src=api_id, dst=relay_id, relation="stores_keys_on",
+        workspace_id=wid, repo_id=rid,
+        provenance={"source": "structured_extractor", "memory_id": legacy_id},
+    ))
+    eng.store.link_memory_entity(
+        memory_id=legacy_id, entity_id=relay_id, workspace_id=wid, repo_id=rid,
+        provenance={"source": "structured_extractor", "memory_id": legacy_id},
+    )
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, min_cluster=20)
+
+    assert report["errors"] == []
+    repaired = eng.store.get_memory(legacy_id)
+    assert repaired.provenance["trusted"] is False
+    assert repaired.provenance["review_state"] == "pending"
+    assert repaired.provenance["derived_by_llm"] is True
+    assert repaired.provenance["derived_graph_inert"] is True
+    assert repaired.metadata["provenance"] == repaired.provenance
+    assert "entities" not in repaired.metadata
+    assert "relations" not in repaired.metadata
+    assert repaired.metadata["unverified_derived_graph"]["entities"] == [
+        "Acme API", "Lunar Relay",
+    ]
+    assert eng.store.conn.execute(
+        "SELECT valid_to FROM edges WHERE id=?", (edge_id,)
+    ).fetchone()["valid_to"] is not None
+    assert {link["relation"] for link in eng.store.get_links(legacy_id)} == {
+        "consolidates"
+    }
 
 
 def test_supersede_sources_requires_structured_mode():
@@ -530,9 +664,41 @@ def test_profiles_pass_rolls_entity_memories_into_one_digest():
     assert prof.mtype == MemoryType.SEMANTIC
     assert prof.title == f"Profile: {name}"
     assert prof.metadata["provenance"]["source"] == "profile_consolidation"
+    assert prof.provenance["trusted"] is True
+    assert prof.provenance["review_state"] == "approved"
     links = eng.store.get_links(entry["id"])
     assert sum(1 for link in links if link["relation"] == "profiles") == 8
     assert report["compaction"]["tokens_before"] > report["compaction"]["tokens_after"] > 0
+
+
+def test_llm_profile_summary_remains_pending_until_human_review():
+    from engraphis.core.consolidate import consolidate_profiles
+
+    class HallucinatedProfileLLM:
+        def chat(self, messages, system=None, **kwargs):
+            return "Aurora secretly operates a lunar payment relay."
+
+    eng, wid, rid, _ = _engine_with_entity_mentions()
+    report = consolidate_profiles(
+        eng, workspace_id=wid, repo_id=rid, llm=HallucinatedProfileLLM(),
+    )
+
+    profile = eng.store.get_memory(report["profiles_created"][0]["id"])
+    assert profile.content.startswith("Aurora secretly operates")
+    assert profile.provenance["trusted"] is False
+    assert profile.provenance["review_state"] == "pending"
+    assert profile.provenance["derived_by_llm"] is True
+    assert profile.metadata["llm_consolidation"] == {
+        "review_required": True,
+        "source_count": 8,
+        "kind": "entity_profile",
+    }
+    prompt_ids = {
+        memory.id for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid, repo_id=rid), prompt_only=True,
+        )
+    }
+    assert profile.id not in prompt_ids
 
 
 def test_profiles_batch_all_eligible_memories(monkeypatch):
@@ -1530,12 +1696,15 @@ from scripts.consolidate import main as consolidate_main  # noqa: E402
 def _seed_db(tmp_path):
     db = tmp_path / "mem.db"
     eng = MemoryEngine.create(str(db))
-    wid = eng.store.get_or_create_workspace("w")
-    rid = eng.store.get_or_create_repo(wid, "r")
-    for i in range(3):
-        eng.remember(f"Build failed on the flaky network test in CI run {i}.",
-                     workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
-                     resolve_conflicts=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        for i in range(3):
+            eng.remember(f"Build failed on the flaky network test in CI run {i}.",
+                         workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+                         resolve_conflicts=False)
+    finally:
+        eng.store.close()
     return db
 
 

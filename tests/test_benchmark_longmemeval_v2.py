@@ -262,6 +262,7 @@ def test_checked_in_official_memory_config_pins_embedding_backend(monkeypatch):
     assert memory.embed_revision == "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
     assert created["embed_model"] == memory.embed_model
     assert created["embed_revision"] == memory.embed_revision
+    assert created["require_immutable_models"] is True
     assert created["vector_backend"] == "numpy"
     assert memory.require_exact_reader_tokenizer is True
     assert memory.metadata["token_budget_method"] == "pinned_reader_content_tokenizer"

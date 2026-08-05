@@ -12,6 +12,7 @@ from engraphis.backends.extractor import (
     ChunkingExtractor,
     PassthroughExtractor,
     StructuredLLMExtractor,
+    _load_chunk_token_counter,
     get_extractor,
 )
 from engraphis.core.interfaces import Extractor
@@ -48,6 +49,13 @@ def test_factory_loads_explicit_pinned_reader_tokenizer(monkeypatch):
 
     assert requests == [("reader/model", "a" * 40)]
     assert extractor.token_counter_identity == f"test:reader/model@{'a' * 40}"
+
+
+def test_chunk_tokenizer_strict_mode_rejects_mutable_remote_revision_before_load():
+    with pytest.raises(ValueError, match="ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS"):
+        _load_chunk_token_counter(
+            "reader/model", "main", require_immutable_models=True,
+        )
 
 
 def test_empty_or_whitespace_returns_nothing():

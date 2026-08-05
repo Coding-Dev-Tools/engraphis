@@ -58,7 +58,13 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     svc = service or MemoryService.create(
         settings.db_path,
         embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+        embed_dim=settings.embed_dim or 384,
         allowed_workspaces=settings.allowed_workspaces,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
         extractor=settings.extractor,
     )
     expected = str(token or "")

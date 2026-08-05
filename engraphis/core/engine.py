@@ -39,6 +39,8 @@ from engraphis.core.interfaces import (
     RetentionDecision,
     Scope,
     SearchFilter,
+    embedding_space_fingerprint,
+    vector_index_requires_sync,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -56,6 +58,7 @@ from engraphis.core.retrieval_policy import (
     CANDIDATE_DEPTH_MODES,
     RETRIEVAL_PROFILES,
 )
+from engraphis.core.retention_policy import MAX_STABILITY_DAYS, MIN_STABILITY_DAYS
 from engraphis.core.resolve import (
     CONFLICT_RELATION,
     RELATED_SIM_FLOOR,
@@ -68,6 +71,8 @@ from engraphis.core.store import Store, _dumps, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger("engraphis.core.engine")
+
+BEST_EFFORT_FAILURE_WARNING_INTERVAL_SECONDS = 60.0
 
 # Sensitivity lattice: a merge keeps the *most restrictive* label of its sources, so
 # secret/sensitive content can never be laundered into a lower-sensitivity merged fact.
@@ -208,6 +213,21 @@ def _rehome_untrusted_graph_hints(metadata: dict,
     return out
 
 
+def _required_resolution_target(decision: Resolution) -> str:
+    """Return a resolver target only when the selected operation requires one."""
+    target_id = decision.target_id
+    if not isinstance(target_id, str) or not target_id:
+        raise RuntimeError(f"{decision.op.value} resolution requires a target memory id")
+    return target_id
+
+
+def _required_memory_workspace_id(record: MemoryRecord) -> str:
+    """Defend the persisted workspace invariant at engine-to-engine boundaries."""
+    workspace_id = record.workspace_id
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise RuntimeError(f"memory {record.id!r} has no workspace id")
+    return workspace_id
+
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
     """The nearest scope ``remember()`` will actually accept for ``repo_id``.
 
@@ -331,6 +351,7 @@ class MemoryEngine:
                  query_planner: Optional[QueryPlanner] = None) -> None:
         self.store = store
         self.embedder = embedder
+        self.embedding_space = embedding_space_fingerprint(embedder)
         self.index = vector_index
         self.reranker = reranker or IdentityReranker()
         self.recall_engine = RecallEngine(
@@ -355,19 +376,48 @@ class MemoryEngine:
         # Serializes the resolve→insert critical section of the write path (see
         # remember_with_resolution). RLock: ingest()/import paths may nest writes.
         self._write_lock = threading.RLock()
-        # Depth of the engine's own trusted producers on THIS thread (consolidate()).
-        # Thread-local on purpose: a sweep must never vouch for another thread's
-        # concurrent caller-driven write. See _resolve_and_store.
-        self._internal_writes = threading.local()
+        # Best-effort derivations can fail repeatedly while a backend is unavailable.
+        # Keep their payload-redacted warnings useful without letting one outage flood logs.
+        self._failure_warning_lock = threading.Lock()
+        self._failure_warning_last_emitted: dict[str, float] = {}
+        self._failure_warning_suppressed: dict[str, int] = {}
+        self._failure_warning_clock = time.monotonic
         # repo_id -> (symbol-set fingerprint, _CodeSymbolMatcher). Bounded; see
         # _code_matcher for the invalidation contract.
         self._code_matchers: dict = {}
 
+    def _warn_redacted_failure(self, operation: str, exc: Exception) -> None:
+        """Log bounded, payload-free warnings for non-fatal derived-work failures."""
+        now = self._failure_warning_clock()
+        with self._failure_warning_lock:
+            last_emitted = self._failure_warning_last_emitted.get(operation)
+            if (
+                last_emitted is not None
+                and now - last_emitted < BEST_EFFORT_FAILURE_WARNING_INTERVAL_SECONDS
+            ):
+                self._failure_warning_suppressed[operation] = (
+                    self._failure_warning_suppressed.get(operation, 0) + 1
+                )
+                return
+            suppressed = self._failure_warning_suppressed.pop(operation, 0)
+            self._failure_warning_last_emitted[operation] = now
+        if suppressed:
+            logger.warning(
+                "%s failed (%s); suppressed %d similar failures",
+                operation,
+                type(exc).__name__,
+                suppressed,
+            )
+        else:
+            logger.warning("%s failed (%s)", operation, type(exc).__name__)
+
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_revision: Optional[str] = None,
+               require_immutable_models: Optional[bool] = None,
                embed_dim: int = 384, vector_backend: str = "numpy",
-               rerank_model: Optional[str] = None, extractor: str = "none",
+               rerank_model: Optional[str] = None,
+               rerank_revision: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
                retention_supervisor: str = "none",
                allow_automatic_critical_retention: bool = False,
@@ -378,10 +428,22 @@ class MemoryEngine:
         from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
         from engraphis.backends.retention import get_retention_supervisor
         store = Store(db_path, connect=connect)
-        embedder = get_embedder(embed_model, embed_dim, revision=embed_revision)
+        embedder = get_embedder(
+            embed_model,
+            embed_dim,
+            revision=embed_revision,
+            require_immutable_models=require_immutable_models,
+        )
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
-        reranker = get_reranker(rerank_model)
-        ext = get_extractor(extractor)
+        reranker = get_reranker(
+            rerank_model,
+            revision=rerank_revision,
+            require_immutable_models=require_immutable_models,
+        )
+        ext = get_extractor(
+            extractor,
+            require_immutable_models=require_immutable_models,
+        )
         if isinstance(ext, PassthroughExtractor):
             ext = None                       # ingest() treats None as passthrough
         ge = _get_ge(graph_extractor) if graph_extractor and graph_extractor != "none" else None
@@ -405,43 +467,147 @@ class MemoryEngine:
         """
         identity = str(getattr(self.embedder, "embedding_identity", "") or "").strip()
         version = str(getattr(self.embedder, "embedding_version", "") or "").strip()
-        if not identity or not version or self.store.embedding_version(identity) == version:
+        fingerprint = self.embedding_space
+        if not identity or not version or not fingerprint:
+            logger.warning(
+                "embedder has no durable identity/version; persistent vector recall "
+                "will remain disabled"
+            )
+            return
+        if self.store.embedding_space_ready(fingerprint):
+            self._hydrate_separate_vector_index(fingerprint)
             return
 
+        self.store.begin_embedding_rebuild(fingerprint)
         rebuilt = 0
+        removed = 0
         after_id = ""
-        while True:
-            records = self.store.list_memories_page(
-                after_id=after_id, limit=EMBEDDING_REBUILD_BATCH, include_invalid=True,
-            )
-            if not records:
-                break
-            after_id = records[-1].id
-            eligible = [
-                record for record in records
-                if inspection_eligible(record.provenance, record.metadata)
-            ]
-            if not eligible:
-                continue
-            texts = [
-                f"{record.title}\n{record.content}" if record.title else record.content
-                for record in eligible
-            ]
-            vectors = self.embedder.embed(texts)
-            # Keep the portable store-backed mirror current even when the active
-            # index is sqlite-vec, whose upsert writes only its ANN table.  A later
-            # fallback to NumPy must not compare v2 queries with stale vectors.
-            for record, vector in zip(eligible, vectors):
-                self.store.put_vector(record.id, vector)
-            self.store.conn.commit()
-            self.index.upsert([record.id for record in eligible], vectors)
-            rebuilt += len(eligible)
+        try:
+            while True:
+                records = self.store.list_memories_page(
+                    after_id=after_id, limit=EMBEDDING_REBUILD_BATCH, include_invalid=True,
+                )
+                if not records:
+                    break
+                after_id = records[-1].id
+                eligible = [
+                    record for record in records
+                    if inspection_eligible(record.provenance, record.metadata)
+                ]
+                excluded_ids = [
+                    record.id for record in records
+                    if not inspection_eligible(record.provenance, record.metadata)
+                ]
+                vectors = None
+                ids = []
+                metadata = []
+                if eligible:
+                    texts = [
+                        f"{record.title}\n{record.content}" if record.title else record.content
+                        for record in eligible
+                    ]
+                    vectors = np.asarray(self.embedder.embed(texts), dtype=np.float32)
+                    if vectors.ndim != 2 or vectors.shape != (
+                            len(eligible), int(self.embedder.dim)):
+                        raise ValueError(
+                            "embedder returned an invalid batch shape during rebuild"
+                        )
+                    if not np.all(np.isfinite(vectors)):
+                        raise ValueError(
+                            "embedder returned non-finite values during rebuild"
+                        )
+                    ids = [record.id for record in eligible]
+                    metadata = [{"model": fingerprint} for _ in eligible]
 
-        self.store.set_embedding_version(identity, version)
+                # Embed outside the database lock, then atomically verify that this
+                # process still owns the target marker before publishing one batch.
+                # A competing process can supersede the marker, but the loser cannot
+                # write vectors or clear the winner's rebuild gate.
+                self.store.conn.execute("BEGIN IMMEDIATE")
+                if self.store.embedding_rebuild_target() != fingerprint:
+                    self.store.conn.rollback()
+                    if self.store.embedding_space_ready(fingerprint):
+                        return
+                    raise RuntimeError(
+                        "embedding rebuild was superseded by another process"
+                    )
+                if excluded_ids:
+                    if vector_index_requires_sync(self.index, self.store):
+                        self.index.delete(excluded_ids, commit=False)
+                    marks = ",".join("?" for _ in excluded_ids)
+                    self.store.conn.execute(
+                        f"DELETE FROM mem_vectors WHERE id IN ({marks})", excluded_ids
+                    )
+                # Keep the portable mirror current even when the active index is
+                # sqlite-vec. A later NumPy fallback must see the same vector space.
+                if vectors is not None:
+                    for record, vector in zip(eligible, vectors):
+                        self.store.put_vector(record.id, vector, model=fingerprint)
+                    if vector_index_requires_sync(self.index, self.store):
+                        self.index.upsert(ids, vectors, metadata, commit=False)
+                self.store.conn.commit()
+                removed += len(excluded_ids)
+                rebuilt += len(eligible)
+
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            if self.store.embedding_rebuild_target() != fingerprint:
+                self.store.conn.rollback()
+                if self.store.embedding_space_ready(fingerprint):
+                    return
+                raise RuntimeError(
+                    "embedding rebuild was superseded by another process"
+                )
+            stale_row = self.store.conn.execute(
+                "SELECT COUNT(*) AS n FROM mem_vectors "
+                "WHERE COALESCE(model, '') <> ?",
+                (fingerprint,),
+            ).fetchone()
+            stale = int(stale_row["n"]) if stale_row is not None else 0
+            if stale:
+                self.store.conn.rollback()
+                raise RuntimeError(
+                    f"embedding rebuild left {stale} stale vector rows"
+                )
+            self.store.finish_embedding_rebuild(
+                fingerprint, identity=identity, version=version
+            )
+        except BaseException as exc:
+            if self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            logger.error(
+                "embedding rebuild failed; vector recall remains disabled (%s)",
+                type(exc).__name__,
+            )
+            raise
+
         if rebuilt:
             self.store.audit(
                 "system", "embedding_rebuild", identity,
-                f"version={version}; records={rebuilt}",
+                f"version={version}; fingerprint={fingerprint}; "
+                f"records={rebuilt}; removed={removed}",
+            )
+
+    def _hydrate_separate_vector_index(self, fingerprint: str) -> None:
+        """Repair a separate ANN backend from the canonical Store mirror."""
+        if not vector_index_requires_sync(self.index, self.store):
+            return
+        ids: list[str] = []
+        vectors: list[np.ndarray] = []
+        for memory_id, vector in self.store.iter_vectors(
+                include_invalid=False, dim=int(self.embedder.dim)):
+            ids.append(memory_id)
+            vectors.append(vector)
+            if len(ids) < EMBEDDING_REBUILD_BATCH:
+                continue
+            self.index.upsert(
+                ids, np.asarray(vectors, dtype=np.float32),
+                [{"model": fingerprint} for _ in ids],
+            )
+            ids, vectors = [], []
+        if ids:
+            self.index.upsert(
+                ids, np.asarray(vectors, dtype=np.float32),
+                [{"model": fingerprint} for _ in ids],
             )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -559,6 +725,23 @@ class MemoryEngine:
         # pending evidence is stored passively and cannot reinforce or supersede it.
         trusted_write = prompt_eligible(provenance, write_metadata)
         text = f"{title}\n{content}" if title else content
+        persistent_store = (
+            self.store.path != ":memory:"
+            and not self.store.path.startswith("file::memory:")
+        )
+        if not poisoning.quarantined and persistent_store:
+            if not self.embedding_space:
+                raise RuntimeError(
+                    "persistent writes require an embedder with a durable "
+                    "embedding_identity and embedding_version"
+                )
+            if not self.store.embedding_space_ready(self.embedding_space):
+                raise RuntimeError(
+                    "the configured embedding space is not active; restart through "
+                    "MemoryEngine.create() to complete the guarded rebuild"
+                )
+        if self.embedding_space:
+            write_metadata["embed_model"] = self.embedding_space
         # Embedding is the expensive, thread-safe part — compute it BEFORE taking the
         # write lock so concurrent writers only serialize the fast resolve+insert step.
         # Quarantine happens before embedding: payloads retained only for inspection
@@ -617,6 +800,8 @@ class MemoryEngine:
         # not deduplicate into, invalidate, relate to, reinforce, or otherwise
         # mutate higher-trust memory; that is a trust lattice, not a detector score.
         if resolve_conflicts and trusted_write and not poisoning.quarantined:
+            if vec is None:
+                raise ValueError("non-quarantined writes require an embedding")
             decision, neighbors, conflicted_with = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
@@ -663,7 +848,7 @@ class MemoryEngine:
         if (decision is not None
                 and decision.op == ResolutionOp.INVALIDATE
                 and valid_from is not None):
-            previous = self.store.get_memory(decision.target_id)
+            previous = self.store.get_memory(_required_resolution_target(decision))
             if (previous is not None
                     and previous.valid_from is not None
                     and valid_from < previous.valid_from):
@@ -679,17 +864,15 @@ class MemoryEngine:
             conflicted_with = None
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
-            self.store.reinforce(decision.target_id, boost=scoring.INTERACTION_BOOST["create"])
-            self.store.audit("resolver", "noop", decision.target_id, decision.reason)
-            return {"id": decision.target_id, "op": "noop", "reason": decision.reason}
+            self.store.reinforce(_required_resolution_target(decision), boost=scoring.INTERACTION_BOOST["create"])
+            self.store.audit("resolver", "noop", _required_resolution_target(decision), decision.reason)
+            return {"id": _required_resolution_target(decision), "op": "noop", "reason": decision.reason}
 
         # Before anything reads it: demote graph hints this write cannot prove came from
         # an Extractor, so the "structured_extractor" feed below can only ever see
         # genuine extractor output (defense in depth for direct-engine callers that never
-        # pass through service.py::_clean_metadata). A consolidation sweep on this thread
-        # is one of the engine's own producers and vouches for all of them.
-        if trusted_graph_keys is None and getattr(self._internal_writes, "depth", 0):
-            trusted_graph_keys = frozenset(GRAPH_HINT_KEYS)
+        # pass through service.py::_clean_metadata). Internal producers must vouch for
+        # individual keys explicitly; there is no ambient thread-wide trust elevation.
         meta = _rehome_untrusted_graph_hints(dict(metadata or {}), trusted_graph_keys)
         if poisoning.quarantined:
             # Policy values are written after caller-owned metadata. This prevents a
@@ -698,7 +881,7 @@ class MemoryEngine:
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
             # Persist the supersession pointer on the new record so the chain is
             # queryable later (why/timeline/inspector), not only in the audit log.
-            meta["supersedes"] = [decision.target_id]
+            meta["supersedes"] = [_required_resolution_target(decision)]
         if conflicted_with:
             # Surface the deterministic conflict repair on the new record so
             # downstream (recall/why/inspector) can explain the lowered confidence
@@ -708,7 +891,7 @@ class MemoryEngine:
         if poisoning.quarantined:
             # Retained only for governance inspection: an untrusted payload must not
             # elevate itself through caller-supplied retention supervision.
-            importance, stability, retention_signal = 0.0, 0.05, {}
+            importance, stability, retention_signal = 0.0, MIN_STABILITY_DAYS, {}
         else:
             importance, stability, retention_signal = self._retention_signal(
                 content, title=title, mtype=mtype, metadata=meta, importance=importance,
@@ -720,11 +903,14 @@ class MemoryEngine:
         # Confidence defaults to 1.0 (no scoring change for ordinary writes); a
         # caller-supplied value wins, and the structured-extraction metadata hint is
         # honored when present so persisted verdicts actually reach scoring.
-        if confidence is None:
-            confidence = meta.get("confidence", 1.0)
+        raw_confidence: object = confidence if confidence is not None else meta.get("confidence", 1.0)
         try:
-            confidence = float(confidence)
-        except (TypeError, ValueError):
+            confidence = (
+                float(raw_confidence)
+                if isinstance(raw_confidence, (str, int, float))
+                else 1.0
+            )
+        except (TypeError, ValueError, OverflowError):
             confidence = 1.0
         confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 1.0
         if conflicted_with:
@@ -748,7 +934,53 @@ class MemoryEngine:
             provenance=dict(meta.get("provenance") or {}),
             embedding=None if poisoning.quarantined else vec,
         )
-        mid = self.store.add_memory(rec)
+        invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
+        try:
+            # A replacement and the predecessor interval it closes are one authoritative
+            # state transition. Portable vector/FTS mirrors participate in the same
+            # transaction; external vector-index and graph enrichments run only after it commits.
+            mid = self.store.add_memory(rec, commit=not invalidating)
+            if invalidating:
+                if decision is None:
+                    raise RuntimeError("invalidating write is missing its resolution")
+                target_id = _required_resolution_target(decision)
+                resolution_reason = decision.reason
+                predecessor = self.store.get_memory(target_id)
+                predecessor_end = predecessor.valid_to if predecessor is not None else None
+                if (predecessor_end is not None and rec.valid_from is not None
+                        and rec.valid_from < predecessor_end):
+                    # Splice a backfilled interval between its recorded predecessor and
+                    # successor without widening either historical interval.
+                    self.store.conn.execute(
+                        "UPDATE memories SET valid_to=?, valid_to_recorded_at=? WHERE id=?",
+                        (rec.valid_from, now_ts(), target_id),
+                    )
+                    self.store.invalidate_edges_for_memory(
+                        target_id, at=rec.valid_from, commit=False
+                    )
+                    self.store.audit(
+                        "system", "invalidate", target_id, resolution_reason,
+                        commit=False,
+                    )
+                    self.store.close_validity(
+                        mid, at=predecessor_end,
+                        reason="bounded by the recorded successor interval",
+                        commit=False,
+                    )
+                else:
+                    self.store.close_validity(
+                        target_id, at=rec.valid_from,
+                        reason=resolution_reason, commit=False,
+                    )
+                self.store.audit(
+                    "resolver", "invalidate", target_id, resolution_reason,
+                    commit=False,
+                )
+                self.store.conn.commit()
+        except BaseException:
+            if invalidating and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            raise
         if poisoning.quarantined:
             # Deliberately content-free: a reviewer can inspect the retained record,
             # while audit exports never reflect prompt-injection text into another UI.
@@ -773,20 +1005,27 @@ class MemoryEngine:
                 f"{retention_signal.get('label', 'normal')}: "
                 f"{retention_signal.get('reason', '')}"[:1000],
             )
-        try:
-            self.index.upsert([mid], vec.reshape(1, -1))
-        except Exception as exc:  # noqa: BLE001 — a failed index write must not lose the memory
-            # …but it must not be silent either: without the vector row this memory is
-            # invisible to the semantic-recall arm until re-indexed, so leave a trace in
-            # both the log and the audit trail (best-effort — never fail the write twice).
-            logger.warning("vector-index upsert failed for %s (%s)",
-                           mid, type(exc).__name__)
+        if vec is None:
+            raise RuntimeError("non-quarantined memory was stored without an embedding")
+        if vector_index_requires_sync(self.index, self.store):
             try:
-                self.store.audit(
-                    "engine", "index_upsert_failed", mid,
-                    "failure_type=%s" % type(exc).__name__)
-            except Exception:  # noqa: BLE001
-                pass
+                self.index.upsert(
+                    [mid], vec.reshape(1, -1),
+                    [{"model": self.embedding_space}],
+                )
+            except Exception as exc:  # noqa: BLE001 — a failed index write must not lose the memory
+                # …but it must not be silent either: without the derived index row this
+                # memory is invisible to that semantic backend until re-indexed. The
+                # NumPy backend searches Store.mem_vectors directly and is already
+                # coherent after Store.add_memory, so it never enters this duplicate path.
+                logger.warning("vector-index upsert failed for %s (%s)",
+                               mid, type(exc).__name__)
+                try:
+                    self.store.audit(
+                        "engine", "index_upsert_failed", mid,
+                        "failure_type=%s" % type(exc).__name__)
+                except Exception as audit_exc:  # noqa: BLE001
+                    self._warn_redacted_failure("vector-index failure audit", audit_exc)
         if trusted_write and repo_id and scope != Scope.SESSION:
             self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
 
@@ -808,8 +1047,8 @@ class MemoryEngine:
                             extractor=StructuredMetadataGraphExtractor(meta),
                             provenance={"source": "structured_extractor", "memory_id": mid},
                             valid_from=rec.valid_from, ingested_at=rec.ingested_at)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._warn_redacted_failure("structured graph enrichment", exc)
         if trusted_write and scope != Scope.SESSION and self.graph_extractor is not None:
             try:
                 from engraphis.backends.graph_extractor import feed as _graph_feed
@@ -817,8 +1056,8 @@ class MemoryEngine:
                             repo_id=repo_id, title=title, extractor=self.graph_extractor,
                             provenance={"source": "graph_extractor", "memory_id": mid},
                             valid_from=rec.valid_from, ingested_at=rec.ingested_at)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._warn_redacted_failure("graph extraction", exc)
         if trusted_write and scope != Scope.SESSION:
             self._link_memory_entities(
                 mid, f"{title}\n{content}", workspace_id=workspace_id, repo_id=repo_id,
@@ -826,36 +1065,10 @@ class MemoryEngine:
             )
 
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
-            # World time closes when the replacement becomes true, not when this process
-            # happened to ingest it. This keeps backdated and scheduled facts queryable at
-            # the correct ``as_of`` anchor.
-            predecessor = self.store.get_memory(decision.target_id)
-            predecessor_end = predecessor.valid_to if predecessor is not None else None
-            if (predecessor_end is not None and rec.valid_from is not None
-                    and rec.valid_from < predecessor_end):
-                # The target was already retired by its recorded successor.  Splicing an
-                # intermediate version must shorten that historical interval, not leave
-                # the old end in place (``close_validity`` intentionally only closes live
-                # rows).  The new row inherits the old boundary below.
-                self.store.conn.execute(
-                    "UPDATE memories SET valid_to=?, valid_to_recorded_at=? WHERE id=?",
-                    (rec.valid_from, now_ts(), decision.target_id),
-                )
-                self.store.audit("system", "invalidate", decision.target_id,
-                                 decision.reason)
-                self.store.close_validity(
-                    mid, at=predecessor_end,
-                    reason="bounded by the recorded successor interval",
-                )
-            else:
-                self.store.close_validity(
-                    decision.target_id, at=rec.valid_from, reason=decision.reason
-                )
             # Keep the superseded vector. Every vector backend applies the same temporal
             # SearchFilter as lexical/graph retrieval, so it is hidden from current recall
             # but remains available for historical ``as_of`` queries. Deleting it made
             # time travel silently lose the semantic arm.
-            self.store.audit("resolver", "invalidate", decision.target_id, decision.reason)
             linked = self._evolve(mid, neighbors, exclude={decision.target_id}) if trusted_write else []
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
                    "reason": decision.reason}
@@ -887,8 +1100,9 @@ class MemoryEngine:
                     (round(CONFLICT_CONFIDENCE_FACTOR, 4), conflicted_with),
                 )
                 self.store.conn.commit()
-            except Exception:  # noqa: BLE001 — best-effort repair, never fail the write
-                pass
+            except Exception as exc:  # noqa: BLE001 — best-effort repair, never fail the write
+                self._warn_redacted_failure("conflict repair", exc)
+        out: dict[str, object]
         if decision is not None and decision.op == ResolutionOp.RELATE:
             related_to = decision.target_id
             if related_to and not self.store.has_link(mid, related_to):
@@ -967,7 +1181,8 @@ class MemoryEngine:
         final_stability = _bounded_finite(
             decision.stability if decision.stability is not None
             and not demoted_automatic_critical else preset_stability,
-            default=preset_stability, minimum=0.05, maximum=100.0,
+            default=preset_stability,
+            minimum=MIN_STABILITY_DAYS, maximum=MAX_STABILITY_DAYS,
         )
         signal = {
             "source": source,
@@ -1014,14 +1229,16 @@ class MemoryEngine:
                         source_kind="text_mention", confidence=0.8,
                         valid_from=valid_from, commit=False,
                     )
-            self.store.conn.commit()
-        except Exception:
+            if owns_transaction:
+                self.store.conn.commit()
+        except Exception as exc:
             # ``link_memory_entity(..., commit=False)`` opens a transaction. Never
             # leave a failed best-effort graph enrichment transaction pinned to this
             # thread: it could be committed by an unrelated later write.
             if (owns_transaction
                     and self.store.conn.transaction_owned_by_current_thread()):
                 self.store.conn.rollback()
+            self._warn_redacted_failure("memory-entity linking", exc)
 
     def _evolve(self, new_id: str, neighbors: list, *, exclude: Optional[set] = None) -> list[str]:
         """A-MEM-style memory evolution on write: a new memory
@@ -1040,7 +1257,12 @@ class MemoryEngine:
             for sim, nrec in ranked:
                 if len(linked) >= EVOLVE_MAX_LINKS:
                     break
-                if sim < RELATED_SIM_FLOOR or nrec.id in exclude or nrec.id == new_id:
+                try:
+                    similarity = float(sim)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (not math.isfinite(similarity) or similarity < RELATED_SIM_FLOOR
+                        or nrec.id in exclude or nrec.id == new_id):
                     continue
                 if self.store.has_link(new_id, nrec.id):
                     continue
@@ -1050,9 +1272,90 @@ class MemoryEngine:
             if linked:
                 self.store.audit("resolver", "evolve", new_id,
                                  f"auto-linked to {len(linked)} related: {', '.join(linked)}")
-        except Exception:
+        except Exception as exc:
+            self._warn_redacted_failure("memory evolution", exc)
             return linked
         return linked
+
+    def _search_resolution_vectors(
+        self,
+        vec: np.ndarray,
+        candidate_k: int,
+        flt: SearchFilter,
+        *,
+        canonical_only: bool = False,
+    ) -> tuple[list[tuple[str, float]], bool]:
+        """Search the injected index, falling back to canonical stored vectors.
+
+        Contradiction resolution is part of write integrity. Treating an index outage
+        as an empty neighborhood would silently turn a NOOP/INVALIDATE into ADD. The
+        store-backed exact scan preserves portable NumPy semantics without importing a
+        concrete backend into core. If both paths fail, the write aborts before mutation.
+        """
+        if not canonical_only:
+            try:
+                indexed = self.index.search(vec, candidate_k, filter=flt)
+                valid_indexed: list[tuple[str, float]] = []
+                for item in indexed:
+                    try:
+                        memory_id, similarity = item
+                        similarity = float(similarity)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if (isinstance(memory_id, str) and memory_id and
+                            math.isfinite(similarity)):
+                        valid_indexed.append((memory_id, similarity))
+                if valid_indexed:
+                    return valid_indexed, False
+                # An empty injected result is not enough evidence that no related
+                # memory exists: an asynchronously rebuilt or partially populated
+                # index can be empty while the canonical Store still has vectors.
+                # Fall through to the authoritative scan so resolution cannot turn
+                # a NOOP/INVALIDATE into an ADD merely because the index is stale.
+            except Exception as exc:
+                failure_type = type(exc).__name__
+                logger.warning(
+                    "vector-index search failed during resolution (%s); "
+                    "using canonical vector scan",
+                    failure_type,
+                )
+                try:
+                    self.store.audit(
+                        "resolver",
+                        "index_search_fallback",
+                        flt.workspace_id or "resolution",
+                        "failure_type=%s" % failure_type,
+                        commit=not self.store.conn.transaction_owned_by_current_thread(),
+                    )
+                except Exception as audit_exc:
+                    logger.warning(
+                        "could not audit resolution vector fallback (%s)",
+                        type(audit_exc).__name__,
+                    )
+
+        try:
+            query = np.asarray(vec, dtype=np.float32)
+            if query.ndim != 1 or query.shape[0] < 1 or not np.isfinite(query).all():
+                raise ValueError("resolution query vector must be a finite one-dimensional array")
+            with np.errstate(over="ignore", invalid="ignore"):
+                norm = float(np.linalg.norm(query))
+            if not math.isfinite(norm):
+                raise ValueError("resolution query vector norm must be finite")
+            if norm > 0:
+                query = query / norm
+            scores: list[tuple[str, float]] = []
+            for memory_id, stored in self.store.iter_vectors(
+                flt, dim=int(query.shape[0])
+            ):
+                if stored.shape != query.shape:
+                    continue
+                score = float(stored @ query)
+                if math.isfinite(score):
+                    scores.append((memory_id, score))
+            scores.sort(key=lambda item: (-item[1], item[0]))
+            return scores[:max(0, int(candidate_k))], True
+        except Exception as exc:
+            raise RuntimeError("vector neighbor resolution unavailable") from exc
 
     def _resolve_against_neighbors(self, text: str, vec: np.ndarray, *, workspace_id: str,
                                    repo_id: Optional[str], session_id: Optional[str],
@@ -1063,17 +1366,16 @@ class MemoryEngine:
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors, conflicted_with)``
         so the caller can also evolve the neighborhood and persist a conflict repair.
-        Never raises — a broken/missing index degrades to "no neighbors found" (ADD),
-        not a write failure."""
+        An injected-index failure uses the canonical stored-vector mirror; if that scan
+        also fails, resolution aborts rather than blindly inserting overlapping truth."""
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id if scope == Scope.SESSION else None,
             scopes=[scope], mtypes=[mtype], valid_at=valid_at,
         )
-        try:
-            hits = self.index.search(vec, candidate_k, filter=flt)
-        except Exception:
-            hits = []
+        hits, canonical_fallback = self._search_resolution_vectors(
+            vec, candidate_k, flt
+        )
         current_fallback = False
         if not hits and valid_at is not None:
             # A candidate may be backdated before an already-recorded claim. That claim
@@ -1087,11 +1389,13 @@ class MemoryEngine:
                 session_id=session_id if scope == Scope.SESSION else None,
                 scopes=[scope], mtypes=[mtype],
             )
-            try:
-                hits = self.index.search(vec, candidate_k, filter=current_filter)
-                current_fallback = True
-            except Exception:
-                pass
+            hits, canonical_fallback = self._search_resolution_vectors(
+                vec,
+                candidate_k,
+                current_filter,
+                canonical_only=canonical_fallback,
+            )
+            current_fallback = True
         neighbors = []
         for nid, sim in hits:
             nrec = self.store.get_memory(nid)
@@ -1276,21 +1580,15 @@ class MemoryEngine:
         """One sleep-time consolidation sweep — episodic→semantic distillation plus
         decayed-transient archival. See ``core.consolidate.consolidate`` for knobs.
 
-        Marks the sweep as an engine-internal producer for its duration, so the structured
-        digests it writes keep their graph hints (they are distilled from this device's
-        own memories by the operator's configured LLM, exactly like an ``Extractor``'s
-        output — not caller-supplied metadata). Every production entry point goes through
-        here; see ``_rehome_untrusted_graph_hints`` for why this cannot be signalled
-        in-band through the metadata dict.
+        LLM-derived facts, profiles, and graph hints remain review-pending; valid source
+        IDs establish lineage but do not establish semantic entailment. Deterministic
+        fallback digests retain the ordinary local trust policy.
         """
         from engraphis.core.consolidate import consolidate as _consolidate
-        depth = getattr(self._internal_writes, "depth", 0)
-        self._internal_writes.depth = depth + 1
-        try:
-            return _consolidate(self, workspace_id=workspace_id, repo_id=repo_id,
-                                dry_run=dry_run, llm=llm, **kw)
-        finally:
-            self._internal_writes.depth = depth
+        return _consolidate(
+            self, workspace_id=workspace_id, repo_id=repo_id,
+            dry_run=dry_run, llm=llm, **kw,
+        )
 
     # ── read ──────────────────────────────────────────────────────────────────
     def _recall_filter(self, *, workspace_id: Optional[str], repo_id: Optional[str],
@@ -1431,8 +1729,16 @@ class MemoryEngine:
             or getattr(counter, "__name__", None)
             or type(counter).__name__
         )
+        def count_tokens(value: str) -> int:
+            raw_count: object = counter(value)
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int):
+                raise ValueError("adaptive context token counter must return a non-negative integer")
+            if raw_count < 0:
+                raise ValueError("adaptive context token counter must return a non-negative integer")
+            return raw_count
+
         source_history = str(history or "")
-        history_tokens = int(counter(source_history))
+        history_tokens = count_tokens(source_history)
 
         if retrieval_token_budget is None:
             retrieval_budget = min(max_budget, max(1, max_budget // 2)) if max_budget else 0
@@ -1505,7 +1811,7 @@ class MemoryEngine:
             wider, truncated = fit_recent_history(
                 source_history,
                 token_budget=max_budget,
-                count_tokens=counter,
+                count_tokens=count_tokens,
             )
             if wider:
                 return AdaptiveContextResult(
@@ -1513,7 +1819,7 @@ class MemoryEngine:
                     mode="history_fallback",
                     reason="retrieval support was weak, so raw recent history was widened",
                     history_tokens=history_tokens,
-                    context_tokens=int(counter(wider)),
+                    context_tokens=count_tokens(wider),
                     max_context_tokens=max_budget,
                     retrieval_budget_tokens=retrieval_budget,
                     retrieval_support=support,
@@ -1552,7 +1858,7 @@ class MemoryEngine:
             mode="retrieval",
             reason="history exceeded the prompt budget and retrieved evidence was strong",
             history_tokens=history_tokens,
-            context_tokens=int(counter(result.context)),
+            context_tokens=count_tokens(result.context),
             max_context_tokens=max_budget,
             retrieval_budget_tokens=retrieval_budget,
             retrieval_support=support,
@@ -1666,8 +1972,21 @@ class MemoryEngine:
         deliberately excludes (it's the live-recall path), so this recomputes similarity
         directly from ``Store.iter_vectors(..., include_invalid=True)`` instead.
         """
+        semantic_ready = bool(getattr(self.embedder, "supports_semantic_search", False))
+        persistent_store = (
+            self.store.path != ":memory:"
+            and not self.store.path.startswith("file::memory:")
+        )
+        if semantic_ready and persistent_store:
+            # History helpers bypass RecallEngine's readiness gate and read the
+            # portable vector mirror directly; never compare a query against a
+            # stale/mixed embedding space on that path.
+            semantic_ready = bool(
+                self.embedding_space
+                and self.store.embedding_space_ready(self.embedding_space)
+            )
         sem: dict[str, float] = {}
-        if bool(getattr(self.embedder, "supports_semantic_search", False)):
+        if semantic_ready:
             qvec = self.embedder.embed([query])[0]
             qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
             for mid, vec in self.store.iter_vectors(
@@ -1857,7 +2176,7 @@ class MemoryEngine:
             }
         )
         new_id = self.remember(
-            new_content, workspace_id=old.workspace_id, repo_id=old.repo_id,
+            new_content, workspace_id=_required_memory_workspace_id(old), repo_id=old.repo_id,
             session_id=old.session_id, mtype=old.mtype,
             scope=_writable_scope(old.scope, old.repo_id), title=old.title,
             importance=old.importance, keywords=old.keywords, metadata=metadata,
@@ -1927,7 +2246,7 @@ class MemoryEngine:
             # bounded exact-scope scan is both portable to SQLite builds without JSON1 and
             # avoids adding a denormalized trust index solely for retry idempotency.
             source_scope = SearchFilter(
-                workspace_id=old.workspace_id,
+                workspace_id=_required_memory_workspace_id(old),
                 repo_id=old.repo_id,
                 session_id=old.session_id if old.scope == Scope.SESSION else None,
             )
@@ -1971,7 +2290,7 @@ class MemoryEngine:
             }
             result = self.remember_with_resolution(
                 content,
-                workspace_id=old.workspace_id,
+                workspace_id=_required_memory_workspace_id(old),
                 repo_id=old.repo_id,
                 session_id=old.session_id,
                 mtype=old.mtype,
@@ -2074,7 +2393,7 @@ class MemoryEngine:
 
         result = self.remember_with_resolution(
             old.content,
-            workspace_id=old.workspace_id,
+            workspace_id=_required_memory_workspace_id(old),
             repo_id=target_repo_id,
             session_id=None,
             mtype=old.mtype,
@@ -2462,7 +2781,7 @@ class MemoryEngine:
         self.store.conn.commit()
         code_memory_links = self.rebuild_code_memory_links(repo_id=repo_id)
 
-        primary_lang = max(lang_counts, key=lang_counts.get) if lang_counts else ""
+        primary_lang = max(lang_counts.items(), key=lambda item: item[1])[0] if lang_counts else ""
         self.store.update_repo_index(
             repo_id, root_path=str(root), primary_lang=primary_lang,
             settings={
@@ -2911,8 +3230,8 @@ class MemoryEngine:
             in touched_leaf_names
         ]
         dependent_files = sorted({
-            edge.get("file") for edge in inbound
-            if edge.get("file") and edge.get("file") not in normalized
+            file for edge in inbound
+            if isinstance((file := edge.get("file")), str) and file and file not in normalized
         })
 
         memory_mentions: dict[str, dict] = {}

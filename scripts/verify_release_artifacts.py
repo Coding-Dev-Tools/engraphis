@@ -20,14 +20,26 @@ class ArtifactIncomplete(RuntimeError):
     """The published set is valid so far but does not contain every candidate file."""
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep release metadata reads pinned to the configured PyPI origin."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def local_artifacts(directory: Path) -> dict[str, str]:
-    files = sorted(path for path in Path(directory).iterdir() if path.is_file())
+    files = sorted(
+        path for path in Path(directory).iterdir()
+        if path.is_file() or path.is_symlink()
+    )
     if not files:
         raise ArtifactMismatch("the local distribution set is empty")
     result = {}
     for path in files:
-        if not (path.name.endswith(".whl") or path.name.endswith(".tar.gz")):
-            raise ArtifactMismatch("the distribution set contains a non-package file")
+        if path.is_symlink() or not path.is_file() or not (
+            path.name.endswith(".whl") or path.name.endswith(".tar.gz")
+        ):
+            raise ArtifactMismatch("the distribution set contains an unsafe non-package file")
         if path.name in result:
             raise ArtifactMismatch("the distribution set contains duplicate filenames")
         result[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -38,8 +50,10 @@ def pypi_artifacts(version: str) -> dict[str, str]:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ArtifactMismatch("release version must be stable semantic version syntax")
     url = "https://pypi.org/pypi/engraphis/%s/json" % quote(version, safe="")
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=30) as response:
             metadata = json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -47,8 +61,12 @@ def pypi_artifacts(version: str) -> dict[str, str]:
         raise ArtifactMismatch("PyPI metadata request failed") from None
     except (OSError, ValueError, json.JSONDecodeError):
         raise ArtifactMismatch("PyPI metadata response was unavailable or malformed") from None
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("urls"), list):
+        raise ArtifactMismatch("PyPI returned malformed artifact metadata")
     result = {}
-    for item in metadata.get("urls", []):
+    for item in metadata["urls"]:
+        if not isinstance(item, dict):
+            raise ArtifactMismatch("PyPI returned malformed artifact metadata")
         filename = item.get("filename")
         digest = (item.get("digests") or {}).get("sha256")
         if (not isinstance(filename, str) or not isinstance(digest, str)

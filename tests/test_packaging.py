@@ -160,6 +160,32 @@ def test_distribution_configuration_excludes_runtime_bytecode():
     assert "global-exclude *.pyo" in manifest
 
 
+def test_native_vector_extra_uses_delete_safe_sqlitevec_floor():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'vector = [\n    "sqlite-vec>=0.1.9,<0.2",\n]' in pyproject
+    test_extra = pyproject[pyproject.index("test = ["):]
+    assert '"sqlite-vec>=0.1.9,<0.2"' in test_extra
+    all_extra = pyproject[pyproject.index("all = ["):pyproject.index("dev = [")]
+    assert "sqlite-vec" not in all_extra
+
+
+def test_release_test_tooling_excludes_vulnerable_pytest_and_uses_private_temp_roots():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert pyproject.count(
+        '"pytest>=9.0.3; python_version >= \'3.10\'"'
+    ) == 2
+    for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        workflow = (ROOT / relative).read_text(encoding="utf-8")
+        pytest_lines = [
+            line for line in workflow.splitlines() if "python -m pytest" in line
+        ]
+        assert pytest_lines
+        assert all('--basetemp="${RUNNER_TEMP}/engraphis-pytest"' in line
+                   for line in pytest_lines)
+
+
 def test_migration_backups_are_ignored_for_database_paths_without_extensions():
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "*.pre-migration-v*.bak" in ignore
@@ -176,19 +202,21 @@ def test_distribution_configuration_includes_external_dashboard_assets():
 def test_distribution_configuration_includes_public_evidence_tools():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    package_data = pyproject[pyproject.index('[tool.setuptools.package-data]'):
+                             pyproject.index('[tool.setuptools.exclude-package-data]')]
     assert 'include = ["engraphis*", "scripts*", "eval*"]' in pyproject
-    assert (
-        '"eval" = ["BASELINES.md", "EVIDENCE.md", "configs/*.json", "datasets/*.jsonl"]'
-        in pyproject
-    )
+    assert '"datasets/locomo10_repair_manifest.json"' in package_data
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
+        "include docs/RECALL_RECOVERY.md",
+        "include docs/images/context-efficiency.svg",
         "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
         "include eval/BASELINES.md",
         "include eval/EVIDENCE.md",
         "recursive-include eval/configs *.json",
         "recursive-include eval/datasets *.jsonl",
+        "include eval/datasets/locomo10_repair_manifest.json",
     ):
         assert rule in manifest
     assert "docker-compose.lan.yml" in REQUIRED_SDIST
@@ -325,6 +353,9 @@ def test_dependency_floors_exclude_known_vulnerable_and_breaking_releases():
     assert "python-multipart>=0.0.31" in combined
     assert "starlette>=1.3.1,<2" in combined
     assert "Pillow>=12.3.0" in pyproject
+    assert pyproject.count("cryptography>=50.0.0") == 4
+    assert "cryptography>=50.0.0" in requirements
+    assert "cryptography>=48.0.1" not in combined
 
 
 def test_example_config_preserves_platform_database_default():

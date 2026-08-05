@@ -36,13 +36,34 @@ jobs:
       - name: Unit tests (full suite — extras-gated tests included)
         run: |
           python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
-          python -m pytest -o addopts="" tests/ -q -rs
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Retrieval eval gate — CodeMem (coding-agent wedge, incl. conflict resolution)
         run: python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
       - name: Ablation (vector-only vs hybrid)
         run: python -m eval.ablation
+      - name: Reinforcement state-transition gate
+        run: python -m eval.reinforcement
+      - name: Adversarial memory prompt-boundary gate
+        run: python -m eval.adversarial_memory_security
+
+  typecheck:
+    name: core + backends typecheck (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install typecheck dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Typecheck core and backends (Pyright)
+        run: pyright
 
   encryption:
     name: encryption driver gate (Python ${{ matrix.python-version }})
@@ -66,7 +87,9 @@ jobs:
       # extension during the long general suite. Keep its real driver contract in
       # this dedicated, short-lived process rather than skipping encryption coverage.
       - name: Encryption at-rest integration tests
-        run: python -m pytest -o addopts="" tests/test_encrypted_store.py -q -rs
+        run: |
+          python -c "import sqlcipher3; print(sqlcipher3.__file__)"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/test_encrypted_store.py -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
 
   core-py39:
     name: core floor (numpy-only, Python 3.9)
@@ -81,13 +104,59 @@ jobs:
       - name: Install (numpy-only core — the minimum supported runtime)
         run: |
           python -m pip install --upgrade pip
-          pip install numpy pytest
+          pip install numpy "pytest<9"
       - name: Unit tests (extras-gated tests skip; the core must pass)
-        run: python -m pytest -o addopts="" tests/ -q -rs
+        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Ablation
         run: python -m eval.ablation
+      - name: Reinforcement state-transition gate
+        run: python -m eval.reinforcement
+      - name: Adversarial memory prompt-boundary gate
+        run: python -m eval.adversarial_memory_security
+      - name: Build and smoke installed core artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "build==1.2.2"
+          dist_dir="$RUNNER_TEMP/engraphis-py39-dist"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          python -m build --outdir "$dist_dir"
+          index=0
+          for artifact in "$dist_dir"/*.whl "$dist_dir"/*.tar.gz; do
+            index=$((index + 1))
+            venv="$RUNNER_TEMP/engraphis-py39-artifact-$index"
+            python -m venv "$venv"
+            "$venv/bin/python" -m pip install --disable-pip-version-check "$artifact"
+            "$venv/bin/python" -m pip check
+            (
+              cd "$RUNNER_TEMP"
+              "$venv/bin/python" - <<'PY'
+          import pathlib
+          import sys
+
+          import engraphis
+          from engraphis.core.engine import MemoryEngine
+
+          package = pathlib.Path(engraphis.__file__).resolve()
+          assert pathlib.Path(sys.prefix).resolve() in package.parents, package
+          engine = MemoryEngine.create(":memory:")
+          workspace_id = engine.store.get_or_create_workspace("py39-artifact")
+          memory_id = engine.remember(
+              "The Python 3.9 artifact marker is indigo.",
+              workspace_id=workspace_id,
+              resolve_conflicts=False,
+          )
+          result = engine.recall("Python 3.9 artifact marker", workspace_id=workspace_id, k=3)
+          assert any(chunk["id"] == memory_id for chunk in result.chunks)
+          engine.store.close()
+          PY
+              "$venv/bin/engraphis" --help
+              "$venv/bin/engraphis" --version
+              "$venv/bin/engraphis-cli" --help
+            )
+          done
 
   coverage:
     name: coverage gate (Python 3.11)
@@ -104,7 +173,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" pytest-cov
       - name: Coverage run (all extras-gated tests, tracked modules)
-        run: python -m pytest -o addopts="" tests/ -q -rs --cov=engraphis --cov-report=term-missing --cov-fail-under=60
+        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest" --cov=engraphis --cov-report=term-missing --cov-fail-under=60
 
   hygiene:
     name: repo hygiene gate (no stray DBs/logs)
@@ -239,7 +308,7 @@ jobs:
             rm -rf "$audit_dir"
           }
           trap cleanup EXIT
-          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
           docker create --name "$container" engraphis:ci >/dev/null
           docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
           python -m pip_audit --path "$audit_dir"
@@ -277,9 +346,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Install pinned build and audit tooling
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "build==1.5.0" "pip-audit==2.10.1"
       - name: Build sdist + wheel and verify a clean install
         run: |
-          python -m pip install --upgrade pip build pip-audit
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
           python -m build
           python scripts/verify_distribution_contents.py dist/*
           python -m venv .audit-venv

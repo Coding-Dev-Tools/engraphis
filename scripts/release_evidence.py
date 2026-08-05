@@ -146,13 +146,25 @@ def distribution_artifacts(directory: Path, version: str) -> list[dict[str, Any]
     artifacts = []
     for path in paths:
         name = path.name
-        if not name.endswith(allowed) or not _SAFE_PATH.fullmatch(name) or _SECRET_NAME.search(name):
+        if path.is_symlink() or not path.is_file() or (
+                not name.endswith(allowed) or not _SAFE_PATH.fullmatch(name)
+                or _SECRET_NAME.search(name)
+        ):
             raise EvidenceError("distribution directory contains an unsafe non-package file")
         if not name.startswith(PACKAGE + "-" + version + ".") and not name.startswith(
             PACKAGE + "-" + version + "-"
         ):
             raise EvidenceError("distribution filename does not match package version")
+        if _SECRET_VALUE.search(name):
+            raise EvidenceError("evidence must not include secret-like values")
         artifacts.append({"filename": name, "bytes": path.stat().st_size, "sha256": _sha256(path)})
+    if (
+        sum(item["filename"].endswith(".whl") for item in artifacts) != 1
+        or sum(item["filename"].endswith(".tar.gz") for item in artifacts) != 1
+    ):
+        raise EvidenceError(
+            "distribution directory must contain exactly one wheel and one source distribution"
+        )
     return artifacts
 
 
@@ -188,8 +200,61 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
         "tests": [
             {"id": "ruff", "command": ["ruff", "check", "."], "inputs": []},
             {
+                "id": "pyright-core-backends",
+                "command": ["pyright"],
+                "workflow_job": "build",
+                "workflow_steps": ["Full release gate"],
+                "inputs": [],
+            },
+            {
+                "id": "codeql",
+                "command": [
+                    "python", "scripts/check_codeql_sarif.py", "codeql-results",
+                ],
+                "workflow_job": "code-security",
+                "workflow_steps": [
+                    "Initialize CodeQL",
+                    "Analyze complete source tree",
+                    "Require clean CodeQL results",
+                ],
+                "inputs": [],
+            },
+            {
                 "id": "pytest",
                 "command": ["python", "-m", "pytest", "-o", "addopts=", "tests/", "-q", "-rs"],
+                "inputs": [],
+            },
+            {
+                "id": "reproducible-distributions",
+                "command": [
+                    "bash", "-c",
+                    "diff <(cd dist && sha256sum * | sort) "
+                    "<(cd dist-repeat && sha256sum * | sort)",
+                ],
+                "workflow_job": "build",
+                "workflow_steps": [
+                    "Build source and universal wheel distributions",
+                    "Validate distributions",
+                ],
+                "inputs": [],
+            },
+            {
+                "id": "installed-artifact-smoke",
+                "command": ["python", "-m", "scripts.smoke_entry_points", "--timeout", "20"],
+                "workflow_job": "build",
+                "workflow_steps": ["Smoke installed wheel and source distribution"],
+                "inputs": [],
+            },
+            {
+                "id": "installed-artifact-smoke-py39",
+                "command": [
+                    "python", "-m", "pip", "install", "<downloaded-wheel-or-sdist>",
+                ],
+                "workflow_job": "artifact-core-py39",
+                "workflow_steps": [
+                    "Download exact release distributions",
+                    "Install, verify, and smoke wheel and source distribution",
+                ],
                 "inputs": [],
             },
             {
@@ -232,6 +297,15 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
                 "inputs": [],
             },
             {
+                "id": "pi-extension",
+                "command": ["npm", "run", "verify"],
+                "workflow_job": "pi-extension",
+                "workflow_steps": [
+                    "Verify the publishable Pi package and live bridge",
+                ],
+                "inputs": [],
+            },
+            {
                 "id": "dependency-audit",
                 "command": ["python", "-m", "pip_audit", "--local"],
                 "inputs": [],
@@ -271,6 +345,16 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
                     _file_input(root, "eval/datasets/sample.jsonl"),
                     _file_input(root, "eval/datasets/graph_multihop.jsonl"),
                 ],
+            },
+            {
+                "id": "adversarial-memory-security",
+                "command": ["python", "-m", "eval.adversarial_memory_security"],
+                "inputs": [],
+            },
+            {
+                "id": "reinforcement-state-transition",
+                "command": ["python", "-m", "eval.reinforcement"],
+                "inputs": [],
             },
         ],
     }
@@ -317,7 +401,8 @@ def build_evidence(
                 "workflow": ".github/workflows/release.yml",
                 "job": "release-evidence",
                 "completed_gate_jobs": [
-                    "build", "python-matrix", "encryption", "browser-accessibility", "docker-smoke",
+                    "build", "python-matrix", "artifact-core-py39", "encryption",
+                    "browser-accessibility", "pi-extension", "docker-smoke", "code-security",
                 ],
                 "sbom_generator": {
                     "name": "cyclonedx-bom",

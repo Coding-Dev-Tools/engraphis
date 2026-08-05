@@ -31,7 +31,12 @@ from typing import Any, Optional
 
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
-from engraphis.core.poisoning import REVIEW_PENDING, prompt_eligible
+from engraphis.core.poisoning import (
+    REVIEW_PENDING,
+    llm_consolidation_kind,
+    pending_llm_consolidation_envelope,
+    prompt_eligible,
+)
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger(__name__)
@@ -583,6 +588,18 @@ def _derived_safety_is_current(
     )
     if current_sensitivity != expected_sensitivity:
         return False
+    llm_kind = llm_consolidation_kind(derived.provenance, derived.content)
+    if llm_kind is not None:
+        dedicated = derived.provenance if isinstance(derived.provenance, dict) else {}
+        raw_nested = (derived.metadata or {}).get("provenance")
+        nested = raw_nested if isinstance(raw_nested, dict) else {}
+        return all(
+            provenance.get("trusted") is False
+            and provenance.get("review_state") == REVIEW_PENDING
+            and provenance.get("derived_by_llm") is True
+            and provenance.get("derived_graph_inert") is True
+            for provenance in (dedicated, nested)
+        )
     # Inheritance is tightening-only: an already-untrusted derived row remains
     # untrusted even after all of its sources are later approved.
     return not (
@@ -651,14 +668,10 @@ def _audit_consolidation_once(engine, action: str, target: str, detail: str) -> 
         engine.store.audit("consolidation", action, target, detail)
 
 
-def _resume_structured_digests(
-    engine, cluster: list[MemoryRecord], *, supersede_sources: bool = False,
-    now: Optional[float] = None,
-) -> None:
+def _resume_structured_digests(engine, cluster: list[MemoryRecord]) -> None:
     """Repair every structured fact already committed for this cluster."""
     source_by_id = {memory.id: memory for memory in cluster}
     cluster_ids = set(source_by_id)
-    cited_sources: set[str] = set()
     for existing, cited_ids in _derived_memories_for_source_subset(
         engine.store, cluster[0], cluster_ids,
         provenance_source="structured_consolidation",
@@ -666,7 +679,6 @@ def _resume_structured_digests(
         sources = [source_by_id[source_id] for source_id in cited_ids]
         sensitivity, trusted = _inherit_safety(engine, existing.id, sources)
         _ensure_derived_links(engine.store, existing.id, sources, "consolidates")
-        cited_sources.update(cited_ids)
         structured = (existing.metadata or {}).get("structured_consolidation") or {}
         audit = structured.get("llm") or {}
         try:
@@ -681,14 +693,6 @@ def _resume_structured_digests(
             f"confidence={float(confidence):.2f}; sensitivity={sensitivity}; "
             f"trusted={trusted}; prompt_sha256={audit.get('prompt_sha256', '')}",
         )
-    if supersede_sources:
-        at = time.time() if now is None else now
-        for memory in cluster:
-            if memory.id in cited_sources:
-                engine.store.close_validity(
-                    memory.id, at=at, actor="consolidation",
-                    reason="superseded by structured consolidation",
-                )
 
 
 def _ensure_derived_links(store, derived_id: str, sources: list[MemoryRecord],
@@ -706,7 +710,8 @@ def _ensure_derived_links(store, derived_id: str, sources: list[MemoryRecord],
 
 
 def _write_or_resume_digest(engine, cluster: list[MemoryRecord], *, content: str,
-                            subject: str, now: float) -> tuple[str, bool]:
+                            subject: str, now: float,
+                            llm_derived: bool = False) -> tuple[str, bool]:
     """Write a digest once, or finish one whose links were interrupted."""
     store = engine.store
     source_ids = {memory.id for memory in cluster}
@@ -725,12 +730,16 @@ def _write_or_resume_digest(engine, cluster: list[MemoryRecord], *, content: str
             f"(sensitivity={sensitivity}, trusted={trusted})",
         )
         return existing.id, False
-    return _write_digest(engine, cluster, content=content, subject=subject, now=now), True
+    return _write_digest(
+        engine, cluster, content=content, subject=subject, now=now,
+        llm_derived=llm_derived,
+    ), True
 
 
 def _write_or_resume_profile(engine, name: str, etype: str,
                              sources: list[MemoryRecord], *, content: str,
-                             now: float) -> tuple[str, bool]:
+                             now: float,
+                             llm_derived: bool = False) -> tuple[str, bool]:
     """Write a profile once, or finish one whose links were interrupted."""
     store = engine.store
     existing = _derived_memory_for_sources(
@@ -746,7 +755,10 @@ def _write_or_resume_profile(engine, name: str, etype: str,
             f"(sensitivity={sensitivity}, trusted={trusted})",
         )
         return existing.id, False
-    return _write_profile(engine, name, etype, sources, content=content, now=now), True
+    return _write_profile(
+        engine, name, etype, sources, content=content, now=now,
+        llm_derived=llm_derived,
+    ), True
 
 
 def _error_entry(cluster: list[MemoryRecord], exc: Exception) -> dict:
@@ -803,10 +815,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         if structured:
             for retry_cluster in _structured_retry_clusters(store, flt):
                 try:
-                    _resume_structured_digests(
-                        engine, retry_cluster,
-                        supersede_sources=bool(supersede_sources), now=now,
-                    )
+                    _resume_structured_digests(engine, retry_cluster)
                 except Exception as exc:
                     report["errors"].append(_error_entry(retry_cluster, exc))
 
@@ -856,7 +865,8 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 
     if structured:
         report["structured"] = {"enabled": True, "attempted": 0, "succeeded": 0,
-                                "fallbacks": 0, "sources_superseded": 0}
+                                "fallbacks": 0, "sources_superseded": 0,
+                                "supersessions_deferred": 0}
     distilled_before = distilled_after = 0
     archived_tokens = 0
 
@@ -866,9 +876,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
             try:
                 # Resume partial structured facts even when their remaining source
                 # subset is smaller than MIN_CLUSTER.
-                _resume_structured_digests(
-                    engine, cluster, supersede_sources=bool(supersede_sources), now=now,
-                )
+                _resume_structured_digests(engine, cluster)
             except Exception as exc:
                 report["errors"].append(_error_entry(cluster, exc))
                 continue
@@ -931,12 +939,11 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                         for f in structured_facts
                     ]
                     if supersede_sources:
-                        entry["would_supersede_sources"] = source_ids
+                        entry["would_defer_supersession_until_review"] = source_ids
                 else:
                     try:
                         ids = _write_structured_digests(
-                            engine, cluster, structured_facts, subject=subject, now=now,
-                            supersede_sources=bool(supersede_sources))
+                            engine, cluster, structured_facts, subject=subject, now=now)
                     except Exception as exc:
                         report["errors"].append(_error_entry(cluster, exc))
                         continue
@@ -944,13 +951,15 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                     if ids:
                         entry["id"] = ids[0]
                     if supersede_sources:
-                        entry["superseded_sources"] = source_ids
-                        report["structured"]["sources_superseded"] += len(source_ids)
+                        # Valid citations establish lineage, not semantic entailment. Keep
+                        # authoritative sources live until the derived facts are reviewed.
+                        entry["supersession_deferred"] = source_ids
+                        report["structured"]["supersessions_deferred"] += len(source_ids)
                 report["digests_created"].append(entry)
                 continue
             report["structured"]["fallbacks"] += 1
 
-        content, subject = _build_digest_content(cluster, llm=llm)
+        content, subject, llm_derived = _build_digest_content(cluster, llm=llm)
         t_after = estimate_tokens(content)
         distilled_before += t_before
         distilled_after += t_after
@@ -962,6 +971,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
             try:
                 digest_id, created = _write_or_resume_digest(
                     engine, cluster, content=content, subject=subject, now=now,
+                    llm_derived=llm_derived,
                 )
             except Exception as exc:
                 report["errors"].append(_error_entry(cluster, exc))
@@ -1144,16 +1154,34 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
         [record.sensitivity or "normal"] + [(m.sensitivity or "normal") for m in sources],
         key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
     )
-    trusted = (prompt_eligible(record.provenance, record.metadata)
-               and _sources_are_trusted(sources))
     provenance = dict(record.provenance or {})
+    metadata = dict(record.metadata or {})
+    # Source-ID membership proves lineage, not entailment. Structured facts always come
+    # from an LLM, and optional prose summaries carry the explicit marker below; neither
+    # may inherit prompt authority merely because all cited sources are approved.
+    llm_derived = llm_consolidation_kind(provenance, record.content) is not None
+    trusted = (
+        not llm_derived
+        and prompt_eligible(record.provenance, record.metadata)
+        and _sources_are_trusted(sources)
+    )
     provenance["trusted"] = trusted
+    if llm_derived:
+        provenance, metadata, _ = pending_llm_consolidation_envelope(
+            provenance, metadata, record.content,
+        )
+        engine.store.retire_memory_graph_state(
+            memory_id,
+            preserve_link_relations=("consolidates", PROFILE_RELATION),
+            commit=False,
+        )
+        provenance["derived_graph_inert"] = True
     if not trusted:
         # A source can be downgraded after a derived row was committed.  Reopening
         # approval keeps retry-repaired metadata truthful instead of leaving an
         # approved-looking row that only happens to fail prompt eligibility.
         provenance["review_state"] = REVIEW_PENDING
-    metadata = dict(record.metadata or {})
+    metadata["provenance"] = provenance
     engine.store.conn.execute(
         "UPDATE memories SET sensitivity=?, metadata=?, provenance=? WHERE id=?",
         (sensitivity,
@@ -1414,7 +1442,9 @@ def _structured_cluster_facts(cluster: list[MemoryRecord], *, llm: Any,
     return out or None
 
 
-def _build_digest_content(cluster: list[MemoryRecord], *, llm: Any) -> tuple[str, str]:
+def _build_digest_content(
+    cluster: list[MemoryRecord], *, llm: Any,
+) -> tuple[str, str, bool]:
     """The digest text + its subject label. Deterministic by default; an optional LLM
     writes a nicer summary but falls back to the deterministic text on any error, so the
     content (and thus its token estimate) is knowable without writing anything."""
@@ -1422,27 +1452,45 @@ def _build_digest_content(cluster: list[MemoryRecord], *, llm: Any) -> tuple[str
     quotes = [m.content.strip().replace("\n", " ")[:300] for m in cluster[:DIGEST_QUOTES]]
     content = (f"Recurring pattern ({len(cluster)} occurrences): {subject}.\n"
                + "\n".join(f"- {q}" for q in quotes))
+    llm_derived = False
     if llm is not None:
         summary = _llm_summary(llm, _DIGEST_SYSTEM_PROMPT,
                                "\n".join(f"- {m.content.strip()}" for m in cluster))
         if summary:
             content = f"{summary}\n\n(Consolidated from {len(cluster)} episodes: {subject})"
-    return content, subject
+            llm_derived = True
+    return content, subject, llm_derived
 
 
 def _write_digest(engine, cluster: list[MemoryRecord], *, content: str, subject: str,
-                  now: float) -> str:
+                  now: float, llm_derived: bool = False) -> str:
     first = cluster[0]
     importance = max([m.importance or 0.0 for m in cluster] + [0.5])
-    trusted = _sources_are_trusted(cluster)
+    sources_trusted = _sources_are_trusted(cluster)
+    trusted = sources_trusted and not llm_derived
+    provenance = {
+        "source": "consolidation",
+        "trusted": trusted,
+        "consolidates": [m.id for m in cluster],
+    }
+    metadata: dict[str, Any] = {"provenance": provenance}
+    if llm_derived:
+        provenance.update({
+            "review_state": REVIEW_PENDING,
+            "trust_origin": "llm_consolidation",
+            "derived_by_llm": True,
+        })
+        metadata["llm_consolidation"] = {
+            "review_required": True,
+            "source_count": len(cluster),
+        }
     digest_id = engine.remember(
         content,
         workspace_id=first.workspace_id, repo_id=first.repo_id,
         mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
         title=f"Consolidated: {subject}"[:200], importance=importance,
         keywords=_common_tokens(cluster, k=8),
-        metadata={"provenance": {"source": "consolidation", "trusted": trusted,
-                                 "consolidates": [m.id for m in cluster]}},
+        metadata=metadata,
         valid_from=now,
         resolve_conflicts=False,   # the digest is new by construction
     )
@@ -1455,11 +1503,9 @@ def _write_digest(engine, cluster: list[MemoryRecord], *, content: str, subject:
 
 
 def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[dict], *,
-                              subject: str, now: float,
-                              supersede_sources: bool = False) -> list[str]:
+                              subject: str, now: float) -> list[str]:
     """Write validated facts and link each one only to its cited source memories."""
     source_by_id = {memory.id: memory for memory in cluster}
-    cited_sources: set[str] = set()
     ids: list[str] = []
     for fact in facts:
         fact_source_ids = [
@@ -1470,14 +1516,15 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             continue
         sources = [source_by_id[source_id] for source_id in fact_source_ids]
         first = sources[0]
-        trusted = _sources_are_trusted(sources)
-        cited_sources.update(fact_source_ids)
         base_importance = max([memory.importance or 0.0 for memory in sources] + [0.5])
         importance = max(base_importance, float(fact.get("importance") or 0.0))
         metadata = {
             "provenance": {
                 "source": "structured_consolidation",
-                "trusted": trusted,
+                "trusted": False,
+                "review_state": REVIEW_PENDING,
+                "trust_origin": "llm_consolidation",
+                "derived_by_llm": True,
                 "consolidates": fact_source_ids,
                 "source_ids": fact_source_ids,
                 "confidence": fact.get("confidence", 0.0),
@@ -1491,10 +1538,12 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
         }
         if fact.get("llm"):
             metadata["structured_consolidation"]["llm"] = fact["llm"]
-        if fact.get("entities"):
-            metadata["entities"] = fact["entities"]
-        if fact.get("relations"):
-            metadata["relations"] = fact["relations"]
+        if fact.get("entities") or fact.get("relations"):
+            metadata["unverified_derived_graph"] = {
+                "source": "llm_consolidation",
+                "entities": fact.get("entities") or [],
+                "relations": fact.get("relations") or [],
+            }
         mid = engine.remember(
             fact["content"], workspace_id=first.workspace_id, repo_id=first.repo_id,
             mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
@@ -1503,9 +1552,6 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             confidence=fact.get("confidence", 0.0),
             keywords=fact.get("keywords") or _common_tokens(sources, k=8),
             metadata=metadata, valid_from=now, resolve_conflicts=False,
-            _trusted_graph_keys=frozenset(
-                key for key in ("entities", "relations") if key in metadata
-            ),
         )
         sensitivity, trusted = _inherit_safety(engine, mid, sources)
         _ensure_derived_links(engine.store, mid, sources, "consolidates")
@@ -1517,14 +1563,6 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
                            f"prompt_sha256={audit.get('prompt_sha256', '')}")
         ids.append(mid)
 
-    if supersede_sources and ids:
-        reason = "superseded by structured consolidation " + ", ".join(ids[:3])
-        for memory in cluster:
-            if memory.id not in cited_sources:
-                continue
-            engine.store.close_validity(
-                memory.id, at=now, actor="consolidation", reason=reason)
-            # Preserve the source vector for historical/as_of retrieval.
     return ids
 
 
@@ -1629,7 +1667,9 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
             if any(_in_profile(store, m.id) for m in sources):
                 report["skipped_existing"] += 1
                 continue
-            content = _build_profile_content(name, ent.ntype, sources, llm=llm)
+            content, llm_derived = _build_profile_content(
+                name, ent.ntype, sources, llm=llm,
+            )
             t_before = sum(_mem_tokens(m) for m in sources)
             t_after = estimate_tokens(content)
             p_before += t_before
@@ -1638,10 +1678,13 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
                      **_compaction(t_before, t_after, len(sources))}
             if dry_run:
                 entry["would_profile"] = [m.id for m in sources]
+                if llm_derived:
+                    entry["would_require_review"] = True
             else:
                 try:
                     profile_id, created = _write_or_resume_profile(
                         engine, name, ent.ntype, sources, content=content, now=now,
+                        llm_derived=llm_derived,
                     )
                 except Exception as exc:
                     report["errors"].append(_error_entry(sources, exc))
@@ -1660,34 +1703,55 @@ def _in_profile(store, memory_id: str) -> bool:
 
 
 def _build_profile_content(name: str, etype: str, sources: list[MemoryRecord],
-                           *, llm: Any) -> str:
+                           *, llm: Any) -> tuple[str, bool]:
     label = f"{name} ({etype})" if etype else name
     quotes = [m.content.strip().replace("\n", " ")[:300] for m in sources[:PROFILE_QUOTES]]
     content = (f"Profile — {label}: {len(sources)} references.\n"
                + "\n".join(f"- {q}" for q in quotes))
+    llm_derived = False
     if llm is not None:
         summary = _llm_summary(
             llm, _PROFILE_SYSTEM_PROMPT,
             f"Subject: {name}\n" + "\n".join(f"- {m.content.strip()}" for m in sources))
         if summary:
             content = f"{summary}\n\n(Profile of {label}, from {len(sources)} memories)"
-    return content
+            llm_derived = True
+    return content, llm_derived
 
 
 def _write_profile(engine, name: str, etype: str, sources: list[MemoryRecord],
-                   *, content: str, now: float) -> str:
+                   *, content: str, now: float,
+                   llm_derived: bool = False) -> str:
     first = sources[0]
     importance = max([m.importance or 0.0 for m in sources] + [0.6])
-    trusted = _sources_are_trusted(sources)
+    sources_trusted = _sources_are_trusted(sources)
+    trusted = sources_trusted and not llm_derived
+    provenance = {
+        "source": "profile_consolidation",
+        "trusted": trusted,
+        "entity": name,
+        "etype": etype,
+        "profiles": [m.id for m in sources],
+    }
+    metadata: dict[str, Any] = {"provenance": provenance}
+    if llm_derived:
+        provenance.update({
+            "review_state": REVIEW_PENDING,
+            "trust_origin": "llm_consolidation",
+            "derived_by_llm": True,
+        })
+        metadata["llm_consolidation"] = {
+            "review_required": True,
+            "source_count": len(sources),
+            "kind": "entity_profile",
+        }
     profile_id = engine.remember(
         content,
         workspace_id=first.workspace_id, repo_id=first.repo_id,
         mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
         title=f"Profile: {name}"[:200], importance=importance,
         keywords=[name] + _common_tokens(sources, k=6),
-        metadata={"provenance": {"source": "profile_consolidation", "trusted": trusted,
-                                 "entity": name,
-                                 "etype": etype, "profiles": [m.id for m in sources]}},
+        metadata=metadata,
         valid_from=now,
         resolve_conflicts=False,   # a profile is new by construction
     )

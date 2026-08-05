@@ -42,6 +42,10 @@ class ProfileConfig:
     code_scale: float = 1.0
     graph_presence_bonus: float = 0.0
     code_presence_bonus: float = 0.0
+    # Controlled ablations may use the vector backend's raw cosine as an
+    # additional confidence signal. Keep this opt-in: established profiles
+    # preserve rank-only semantic fusion by default.
+    semantic_confidence_calibration: bool = False
 
 
 _CONFIGS = {

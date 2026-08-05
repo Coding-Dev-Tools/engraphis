@@ -21,6 +21,9 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
 
     steps:
       - name: Check out source
@@ -35,8 +38,8 @@ jobs:
 
       - name: Install release gate and the production dependency set (without SQLCipher)
         run: >-
-          python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
-          build twine pip-audit ".[all,test]"
+          python -m pip install --upgrade
+          pip setuptools wheel build twine pip-audit ".[all,test]"
 
       - name: Require tag and package version to match
         if: github.event_name == 'push'
@@ -59,23 +62,69 @@ jobs:
           python scripts/check_commercial_manifest.py
           python scripts/externalize_dashboard_assets.py
           ruff check .
+          pyright
           python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
-          python -m pytest -o addopts="" tests/ -q -rs
-          python -m pytest -o addopts="" tests/test_public_research_boundary.py -q
-          python -m pytest -o addopts="" tests/test_compact_recall.py tests/test_eval_performance.py -q
-          python -m pytest -o addopts="" tests/test_eval_harness.py tests/test_benchmark_evidence.py -q
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/test_public_research_boundary.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/test_compact_recall.py tests/test_eval_performance.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/test_eval_harness.py tests/test_benchmark_evidence.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
           python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
           python -m eval.ablation
+          python -m eval.reinforcement
+          python -m eval.adversarial_memory_security
           python -m pip_audit --local
 
       - name: Build source and universal wheel distributions
+        shell: bash
         run: |
-          python -m build
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          python -m build --outdir dist
+          python scripts/normalize_sdist.py dist/*.tar.gz
+          python -m build --outdir dist-repeat
+          python scripts/normalize_sdist.py dist-repeat/*.tar.gz
+          diff <(cd dist && sha256sum * | sort) <(cd dist-repeat && sha256sum * | sort)
           python scripts/verify_distribution_contents.py dist/*
-
       - name: Validate distributions
         run: python -m twine check dist/*
+
+      - name: Smoke installed wheel and source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist_dir="$PWD/dist"
+          index=0
+          for artifact in "$dist_dir"/*.whl "$dist_dir"/*.tar.gz; do
+            index=$((index + 1))
+            venv="$RUNNER_TEMP/engraphis-artifact-smoke-$index"
+            python -m venv --system-site-packages "$venv"
+            "$venv/bin/python" -m pip install --no-deps "$artifact"
+            (
+              cd "$RUNNER_TEMP"
+              "$venv/bin/python" - <<'PY'
+          import pathlib
+          import sys
+
+          import engraphis
+          from engraphis.core.engine import MemoryEngine
+
+          package = pathlib.Path(engraphis.__file__).resolve()
+          assert pathlib.Path(sys.prefix).resolve() in package.parents, package
+          engine = MemoryEngine.create(":memory:")
+          workspace_id = engine.store.get_or_create_workspace("artifact-smoke")
+          memory_id = engine.remember(
+              "The artifact smoke marker is indigo.",
+              workspace_id=workspace_id,
+              resolve_conflicts=False,
+          )
+          result = engine.recall("artifact smoke marker", workspace_id=workspace_id, k=3)
+          assert any(chunk["id"] == memory_id for chunk in result.chunks)
+          engine.store.close()
+          PY
+              "$venv/bin/python" -m scripts.smoke_entry_points --timeout 20
+            )
+          done
 
       - name: Store distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -103,7 +152,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ "${{ matrix.python-version }}" = "3.9" ]; then
-            python -m pip install numpy pytest ruff
+            python -m pip install numpy "pytest<9" ruff
           else
             python -m pip install -e ".[test]"
           fi
@@ -113,10 +162,67 @@ jobs:
           if [ "${{ matrix.python-version }}" != "3.9" ]; then
             python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
           fi
-          python -m pytest -o addopts="" tests/ -q -rs
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
           python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
           python -m eval.ablation
+          python -m eval.reinforcement
+          python -m eval.adversarial_memory_security
+
+  artifact-core-py39:
+    name: Python 3.9 installed release artifacts
+    needs: build
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+      - name: Download exact release distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Install, verify, and smoke wheel and source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          index=0
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            index=$((index + 1))
+            venv="$RUNNER_TEMP/engraphis-release-py39-artifact-$index"
+            python -m venv "$venv"
+            "$venv/bin/python" -m pip install --disable-pip-version-check "$artifact"
+            "$venv/bin/python" -m pip check
+            (
+              cd "$RUNNER_TEMP"
+              "$venv/bin/python" - <<'PY'
+          import pathlib
+          import sys
+
+          import engraphis
+          from engraphis.core.engine import MemoryEngine
+
+          package = pathlib.Path(engraphis.__file__).resolve()
+          assert pathlib.Path(sys.prefix).resolve() in package.parents, package
+          engine = MemoryEngine.create(":memory:")
+          workspace_id = engine.store.get_or_create_workspace("release-py39-artifact")
+          memory_id = engine.remember(
+              "The release Python 3.9 artifact marker is indigo.",
+              workspace_id=workspace_id,
+              resolve_conflicts=False,
+          )
+          result = engine.recall("release Python 3.9 artifact marker", workspace_id=workspace_id, k=3)
+          assert any(chunk["id"] == memory_id for chunk in result.chunks)
+          engine.store.close()
+          PY
+              "$venv/bin/engraphis" --help
+              "$venv/bin/engraphis" --version
+              "$venv/bin/engraphis-cli" --help
+            )
+          done
 
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
@@ -138,7 +244,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test,encryption]"
       - name: Encryption at-rest integration tests
-        run: python -m pytest -o addopts="" tests/test_encrypted_store.py -q -rs
+        run: |
+          python -c "import sqlcipher3; print(sqlcipher3.__file__)"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/test_encrypted_store.py -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
 
   browser-accessibility:
     name: Browser accessibility release gate
@@ -257,9 +365,42 @@ jobs:
         if: always()
         run: docker rm -f engraphis-release || true
 
+  code-security:
+    name: CodeQL ${{ matrix.language }} release gate
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python", "javascript-typescript"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Analyze complete source tree
+        id: analyze
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        with:
+          output: codeql-results
+          upload: never
+      - name: Require clean CodeQL results
+        run: python scripts/check_codeql_sarif.py "${{ steps.analyze.outputs.sarif-output }}"
+
   release-evidence:
     name: Generate public release evidence
-    needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]
+    needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -289,17 +430,25 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --sbom "$sbom" \
             --verified-check ruff \
+            --verified-check pyright-core-backends \
+            --verified-check codeql \
             --verified-check pytest \
+            --verified-check reproducible-distributions \
+            --verified-check installed-artifact-smoke \
+            --verified-check installed-artifact-smoke-py39 \
             --verified-check privacy-boundary \
             --verified-check token-efficiency \
             --verified-check benchmark-schema-evidence \
             --verified-check encryption-at-rest \
             --verified-check browser-e2e \
+            --verified-check pi-extension \
             --verified-check dependency-audit \
             --verified-check container-smoke \
             --verified-check retrieval-sample \
             --verified-check retrieval-codemem \
             --verified-check retrieval-ablation \
+            --verified-check reinforcement-state-transition \
+            --verified-check adversarial-memory-security \
             --output release-evidence/release-evidence.json
       - name: Store public release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -320,6 +469,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -409,6 +561,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Download published distributions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -531,11 +686,11 @@ jobs:
         shell: bash
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --clobber
           else
-            gh release create "$RELEASE_TAG" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release create "$RELEASE_TAG" verified-dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
