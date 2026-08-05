@@ -24,6 +24,16 @@ DETERMINISTIC_EMBEDDING_VERSION = "v2_aliases_measurements"
 MAX_EMBEDDING_DIM = 65_536
 
 
+def _feature_hash(data: bytes) -> bytes:
+    """Feature hashing only — never used for security.
+
+    Returns a SHA-1 digest used solely to map tokens to deterministic vector
+    dimensions (the "hashing trick"). This is not a security primitive: the
+    output is never used for passwords, signatures, integrity checks, or any
+    other cryptographic purpose.
+    """
+    return hashlib.sha1(data, usedforsecurity=False).digest()  # lgtm[py/weak-sensitive-data-hashing]
+
 class DeterministicEmbedder:
     """Deterministic lexical feature hashing for offline operation.
 
@@ -75,12 +85,7 @@ class DeterministicEmbedder:
         out = np.zeros((len(texts), self._dim), dtype=np.float32)
         for i, text in enumerate(texts):
             for feature in _tokenize(text, kind):
-                # SHA-1 is retained only to keep the established offline embedding
-                # mapping stable across upgrades. This is feature hashing, never a
-                # password, signature, integrity check, or other security primitive.
-                h = hashlib.sha1(
-                    feature.encode("utf-8"), usedforsecurity=False
-                ).digest()
+                h = _feature_hash(feature.encode("utf-8"))
                 idx = int.from_bytes(h[:4], "big") % self._dim
                 sign = 1.0 if h[4] & 1 else -1.0
                 out[i, idx] += sign

@@ -42,7 +42,7 @@ class CrossEncoderReranker:
         )
         if not resolved_model_name:
             raise ValueError("local reranker selector requires a path or cached model name")
-        from sentence_transformers import CrossEncoder  # lazy: optional dependency
+        from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
         kwargs: dict[str, Any] = {"trust_remote_code": False}
         if revision:
             kwargs["revision"] = revision

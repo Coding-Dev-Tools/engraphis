@@ -45,7 +45,7 @@ class SentenceTransformerEmbedder:
             require_immutable_models=require_immutable_models,
             loader="sentence-transformers model",
         )
-        from sentence_transformers import SentenceTransformer  # lazy: optional dependency
+        from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
         kwargs: dict[str, Any] = {"trust_remote_code": False}
         if revision:
             kwargs["revision"] = revision

@@ -83,7 +83,7 @@ class _PinnedReaderTokenCounter:
 def _load_pinned_reader_token_counter(model: str, revision: str) -> Callable[[str], int]:
     """Load the canonical reader tokenizer without affecting the offline default."""
     try:
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
     except ImportError as exc:  # pragma: no cover - optional canonical benchmark dependency
         raise ValueError(
             "canonical output requires transformers and the pinned reader tokenizer"

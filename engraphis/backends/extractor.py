@@ -694,7 +694,7 @@ def _load_chunk_token_counter(
         loader="chunk tokenizer",
     )
     try:
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
             "ENGRAPHIS_CHUNK_TOKENIZER_MODEL requires the optional transformers package"
