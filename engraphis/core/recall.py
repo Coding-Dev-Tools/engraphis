@@ -16,12 +16,13 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import math
 import queue
 import re
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex
 
 import numpy as np
 
@@ -47,6 +48,7 @@ from engraphis.core.interfaces import (
     RetrievalPlan,
     RetrievalPolicy,
     SearchFilter,
+    embedding_space_fingerprint,
 )
 from engraphis.core.retrieval_policy import (
     CANDIDATE_DEPTH_MODES,
@@ -61,9 +63,16 @@ from engraphis.core.query_planner import (
     MAX_PLANNED_QUERIES,
     PLANNING_MODES,
 )
-from engraphis.core.poisoning import inspection_eligible, prompt_eligible
+from engraphis.core.poisoning import (
+    edge_provenance_prompt_eligible,
+    inspection_eligible,
+    prompt_eligible,
+)
 from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import jaccard, tokenize
+
+
+logger = logging.getLogger("engraphis.core.recall")
 
 
 # Prompt-safe recall may search farther than ordinary recall because backends cannot
@@ -120,6 +129,7 @@ class RecallResult:
     semantic_support: bool = True
     embedding_mode: str = "semantic"
     degraded_reason: str = ""
+    vector_search_ready: bool = True
 
 
 class RecallEngine:
@@ -205,10 +215,32 @@ class RecallEngine:
         # so benchmark labels do not expand the public routing contract.
         config = arm_config or profile_config(selected_profile)
         capabilities = embedder_capabilities(self.embedder)
+        vector_search_ready = bool(capabilities["semantic_support"])
+        persistent_store = (
+            self.store.path != ":memory:"
+            and not self.store.path.startswith("file::memory:")
+        )
+        if vector_search_ready and persistent_store:
+            fingerprint = embedding_space_fingerprint(self.embedder)
+            vector_search_ready = bool(
+                fingerprint and self.store.embedding_space_ready(fingerprint)
+            )
+            if not vector_search_ready:
+                health = self.store.embedding_space_health(fingerprint)
+                capabilities["degraded_mode"] = True
+                capabilities["semantic_support"] = False
+                capabilities["degraded_reason"] = (
+                    "semantic vector retrieval is disabled until the configured "
+                    "embedding rebuild completes"
+                    if health["rebuilding"] else
+                    "semantic vector retrieval is disabled because stored vectors "
+                    "do not match the configured embedding space"
+                )
+        capabilities["vector_search_ready"] = vector_search_ready
         # A vector is not automatically semantic evidence. Feature hashing and any
         # unclassified third-party adapter fail closed: keep lexical/graph/code recall,
         # but never query the vector arm or add its cosine to a recall score.
-        if not capabilities["semantic_support"]:
+        if not vector_search_ready:
             config = replace(config, vector=False, semantic_scale=0.0)
         planning_mode = str(planning or "off").strip().casefold()
         if planning_mode not in PLANNING_MODES:
@@ -247,7 +279,7 @@ class RecallEngine:
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
         ]
-        if not capabilities["semantic_support"]:
+        if not vector_search_ready:
             # Planned subqueries can select their own retrieval profile. Apply the
             # degraded-mode clamp after that expansion so planning cannot re-enable
             # feature-hashing vectors for any arm.
@@ -266,6 +298,7 @@ class RecallEngine:
             for run_config in run_configs
         ]
 
+        vector_runtime_failed = False
         while True:
             query_runs = []
             for item, run_config, qvec in zip(
@@ -282,10 +315,28 @@ class RecallEngine:
                         "code": {},
                     })
                     continue
-                vec = (
-                    dict(self.index.search(qvec, arm_candidate_k, filter=query_filter))
-                    if qvec is not None else {}
-                )
+                vec = {}
+                if qvec is not None and not vector_runtime_failed:
+                    try:
+                        vec = dict(
+                            self.index.search(
+                                qvec, arm_candidate_k, filter=query_filter
+                            )
+                        )
+                    except Exception as exc:  # optional backend; preserve other arms
+                        vector_runtime_failed = True
+                        capabilities.update({
+                            "degraded_mode": True,
+                            "vector_search_ready": False,
+                            "degraded_reason": (
+                                "semantic vector retrieval failed; lexical, graph, and "
+                                "code retrieval remain available"
+                            ),
+                        })
+                        logger.warning(
+                            "semantic vector retrieval failed (%s); using non-vector arms",
+                            type(exc).__name__,
+                        )
                 lex = (
                     dict(self.store.fts_search(
                         item.text, arm_candidate_k, filter=query_filter
@@ -500,14 +551,56 @@ class RecallEngine:
         rerank_k = len(pool) if effective_limits else k
         if self.reranker:
             fused_before = {candidate.id: candidate.score for candidate in pool}
-            reranked = self.reranker.rerank(query, pool, rerank_k)
-            rerank_raw = {
-                candidate.id: float(candidate.score) for candidate in reranked
-            }
-            changed = any(
-                abs(rerank_raw[candidate.id] - fused_before.get(candidate.id, 0.0)) > 1e-12
-                for candidate in reranked
-            )
+            # Rerankers are injected provider boundaries. Give them Candidate copies so
+            # a mutate-then-raise implementation cannot corrupt the fused fallback.
+            rerank_input = [replace(candidate) for candidate in pool]
+            rerank_failed = False
+            try:
+                raw_reranked = self.reranker.rerank(query, rerank_input, rerank_k)
+            except Exception as exc:
+                rerank_failed = True
+                logger.warning(
+                    "reranker failed (%s); using fused ranking",
+                    type(exc).__name__,
+                )
+                raw_reranked = []
+            pool_by_id = {candidate.id: candidate for candidate in pool}
+            reranked: list[Candidate] = []
+            seen_reranked: set[str] = set()
+            for candidate in raw_reranked if isinstance(raw_reranked, list) else []:
+                if not isinstance(candidate, Candidate) or candidate.id in seen_reranked:
+                    continue
+                canonical = pool_by_id.get(candidate.id)
+                if canonical is None:
+                    continue
+                try:
+                    rerank_score = float(candidate.score)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not math.isfinite(rerank_score):
+                    continue
+                canonical.score = rerank_score
+                reranked.append(canonical)
+                seen_reranked.add(candidate.id)
+            if reranked:
+                rerank_raw = {
+                    candidate.id: float(candidate.score) for candidate in reranked
+                }
+                changed = any(
+                    abs(
+                        rerank_raw[candidate.id]
+                        - fused_before.get(candidate.id, 0.0)
+                    ) > 1e-12
+                    for candidate in reranked
+                )
+            else:
+                if pool and rerank_k > 0 and not rerank_failed:
+                    logger.warning(
+                        "reranker returned no valid candidates; using fused ranking"
+                    )
+                reranked = pool[:rerank_k]
+                rerank_raw = {}
+                changed = False
             if changed:
                 fusion_norm = scoring.normalize({
                     candidate.id: fused_before.get(candidate.id, 0.0)
@@ -531,6 +624,15 @@ class RecallEngine:
         final, type_limit_drops = _apply_mtype_limits(
             ranked_final, effective_limits, k=max(0, int(k))
         )
+        # _apply_mtype_limits excludes candidates without a record. Keep that
+        # invariant explicit at this interface boundary so injected rerankers
+        # cannot make prompt construction dereference an absent record.
+        final_records: list[tuple[Candidate, MemoryRecord]] = []
+        for candidate in final:
+            record = candidate.record
+            if record is not None:
+                final_records.append((candidate, record))
+        final = [candidate for candidate, _ in final_records]
 
         if reinforce and not requested_historical:
             for c in final:
@@ -558,32 +660,30 @@ class RecallEngine:
                         )
         support = {
             candidate.id: _absolute_retrieval_support(
-                query,
-                candidate.record.content,
-                title=candidate.record.title,
+                query, record.content, title=record.title,
                 semantic_cosine=support_cosines.get(candidate.id, 0.0),
             )
-            for candidate in final
+            for candidate, record in final_records
         }
         chunks = [{
-            "id": c.id, "title": c.record.title, "content": c.record.content,
-            "scope": c.record.scope.value, "mtype": c.record.mtype.value,
-            "repo_id": c.record.repo_id, "score": round(c.score, 4), "arm": c.arm,
+            "id": c.id, "title": record.title, "content": record.content,
+            "scope": record.scope.value, "mtype": record.mtype.value,
+            "repo_id": record.repo_id, "score": round(c.score, 4), "arm": c.arm,
             # ``score`` stays for compatibility.  ``relative_score`` names its actual
             # contract: compare it only among candidates from this one response.
             "relative_score": round(c.score, 4),
             "absolute_support": round(support[c.id], 4),
-            "subject_key": c.record.subject_key,
-            "claim_kind": c.record.claim_kind,
-            "retention": round(scoring.retention(c.record.stability, c.record.last_access, now), 4),
-            "provenance": c.record.provenance,
+            "subject_key": record.subject_key,
+            "claim_kind": record.claim_kind,
+            "retention": round(scoring.retention(record.stability, record.last_access, now), 4),
+            "provenance": record.provenance,
             # Consolidated digests/profiles expose the ids of the source memories
             # they summarize as citable evidence (never their bodies — see
             # ``_consolidation_evidence``).  Ordinary memories carry no such field.
             "consolidation_source_ids": (
-                _consolidation_evidence(c.record, store=self.store, flt=flt)
+                _consolidation_evidence(record, store=self.store, flt=flt)
             ),
-        } for c in final]
+        } for c, record in final_records]
         context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
         trace = None
         if diagnostics:
@@ -629,16 +729,15 @@ class RecallEngine:
             token_counter=getattr(self.context_packer, "count_tokens", None),
             source_metadata={
                 candidate.id: {
-                    **_source_safety_metadata(candidate.record),
+                    **_source_safety_metadata(record),
                     **(
                         {"consolidation_source_ids": _consolidation_evidence(
-                            candidate.record, store=self.store, flt=flt
+                            record, store=self.store, flt=flt
                         )}
-                        if _consolidated_source(candidate.record) else {}
+                        if _consolidated_source(record) else {}
                     ),
                 }
-                for candidate in final
-                if candidate.record is not None
+                for candidate, record in final_records
             },
             **capabilities,
         )
@@ -867,7 +966,7 @@ class RecallEngine:
                     symbol_strength[aliases[dst]] * 0.55,
                 )
         if related_names:
-            symbol_kwargs = {
+            symbol_kwargs: dict[str, object] = {
                 "limit": max(100, min(2000, candidate_k * 20)),
             }
             # Like code edges, direct symbol resolution is an optional Store
@@ -885,9 +984,9 @@ class RecallEngine:
             if supports_identifiers:
                 symbol_kwargs["identifiers"] = list(related_names)
             else:
-                # External legacy stores cannot filter this lookup.  Do not
-                # reintroduce the incorrect global prefix cap for them.
-                symbol_kwargs["limit"] = None
+                # External legacy stores cannot filter this lookup. Keep the
+                # fallback bounded rather than scanning an entire repository.
+                symbol_kwargs["limit"] = max(100, min(2000, candidate_k * 20))
             all_symbols = _call_temporal_store(
                 self.store.list_symbols,
                 flt,
@@ -922,14 +1021,22 @@ class RecallEngine:
             limit=max(2, min(10, candidate_k)),
             requested_historical=historical,
         )
+        if not isinstance(rows_by_symbol, dict):
+            return {}
         out: dict[str, float] = {}
         for symbol_id in selected_symbol_ids:
             rows = rows_by_symbol.get(symbol_id, [])
+            if not isinstance(rows, list):
+                continue
             for rank, row in enumerate(rows):
-                memory_id = row.get("id")
-                if not memory_id:
+                if not isinstance(row, dict):
                     continue
-                confidence = max(0.0, min(1.0, float(row.get("confidence") or 0.0)))
+                memory_id = row.get("id")
+                if not isinstance(memory_id, str) or not memory_id:
+                    continue
+                # Store adapters are an input boundary: malformed confidence must
+                # not abort recall (nor become NaN/Infinity in ranking).
+                confidence = max(0.0, min(1.0, _finite_arm_score(row.get("confidence"))))
                 score = symbol_strength[symbol_id] * confidence / (rank + 1)
                 out[memory_id] = max(out.get(memory_id, 0.0), score)
         return dict(
@@ -982,7 +1089,7 @@ class RecallEngine:
         return {str(value) for value in values if value}
 
     def _prompt_eligible_edges(self, edges: list) -> list:
-        """Keep direct edges and edges whose every memory support is prompt-eligible."""
+        """Keep trusted direct edges and memory-supported prompt-eligible edges."""
         source_ids = (
             set().union(*(self._edge_source_memory_ids(edge) for edge in edges))
             if edges else set()
@@ -990,8 +1097,11 @@ class RecallEngine:
         eligible_ids = self._prompt_eligible_memory_ids(source_ids)
         return [
             edge for edge in edges
-            if not (sources := self._edge_source_memory_ids(edge))
-            or sources <= eligible_ids
+            if edge_provenance_prompt_eligible(edge.provenance)
+            and (
+                not (sources := self._edge_source_memory_ids(edge))
+                or sources <= eligible_ids
+            )
         ]
 
     def _graph_arm_ppr(
@@ -1030,8 +1140,22 @@ class RecallEngine:
         ent = "ent::{}".format
         adj: dict[str, list[tuple[str, float]]] = {}
 
+        def safe_graph_weight(value: object, *, default: float = 1.0) -> float:
+            if not isinstance(
+                value, (str, bytes, bytearray, SupportsFloat, SupportsIndex)
+            ):
+                return default
+            try:
+                coercible_value: Any = value
+                weight = float(coercible_value)
+            except (TypeError, ValueError, OverflowError):
+                weight = default
+            if not math.isfinite(weight) or weight <= 0:
+                weight = default
+            return min(max(weight, 1e-6), 1e6)
+
         def connect(a: str, b: str, w: float, layer: GraphLayer) -> None:
-            weighted = max(float(w or 1.0), 1e-6) * traversal_plan.multiplier(layer)
+            weighted = safe_graph_weight(w) * traversal_plan.multiplier(layer)
             adj.setdefault(a, []).append((b, weighted))
             adj.setdefault(b, []).append((a, weighted))
 
@@ -1067,7 +1191,7 @@ class RecallEngine:
             connect(
                 ent(e.src),
                 ent(e.dst),
-                max(float(e.weight or 1.0), 1e-6),
+                safe_graph_weight(e.weight),
                 e.layer or GraphLayer.SEMANTIC,
             )
 
@@ -1130,7 +1254,7 @@ class RecallEngine:
                 key = (memory_id, entity_id)
                 incidence_strength[key] = max(
                     incidence_strength.get(key, 0.0),
-                    max(float(row.get("confidence") or 0.0), 1e-6),
+                    safe_graph_weight(row.get("confidence"), default=0.0),
                 )
         for (memory_id, entity_id), confidence in incidence_strength.items():
             # Incidence is a structural memory↔entity bridge, not an inferred
@@ -1396,7 +1520,7 @@ def _sanitize_plan(
             raise ValueError("planned query priority must be a positive integer")
         priority = min(MAX_PLANNED_PRIORITY, max(2, item.priority))
         profile = str(item.profile or "balanced").strip().casefold()
-        if profile not in {"balanced", "lexical", "graph", "code"}:
+        if profile not in {"balanced", "fast", "lexical", "graph", "code"}:
             raise ValueError("planned query profile is invalid")
         mtypes = tuple(dict.fromkeys(MemoryType(value) for value in item.mtypes))
         candidates.append((priority, position, PlannedQuery(text, priority, profile, mtypes)))
@@ -1462,8 +1586,13 @@ def _planned_filter(
 
 
 def _finite_arm_value(value: object) -> Optional[float]:
+    # Retrieval adapters are injected, so accept every built-in conversion input
+    # while declining arbitrary objects before asking float() to coerce them.
+    if not isinstance(value, (str, bytes, bytearray, SupportsFloat, SupportsIndex)):
+        return None
     try:
-        score = float(value)
+        coercible_value: Any = value
+        score = float(coercible_value)
     except (TypeError, ValueError, OverflowError):
         return None
     return score if math.isfinite(score) else None
@@ -1525,7 +1654,21 @@ def _fuse_query_runs(
                     state["normalized"][output_name].get(mid, 0.0),
                     normalized.get(mid, 0.0),
                 )
-                adjusted = (normalized.get(mid, 0.0) * scale + bonus) * priority_weight
+                adjusted = normalized.get(mid, 0.0) * scale
+                # VectorIndex returns cosine similarity, unlike the opaque score
+                # scales used by lexical, graph, and code adapters. A singleton
+                # vector result min-max normalizes to 1.0 even when its raw cosine
+                # is near zero. Controlled callers can opt into cosine confidence
+                # calibration of rank evidence; an optional presence bonus remains
+                # a separate explicit signal. Existing profiles retain rank-only
+                # behavior.
+                if (
+                    output_name == "semantic"
+                    and bool(getattr(config, "semantic_confidence_calibration", False))
+                ):
+                    adjusted *= max(0.0, min(1.0, value))
+                adjusted += bonus
+                adjusted *= priority_weight
                 state["adjusted"][output_name][mid] = max(
                     state["adjusted"][output_name].get(mid, 0.0),
                     adjusted,
@@ -1854,7 +1997,7 @@ def _ranked(arm: dict[str, float], recs: dict) -> list[str]:
             _finite_arm_items(arm),
             key=lambda item: (-item[1], str(item[0])),
         )
-        if memory_id in recs
+        if isinstance(memory_id, str) and memory_id in recs
     ]
 
 

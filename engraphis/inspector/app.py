@@ -26,6 +26,7 @@ from engraphis import __version__, http_security
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
 from engraphis.logging_setup import configure_logging
+from engraphis.netutil import is_local_request
 from engraphis.service import MemoryService, ValidationError
 
 logger = logging.getLogger("engraphis")
@@ -105,7 +106,13 @@ def create_app(
             app.state.service = MemoryService.create(
                 settings.db_path,
                 embed_model=settings.embed_model or None,
+                embed_revision=getattr(settings, "embed_revision", "") or None,
+                require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+                embed_dim=settings.embed_dim or 384,
                 allowed_workspaces=settings.allowed_workspaces,
+                vector_backend=settings.vector_backend,
+                rerank_model=getattr(settings, "rerank_model", "") or None,
+                rerank_revision=getattr(settings, "rerank_revision", "") or None,
                 extractor=settings.extractor,
             )
         return app.state.service
@@ -118,16 +125,21 @@ def create_app(
 
         set_current_user(None)
         path = request.url.path
-        if (
-            path.startswith("/api/")
-            and path not in _PUBLIC_API
-            and settings.api_token
-            and not bearer_ok(request.headers.get("Authorization"), settings.api_token)
-        ):
+        protected = path.startswith("/api/") and path not in _PUBLIC_API
+        if protected and settings.api_token:
+            if not bearer_ok(request.headers.get("Authorization"), settings.api_token):
+                return JSONResponse(
+                    {"error": "unauthorized"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        elif protected and not is_local_request(request):
             return JSONResponse(
-                {"error": "unauthorized"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
+                {
+                    "error": "remote access is disabled until ENGRAPHIS_API_TOKEN is set",
+                    "auth": "local-token-required",
+                },
+                status_code=403,
             )
         return await call_next(request)
 

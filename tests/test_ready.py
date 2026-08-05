@@ -56,6 +56,32 @@ def test_api_ready_is_503_when_db_check_fails(app, monkeypatch):
     assert body["checks"]["db"] is False
 
 
+def test_legacy_readiness_forwards_embedder_provenance_policy(monkeypatch):
+    from engraphis import app as app_module
+    from engraphis.backends import embedder_st
+
+    captured = {}
+
+    def get_embedder(model, dim, **kwargs):
+        captured.update(model=model, dim=dim, **kwargs)
+        return type("Embedder", (), {"dim": 384})()
+
+    monkeypatch.setattr(settings, "embed_model", "organization/semantic-model")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "embed_revision", "a" * 40)
+    monkeypatch.setattr(settings, "require_immutable_models", True)
+    monkeypatch.setattr(app_module, "_embedder_ok", False)
+    monkeypatch.setattr(embedder_st, "get_embedder", get_embedder)
+
+    assert app_module._embedder_ready() is True
+    assert captured == {
+        "model": "organization/semantic-model",
+        "dim": 384,
+        "revision": "a" * 40,
+        "require_immutable_models": True,
+    }
+
+
 def test_probes_are_public_even_with_token(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "api_token", "tok-123")
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "tok.db"))

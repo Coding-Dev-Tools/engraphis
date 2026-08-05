@@ -112,6 +112,14 @@ def _load_pinned_reader_tokenizer(model: str, revision: str) -> ContextTokenizer
     would make a token budget unverifiable even if its displayed model name was
     unchanged.
     """
+    from engraphis.backends.model_source import validate_model_source
+
+    validate_model_source(
+        model,
+        revision,
+        require_immutable_models=True,
+        loader="canonical LongMemEval-V2 reader tokenizer",
+    )
     try:
         # The official V2 harness builds prompts with ``AutoProcessor`` rather
         # than loading a tokenizer directly.  Use that exact public surface at
@@ -124,7 +132,9 @@ def _load_pinned_reader_tokenizer(model: str, revision: str) -> ContextTokenizer
             "canonical LongMemEval-V2 accounting requires transformers and the pinned "
             "official reader processor/tokenizer"
         ) from exc
-    processor = AutoProcessor.from_pretrained(model, revision=revision)
+    processor = AutoProcessor.from_pretrained(
+        model, revision=revision, trust_remote_code=False,
+    )
     tokenizer = getattr(processor, "tokenizer", processor)
     if not hasattr(tokenizer, "encode"):
         raise ValueError(
@@ -296,6 +306,7 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             ":memory:",
             embed_model=self.embed_model,
             embed_revision=self.embed_revision,
+            require_immutable_models=True,
             vector_backend=self.vector_backend,
         )
         _require_configured_embedder(
@@ -504,6 +515,7 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             str(database),
             embed_model=self.embed_model,
             embed_revision=self.embed_revision,
+            require_immutable_models=True,
             vector_backend=self.vector_backend,
         )
         _require_configured_embedder(

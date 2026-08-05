@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import stat
 import tarfile
 import zipfile
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Iterable, Optional
 
 
 REQUIRED_COMMON = frozenset({
+    "scripts/smoke_entry_points.py",
     "eval/__init__.py",
     "eval/ablation.py",
     "eval/benchmark.py",
@@ -27,6 +29,7 @@ REQUIRED_COMMON = frozenset({
     "eval/datasets/codemem.jsonl",
     "eval/datasets/graph_multihop.jsonl",
     "eval/datasets/longdoc.jsonl",
+    "eval/datasets/locomo10_repair_manifest.json",
     "eval/datasets/redteam_poisoning.jsonl",
     "eval/datasets/sample.jsonl",
 })
@@ -50,11 +53,23 @@ def _archive_names(path: Path) -> set[str]:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
             names = set()
-            for name in archive.namelist():
+            for info in archive.infolist():
+                name = info.filename
                 folded = name.replace("\\", "/")
-                if folded.startswith("/") or ".." in folded.split("/"):
+                mode = (info.external_attr >> 16) & 0o170000
+                if (
+                    not folded
+                    or folded.startswith("/")
+                    or re.match(r"^[A-Za-z]:", folded)
+                    or ".." in folded.split("/")
+                ):
                     raise ValueError(f"{path.name}: wheel member has unsafe path: {name!r}")
-                names.add(folded.lstrip("/"))
+                if mode == stat.S_IFLNK:
+                    raise ValueError(f"{path.name}: wheel member must not be a symlink: {name!r}")
+                normalized = folded
+                if normalized in names:
+                    raise ValueError(f"{path.name}: wheel contains duplicate member: {name!r}")
+                names.add(normalized)
             return names
     if path.name.endswith(".tar.gz"):
         with tarfile.open(path, "r:gz") as archive:
@@ -63,8 +78,25 @@ def _archive_names(path: Path) -> set[str]:
                 folded = member.name.replace("\\", "/")
                 # Validate before stripping anything: an absolute path such as
                 # "/engraphis-1.0.0/file" must not become apparently relative.
-                if folded.startswith("/") or ".." in folded.split("/"):
-                    raise ValueError(f"{path.name}: source member has unsafe path: {member.name!r}")
+                if (
+                    not folded
+                    or folded.startswith("/")
+                    or re.match(r"^[A-Za-z]:", folded)
+                    or ".." in folded.split("/")
+                ):
+                    raise ValueError(
+                        f"{path.name}: source member has unsafe path: {member.name!r}"
+                    )
+                if not (member.isfile() or member.isdir()):
+                    raise ValueError(
+                        f"{path.name}: source member must be a regular file or directory: "
+                        f"{member.name!r}"
+                    )
+                if folded in raw:
+                    raise ValueError(
+                        f"{path.name}: source archive contains duplicate member: "
+                        f"{member.name!r}"
+                    )
                 raw.add(folded)
         roots = {name.partition("/")[0] for name in raw}
         if len(roots) != 1:

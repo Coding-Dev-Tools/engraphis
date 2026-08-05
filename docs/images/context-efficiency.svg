@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="980" viewBox="0 0 1200 980" role="img" aria-labelledby="title desc">
   <title id="title">Engraphis measured token and context savings</title>
-  <desc id="desc">A dark-mode chart with five measured comparisons. Engraphis used 98.21 percent less context over a long-history workload, 73.0 percent less retrieved context per question, 73.9 percent fewer tokens in the smallest useful memory, returned a 55.38 percent smaller memory-tool response, and reduced a repeated-memory cluster by 47.8 percent through consolidation. Supporting measurements show 53 times more evidence than recency-only retrieval at the same budget, 97.72 percent less total context after including the complete indexing pass with break-even by question 10, and an observed maximum of 106 context tokens under a 1500-token cap.</desc>
+  <desc id="desc">A dark-mode chart with five measured comparisons. Engraphis used 98.21 percent less context over a long-history workload, 71.1 percent less retrieved context per question, 73.9 percent fewer tokens in the smallest useful memory, used a 57.15 percent smaller compact recall payload proxy, and reduced a repeated-memory cluster by 47.8 percent through consolidation. The payload comparison uses 26 JSON-shape samples within a run that timed 260 recalls; it is not an MCP transport measurement. Supporting measurements show 53 times more evidence than recency-only retrieval at the same budget, 97.72 percent less total context after including the complete indexing pass with break-even by question 10, and an observed maximum of 108 context tokens under a 1500-token cap.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#070b16"/>
@@ -30,7 +30,7 @@
   <g filter="url(#shadow)">
     <rect x="70" y="164" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
     <text x="94" y="194" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Long project history sent to the model</text>
-    <text x="94" y="219" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">LoCoMo diagnostic · 10 conversations · 1,986 questions</text>
+    <text x="94" y="219" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">LoCoMo context diagnostic · not QA or leaderboard</text>
     <text x="94" y="249" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#fbbf24">Focused context; full-history recall was higher</text>
     <text x="462" y="190" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Replay everything · 49,915,394 tokens</text>
     <rect x="462" y="201" width="440" height="12" rx="6" fill="#64748b"/>
@@ -43,11 +43,11 @@
     <rect x="70" y="290" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
     <text x="94" y="320" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Retrieved memory content per question</text>
     <text x="94" y="345" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">Long-document test · 18 questions · Recall@5 1.000</text>
-    <text x="462" y="316" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Whole documents · 808.8 tokens</text>
+    <text x="462" y="316" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Whole documents · 740.3 tokens</text>
     <rect x="462" y="327" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="462" y="365" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Focused chunks · 218.4 tokens</text>
+    <text x="462" y="365" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Focused chunks · 214.1 tokens</text>
     <rect x="462" y="376" width="127" height="12" rx="6" fill="url(#engraphis)"/>
-    <text x="1098" y="352" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">73.0% less</text>
+    <text x="1098" y="352" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">71.1% less</text>
   </g>
 
   <g filter="url(#shadow)">
@@ -63,14 +63,14 @@
 
   <g filter="url(#shadow)">
     <rect x="70" y="542" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
-    <text x="94" y="572" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Complete memory-tool response</text>
-    <text x="94" y="595" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">CodeMem test · 260 recalls</text>
-    <text x="94" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">Retrieval scores unchanged</text>
-    <text x="462" y="568" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Full response · 17,172 tokens</text>
+    <text x="94" y="572" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Recall payload proxy</text>
+    <text x="94" y="595" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">26 payload samples · 260 timed recalls</text>
+    <text x="94" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">JSON shape · not MCP transport</text>
+    <text x="462" y="568" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Full proxy · 23,810 tokens</text>
     <rect x="462" y="579" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="462" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Compact response · 7,663 tokens</text>
-    <rect x="462" y="628" width="196" height="12" rx="6" fill="url(#engraphis)"/>
-    <text x="1098" y="604" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">55.38% less</text>
+    <text x="462" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Compact proxy · 10,202 tokens</text>
+    <rect x="462" y="628" width="189" height="12" rx="6" fill="url(#engraphis)"/>
+    <text x="1098" y="604" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">57.15% less</text>
   </g>
 
   <g filter="url(#shadow)">
@@ -98,7 +98,7 @@
 
     <rect x="758" y="800" width="370" height="96" rx="14" fill="#0f1c31" stroke="#254061"/>
     <text x="780" y="828" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">HARD CONTEXT CAP: 1,500</text>
-    <text x="780" y="859" font-family="Inter, Arial, sans-serif" font-size="25.3" font-weight="700" fill="#f8fafc">87.7 average · 106 max</text>
+    <text x="780" y="859" font-family="Inter, Arial, sans-serif" font-size="25.3" font-weight="700" fill="#f8fafc">85.38 average · 108 max</text>
     <text x="780" y="884" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">observed context tokens in CodeMem</text>
   </g>
 

@@ -5,6 +5,101 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-04
+
+Minor release advancing the v2 engine to schema 11 with governed recall recovery,
+embedding-space safety, reproducible release evidence, and stronger offline memory-quality gates.
+
+### Security
+
+- Add opt-in immutable Hugging Face model provenance enforcement for remote embedding models,
+  rerankers, and chunk tokenizers, with revision plumbing across v2 services and local front ends;
+  model loaders now explicitly disable remote code execution while local paths remain supported.
+- Refuse redirects in loopback startup-health and PyPI metadata probes, and treat shortcut icon
+  paths as data across PowerShell, macOS shells, and Linux desktop files.
+- Add an offline release gate proving that quarantined, review-pending, and caller-self-approved
+  external content is downgraded and stays outside prompt recall, including direct poisoned
+  edges and pending-memory-supported edges, while trusted graph evidence remains available.
+- Reject control characters in hosted access and refresh credentials, including credentials
+  returned during rotation, before any network or persistent-state use.
+- Restrict the Inspector API to loopback clients when no API token is configured, and exclude
+  pending or quarantined memories from managed-cloud snapshots.
+- Harden update checks with bounded, link-safe cache reads, atomic private cache writes, strict
+  version limits, finite timestamps, and validated HTTPS or loopback-HTTP URLs.
+- Route private credential and state-file reads through one bounded, race-resistant boundary that
+  rejects links, reparse points, non-regular files, invalid UTF-8, and oversized input.
+- Raise the optional `cryptography` floor to 50.0.0 to exclude known vulnerable releases.
+- Require the patched pytest line in supported release environments and give every CI pytest
+  invocation a private runner-owned temporary root, including the Python 3.9 compatibility lane.
+
+### Fixed
+
+- In schema 11, migrate pre-review trusted memories to explicit approval without releasing quarantined or
+  ambiguous evidence; recover the exact historical local-agent service-gate downgrade and expose
+  content-free eligibility diagnostics when review gating causes zero-result recall.
+- Replace per-backend vector version checks with one active embedding-space fingerprint, make
+  Sentence Transformer/API spaces durable, rebuild on every space transition (including
+  A -> B -> A), and disable vector recall throughout interrupted or mixed-space rebuilds.
+- Describe the stable sqlite-vec backend accurately as native exact KNN, add a dedicated
+  `vector` install extra, require the upstream release containing the vec0 delete fix,
+  and let server entrypoints select it automatically with a safe NumPy fallback.
+- Make contradiction supersession failure-atomic so a failed predecessor invalidation cannot
+  leave two live facts.
+- Bound reinforcement stability and migrate existing out-of-range retention state to schema 10.
+- Preserve v1 graph endpoints during migration and publish migrated databases only after a
+  validated staging database is complete.
+- Reject partial API embedding batches instead of persisting zero-vector placeholders; give
+  semantic embedding spaces durable, secret-free identities; and batch SQLite vector hydration.
+- Prevent CLI metadata from overriding trusted local provenance and honor the selected namespace
+  for grounded chat.
+- Keep service replacement atomic when the prior SQLite handle cannot close, and make
+  authoritative cloud denials fail closed in-process before their durable state writes complete.
+- Keep tag publication reachable by defining every workflow-verified release check in the public
+  evidence manifest, including CodeQL, reproducible distributions, and fresh artifact smokes, and
+  bind the evidence provenance to the completed code-security job.
+- Repair GitHub releases only from the frozen, hash-verified distribution set, excluding any
+  publisher receipt or other unverified file left in the working distribution directory.
+- Exercise both the exact tagged wheel and source distribution in clean Python 3.9 environments,
+  including dependency resolution, pip check, core CLI startup, and in-memory remember/recall;
+  declare the CI build and vulnerability-audit tool versions instead of relying on runner images.
+- Eliminate duplicate NumPy vector writes and commits after ordinary remembers, embedding rebuilds,
+  sync application, and title re-embedding. Store-backed indexes opt out only when they share the
+  exact canonical Store; separately-backed and injected indexes retain explicit synchronization.
+- Replace row-by-row NumPy scan hydration with one filtered, fixed-width matrix read while
+  preserving temporal/scope filters, malformed-dimension isolation, deterministic ties, and
+  immediate visibility of newly written vectors.
+- Surface best-effort graph, entity-linking, evolution, conflict-repair, and index-audit failures as
+  per-engine rate-limited, payload-redacted warnings instead of silently suppressing operational
+  faults.
+- Honor the configured embedding dimension, vector backend, model revisions, reranker, and encrypted
+  connection path consistently across every v2 front end and the sync/consolidation CLIs, preventing
+  an operational command from accidentally rebuilding a persisted semantic space with defaults.
+- Commit standalone entity links without closing a caller-owned transaction, and make the Windows
+  shortcut installer retain its redacted Desktop launcher fallback when PowerShell is unavailable.
+- Serialize and make Store shutdown idempotent, add context-manager and weakref-finalizer cleanup,
+  and keep the offline suite from loading production embedding/reranker models merely because a
+  developer has optional semantic dependencies installed.
+
+### Added
+
+- Extend `eval.vector_scale` with input-identical NumPy/sqlite-vec exact-KNN comparisons,
+  explicit backend identity, deterministic result hashes, and setup-excluded latency envelopes.
+- Add `engraphis-cli review list|approve` for content-free, scoped bulk review. Approval is
+  dry-run by default, requires a reason and one batch confirmation, excludes quarantined records,
+  and supports explicit ids, source/repo filters, and the legacy-agent signature.
+- Add embedding coverage and prompt-eligibility health to service stats, stamp service ingress and
+  writer-policy provenance, and document recall recovery without direct database surgery.
+- Add deterministic reinforcement and adversarial-memory release gates plus a hash-bound LoCoMo
+  evidence-repair manifest and complete pinned-dataset retrieval diagnostics.
+- Pin the Pyright contract for core, backends, and external evaluation; require it in CI and release
+  evidence; verify distribution contents; generate a reproducible CycloneDX SBOM; byte-compare
+  normalized repeat builds; smoke fresh wheel/sdist installs; and bind complete-tree CodeQL to the
+  tag gate.
+- Smoke all 14 installed console entrypoints from their distribution metadata and generated wrapper
+  paths for both wheel and source-distribution installs, with bounded timeouts and diagnostics.
+- Add opt-in semantic-confidence calibration for retrieval-arm experiments while preserving the
+  existing default ranking until paired external non-inferiority evidence is available.
+
 ## [1.4.5] - 2026-08-04
 
 Patch release aligning the package, runtime, commercial manifest, and plugin metadata at 1.4.5

@@ -74,3 +74,10 @@ fixture that compares digest-intent and source-intent rankings with and without 
 production bonus. Run `python -m eval.consolidation_ranking`; digest top-1 preference
 must not regress against the no-bonus baseline, and raw-detail/source evidence must
 remain retrievable before changing the preference or shipping a new release.
+
+## Adversarial memory prompt boundary
+
+Run `python -m eval.adversarial_memory_security` for the deterministic v2 prompt-boundary
+gate. It checks write-time quarantine, review-pending content exclusion, direct and
+support-derived graph-edge exclusion, and availability of trusted control evidence. This is a
+fixed regression fixture, not a claim about real-world poisoning prevalence or detector recall.

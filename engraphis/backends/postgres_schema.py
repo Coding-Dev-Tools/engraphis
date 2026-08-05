@@ -6,6 +6,7 @@ returned, logged, or embedded in memory; provenance contains a one-way digest in
 from __future__ import annotations
 
 import hashlib
+import importlib
 import ipaddress
 import os
 import socket
@@ -118,7 +119,7 @@ def _connect(dsn: str):
         return psycopg.connect(dsn, **connect_kwargs)
     except ImportError:
         try:
-            import psycopg2
+            psycopg2 = importlib.import_module('psycopg2')
             return psycopg2.connect(dsn, **connect_kwargs)
         except ImportError as exc:
             raise PostgresIntrospectionError(
@@ -171,7 +172,10 @@ class PostgresSchemaIntrospector:
                         (str(statement_timeout),),
                     )
                     cursor.execute("SELECT current_database()")
-                    database = str(cursor.fetchone()[0])
+                    database_row = cursor.fetchone()
+                    if not database_row:
+                        raise PostgresIntrospectionError('PostgreSQL did not return a database name')
+                    database = str(database_row[0])
                     tables = _rows(cursor, """
                         SELECT table_schema, table_name, table_type
                         FROM information_schema.tables
@@ -225,10 +229,11 @@ class PostgresSchemaIntrospector:
                 "verify the DSN, network access, and database permissions"
             ) from exc
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         def permitted(schema: Any) -> bool:
             value = str(schema or "")

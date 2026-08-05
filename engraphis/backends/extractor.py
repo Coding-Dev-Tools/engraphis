@@ -29,23 +29,44 @@ import json
 import os
 import re
 from collections.abc import Callable
-from typing import Any, Optional, Type
+from typing import Any, Optional
 
 from engraphis.core.interfaces import ExtractedFact, MemoryType, LLM
 from engraphis.core.textutil import estimate_tokens, tokenize
 
 try:
-    from pydantic import BaseModel, Field, ValidationError, create_model
+    from pydantic import BaseModel as _PydanticBaseModel
+    from pydantic import Field as _pydantic_field
+    from pydantic import ValidationError as _PydanticValidationError
+    from pydantic import create_model as _pydantic_create_model
+
     _PYDANTIC_AVAILABLE = True
+    BaseModel: type[Any] = _PydanticBaseModel
+    Field: Callable[..., Any] = _pydantic_field
+    ValidationError: type[Exception] = _PydanticValidationError
+    create_model: Callable[..., type[Any]] = _pydantic_create_model
 except ImportError:  # pragma: no cover
     _PYDANTIC_AVAILABLE = False
-    BaseModel = object  # type: ignore
-    def Field(*, default_factory=None, **_: Any):  # type: ignore
+
+    class _PydanticUnavailableModel:
+        @classmethod
+        def model_validate(cls, _: Any) -> Any:
+            raise RuntimeError('pydantic is required for structured extraction')
+
+        def model_dump(self) -> dict[str, Any]:
+            return {}
+
+    def _unavailable_field(*, default_factory: Optional[Callable[[], Any]] = None,
+                           **_: Any) -> Any:
         return default_factory() if default_factory else None
-    def create_model(*_: Any, **__: Any):  # type: ignore
-        raise RuntimeError("pydantic is required for structured extraction")
-    class ValidationError(Exception):  # type: ignore
-        pass
+
+    def _unavailable_create_model(*_: Any, **__: Any) -> type[Any]:
+        raise RuntimeError('pydantic is required for structured extraction')
+
+    BaseModel = _PydanticUnavailableModel
+    Field = _unavailable_field
+    ValidationError = ValueError
+    create_model = _unavailable_create_model
 
 MAX_FACTS = 12
 
@@ -154,10 +175,21 @@ class LLMExtractor:
     # ── internals ────────────────────────────────────────────────────────────
     def _ask(self, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
-        if hasattr(self.llm, "chat"):
-            return self.llm.chat(messages, system=_EXTRACT_SYSTEM_PROMPT)
-        return self.llm.complete(
+        chat = getattr(self.llm, "chat", None)
+        if callable(chat):
+            response = chat(messages, system=_EXTRACT_SYSTEM_PROMPT)
+            if not isinstance(response, str):
+                raise TypeError("LLM chat must return text")
+            return response
+        complete = getattr(self.llm, "complete", None)
+        if not callable(complete):
+            raise TypeError("LLM must provide callable chat or complete")
+        response = complete(
             [{"role": "system", "content": _EXTRACT_SYSTEM_PROMPT}, *messages])
+        if not isinstance(response, str):
+            raise TypeError("LLM complete must return text")
+        return response
+
 
     def _parse(self, raw: str) -> list[ExtractedFact]:
         data = _loads_lenient(raw)
@@ -202,7 +234,7 @@ class StructuredLLMExtractor:
     or by passing a Pydantic model to ``with_schema()``.
     """
 
-    _SCHEMA = _ExtractedFactSchema
+    _SCHEMA: type[Any] = _ExtractedFactSchema
     _SYSTEM_PROMPT = (
         "You extract structured facts from text for a knowledge graph. "
         "Each fact must be self-contained, with explicit entities and relations. "
@@ -215,8 +247,10 @@ class StructuredLLMExtractor:
         self.max_facts = max_facts
 
     @classmethod
-    def with_schema(cls, schema: Type[BaseModel]) -> Type["StructuredLLMExtractor"]:
+    def with_schema(cls, schema: type[Any]) -> type["StructuredLLMExtractor"]:
         """Create a subclass with a custom extraction schema."""
+        if not callable(getattr(schema, 'model_validate', None)):
+            raise TypeError('schema must provide Pydantic model_validate')
         return type(f"{cls.__name__}_Custom", (cls,), {"_SCHEMA": schema})
 
     def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]:
@@ -262,8 +296,9 @@ class StructuredLLMExtractor:
         if hasattr(self.llm, "extract_json"):
             return self.llm.extract_json(prompt, self._output_schema())
         messages = [{"role": "user", "content": prompt}]
-        if hasattr(self.llm, "chat"):
-            return self.llm.chat(messages, system=self._SYSTEM_PROMPT)
+        chat = getattr(self.llm, 'chat', None)
+        if callable(chat):
+            return chat(messages, system=self._SYSTEM_PROMPT)
         return self.llm.complete(
             [{"role": "system", "content": self._SYSTEM_PROMPT}, *messages])
 
@@ -302,9 +337,11 @@ class StructuredLLMExtractor:
             keywords = [_defang(str(k), 128) for k in (fact.get("keywords") or [])[:16] if k]
             entities = [_defang(str(e), 256) for e in (fact.get("entities") or [])[:20] if e]
             relations = self._sanitize_relations(fact.get("relations") or [])
-            extra = {k: v for k, v in fact.items() if k not in {
-                "content", "title", "mtype", "importance", "keywords",
-            }}
+            extra = {
+                k: (entities if k == "entities" else relations if k == "relations" else v)
+                for k, v in fact.items()
+                if k not in {"content", "title", "mtype", "importance", "keywords"}
+            }
             metadata: dict[str, Any] = {
                 "llm_extraction": _llm_activity_metadata(self.llm, "llm_structured")
             }
@@ -644,11 +681,20 @@ def _loads_lenient(raw: str) -> dict:
 
 
 def _load_chunk_token_counter(
-    model: str, revision: Optional[str] = None,
+    model: str, revision: Optional[str] = None, *,
+    require_immutable_models: Optional[bool] = None,
 ) -> tuple[Callable[[str], int], str]:
     """Load an explicitly configured Hugging Face tokenizer at the backend edge."""
+    from engraphis.backends.model_source import validate_model_source
+
+    validate_model_source(
+        model,
+        revision,
+        require_immutable_models=require_immutable_models,
+        loader="chunk tokenizer",
+    )
     try:
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
             "ENGRAPHIS_CHUNK_TOKENIZER_MODEL requires the optional transformers package"
@@ -672,6 +718,7 @@ def get_extractor(
     *,
     token_counter: Optional[Callable[[str], int]] = None,
     token_counter_identity: Optional[str] = None,
+    require_immutable_models: Optional[bool] = None,
 ):
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
@@ -693,8 +740,11 @@ def get_extractor(
                 "ENGRAPHIS_CHUNK_TOKENIZER_REVISION", ""
             ).strip()
             if tokenizer_model:
+                tokenizer_kwargs = {}
+                if require_immutable_models is not None:
+                    tokenizer_kwargs["require_immutable_models"] = require_immutable_models
                 token_counter, token_counter_identity = _load_chunk_token_counter(
-                    tokenizer_model, tokenizer_revision or None,
+                    tokenizer_model, tokenizer_revision or None, **tokenizer_kwargs,
                 )
         return ChunkingExtractor(
             target_tokens=_env_int("ENGRAPHIS_CHUNK_TOKENS", CHUNK_TARGET_TOKENS),

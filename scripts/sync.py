@@ -23,9 +23,27 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Optional
 
+from engraphis.config import settings
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.sync import SyncEngine
+from engraphis.service import MemoryService
+
+
+def _service(db_path: str) -> MemoryService:
+    """Open the operational database through the configured application factory."""
+    return MemoryService.create(
+        db_path,
+        embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+        embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
+        allowed_workspaces=settings.allowed_workspaces,
+    )
 
 
 def main(argv=None) -> int:
@@ -61,11 +79,19 @@ def main(argv=None) -> int:
 
     relay_token = args.relay_token
 
+    service = _service(args.db)
+    try:
+        return _sync(args, service.engine, use_relay=use_relay, relay_token=relay_token)
+    finally:
+        service.store.close()
+
+
+def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
+          use_relay: bool, relay_token: Optional[str]) -> int:
     # Local folder sync needs no commercial authority. The managed relay checks its scoped
     # cloud token server-side for organization, workspace, expiry, scopes, and entitlement.
     from engraphis.backends.sync_relay import RelayError, has_sync_token, sync_read_only
 
-    engine = MemoryEngine.create(args.db)
     wid_row = engine.store.conn.execute(
         "SELECT id, settings FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
     if not wid_row:
@@ -82,17 +108,15 @@ def main(argv=None) -> int:
             return 2
         rid = rid_row["id"]
 
-    from engraphis.config import settings
     from engraphis.backends.sync_folder import get_transport
 
     if use_relay:
-        # Fail CLOSED here, unlike the local-authorization convention
-        # (service._workspace_visibility treats malformed settings as shared): this
-        # path uploads the folder off-device, so unreadable settings must block the
-        # push rather than silently treat a possibly-personal folder as shared.
+        # Fail CLOSED before an off-device upload. This mirrors the service
+        # authorization boundary: unreadable settings must never silently turn a
+        # possibly-personal folder into a shared one.
         try:
             workspace_settings = json.loads(wid_row["settings"] or "{}")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             workspace_settings = None
         if not isinstance(workspace_settings, dict):
             print(
@@ -109,7 +133,7 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 2
-        if visibility not in (None, "", "shared"):
+        if visibility not in (None, "shared"):
             print(
                 "error: workspace visibility is invalid; refusing to upload to the "
                 "shared-account relay",

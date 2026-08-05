@@ -1,0 +1,9 @@
+{
+  "schema": "engraphis-locomo-repair/v1",
+  "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+  "repairs": [
+    {"case_id": "conv-42", "question_index": 58, "from": "D10:19", "to": "D20:15"},
+    {"case_id": "conv-42", "question_index": 88, "from": "D", "to": null},
+    {"case_id": "conv-47", "question_index": 38, "from": "D4:36", "to": "D13:3"}
+  ]
+}

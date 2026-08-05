@@ -29,8 +29,19 @@
 
 ## Measured token and context savings
 
+### Runtime estimator
+
+The dashboard Overview and Audit/Receipts views also show a receipt-backed estimate from
+real context deliveries. It compares the host history or retrieved source baseline with the
+context Engraphis actually emitted, keeps token counters and release versions separate, and
+labels adaptive history reductions separately from packing savings. Receipts without estimator
+metadata remain historical/unclassified. This measures estimated prompt-context reduction; it
+does not measure provider billing. The `/context-savings` API and
+`engraphis_context_savings` MCP tool accept optional `from_ts`, `to_ts`, and `release_version`
+filters.
+
 <p align="center">
-  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 71.1 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 57.15 percent smaller recall payload proxy, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -42,11 +53,11 @@
 
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
-| Whole documents | 808.8 tokens | 1.000 |
-| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
+| Whole documents | 740.3 tokens | 1.000 |
+| Engraphis structure-aware chunks | 214.1 tokens | 1.000 |
 
-The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
-per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
+The chunked mode returns the relevant passage instead of the whole document: **526.2 fewer tokens
+per question**. Under the same model-context budget, that leaves roughly **526 tokens** for task
 instructions or other relevant evidence.
 
 ### Measurement details and reproducibility
@@ -57,20 +68,27 @@ boundary.
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
 | Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
-| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.1** tokens | **526.2 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
-| Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
+| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,202** tokens | **13,608 proxy tokens avoided** (**57.15% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
 | Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
-| Small histories across 26 CodeMem agent tasks | Always retrieve: **2,194** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | **252 tokens avoided** (**11.5% lower**) and all 26 unnecessary searches skipped | Both completed **24/26** tasks with the same deterministic offline task agent |
-| Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
+| Small histories across 26 CodeMem agent tasks | Always retrieve: **1,883** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | Adaptive uses **59 more tokens** (**3.1% higher**) while eliminating all **26** memory calls | Both completed **24/26** tasks with the same deterministic offline task agent; this fixture demonstrates bypass behavior, not token savings |
+| Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
-The compact MCP response avoids duplicating full memory bodies when the packed context and source
-list are enough. That can reduce what an agent must inspect or pass onward, but the fixtures do
-**not** measure model-provider charges, end-to-end task time, or customer cost savings.
+The LoCoMo context-use row is an **unpinned, noncanonical retrieval diagnostic**, not official
+LoCoMo QA, answer-quality, provider-cost, or leaderboard evidence. It is not reproduced by the
+small offline fixtures below; [BENCHMARKS.md](BENCHMARKS.md) records its exact limitations and
+the separate hash-bound canonical retrieval diagnostic.
+
+The compact payload shape avoids duplicating full memory bodies when the packed context and source
+list are enough. The evaluator tokenizes JSON-shaped full and compact payload proxies built from
+recall results; it does **not** serialize the MCP envelope or measure a transport response. The
+fixture therefore does not measure model-provider charges, end-to-end task time, or customer cost
+savings.
 
 The measures are deliberately separate and **must not be added together**: chunking counts the
-content of retrieved memory records before `ContextPacker`, whereas compact recall counts the
-serialized MCP response returned to a client. “Tokens to evidence” is the size of the smallest
+content of retrieved memory records before `ContextPacker`, whereas compact recall counts a
+serialized JSON-shape payload proxy. “Tokens to evidence” is the size of the smallest
 retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
 accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
 memories in this fixture), so this is a context-efficiency result, not a storage-reduction claim.
@@ -81,6 +99,7 @@ Reproduce the quality and token/context measurements without a network connectio
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
 python -m eval.grounded
 python -m eval.chunking_eval
+python -m eval.adversarial_memory_security
 python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
 python -m eval.productivity --dataset eval/datasets/codemem.jsonl
 ```
@@ -89,7 +108,8 @@ These are small deterministic correctness and efficiency fixtures, not official 
 LongMemEval QA scores or a third-party leaderboard result. Compact-response counts use the exact
 `engraphis.regex.v1` counter; the chunking evaluation uses its documented deterministic
 normalized-character estimator. Chunking measures retrieved memory content, while compact recall
-measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
+measures a serialized JSON-shape payload proxy, not an MCP transport response. See
+[`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
 limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
 
 </details>
@@ -119,6 +139,7 @@ continues to support Python 3.9+.
 |---|---|---|
 | Local dashboard and REST API | `pip install "engraphis[server]"` | `engraphis-dashboard` |
 | Coding-agent memory over Smart MCP | `pip install "engraphis[mcp]"` | `codex mcp add engraphis -- engraphis-mcp` |
+| Native SQLite vector acceleration | `pip install "engraphis[vector]"` | Server entrypoints select it automatically |
 | Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
 
 For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
@@ -134,11 +155,16 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
 > require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
-> moves to version 9. Existing v7-to-v8 databases already contain `confidence` and
-> `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table support
+> in the 1.4.0 release was version 9. Existing v7-to-v8 databases already contain `confidence`
+> and `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table
 > and performs a one-time entity-canonicalization repair, then migrates automatically on first
 > open. A tombstone with a known `repo_id` is terminal only in that repository; legacy repo-less
 > tombstones remain global. See the [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
+
+> **Upgrading to 1.5:** schema 10 bounds legacy retention state and schema 11 backfills explicit
+> approval only for eligible pre-review local memories. Pending and quarantined evidence remains
+> gated. Existing 1.4.x databases migrate automatically when Engraphis 1.5 opens them; see the
+> [1.5.0 release notes](CHANGELOG.md#150---2026-08-04).
 
 ---
 
@@ -155,7 +181,7 @@ for the short version of how much less history an agent has to carry.
 | Agent need | What Engraphis changes |
 |---|---|
 | Remember a project across sessions | Stores typed memory in a `workspace → repo → session` hierarchy and provides a last-session handoff. |
-| Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal. |
+| Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal; `fast` can skip graph traversal for small or latency-sensitive vaults. |
 | Know what is true now and what changed | Preserves bi-temporal history and supersession chains instead of silently overwriting a fact. |
 | Avoid confident guesses | Returns cited evidence or explicitly abstains when support is too weak. |
 | Avoid dragging the whole project into every prompt | Packs context to a configured hard budget and can return a compact MCP response. |
@@ -229,6 +255,7 @@ pip install "engraphis[documents]"  # PDF + image OCR bindings
 pip install "engraphis[transcription]" # faster-whisper audio/video
 pip install "engraphis[postgres]"   # PostgreSQL schema introspection
 pip install "engraphis[code]"       # tree-sitter code graph indexing
+pip install "engraphis[vector]"     # native sqlite-vec exact-KNN acceleration
 pip install "engraphis[cloud-sync]" # Cloud Sync client crypto/runtime
 pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library: numpy only, fully offline
@@ -244,10 +271,19 @@ or newer for the `server`, `mcp`, `documents`, `cloud-sync`, or `all` installati
 
 The default `NumpyVectorIndex` performs an exact full scan. There is no universal memory-count
 cutoff because latency depends on vector size, hardware, filters, and the rest of the recall
-pipeline. Measure your machine with `python -m eval.vector_scale`, then run
+pipeline. Measure your machine with `python -m eval.vector_scale --backend numpy`, then run
 `python -m eval.performance` on a representative corpus. If exact scans miss your latency target,
-create the engine with `vector_backend="sqlite-vec"` and remeasure. See [BENCHMARKS.md](BENCHMARKS.md)
-for the reproducible commands and reporting limits.
+install `engraphis[vector]`, create the engine with `vector_backend="sqlite-vec"`, and remeasure.
+The stable sqlite-vec `vec0` backend executes exact KNN in native code; it is acceleration, not a
+claim of sublinear ANN scaling. See [BENCHMARKS.md](BENCHMARKS.md) for the reproducible commands
+and reporting limits.
+
+Dashboard, REST, and MCP entrypoints default to `ENGRAPHIS_VECTOR_BACKEND=auto`: they use
+sqlite-vec when the `vector` extra is installed and compatible, then safely fall back to NumPy.
+Programmatic `MemoryEngine.create()` and `MemoryService.create()` retain the deterministic
+`numpy` default unless a backend is requested explicitly.
+Use `python -m eval.vector_scale --backend sqlite-vec` for an input-identical direct-search
+comparison; setup/index-build time is explicitly excluded from the timed search envelope.
 
 `sqlcipher3-binary` publishes CPython manylinux x86-64 wheels. On that target,
 `engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
@@ -392,6 +428,12 @@ print(hit["context"])
 
 The same `MemoryService` backs the dashboard and the MCP server.
 
+After an upgrade, `stats()` reports prompt-eligibility counts and active embedding-space
+coverage. Zero-result recall identifies a review-gated scope instead of silently looking empty,
+and `engraphis-cli review list|approve` provides a dry-run-first local bulk workflow. Embedding
+model changes trigger a guarded rebuild; vector recall stays disabled until every stored vector
+matches the new fingerprint. See [recall recovery](docs/RECALL_RECOVERY.md).
+
 Agent hosts can avoid retrieval when their existing history already fits:
 
 ```python
@@ -463,7 +505,7 @@ print(merged["compaction"])
 evidence for historical reads. If a credential was captured, new writes are blocked before
 storage; for a legacy leak use the explicitly destructive `MemoryService.secure_erase()` or
 `POST /api/secure-erase`/`engraphis_secure_erase`. That flow removes the one memory and local
-FTS/vector/ANN and derived graph/link rows, runs SQLite secure-delete, WAL checkpoint, and
+FTS/vector-index and derived graph/link rows, runs SQLite secure-delete, WAL checkpoint, and
 VACUUM, and scans recognised local SQLite recovery backups. It cannot erase exports, filesystem
 snapshots, remote peers, unknown backups, or information a running/compromised agent already
 read; rotate the credential. See [secure-erasure limits](docs/SECURE_ERASURE.md). `forget`
@@ -561,6 +603,10 @@ plaintext. Generate a strong key:
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
+When using `ENGRAPHIS_DB_KEY_FILE`, provision a regular secret file readable only by the
+service identity. Engraphis rejects links, reparse points, hard links, malformed text, and
+oversized key files rather than following an unexpected filesystem object.
+
 > An existing plaintext database cannot be opened with a key: migrate it (dump → import
 > into a fresh keyed DB). See `.env.example` for all encryption options.
 
@@ -602,6 +648,10 @@ All via environment (or `.env`):
 | `ENGRAPHIS_HTTP_INDEX_ROOT` | First `ENGRAPHIS_INDEX_ROOTS` entry, or current directory | Single root for dashboard and REST `POST /api/code/index`; submitted paths resolve beneath it. An explicit root (or fallback entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and CLI indexing continue to use `ENGRAPHIS_INDEX_ROOTS`. |
 | `ENGRAPHIS_DB_KEY` | Not set | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
+| `ENGRAPHIS_EMBED_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the embedding model |
+| `ENGRAPHIS_RERANK_MODEL` | Not set | Optional sentence-transformers cross-encoder reranker |
+| `ENGRAPHIS_RERANK_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the reranker |
+| `ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS` | `false` | When enabled, require a 40-hex commit before loading remote embedding models, rerankers, or chunk tokenizers; `local:` selectors and filesystem paths remain permitted |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
 | `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` | Not set | Optional Hugging Face tokenizer used to enforce chunk budgets with the downstream reader's real tokenization; requires the optional `transformers` package |
 | `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` | Not set | Optional immutable tokenizer/model revision recorded in the chunk-counter identity; pin this for reproducible benchmark artifacts |

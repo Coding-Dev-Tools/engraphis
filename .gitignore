@@ -29,6 +29,7 @@ build/
 .pytest_cache/
 /.pytest-*-tmp/
 .ruff_cache/
+.coverage
 node_modules/
 .playwright/
 playwright-report/

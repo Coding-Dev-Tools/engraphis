@@ -7,6 +7,7 @@ only on inputs it rejects *before* opening a socket.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -28,6 +29,14 @@ from engraphis import update_check as u
 ])
 def test_parse_version(text, expected):
     assert u.parse_version(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "1." + "9" * 1000,
+    ".".join(["1"] * (u._MAX_VERSION_PARTS + 1)),
+])
+def test_parse_version_rejects_pathological_numeric_versions(text):
+    assert u.parse_version(text) is None
 
 
 @pytest.mark.parametrize("latest,current,newer", [
@@ -77,9 +86,20 @@ def test_parse_generic_and_garbage():
     "http://example.com/releases",   # plain http, non-loopback
     "ftp://example.com/x",
     "file:///etc/passwd",
+    "https://user@example.com/releases",
+    "https://[::1/releases",
+    "https://example.com\\@127.0.0.1/releases",
 ])
 def test_fetch_rejects_unsafe_schemes(url):
     assert u._fetch(url, timeout=0.01) is None
+
+
+def test_fetch_rejects_dns_loopback_alias_before_opening(monkeypatch):
+    monkeypatch.setattr(
+        u, "build_pinned_https_opener",
+        lambda *args, **kwargs: pytest.fail("a DNS alias must not reach an HTTP opener"),
+    )
+    assert u._fetch("http://localhost/latest", timeout=0.01) is None
 
 
 # ── endpoint / explicit opt-in configuration ──────────────────────────────────
@@ -171,6 +191,19 @@ def test_fetch_failure_preserves_last_good(cache, monkeypatch):
     assert snap["latest"] == "1.4.0" and snap["update_available"] is True  # last good kept
 
 
+def test_unexpected_fetch_failure_is_fail_silent(cache, monkeypatch):
+    stale = {"latest": "1.4.0", "url": "https://rel/1.4.0", "checked_at": 0.0}
+    cache.write_text(json.dumps(stale))
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("provider detail must not escape")
+
+    monkeypatch.setattr(u, "_fetch", fail)
+    snap = u.check()
+
+    assert snap["latest"] == "1.4.0"
+    assert snap["error"] == "update check unavailable"
+
 def test_snapshot_is_non_blocking(cache, monkeypatch):
     monkeypatch.setattr(u, "CURRENT_VERSION", "1.0.0")
     called = {"bg": False}
@@ -179,6 +212,39 @@ def test_snapshot_is_non_blocking(cache, monkeypatch):
     snap = u.snapshot()  # empty cache → returns immediately, schedules a background refresh
     assert snap["update_available"] is False
     assert called["bg"] is True
+
+
+@pytest.mark.parametrize("checked_at", [
+    [1], {"value": 1}, "nan", "inf", "-inf",
+])
+def test_malformed_cache_timestamp_is_fail_silent(cache, monkeypatch, checked_at):
+    cache.write_text(json.dumps({"latest": "2.0.0", "checked_at": checked_at}))
+    monkeypatch.setattr(u, "refresh_in_background", lambda *args, **kwargs: None)
+
+    snap = u.snapshot()
+
+    assert snap["checked_at"] == 0.0
+
+
+def test_oversized_cache_is_ignored(cache):
+    cache.write_text("x" * (u._MAX_CACHE_BYTES + 1))
+    assert u._read_cache() == {}
+
+
+def test_linked_cache_is_ignored_and_never_overwrites_target(cache):
+    victim = cache.with_name("victim.json")
+    victim.write_text("do not replace")
+    try:
+        cache.symlink_to(victim)
+    except (NotImplementedError, OSError):
+        try:
+            os.link(victim, cache)
+        except OSError:
+            pytest.skip("this platform cannot create a link for the cache test")
+
+    assert u._read_cache() == {}
+    u._write_cache("9.9.9", "https://example.test/release")
+    assert victim.read_text() == "do not replace"
 
 
 def test_notice_line(monkeypatch):

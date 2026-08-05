@@ -19,13 +19,16 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope
+from engraphis.config import _publish_no_replace
 from engraphis.core.poisoning import (
     PoisoningDecision,
     apply_quarantine_metadata,
@@ -94,8 +97,8 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def migrate(old_path: str, new_path: str, *, workspace: str = "default",
-            dry_run: bool = False) -> dict:
+def _migrate_to_path(old_path: str, new_path: str, *, workspace: str = "default",
+                     dry_run: bool = False, _precreated_target: bool = False) -> dict:
     source_path = Path(old_path).expanduser().resolve()
     target_path = Path(new_path).expanduser().resolve()
     # The migration writes a complete new v2 database. Reusing an output path can
@@ -107,27 +110,46 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
     if not dry_run:
         if source_path == target_path:
             raise ValueError("v1 migration requires --new to differ from --old")
-        if target_path.exists():
+        if target_path.exists() and not _precreated_target:
             raise FileExistsError(
                 "v1 migration requires a fresh --new path; refusing existing target "
                 f"{target_path}"
             )
+    # sqlite3.connect() creates a missing path. Validate the source first so a
+    # failed migration (especially a dry run) never leaves a new empty database
+    # behind or creates an output parent before discovering the missing input.
+    if not source_path.is_file():
+        raise FileNotFoundError(f"v1 migration source is not a file: {source_path}")
 
     src = sqlite3.connect(str(source_path))
     src.row_factory = sqlite3.Row
-
-    counts = {"memories": 0, "entities": 0, "edges": 0, "events": 0, "thoughts": 0, "repos": 0}
-    if not _has_table(src, "memories"):
-        src.close()
-        raise SystemExit(f"No 'memories' table in {old_path} — is this a v1 database?")
-
     store: Optional[Store] = None
-    if not dry_run:
-        store = Store(str(target_path))
-        wid = store.get_or_create_workspace(workspace)
+    try:
+        if not _has_table(src, "memories"):
+            raise SystemExit(f"No 'memories' table in {old_path} — is this a v1 database?")
+        wid = ""
+        if not dry_run:
+            store = Store(str(target_path))
+            wid = store.get_or_create_workspace(workspace)
+        return _migrate_rows(
+            src, store, wid=wid, target_path=target_path,
+        )
+    finally:
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            src.close()
+
+
+def _migrate_rows(src: sqlite3.Connection, store: Optional[Store], *, wid: str,
+                  target_path: Path) -> dict:
+    counts = {"memories": 0, "entities": 0, "edges": 0, "events": 0, "thoughts": 0, "repos": 0}
 
     # namespace -> repo_id
     repo_ids: dict[str, str] = {}
+    entity_ids: dict[tuple[str, str, str], str] = {}
+    edge_entity_candidates: dict[tuple[str, str], set[str]] = {}
 
     def repo_for(namespace: str) -> str:
         ns = namespace or "default"
@@ -138,6 +160,35 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
             else:
                 repo_ids[ns] = f"(repo:{ns})"
         return repo_ids[ns]
+
+    def entity_for(namespace: str, name: object, entity_type: str = "") -> str:
+        ns = namespace or "default"
+        label = str(name or "").strip()
+        ntype = str(entity_type or "").strip()
+        if not label:
+            raise ValueError("v1 migration found an edge/entity with an empty name")
+        name_key = (ns, label.casefold())
+        key = (*name_key, ntype)
+        if key not in entity_ids:
+            if store is not None:
+                entity_ids[key] = store.upsert_entity(Node(
+                    id="", name=label, ntype=ntype,
+                    workspace_id=wid, repo_id=repo_for(ns),
+                ))
+            else:
+                entity_ids[key] = f"(entity:{ns}:{label}:{ntype})"
+            edge_entity_candidates.setdefault(name_key, set()).add(entity_ids[key])
+        return entity_ids[key]
+
+    def edge_entity_for(namespace: str, name: object) -> str:
+        """Resolve type-less v1 edge names without conflating typed entities."""
+        ns = namespace or "default"
+        label = str(name or "").strip()
+        candidates = edge_entity_candidates.get((ns, label.casefold()), set())
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        # Missing or ambiguous endpoints retain the v1 name as an untyped node.
+        return entity_for(ns, label)
 
     # ── memories ──────────────────────────────────────────────────────────────
     mcols = _columns(src, "memories")
@@ -201,11 +252,11 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
             if store is None:
                 continue
             ns = r["namespace"] if "namespace" in ecols else "default"
-            store.upsert_entity(Node(
-                id="", name=r["name"],
-                ntype=(r["entity_type"] if "entity_type" in ecols else "") or "",
-                workspace_id=wid, repo_id=repo_for(ns),
-            ))
+            entity_for(
+                ns,
+                r["name"],
+                (r["entity_type"] if "entity_type" in ecols else "") or "",
+            )
 
     # ── edges ─────────────────────────────────────────────────────────────────
     if _has_table(src, "edges"):
@@ -216,11 +267,19 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
                 continue
             ns = r["namespace"] if "namespace" in gcols else "default"
             store.upsert_edge(Edge(
-                id="", src=r["source_entity"], dst=r["target_entity"], relation=r["relation"],
+                id="",
+                src=edge_entity_for(ns, r["source_entity"]),
+                dst=edge_entity_for(ns, r["target_entity"]),
+                relation=r["relation"],
                 weight=(r["weight"] if "weight" in gcols else 1.0) or 1.0,
                 workspace_id=wid, repo_id=repo_for(ns),
                 valid_from=(r["created_at"] if "created_at" in gcols else now_ts()),
-                provenance={"source": "v1"},
+                provenance={
+                    "source": "v1",
+                    "trusted": False,
+                    "trust_origin": "v1_migration",
+                    "review_state": "pending",
+                },
             ))
 
     # ── events ────────────────────────────────────────────────────────────────
@@ -269,12 +328,74 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
                     "policy=%s; reasons=%s" % (decision.policy, ",".join(decision.reasons)),
                 )
 
-    src.close()
     if store is not None:
         store.audit("migration", "migrate_v1_to_v2", str(target_path), str(counts))
         store.conn.commit()
-        store.close()
     return counts
+
+
+def _validate_and_flush_stage(path: Path) -> None:
+    connection = sqlite3.connect(str(path), timeout=30)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        check = connection.execute("PRAGMA quick_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError("v1 migration integrity check failed")
+    finally:
+        connection.close()
+    descriptor = os.open(
+        str(path),
+        os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _cleanup_stage(path: Path) -> None:
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
+def migrate(old_path: str, new_path: str, *, workspace: str = "default",
+            dry_run: bool = False) -> dict:
+    """Migrate through a same-directory stage and publish only a verified database."""
+    source_path = Path(old_path).expanduser().resolve()
+    target_path = Path(new_path).expanduser().resolve()
+    if dry_run:
+        return _migrate_to_path(
+            str(source_path), str(target_path), workspace=workspace, dry_run=True,
+        )
+    if source_path == target_path:
+        raise ValueError("v1 migration requires --new to differ from --old")
+    if target_path.exists():
+        raise FileExistsError(
+            "v1 migration requires a fresh --new path; refusing existing target "
+            f"{target_path}"
+        )
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, stage_name = tempfile.mkstemp(
+        prefix=f".{target_path.name}.migration-",
+        suffix=".db",
+        dir=str(target_path.parent),
+    )
+    os.close(descriptor)
+    stage_path = Path(stage_name)
+    try:
+        counts = _migrate_to_path(
+            str(source_path), str(stage_path), workspace=workspace,
+            _precreated_target=True,
+        )
+        _validate_and_flush_stage(stage_path)
+        _publish_no_replace(stage_path, target_path)
+        return counts
+    finally:
+        _cleanup_stage(stage_path)
 
 
 def main() -> None:

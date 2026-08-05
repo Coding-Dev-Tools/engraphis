@@ -1,13 +1,14 @@
-"""Deterministic scale measurements for the production NumPy vector index.
+"""Deterministic scale measurements for supported exact vector backends.
 
 This is deliberately narrower than :mod:`eval.performance`: it measures only the
-store-backed ``NumpyVectorIndex`` scan so an operator can map corpus-size envelopes
+store-backed exact vector search so an operator can map corpus-size envelopes
 on their own machine. Timings are observational data, never a universal capacity
 limit or a CI acceptance gate.
 
 Usage::
 
-    python -m eval.vector_scale --sizes 1000,10000,100000 --queries 20 --iterations 3 --json
+    python -m eval.vector_scale --backend numpy --sizes 1000,10000,100000 --json
+    python -m eval.vector_scale --backend sqlite-vec --sizes 1000,10000,100000 --json
 """
 from __future__ import annotations
 
@@ -22,12 +23,13 @@ from typing import Optional
 
 import numpy as np
 
-from engraphis.backends.vector_numpy import NumpyVectorIndex
+from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store
 
 
 SCHEMA = "engraphis-vector-scale/v1"
+BACKENDS = ("numpy", "sqlite-vec")
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -82,9 +84,13 @@ def run(
     warmups: int = 1,
     k: int = 10,
     seed: int = 20260731,
+    backend: str = "numpy",
 ) -> dict:
     """Return JSON-safe, machine-specific direct-index scale measurements."""
     sizes = parse_sizes(",".join(str(size) for size in sizes))
+    backend = str(backend or "").strip().casefold()
+    if backend not in BACKENDS:
+        raise ValueError("backend must be one of: numpy, sqlite-vec")
     if dim <= 0 or queries <= 0 or iterations <= 0 or warmups < 0 or k <= 0:
         raise ValueError("dim, queries, iterations, and k must be positive; warmups cannot be negative")
 
@@ -100,7 +106,13 @@ def run(
         store = Store(":memory:")
         workspace_id = store.get_or_create_workspace("vector-scale")
         repo_id = store.get_or_create_repo(workspace_id, "deterministic-corpus")
-        index = NumpyVectorIndex(store)
+        try:
+            index = get_vector_index(store, dim=dim, prefer=backend)
+        except Exception as exc:
+            store.close()
+            if backend == "sqlite-vec":
+                raise RuntimeError("sqlite-vec backend is unavailable; install sqlite-vec and use a compatible SQLite build") from exc
+            raise
         records = [
             MemoryRecord(
                 id=f"mem_scale_{number:09d}",
@@ -109,12 +121,13 @@ def run(
                 scope=Scope.REPO,
                 workspace_id=workspace_id,
                 repo_id=repo_id,
-                embedding=vectors[number],
             )
             for number in range(size)
         ]
         for record in records:
             store.add_memory(record, audit=False, commit=False)
+        # Corpus construction and native-index population complete before warmups.
+        index.upsert([record.id for record in records], vectors[:size], commit=False)
         store.conn.commit()
         search_filter = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
 
@@ -141,7 +154,9 @@ def run(
     return {
         "schema": SCHEMA,
         "measurement": {
-            "kind": "direct_numpy_vector_search",
+            "kind": "direct_exact_vector_search",
+            "exact_knn": True,
+            "setup_included_in_latency": False,
             "timing_interpretation": "machine-specific observed envelope, not a pass/fail limit",
         },
         "config": {
@@ -152,6 +167,7 @@ def run(
             "warmups": warmups,
             "k": k,
             "seed": seed,
+            "backend_requested": backend,
         },
         "inputs": {
             "vectors_sha256": vector_sha256,
@@ -162,7 +178,9 @@ def run(
             "platform": platform.system().lower(),
             "architecture": platform.machine().lower(),
             "numpy": np.__version__,
-            "vector_backend": "NumpyVectorIndex",
+            "vector_backend_requested": backend,
+            "vector_backend": type(index).__name__,
+            "exact_knn": True,
         },
         "results": rows,
     }
@@ -170,7 +188,7 @@ def run(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Measure deterministic corpus-size envelopes for NumpyVectorIndex."
+        description="Measure deterministic corpus-size envelopes for exact vector backends."
     )
     parser.add_argument("--sizes", default="1000,10000,100000")
     parser.add_argument("--dim", type=int, default=256)
@@ -179,6 +197,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260731)
+    parser.add_argument("--backend", choices=BACKENDS, default="numpy")
     parser.add_argument("--json", action="store_true", help="print the complete JSON report")
     args = parser.parse_args(argv)
     report = run(
@@ -189,11 +208,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         warmups=args.warmups,
         k=args.k,
         seed=args.seed,
+        backend=args.backend,
     )
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(f"{SCHEMA}: direct NumPy vector search (machine-specific envelope)")
+        print("{}: {} exact KNN (machine-specific envelope)".format(
+            SCHEMA, report["environment"]["vector_backend"]
+        ))
         for row in report["results"]:
             latency = row["latency_ms"]
             print(

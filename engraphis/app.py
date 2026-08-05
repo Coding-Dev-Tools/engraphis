@@ -188,7 +188,12 @@ def _embedder_ready() -> bool:
     global _embedder_ok
     try:
         from engraphis.backends.embedder_st import get_embedder
-        emb = get_embedder(settings.embed_model or None, settings.embed_dim or 384)
+        emb = get_embedder(
+            settings.embed_model or None,
+            settings.embed_dim or 384,
+            revision=settings.embed_revision or None,
+            require_immutable_models=settings.require_immutable_models,
+        )
         _embedder_ok = emb is not None and int(emb.dim) > 0
     except Exception as exc:  # pragma: no cover - defensive; get_embedder falls back itself
         # Provider/backend exceptions can contain credentialed URLs or local paths.

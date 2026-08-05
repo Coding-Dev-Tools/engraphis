@@ -13,10 +13,11 @@ Design notes:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from numbers import Integral
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 
@@ -46,6 +47,7 @@ class ApiEmbedder:
 
     supports_semantic_search = True
     embedding_mode = "semantic"
+    embedding_identity = "api_embeddings"
 
     def __init__(
         self,
@@ -81,6 +83,12 @@ class ApiEmbedder:
             probe = self.embed(["hello"])
             self._dim = probe.shape[1]
         return self._dim  # type: ignore[return-value]
+
+    @property
+    def embedding_version(self) -> str:
+        """Return a credential-free fingerprint of the provider vector space."""
+        payload = f"v1\0{self._base_url}\0{self.model}\0{self.dim}".encode("utf-8")
+        return "v1:" + hashlib.sha256(payload).hexdigest()
 
     def embed(
         self, texts: list[str], *, kind: Literal["text", "code"] = "text"
@@ -129,7 +137,7 @@ class ApiEmbedder:
         except Exception:
             logger.warning("Batch embedding request failed; falling back per-item")
             # Fallback: embed one at a time
-            vecs = [self._embed_one(t) for t in texts]
+            vecs: list[Optional[list[float]]] = [self._embed_one(t) for t in texts]
             return self._finalize_vectors(vecs, len(texts))
 
         vectors = self._ordered_batch_vectors(data, len(texts))
@@ -141,7 +149,7 @@ class ApiEmbedder:
 
     def _finalize_vectors(
         self,
-        vectors: list[Optional[list[float]]],
+        vectors: Sequence[Optional[list[float]]],
         count: int,
     ) -> np.ndarray:
         """Assemble one finite, consistently-sized, L2-normalized vector per input."""
@@ -156,21 +164,24 @@ class ApiEmbedder:
             # would poison future successful responses from a differently-sized
             # provider model.
             raise RuntimeError("embedding provider returned no usable vectors")
+        if any(vector is None for vector in vectors):
+            raise RuntimeError("embedding provider returned an incomplete response")
         if len(widths) > 1:
             raise RuntimeError("embedding provider returned inconsistent dimensions")
         dimension = next(iter(widths))
         if not 1 <= dimension <= MAX_EMBEDDING_DIM:
             raise RuntimeError("embedding provider returned an invalid dimension")
-        completed = [
-            vector if vector is not None else [0.0] * dimension
-            for vector in vectors
-        ]
-        result = np.asarray(completed, dtype=np.float32)
+        result = np.asarray(vectors, dtype=np.float32)
         if result.shape != (count, dimension) or not np.isfinite(result).all():
             raise RuntimeError("embedding provider returned malformed vectors")
-        norms = np.linalg.norm(result, axis=1, keepdims=True)
+        # Normalize in float64: a finite float32 vector near the representable
+        # maximum can overflow a float32 norm to inf and collapse to all zeros.
+        result64 = result.astype(np.float64)
+        norms = np.linalg.norm(result64, axis=1, keepdims=True)
+        if not np.isfinite(norms).all():
+            raise RuntimeError("embedding provider returned an invalid vector norm")
         norms = np.where(norms == 0, 1.0, norms)
-        result = result / norms
+        result = (result64 / norms).astype(np.float32)
         if self._dim is None:
             self._dim = dimension
         return result

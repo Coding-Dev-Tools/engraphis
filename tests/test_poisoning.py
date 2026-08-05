@@ -8,6 +8,9 @@ from engraphis.core.poisoning import (
     POLICY_VERSION,
     assess_untrusted_payload,
     detect_payload_signals,
+    edge_provenance_prompt_eligible,
+    prompt_eligible,
+    provenance_is_approved,
     source_is_external,
 )
 from engraphis.service import MemoryService
@@ -33,6 +36,38 @@ def test_policy_is_deterministic_and_inspects_every_write():
         payload, metadata={"provenance": {"source": "human", "trusted": True}}
     )
     assert trusted.quarantined is True
+
+
+@pytest.mark.parametrize("marker", [False, 0, "false", None])
+def test_direct_edge_trust_marker_fails_closed_unless_literal_true(marker):
+    assert edge_provenance_prompt_eligible({"trusted": marker}) is False
+    assert edge_provenance_prompt_eligible({}) is True
+    assert edge_provenance_prompt_eligible({"trusted": True}) is True
+
+
+def test_legacy_llm_consolidation_cannot_inherit_prompt_approval():
+    legacy_structured = {
+        "source": "structured_consolidation",
+        "trusted": True,
+        "review_state": "approved",
+    }
+    marked_summary = {
+        "source": "consolidation",
+        "trusted": True,
+        "review_state": "approved",
+        "derived_by_llm": True,
+    }
+    human_successor = {
+        "source": "human_review",
+        "trusted": True,
+        "review_state": "approved",
+    }
+
+    assert provenance_is_approved(legacy_structured) is False
+    assert prompt_eligible(legacy_structured) is False
+    assert provenance_is_approved(marked_summary) is False
+    assert prompt_eligible(marked_summary) is False
+    assert prompt_eligible(human_successor) is True
 
 
 def test_signal_detection_is_independent_of_trust_and_normalizes_obfuscation():

@@ -10,6 +10,29 @@ from engraphis.inspector.app import create_app  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
 
+def test_lazy_inspector_factory_forwards_configured_vector_backend(monkeypatch):
+    original_create = MemoryService.create
+    captured = {}
+
+    def observe(_path, *args, **kwargs):
+        captured.update(kwargs)
+        return original_create(":memory:", vector_backend="numpy", graph_extractor="none")
+
+    monkeypatch.setattr(MemoryService, "create", observe)
+    monkeypatch.setattr(settings, "api_token", "")
+    monkeypatch.setattr(settings, "vector_backend", "auto")
+    monkeypatch.setattr(settings, "embed_dim", 768)
+    app = create_app()
+    client = TestClient(app)
+    try:
+        assert client.get("/api/workspaces").status_code == 200
+        assert captured["vector_backend"] == "auto"
+        assert captured["embed_dim"] == 768
+    finally:
+        if app.state.service is not None:
+            app.state.service.store.close()
+
+
 @pytest.fixture()
 def make_client(monkeypatch):
     def _make(*, token: str = "", legacy_auth_store=None):
@@ -62,6 +85,21 @@ def test_optional_api_token_gates_local_data_but_not_health_or_state(make_client
         params=params,
         headers={"Authorization": "Bearer correct-token"},
     ).status_code == 200
+
+
+def test_tokenless_inspector_rejects_remote_reads_and_mutations(make_client):
+    app, local_client, _ = make_client()
+    local_client.close()
+    remote = TestClient(app, client=("203.0.113.10", 50_000))
+
+    assert remote.get("/api/health").status_code == 200
+    assert remote.get("/api/auth/state").status_code == 200
+    denied_read = remote.get("/api/workspaces")
+    denied_write = remote.post("/api/secure-erase", json={})
+
+    assert denied_read.status_code == 403
+    assert denied_write.status_code == 403
+    assert denied_read.json()["auth"] == "local-token-required"
 
 
 @pytest.mark.parametrize(

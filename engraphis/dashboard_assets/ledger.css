@@ -22,6 +22,18 @@
 }
 
 * { box-sizing: border-box; }
+.savings-number { display: block; margin: 0 0 4px; color: var(--c-fg); font: 600 1.65rem/1.1 var(--sans); letter-spacing: -.03em; }
+.savings-note { color: var(--c-dim); font-size: .78rem; margin: 12px 0 0; }
+.field-note { color: var(--c-dim); font-size: .82rem; margin: 8px 0 0; }
+.savings-detail { margin: 0 0 24px; padding: 16px; border: 1px solid var(--c-line); border-radius: 10px; background: var(--c-surface); }
+.savings-detail h3 { margin: 16px 0 8px; font-size: .85rem; color: var(--c-mid); }
+.savings-detail-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.savings-breakdown { display: grid; gap: 6px; }
+.savings-breakdown-row { display: flex; justify-content: space-between; gap: 16px; padding: 7px 0; border-bottom: 1px solid var(--c-line); color: var(--c-mid); font-size: .84rem; }
+.savings-breakdown-row:last-child { border-bottom: 0; }
+.savings-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.savings-presets button { border: 1px solid var(--c-line2); border-radius: 999px; background: transparent; color: var(--c-mid); padding: 5px 9px; cursor: pointer; }
+.savings-presets button.active { border-color: var(--c-acc); color: var(--c-fg); background: var(--c-acc-soft); }
 [hidden] { display: none !important; }
 html { min-width: 320px; background: var(--c-bg); }
 body {

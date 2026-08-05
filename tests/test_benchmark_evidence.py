@@ -28,9 +28,27 @@ from eval.benchmark import (
     write_canonical_artifact,
 )
 from eval.chunking_eval import compare as compare_chunking, load as load_chunking
+from eval.harness import load_dataset as load_performance_dataset
+from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def offline_release_evidence():
+    """Run the exact small offline commands that back the public documentation."""
+    longdoc = ROOT / "eval" / "datasets" / "longdoc.jsonl"
+    codemem = ROOT / "eval" / "datasets" / "codemem.jsonl"
+    return {
+        "chunking": compare_chunking(
+            load_chunking(str(longdoc)), k=5, embed_model=None
+        ),
+        "performance": run_performance(
+            load_performance_dataset(str(codemem)), k=5, iterations=10
+        ),
+        "grounded": grounded_eval.run(),
+    }
 
 
 def test_public_facing_docs_do_not_use_em_dashes():
@@ -80,32 +98,52 @@ def test_public_record_redaction_uses_an_allowlist_for_raw_payload_aliases():
     assert len(record["context_or_prompt_sha256"]) == 64
 
 
-def test_readme_distinguishes_every_current_token_context_measurement():
+def test_readme_distinguishes_every_current_token_context_measurement(
+    offline_release_evidence,
+):
     """Public token-efficiency copy must preserve each metric's counting boundary."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    chunking = offline_release_evidence["chunking"]
+    whole = chunking["reports"]["whole"]
+    chunked = chunking["reports"]["chunked"]
+    performance = offline_release_evidence["performance"]
+    context = performance["context"]
+    payload_samples = len(performance["detail"])
+    timed_recalls = performance["run"]["timed_recalls"]
 
     for evidence in (
         "## Measured token and context savings",
         "98.21 percent less long-history context",
-        "73.0% lower",
+        f"{chunking['context_reduction_pct']:.1f}% lower",
         "73.9 percent fewer tokens in the smallest useful memory",
-        "55.38 percent smaller memory response",
+        f"{100 * context['serialized_payload_savings_ratio']:.2f} percent smaller "
+        "recall payload proxy",
         "47.8 percent less repeated-memory context after consolidation",
         "<summary>See benchmark details and reproduce the results</summary>",
         "### Measurement details and reproducibility",
         "49,915,394** tokens → Engraphis: **891,857** tokens",
         "98.2133% lower",
-        "808.8** tokens → structure-aware chunks: **218.4** tokens",
-        "73.0% lower",
-        "162.2** tokens → chunks: **42.4** tokens",
+        f"{whole['mean_context_tokens']:.1f}** tokens → structure-aware chunks: "
+        f"**{chunked['mean_context_tokens']:.1f}** tokens",
+        f"{chunking['context_reduction_pct']:.1f}% lower",
+        f"{whole['mean_evidence_tokens']:.1f}** tokens → chunks: "
+        f"**{chunked['mean_evidence_tokens']:.1f}** tokens",
         "73.9% lower",
-        "17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens",
-        "55.38% lower",
+        f"{context['full_serialized_payload_tokens']:,}** `engraphis.regex.v1` tokens → "
+        f"compact proxy: **{context['compact_serialized_payload_tokens']:,}** tokens",
+        f"{context['saved_serialized_payload_tokens']:,} proxy tokens avoided",
+        f"{100 * context['serialized_payload_savings_ratio']:.2f}% lower",
+        f"{payload_samples} payload samples; {timed_recalls} timed recalls",
         "230** tokens → one digest: **120** tokens",
         "47.8% lower",
-        "2,194** total agent-facing tokens",
-        "252 tokens avoided",
-        "1,500** tokens; observed mean: **87.73**; observed maximum: **106**",
+        "1,883** total agent-facing tokens",
+        "59 more tokens",
+        "3.1% higher",
+        "demonstrates bypass behavior, not token savings",
+        f"1,500** tokens; observed mean: **{context['mean_tokens']:.2f}**; "
+        f"observed maximum: **{context['max_tokens']}**",
+        "does **not** serialize the MCP envelope",
+        "not an MCP transport response",
         "must not be added together",
         "not a storage-reduction claim",
         "There is no universal memory-count",
@@ -114,28 +152,29 @@ def test_readme_distinguishes_every_current_token_context_measurement():
     ):
         assert evidence in readme
 
+    assert payload_samples == performance["corpus"]["questions"]
+    assert timed_recalls == payload_samples * performance["run"]["iterations"]
 
-def test_readme_keeps_external_evidence_caveats_out_of_the_front_page():
-    """Benchmark caveats belong in the supporting benchmark documentation."""
+
+def test_readme_keeps_external_evidence_claims_adjacent_to_their_boundary():
+    """A headline external diagnostic must carry its evidence boundary nearby."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
-    boundary = "External LoCoMo-derived figures are not canonical."
-    assert boundary not in readme
     assert "<summary>See benchmark details and reproduce the results</summary>" in readme
-
-    for detail in (
-        "Unpinned, noncanonical workload diagnostic",
-        "not answer quality or leaderboard accuracy",
+    assert "unpinned, noncanonical retrieval diagnostic" in readme.lower()
+    assert "not official\nLoCoMo QA" in readme
+    assert "not reproduced by the\nsmall offline fixtures below" in readme
+    for supporting_detail in (
         "### Choose a vector backend for your corpus",
         "python -m eval.redteam_poisoning",
         "[local and hosted plans]",
     ):
-        assert detail not in readme
+        assert supporting_detail not in readme
 
     assert "unpinned, noncanonical workload diagnostic" in benchmarks.lower()
-    assert "NumPy vector scale envelope" in benchmarks
+    assert "Exact vector scale envelope" in benchmarks
     assert "python -m eval.redteam_poisoning" in security
 
 
@@ -189,13 +228,14 @@ def test_readme_visual_pngs_match_their_svg_canvas():
         assert struct.unpack(">II", png_header[16:24]) == expected
 
 
-def test_example_visual_uses_the_checked_in_offline_fixture_results():
+def test_example_visual_uses_the_checked_in_offline_fixture_results(
+    offline_release_evidence,
+):
     """The new examples must not drift away from the commands readers can run."""
-    longdoc = ROOT / "eval" / "datasets" / "longdoc.jsonl"
-    chunking = compare_chunking(load_chunking(str(longdoc)), k=5, embed_model=None)
+    chunking = offline_release_evidence["chunking"]
     whole = chunking["reports"]["whole"]
     chunked = chunking["reports"]["chunked"]
-    grounded = grounded_eval.run()
+    grounded = offline_release_evidence["grounded"]
     visual = (ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg").read_text(
         encoding="utf-8"
     )
@@ -215,11 +255,20 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results():
     assert "5/5 off-topic questions abstained" in visual
 
 
-def test_context_savings_visual_is_plain_language_and_uses_measured_results():
+def test_context_savings_visual_is_plain_language_and_uses_measured_results(
+    offline_release_evidence,
+):
     """The headline chart must stay simple and tied to the documented measurements."""
     visual = (ROOT / "docs" / "images" / "context-efficiency.svg").read_text(
         encoding="utf-8"
     )
+    chunking = offline_release_evidence["chunking"]
+    whole = chunking["reports"]["whole"]
+    chunked = chunking["reports"]["chunked"]
+    performance = offline_release_evidence["performance"]
+    context = performance["context"]
+    payload_samples = len(performance["detail"])
+    timed_recalls = performance["run"]["timed_recalls"]
 
     for evidence in (
         "Give your agent more room to think",
@@ -227,15 +276,18 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results():
         "Engraphis · 891,857 tokens",
         "98.21% less",
         "Focused context; full-history recall was higher",
-        "Whole documents · 808.8 tokens",
-        "Focused chunks · 218.4 tokens",
-        "73.0% less",
-        "Whole document · 162.2 tokens",
-        "Useful chunk · 42.4 tokens",
+        f"Whole documents · {whole['mean_context_tokens']:.1f} tokens",
+        f"Focused chunks · {chunked['mean_context_tokens']:.1f} tokens",
+        f"{chunking['context_reduction_pct']:.1f}% less",
+        f"Whole document · {whole['mean_evidence_tokens']:.1f} tokens",
+        f"Useful chunk · {chunked['mean_evidence_tokens']:.1f} tokens",
         "73.9% less",
-        "Full response · 17,172 tokens",
-        "Compact response · 7,663 tokens",
-        "55.38% less",
+        "Recall payload proxy",
+        f"{payload_samples} payload samples · {timed_recalls} timed recalls",
+        "JSON shape · not MCP transport",
+        f"Full proxy · {context['full_serialized_payload_tokens']:,} tokens",
+        f"Compact proxy · {context['compact_serialized_payload_tokens']:,} tokens",
+        f"{100 * context['serialized_payload_savings_ratio']:.2f}% less",
         "Repeated memories · 230 tokens",
         "Consolidated digest · 120 tokens",
         "47.8% less",
@@ -243,7 +295,7 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results():
         "INCLUDING INDEXING",
         "97.72% less total",
         "paid back by question 10",
-        "87.7 average · 106 max",
+        f"{context['mean_tokens']:.2f} average · {context['max_tokens']} max",
         "percentages are not additive",
     ):
         assert evidence in visual
@@ -253,6 +305,41 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results():
         for value in re.findall(r'font-size="([^"]+)"', visual)
     }
     assert text_sizes == {13.2, 14.3, 17.6, 18.7, 25.3, 29.7, 33.0}
+
+
+def test_benchmark_guide_tracks_the_live_offline_evaluators(offline_release_evidence):
+    """Method prose must change whenever its executable offline evidence changes."""
+    benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
+    normalized = " ".join(benchmarks.split())
+    chunking = offline_release_evidence["chunking"]
+    whole = chunking["reports"]["whole"]
+    chunked = chunking["reports"]["chunked"]
+    performance = offline_release_evidence["performance"]
+    context = performance["context"]
+    payload_samples = len(performance["detail"])
+
+    for evidence in (
+        f"falls from {whole['mean_context_tokens']:.1f} to "
+        f"{chunked['mean_context_tokens']:.1f} tokens",
+        f"{whole['mean_context_tokens'] - chunked['mean_context_tokens']:.1f} fewer, "
+        f"{chunking['context_reduction_pct']:.1f}% lower",
+        f"falls from {whole['mean_evidence_tokens']:.1f} to "
+        f"{chunked['mean_evidence_tokens']:.1f} tokens",
+        "Payload proxies are sampled once per question",
+        "not serialized MCP envelopes or transport responses",
+        f"{payload_samples} payload samples total **"
+        f"{context['full_serialized_payload_tokens']:,}** full-proxy",
+        f"versus **{context['compact_serialized_payload_tokens']:,}** compact-proxy tokens",
+        f"avoiding **{context['saved_serialized_payload_tokens']:,}** proxy tokens",
+        f"**{100 * context['serialized_payload_savings_ratio']:.2f}% lower**",
+        f"averages **{context['mean_tokens']:.2f}** tokens and reaches "
+        f"**{context['max_tokens']}**",
+    ):
+        assert evidence in normalized
+
+    assert performance["run"]["timed_recalls"] == (
+        payload_samples * performance["run"]["iterations"]
+    )
 
 
 def _complete_canonical_report(dataset, config):

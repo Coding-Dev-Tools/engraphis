@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field, StrictInt
 
 from engraphis import licensing
@@ -39,6 +39,7 @@ from engraphis.service import (
 )
 from engraphis.core.store import _escape_like
 from engraphis.core.textutil import jaccard, tokenize
+from engraphis.netutil import is_local_request
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
@@ -113,12 +114,16 @@ def service() -> MemoryService:
     if _service is None:
         _service = MemoryService.create(
             settings.db_path, embed_model=settings.embed_model,
+            embed_revision=getattr(settings, "embed_revision", "") or None,
+            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
             embed_dim=settings.embed_dim or 384,
-            vector_backend=settings.vector_backend)
+            vector_backend=settings.vector_backend,
+            rerank_model=getattr(settings, "rerank_model", "") or None,
+            rerank_revision=getattr(settings, "rerank_revision", "") or None)
     return _service
 
 
-def set_service(svc: MemoryService) -> None:
+def set_service(svc: Optional[MemoryService]) -> None:
     """Inject a service (tests / the dashboard app).
 
     Close the previously-bound service's store connection first so its SQLite/WAL
@@ -127,11 +132,16 @@ def set_service(svc: MemoryService) -> None:
     same path and surfaced as an intermittent ``database is locked``."""
     global _service
     prev = _service
+    if prev is svc:
+        return
     if prev is not None:
+        store = getattr(prev, "store", None)
         try:
-            prev.store.close()
-        except Exception:  # noqa: BLE001 — never block the swap on a close error
-            pass
+            if store is not None:
+                store.close()
+        except Exception as exc:  # noqa: BLE001 - preserve the prior live binding
+            logger.error("prior memory service close failed (%s)", type(exc).__name__)
+            raise RuntimeError("the prior memory service could not be closed") from None
     _service = svc
 
 
@@ -1432,9 +1442,22 @@ def receipts(workspace: Optional[str] = None,
 
 
 @router.get("/context-savings")
-def context_savings(workspace: Optional[str] = None, repo: Optional[str] = None):
+def context_savings(
+    workspace: Optional[str] = None,
+    repo: Optional[str] = None,
+    from_ts: Optional[float] = None,
+    to_ts: Optional[float] = None,
+    release_version: Optional[str] = None,
+):
     ws = workspace or _require_ws()
-    return _run(service().context_savings, workspace=ws, repo=repo)
+    return _run(
+        service().context_savings,
+        workspace=ws,
+        repo=repo,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        release_version=release_version,
+    )
 
 
 @router.get("/receipts/verify")
@@ -1556,8 +1579,17 @@ class _RememberReq(BaseModel):
     claim_kind: str = ""
 
 
+def _request_is_loopback(request: Request) -> bool:
+    """Attest a direct local request without trusting proxy-rewritten peers.
+
+    A reverse proxy commonly has a loopback socket peer.  Forwarded requests must not
+    inherit local-agent approval authority merely because that proxy is local.
+    """
+    return is_local_request(request)
+
+
 @router.post("/remember")
-def remember(req: _RememberReq):
+def remember(req: _RememberReq, request: Request):
     return _run(service().remember, req.content, workspace=req.workspace,
                 repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
@@ -1569,7 +1601,13 @@ def remember(req: _RememberReq):
                 retention_class=req.retention_class,
                 retention_reason=req.retention_reason,
                 valid_from=req.valid_from,
-                subject_key=req.subject_key, claim_kind=req.claim_kind)
+                subject_key=req.subject_key, claim_kind=req.claim_kind,
+                _local_agent_operator=(
+                    _request_is_loopback(request)
+                    and req.source.strip().casefold() == "agent"
+                    and req.trusted
+                ),
+                _ingress="http")
 
 
 class _IntentRememberReq(BaseModel):
@@ -1589,7 +1627,7 @@ class _IntentRememberReq(BaseModel):
 
 
 @router.post("/intent/remember")
-def intent_remember(req: _IntentRememberReq):
+def intent_remember(req: _IntentRememberReq, request: Request):
     # The local open core accepts its own writes. Hosted remote-agent authorization is a
     # separate server-side Team boundary and is not implemented in this package.
     return _run(
@@ -1599,6 +1637,8 @@ def intent_remember(req: _IntentRememberReq):
         retention_reason=req.retention_reason,
         valid_from=req.valid_from,
         subject_key=req.subject_key, claim_kind=req.claim_kind,
+        _local_agent_operator=_request_is_loopback(request),
+        _ingress="http",
     )
 
 
@@ -2327,9 +2367,10 @@ def entitled_features(plan: str) -> list:
 # a daemon thread so the next read is right. That background refresh is also what corrects a
 # plan the customer changed in the account portal — a Pro→Team upgrade unlocks a tab the
 # customer cannot click *until* it is unlocked, so nothing else would ever ask. Every
-# failure — offline, lapsed, revoked, unreadable state directory, malformed body — degrades
-# to the last known plan and finally to the inference below. Nothing here can raise into, or
-# delay, ``/api/bootstrap``.
+# Transport and parse failures degrade to the last known plan and finally to the inference
+# below. An authoritative 401/402/403 instead removes grants immediately, including while
+# its durable state update is blocked. Nothing here can raise into, or delay,
+# ``/api/bootstrap``.
 
 #: Cache envelope version; an unrecognised value is discarded rather than trusted.
 _ENTITLEMENT_CACHE_SCHEMA = "engraphis-cloud-entitlement/v1"
@@ -2345,6 +2386,11 @@ _ENTITLEMENT_RETRY_BASE_SECONDS = 30.0
 _ENTITLEMENT_RETRY_MAX_SECONDS = 15 * 60.0
 _entitlement_retry_after = 0.0
 _entitlement_refresh_failures = 0
+# A control-plane 401/402/403 must take effect before either local state write begins.
+# The event closes the request/write race and keeps this process fail-closed when the
+# state directory is temporarily unwritable. A newer active authoritative record clears it.
+_AUTHORITATIVE_DENIAL_PENDING = threading.Event()
+_authoritative_denial_at = 0.0
 #: Same opt-out vocabulary as ``ENGRAPHIS_UPDATE_CHECK`` (see engraphis/update_check.py).
 _FALSY_SETTINGS = {"0", "false", "no", "off", "disable", "disabled"}
 
@@ -2671,7 +2717,7 @@ def _read_entitlement_cache() -> dict:
     return resolved
 
 
-def _write_entitlement_cache(entitlement: dict) -> None:
+def _write_entitlement_cache(entitlement: dict) -> bool:
     """Persist the authoritative entitlement so the next boot starts correct.
 
     Written through the owner-only atomic helper used for the cloud session itself: the
@@ -2682,7 +2728,7 @@ def _write_entitlement_cache(entitlement: dict) -> None:
 
     path = _entitlement_cache_path()
     if path is None:
-        return
+        return False
     try:
         from engraphis.private_state import atomic_private_text
         atomic_private_text(path, json.dumps({
@@ -2700,11 +2746,13 @@ def _write_entitlement_cache(entitlement: dict) -> None:
             "trial_consumed": bool(entitlement.get("trial_consumed")),
             "trial_ends_at": float(entitlement.get("trial_ends_at") or 0.0),
         }, sort_keys=True, separators=(",", ":")), harden_parent=True)
+        return True
     except Exception:  # noqa: BLE001 - losing the cache write must not surface anywhere
         logger.debug("entitlement cache write skipped")
+        return False
 
 
-def _deny_entitlement_cache() -> None:
+def _deny_entitlement_cache() -> bool:
     """Clear this cache's grants after an authoritative billing denial.
 
     ``cloud_session.record_billing_denial`` settles the session record, but an older
@@ -2728,7 +2776,7 @@ def _deny_entitlement_cache() -> None:
     try:
         cached = _read_entitlement_cache()
         if not cached:
-            return
+            return True
         denied = dict(cached)
         denied["cloud_access_active"] = False
         denied["features"] = []
@@ -2738,23 +2786,52 @@ def _deny_entitlement_cache() -> None:
         # "your subscription lapsed" in the panel this settles.
         denied["status"] = ""
         denied["fetched_at"] = time.time()
-        _write_entitlement_cache(denied)
+        return _write_entitlement_cache(denied)
     except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
-        logger.debug("entitlement cache denial skipped")
+        logger.warning("entitlement cache denial persistence failed")
+        return False
+
+
+def _mark_authoritative_denial() -> None:
+    """Make an authoritative cloud denial visible before persistence starts."""
+
+    global _authoritative_denial_at
+    with _ENTITLEMENT_REFRESH_LOCK:
+        _authoritative_denial_at = time.time()
+        _AUTHORITATIVE_DENIAL_PENDING.set()
+
+
+def _clear_superseded_denial(checked_at: float) -> bool:
+    """Clear the process guard only for a newer active authoritative answer."""
+
+    global _authoritative_denial_at
+    with _ENTITLEMENT_REFRESH_LOCK:
+        if (
+            _AUTHORITATIVE_DENIAL_PENDING.is_set()
+            and checked_at > _authoritative_denial_at
+        ):
+            _AUTHORITATIVE_DENIAL_PENDING.clear()
+            _authoritative_denial_at = 0.0
+            return True
+    return False
 
 
 def _record_authoritative_denial() -> None:
     """Settle both persisted entitlement sources after a 401/402/403 cloud answer."""
 
+    _mark_authoritative_denial()
     try:
         from engraphis.cloud_session import record_billing_denial
 
         record_billing_denial()
-    except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
-        pass
+    except Exception as exc:  # noqa: BLE001 - the in-process guard remains authoritative
+        logger.warning(
+            "cloud session denial persistence failed (%s)", type(exc).__name__
+        )
     # An older control plane or direct-token deployment may have no entitlement fields in
     # the session record, so the compatibility cache must settle independently.
-    _deny_entitlement_cache()
+    if not _deny_entitlement_cache():
+        logger.warning("authoritative entitlement denial remains process-local")
 
 
 def _fetch_authoritative_entitlement() -> Optional[dict]:
@@ -3008,6 +3085,37 @@ def _plan_entitlement() -> dict:
                        "cloud_access_active": False, "checked_at": 0.0}
         entitlement.update(_unknown_trial_facts())
         return entitlement
+    if _AUTHORITATIVE_DENIAL_PENDING.is_set():
+        # Reads are safe here: only access is overridden. Keeping the last known paid plan
+        # lets the UI direct a lapsed Team customer to billing without restoring any grant.
+        known = _session_entitlement()
+        known_source = "session"
+        if not known:
+            known = _read_entitlement_cache()
+            known_source = "cloud"
+        try:
+            known_checked_at = float(known.get("fetched_at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            known_checked_at = 0.0
+        if (
+            known
+            and bool(known.get("cloud_access_active"))
+            and _clear_superseded_denial(known_checked_at)
+        ):
+            return _resolved_entitlement(known, source=known_source)
+        with _ENTITLEMENT_REFRESH_LOCK:
+            denial_checked_at = _authoritative_denial_at
+        plan = _normalized_plan(known.get("plan")) if known else "pro"
+        denied = {
+            "plan": plan,
+            "features": [],
+            "cloud_access_active": False,
+            "organization_id": str(known.get("organization_id") or "") if known else "",
+            "fetched_at": max(known_checked_at, denial_checked_at),
+        }
+        denied.update(_trial_facts(known) if known else _unknown_trial_facts())
+        _refresh_entitlement_in_background(denied)
+        return _resolved_entitlement(denied, source="authoritative_denial")
     session = _session_entitlement()
     if session:
         _refresh_entitlement_in_background(session)
@@ -3325,7 +3433,19 @@ def _sync_all(svc) -> dict:
     from engraphis.cloud_session import CloudSessionError, access_for_workspace
     from engraphis.core.sync import SyncEngine
 
-    wss = svc.list_workspaces().get("workspaces") or []
+    # Ordinary workspace listings intentionally hide malformed access envelopes.
+    # Sync still needs to see those rows so it can report and skip them instead of
+    # either uploading them or claiming there is nothing to sync. Enumerate a
+    # sync-specific raw inventory, constrained by the same instance allow-list.
+    workspace_rows = svc.store.conn.execute(
+        "SELECT name FROM workspaces ORDER BY name"
+    ).fetchall()
+    allowed_workspaces = getattr(svc, "allowed_workspaces", None)
+    wss = [
+        {"name": row["name"]}
+        for row in workspace_rows
+        if allowed_workspaces is None or row["name"] in allowed_workspaces
+    ]
     engine = svc.engine
     syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index,
                         allowed_workspaces=settings.allowed_workspaces or None)
@@ -3341,27 +3461,16 @@ def _sync_all(svc) -> dict:
         name = w.get("name")
         if not name:
             continue
-        if w.get("visibility") == "personal":
-            # Personal folders are private to their owner and must never leave this device
-            # over the hosted organization relay: the relay namespace is shared by authorized
-            # organization members, not partitioned per local user — pushing a personal
-            # folder there would let any teammate pull it. Keep them local. (Both callers are
-            # covered: the "Sync now" button runs in the owner-admin's request context, where
-            # list_workspaces already hides *other* users' personal folders but still returns
-            # the caller's own; the background loop runs with no user context and sees them
-            # all. This skip is the single point that keeps either from syncing.)
-            continue
         row = svc.store.conn.execute(
             "SELECT id, settings FROM workspaces WHERE name=?", (name,)).fetchone()
         if not row:
             continue
-        # Fail CLOSED on unreadable settings, unlike the local-authorization
-        # convention (which collapses malformed settings to "shared"): this path
-        # uploads the folder off-device, so a corrupted settings row must block the
-        # push rather than silently treat a possibly-personal folder as shared.
+        # Fail CLOSED before an off-device upload. This mirrors the service
+        # authorization boundary: unreadable settings must never silently turn a
+        # possibly-personal folder into a shared one.
         try:
             raw_settings = json.loads(row["settings"] or "{}")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             raw_settings = None
         if not isinstance(raw_settings, dict):
             errors.append({
@@ -3372,8 +3481,11 @@ def _sync_all(svc) -> dict:
             continue
         visibility = raw_settings.get("visibility")
         if visibility == "personal":
+            # The hosted relay namespace is shared by authorized organization
+            # members, not partitioned per local user. Personal folders stay local
+            # regardless of which principal initiated this sweep.
             continue
-        if visibility not in (None, "", "shared"):
+        if visibility not in (None, "shared"):
             errors.append({
                 "workspace": name,
                 "error": "workspace visibility is invalid; refusing to sync to the "
@@ -3462,12 +3574,11 @@ async def sync_run():
             "upgrade_url": licensing.upgrade_url()})
 
     svc = service()
-    if not (svc.list_workspaces().get("workspaces") or []):
-        raise HTTPException(status_code=400,
-                            detail={"error": "Nothing to sync yet — add a memory first."})
-
     import asyncio
     summary = await asyncio.to_thread(_sync_all, svc)
+    if summary["workspaces"] == 0:
+        raise HTTPException(status_code=400,
+                            detail={"error": "Nothing to sync yet — add a memory first."})
     _SYNC_STATE["last"] = summary
     # Promote a total authorization loss to the dashboard's recovery CTA.  Successful
     # empty/read-only workspaces still count as successes, so exported == 0 is not enough:

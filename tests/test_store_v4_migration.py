@@ -10,6 +10,13 @@ import pytest
 
 from engraphis.core.store import Store
 from engraphis.core.interfaces import Edge, MemoryRecord, Scope, SearchFilter
+from engraphis.core.retention_policy import (
+    DEFAULT_STABILITY_DAYS,
+    MAX_ACCESS_COUNT,
+    MAX_STABILITY_DAYS,
+    MIN_STABILITY_DAYS,
+)
+from engraphis.core.schema import SCHEMA_VERSION
 
 
 def _adversarial_link(target: Path, link: Path) -> None:
@@ -57,7 +64,7 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     _prepare_v3(db)
 
     migrated = Store(str(db))
-    assert migrated.schema_version == 9
+    assert migrated.schema_version == SCHEMA_VERSION
     assert migrated.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -147,7 +154,7 @@ def test_v4_upgrade_rebuilds_code_history_and_backfills_claim_identity(tmp_path)
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert Path(f"{db}.pre-migration-v5.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= columns
@@ -248,8 +255,8 @@ def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_pa
             "SELECT valid_from, ingested_at, valid_to, expired_at "
             "FROM mem_links WHERE a='mem_a'"
         ).fetchone()
-        assert upgraded.schema_version == 9
-        assert Path(f"{db}.pre-migration-v9.bak").is_file()
+        assert upgraded.schema_version == SCHEMA_VERSION
+        assert Path(f"{db}.pre-migration-v{SCHEMA_VERSION}.bak").is_file()
         assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
         assert row["valid_from"] == row["ingested_at"] == 123
         assert row["valid_to"] is None and row["expired_at"] is None
@@ -298,7 +305,7 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
         history = upgraded.conn.execute(
             "SELECT file, content_hash, valid_from, ingested_at FROM code_file_history"
         ).fetchone()
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert Path(f"{db}.pre-migration-v6.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert history["file"] == "api.py"
@@ -343,7 +350,7 @@ def test_v6_upgrade_adds_confidence_and_preserves_rows(tmp_path):
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == SCHEMA_VERSION
         # A v6 source backs up as v7 (min(SCHEMA_VERSION, previous_version + 1)).
         assert Path(f"{db}.pre-migration-v7.bak").is_file()
         assert "confidence" in columns
@@ -391,7 +398,7 @@ def test_v7_reopen_canonicalizes_legacy_entity_aliases_idempotently(
             "SELECT id, canonical_id, canonical_method FROM entities "
             "ORDER BY id"
         ).fetchall()
-        assert reopened.schema_version == 9
+        assert reopened.schema_version == SCHEMA_VERSION
         assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
             ("ent_open_ai", "token_overlap"),
             ("ent_open_ai", "token_overlap"),
@@ -457,7 +464,7 @@ def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_pa
         row = upgraded.conn.execute(
             "SELECT memory_id, repo_id FROM memory_tombstones WHERE memory_id='legacy-erased'"
         ).fetchone()
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert "repo_id" in columns
         assert index_columns == ["workspace_id", "repo_id", "memory_id"]
         assert row["memory_id"] == "legacy-erased"
@@ -490,7 +497,7 @@ def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypa
     monkeypatch.setattr(Store, "_migrate_code_file_history_v6", unexpected)
     reopened = Store(str(db))
     try:
-        assert reopened.schema_version == 9
+        assert reopened.schema_version == SCHEMA_VERSION
     finally:
         reopened.close()
 
@@ -522,7 +529,7 @@ def test_migration_transform_failure_rolls_back_and_restart_completes(
 
     monkeypatch.setattr(Store, "_backfill_edge_supports", original)
     restarted = Store(str(db))
-    assert restarted.schema_version == 9
+    assert restarted.schema_version == SCHEMA_VERSION
     assert restarted.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -653,4 +660,51 @@ def test_backup_directory_is_durable_before_schema_transform(monkeypatch, tmp_pa
     monkeypatch.setattr(Store, "_apply_schema", require_flush_before_schema)
 
     Store(str(db)).close()
-    assert _version(db) == 9
+    assert _version(db) == SCHEMA_VERSION
+
+
+def test_v9_upgrade_repairs_unsafe_retention_state(tmp_path):
+    db = tmp_path / "v9-retention.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    ids = [
+        store.add_memory(MemoryRecord(id=f"mem_retention_{index}", content=str(index),
+                                      workspace_id=workspace_id))
+        for index in range(5)
+    ]
+    rows = [
+        (None, None),
+        (-2.0, -3),
+        (0.01, 4),
+        (float("inf"), MAX_ACCESS_COUNT + 10),
+        (250.0, 5),
+    ]
+    for memory_id, (stability, count) in zip(ids, rows):
+        store.conn.execute(
+            "UPDATE memories SET stability=?, access_count=? WHERE id=?",
+            (stability, count, memory_id),
+        )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (9, 0)")
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        repaired = upgraded.conn.execute(
+            "SELECT stability, access_count FROM memories ORDER BY id"
+        ).fetchall()
+        assert upgraded.schema_version == SCHEMA_VERSION
+        assert [row["stability"] for row in repaired] == [
+            DEFAULT_STABILITY_DAYS,
+            DEFAULT_STABILITY_DAYS,
+            MIN_STABILITY_DAYS,
+            MAX_STABILITY_DAYS,
+            MAX_STABILITY_DAYS,
+        ]
+        assert [row["access_count"] for row in repaired] == [
+            0, 0, 4, MAX_ACCESS_COUNT, 5,
+        ]
+        assert Path(f"{db}.pre-migration-v10.bak").is_file()
+    finally:
+        upgraded.close()
