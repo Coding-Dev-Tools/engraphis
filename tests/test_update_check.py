@@ -69,9 +69,9 @@ def test_parse_github_rejects_draft_and_prerelease():
 
 
 def test_parse_pypi_payload():
-    got = u._parse_release_payload({"info": {"version": "1.5.0"}})
-    assert got["version"] == "1.5.0"
-    assert "1.5.0" in got["url"]
+    got = u._parse_release_payload({"info": {"version": "1.5"}})
+    assert got["version"] == "1.5"
+    assert "1.5" in got["url"]
 
 
 def test_parse_generic_and_garbage():

@@ -36,7 +36,7 @@ def test_estimator_classifies_each_delivery_basis(
         baseline_tokens=100,
         emitted_tokens=40,
         token_counter="engraphis.regex.v1",
-        release_version="1.5.0",
+        release_version="1.5",
     )
 
     assert isinstance(estimate, SavingsEstimate)
@@ -46,7 +46,7 @@ def test_estimator_classifies_each_delivery_basis(
     assert estimate.saved_tokens == (60 if eligible else 0)
     assert 0 <= estimate.saved_tokens <= estimate.baseline_tokens
     assert 0 <= estimate.savings_ratio <= 1
-    assert estimate.release_version == "1.5.0"
+    assert estimate.release_version == "1.5"
 
 
 def test_estimator_is_conservative_for_bad_counts_and_annotates_existing_usage():
@@ -62,7 +62,7 @@ def test_estimator_is_conservative_for_bad_counts_and_annotates_existing_usage()
 
     assert usage["estimated_saved_tokens"] == 60
     assert usage["savings_eligible"] is True
-    assert usage["release_version"] == "1.5.0"
+    assert usage["release_version"] == "1.5"
     abstained = estimate_savings(
         operation="adaptive_context",
         adaptive_mode="low_confidence_abstain",
@@ -73,7 +73,7 @@ def test_estimator_is_conservative_for_bad_counts_and_annotates_existing_usage()
     assert abstained.baseline_tokens == 0
 
 
-def _usage(baseline, emitted, *, counter, release="1.5.0", eligible=True,
+def _usage(baseline, emitted, *, counter, release="1.5", eligible=True,
            basis="history_retrieval", confidence="high"):
     saved = max(0, baseline - emitted) if eligible else 0
     return {
@@ -157,7 +157,7 @@ def test_context_savings_aggregates_estimates_filters_releases_and_counters():
     assert all_time["estimated"]["unclassified_receipt_count"] == 1
 
     current = store.context_savings(
-        workspace_id=wid, repo_id=rid, release_version="1.5.0"
+        workspace_id=wid, repo_id=rid, release_version="1.5"
     )
     assert current["receipt_count"] == 2
     assert current["usage_receipt_count"] == 2
