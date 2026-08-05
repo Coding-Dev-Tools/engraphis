@@ -97,7 +97,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         filtered = client.get(
             "/api/context-savings",
             params={"workspace": "demo", "from_ts": 0, "to_ts": 9_999_999_999,
-                    "release_version": "1.5.0"},
+                    "release_version": "1.5"},
         )
         assert filtered.status_code == 200
         assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}

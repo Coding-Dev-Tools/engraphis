@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
-_RELEASE_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+_RELEASE_VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$")
 
 
 @dataclass(frozen=True)
