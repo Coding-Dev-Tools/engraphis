@@ -87,7 +87,9 @@ search in a fresh process when using the SQLCipher extra.
 
 ## Query planning
 
-Recall defaults to the `balanced` retrieval profile and `planning="off"`. Opt-in
+Recall defaults to the `balanced` retrieval profile and `planning="off"`. The explicit `fast`
+profile keeps vector + lexical retrieval while skipping graph traversal for small or
+latency-sensitive vaults. Opt-in
 `planning="auto"` keeps the original query, admits at most two deterministic or injected query
 routes, and fuses them before reranking against the original query. `mtype_limits`, when provided,
 are post-rerank maximum counts rather than relevance boosts. Every packed response has a stable

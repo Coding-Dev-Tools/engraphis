@@ -21,6 +21,7 @@ from eval.harness import _seed_case_graph, load_dataset
     ("name", "expected"),
     [
         ("balanced", (True, True, True, False)),
+        ("fast", (True, True, False, False)),
         ("lexical", (False, True, False, False)),
         ("graph", (True, True, True, False)),
         ("code", (True, True, True, True)),
@@ -34,6 +35,24 @@ def test_concrete_profiles_have_stable_arm_configurations(
     assert (config.vector, config.lexical, config.graph, config.code) == expected
     with pytest.raises(FrozenInstanceError):
         config.code = False  # type: ignore[misc]
+
+
+def test_fast_profile_skips_graph_traversal_for_latency_sensitive_recalls() -> None:
+    config = profile_config("fast")
+
+    assert config.name == "fast"
+    assert config.vector and config.lexical
+    assert not config.graph and not config.code
+
+    depth, reason = DeterministicRetrievalPolicy().candidate_depth(
+        "find the release decision",
+        k=5,
+        ceiling=100,
+        profile="fast",
+        mode="adaptive",
+    )
+    assert depth == 10
+    assert reason == "adaptive fast floor"
 
 
 @pytest.mark.parametrize(

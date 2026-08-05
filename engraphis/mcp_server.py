@@ -310,8 +310,9 @@ def engraphis_recall(
         description="Hard packed-context budget under the named token counter (0-32768).",
         ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="Retrieval profile: balanced (legacy hybrid), auto, lexical, graph, "
-                    "or code. Auto is opt-in until benchmarks demonstrate a win.")] = "balanced",
+        description="Retrieval profile: balanced (hybrid), fast (vector + lexical, no graph), "
+                    "auto, lexical, graph, or code. Auto is opt-in until benchmarks demonstrate "
+                    "a win.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in "
                     "profile-aware performance experiment.")] = "fixed",
@@ -383,7 +384,7 @@ def engraphis_recall_context(
         description="Hard packed-context budget under the reported token counter.",
         ge=0, le=32_768)] = 1024,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     as_of: Annotated[Optional[float], Field(
@@ -501,7 +502,7 @@ def engraphis_recall_grounded(
     token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(
@@ -588,7 +589,7 @@ def engraphis_answer(
     token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(

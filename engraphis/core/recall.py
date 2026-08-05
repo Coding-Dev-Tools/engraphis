@@ -1520,7 +1520,7 @@ def _sanitize_plan(
             raise ValueError("planned query priority must be a positive integer")
         priority = min(MAX_PLANNED_PRIORITY, max(2, item.priority))
         profile = str(item.profile or "balanced").strip().casefold()
-        if profile not in {"balanced", "lexical", "graph", "code"}:
+        if profile not in {"balanced", "fast", "lexical", "graph", "code"}:
             raise ValueError("planned query profile is invalid")
         mtypes = tuple(dict.fromkeys(MemoryType(value) for value in item.mtypes))
         candidates.append((priority, position, PlannedQuery(text, priority, profile, mtypes)))

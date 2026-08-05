@@ -181,7 +181,7 @@ for the short version of how much less history an agent has to carry.
 | Agent need | What Engraphis changes |
 |---|---|
 | Remember a project across sessions | Stores typed memory in a `workspace → repo → session` hierarchy and provides a last-session handoff. |
-| Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal. |
+| Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal; `fast` can skip graph traversal for small or latency-sensitive vaults. |
 | Know what is true now and what changed | Preserves bi-temporal history and supersession chains instead of silently overwriting a fact. |
 | Avoid confident guesses | Returns cited evidence or explicitly abstains when support is too weak. |
 | Avoid dragging the whole project into every prompt | Packs context to a configured hard budget and can return a compact MCP response. |

@@ -52,7 +52,7 @@ class LLMQueryPlanner:
                             },
                             "profile": {
                                 "type": "string",
-                                "enum": ["balanced", "lexical", "graph", "code"],
+                                "enum": ["balanced", "fast", "lexical", "graph", "code"],
                             },
                             "mtypes": {
                                 "type": "array",
@@ -68,7 +68,7 @@ class LLMQueryPlanner:
         prompt = (
             "Plan memory retrieval for the query below. Keep the original query first "
             "with priority 1. Add no more than two distinct queries. Use only balanced, "
-            "lexical, graph, or code profiles. Type limits are maxima, not boosts.\n\n"
+            "fast, lexical, graph, or code profiles. Type limits are maxima, not boosts.\n\n"
             f"QUERY:\n{query}"
         )
         kwargs = {"timeout": timeout_s} if timeout_s is not None else {}

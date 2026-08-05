@@ -282,8 +282,9 @@ This is how to make the connection actually pay off. The discipline fits on a ca
 
 `engraphis_recall_context` returns `usage` fields for the declared token counter: `budget_tokens`,
 `context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`, `packed_count`,
-`omitted_count`, and `token_counter`. Recall defaults to the `balanced` profile; set `auto` only
-explicitly. For time travel, use `valid_at` for what was true and `known_at` for what was known;
+`omitted_count`, and `token_counter`. Recall defaults to the `balanced` profile; use `fast` for
+vector + lexical retrieval without graph traversal, and set `auto` only explicitly. For time
+travel, use `valid_at` for what was true and `known_at` for what was known;
 `as_of` remains the `valid_at` alias and must match it when both are provided. `engraphis_recall`
 remains the full-response compatibility path, with `response_mode=compact` when duplicate bodies
 are unnecessary; both recall surfaces accept `diagnostics=true` for a retrieval trace.
