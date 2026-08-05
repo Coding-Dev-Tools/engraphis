@@ -381,7 +381,7 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
         "github-release-repair:", 1
     )[1]
 
-    assert '[[ "$RELEASE_TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]' in repair
+    assert '[[ "$RELEASE_TAG" =~ ^v[0-9]+\\.[0-9]+(\\.[0-9]+)?$ ]]' in repair
     assert "github.ref == 'refs/heads/main'" in repair
     assert '"repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}"' in repair
     assert '"repos/${GH_REPO}/git/tags/${tag_sha}"' in repair
