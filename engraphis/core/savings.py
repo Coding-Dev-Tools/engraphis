@@ -6,8 +6,8 @@ avoided prompt context, not provider billing or end-to-end task cost.
 """
 from __future__ import annotations
 
-import re
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 

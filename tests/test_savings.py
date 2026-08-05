@@ -159,6 +159,8 @@ def test_context_savings_aggregates_estimates_filters_releases_and_counters():
     current = store.context_savings(
         workspace_id=wid, repo_id=rid, release_version="1.5.0"
     )
+    assert current["receipt_count"] == 2
+    assert current["usage_receipt_count"] == 2
     assert current["estimated"]["eligible_receipt_count"] == 1
     assert current["estimated"]["saved_tokens"] == 60
     assert current["estimated"]["by_basis"][0]["basis"] == "history_retrieval"
@@ -189,3 +191,28 @@ def test_service_context_savings_filters_and_new_receipts_are_versioned():
     assert filtered["estimated"]["eligible_receipt_count"] == 1
     with pytest.raises(ValidationError, match="semantic version"):
         service.context_savings(workspace="versioned", release_version="legacy")
+
+
+def test_context_savings_ignores_gateway_copies_and_rejects_noncanonical_estimates():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("gateway-savings")
+    authoritative = _usage(100, 40, counter="engraphis.regex.v1")
+    store.record_receipt(
+        "adaptive_context", workspace_id=wid,
+        metadata={"token_usage": authoritative},
+    )
+    store.record_receipt(
+        "smart_gateway", workspace_id=wid,
+        metadata={"token_usage": authoritative},
+    )
+    noncanonical = _usage(80, 20, counter="engraphis.regex.v1")
+    noncanonical["estimated_savings_ratio"] = 0.1
+    store.record_receipt(
+        "adaptive_context", workspace_id=wid,
+        metadata={"token_usage": noncanonical},
+    )
+
+    summary = store.context_savings(workspace_id=wid)
+    assert summary["estimated"]["eligible_receipt_count"] == 1
+    assert summary["estimated"]["saved_tokens"] == 60
+    assert summary["estimated"]["invalid_estimate_count"] == 1

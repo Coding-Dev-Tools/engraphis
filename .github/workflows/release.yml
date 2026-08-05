@@ -73,7 +73,7 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
-          python -m pip_audit --local
+          python -m pip_audit --local --skip-editable
 
       - name: Build source and universal wheel distributions
         shell: bash

@@ -162,7 +162,7 @@ def test_ci_and_release_audit_production_image_dependencies():
         assert "ENGRAPHIS_API_TOKEN: ci-lan-overlay-token" in workflow
         assert "Validate token-protected LAN Compose overlay" in workflow
     assert 'pip setuptools wheel build twine pip-audit ".[all,test]"' in release_build
-    assert "python -m pip_audit --local" in release_build
+    assert "python -m pip_audit --local --skip-editable" in release_build
     assert "python scripts/normalize_sdist.py dist/*.tar.gz" in release_build
     assert "python scripts/normalize_sdist.py dist-repeat/*.tar.gz" in release_build
     assert "engine.store.close()" in release_build

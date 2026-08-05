@@ -160,9 +160,17 @@ class SqliteVecVectorIndex:
         try:
             if owns_transaction:
                 conn.execute("BEGIN IMMEDIATE")
+            # ``vec0`` virtual tables do not implement SQLite's conflict-resolution
+            # algorithms consistently: INSERT OR REPLACE can still raise a UNIQUE
+            # constraint error when a persisted row is hydrated after reopening a
+            # database. Delete the batch first, then insert the replacement rows in
+            # the same transaction so restart hydration remains idempotent and
+            # failures roll back to the previous index state.
+            marks = ",".join("?" for _ in ids)
+            conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
             for mid, vector in zip(ids, normalized):
                 conn.execute(
-                    "INSERT OR REPLACE INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
+                    "INSERT INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
                     (mid, vector.tobytes()),
                 )
             if commit and owns_transaction and conn.transaction_owned_by_current_thread():

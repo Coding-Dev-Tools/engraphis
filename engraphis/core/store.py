@@ -665,9 +665,9 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
                 return False
             if flt.session_id and rec.session_id != flt.session_id:
                 return False
-        if flt.scopes and rec.scope not in flt.scopes:
+        if flt.scopes is not None and rec.scope not in flt.scopes:
             return False
-        if flt.mtypes and rec.mtype not in flt.mtypes:
+        if flt.mtypes is not None and rec.mtype not in flt.mtypes:
             return False
     if include_invalid:
         return True
@@ -895,7 +895,15 @@ class _SerializedConnection:
             self._lock.release()              # no open transaction; release now
 
     def _finish(self, fn):
-        self._acquire()
+        # Finalizers may run while a test or embedding application temporarily
+        # instruments the acquire hook.  Teardown must use the primitive lock directly;
+        # dispatching through ``self._acquire`` can invoke an observer after its owning
+        # Store has become unreachable and can crash CPython while closing SQLite on
+        # Windows.
+        if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
+            raise sqlite3.OperationalError(
+                "store write lock timeout — a transaction appears stuck"
+            )
         succeeded = False
         try:
             fn()
@@ -5969,7 +5977,7 @@ class Store:
             params,
         ).fetchall()
         totals = {
-            "receipt_count": len(rows),
+            "receipt_count": 0,
             "usage_receipt_count": 0,
             "savings_receipt_count": 0,
             "invalid_receipt_count": 0,
@@ -6090,10 +6098,27 @@ class Store:
             if not isinstance(basis, str) or not isinstance(confidence, str):
                 estimate_totals["invalid_estimate_count"] += 1
                 return
+            if (
+                basis not in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_basis"]
+                or confidence not in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_confidence"]
+            ):
+                estimate_totals["invalid_estimate_count"] += 1
+                return
             baseline = int(usage["baseline_tokens"])
             emitted = int(usage["emitted_tokens"])
             saved = int(usage["estimated_saved_tokens"])
-            if saved != expected_saved or saved > baseline:
+            expected_saved = max(0, baseline - emitted) if usage["savings_eligible"] else 0
+            expected_ratio = expected_saved / baseline if baseline else 0.0
+            if (
+                saved != expected_saved
+                or saved > baseline
+                or not math.isclose(
+                    float(usage["estimated_savings_ratio"]),
+                    expected_ratio,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
                 estimate_totals["invalid_estimate_count"] += 1
                 return
             if not usage["savings_eligible"]:
@@ -6134,13 +6159,26 @@ class Store:
                 or receipt.get("scope_digest")
                 != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
             ):
-                totals["invalid_receipt_count"] += 1
+                if release_version is None:
+                    totals["receipt_count"] += 1
+                    totals["invalid_receipt_count"] += 1
                 continue
             metadata = receipt.get("metadata")
             usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+            operation = str(receipt["operation"])
+            if release_version is not None and (
+                operation == "smart_gateway"
+                or not isinstance(usage, dict)
+                or usage.get("release_version") != release_version
+            ):
+                continue
+            totals["receipt_count"] += 1
             if not isinstance(usage, dict):
                 continue
-            if release_version is not None and usage.get("release_version") != release_version:
+            # Smart gateway telemetry is supplementary to the authoritative classic
+            # handler receipt. Older databases may contain copied token_usage here;
+            # ignore it so those historical rows cannot double-count a delivery.
+            if operation == "smart_gateway":
                 continue
             totals["usage_receipt_count"] += 1
             required = ("source_tokens", "context_tokens", "saved_tokens")
@@ -6455,14 +6493,20 @@ class Store:
                 if flt.session_id:
                     where.append(f"{p}session_id=?")
                     params.append(flt.session_id)
-            if flt.scopes:
-                marks = ",".join("?" for _ in flt.scopes)
-                where.append(f"{p}scope IN ({marks})")
-                params.extend(_enum(s) for s in flt.scopes)
-            if flt.mtypes:
-                marks = ",".join("?" for _ in flt.mtypes)
-                where.append(f"{p}mtype IN ({marks})")
-                params.extend(_enum(m) for m in flt.mtypes)
+            if flt.scopes is not None:
+                if not flt.scopes:
+                    where.append("0")
+                else:
+                    marks = ",".join("?" for _ in flt.scopes)
+                    where.append(f"{p}scope IN ({marks})")
+                    params.extend(_enum(s) for s in flt.scopes)
+            if flt.mtypes is not None:
+                if not flt.mtypes:
+                    where.append("0")
+                else:
+                    marks = ",".join("?" for _ in flt.mtypes)
+                    where.append(f"{p}mtype IN ({marks})")
+                    params.extend(_enum(m) for m in flt.mtypes)
         if not include_invalid:
             valid_at, known_at = _temporal_anchors(flt)
             where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")

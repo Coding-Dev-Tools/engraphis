@@ -19,7 +19,7 @@ from engraphis.core.interfaces import (
 from engraphis.core import scoring
 from engraphis.core.retention_policy import MAX_STABILITY_DAYS
 from engraphis.core.schema import SCHEMA_VERSION
-from engraphis.core.store import Store, normalize_entity_name
+from engraphis.core.store import Store, memory_matches_filter, normalize_entity_name
 
 
 @pytest.fixture()
@@ -802,6 +802,23 @@ def test_bitemporal_visibility(store):
     assert mid in [m.id for m in store.list_memories(flt, include_invalid=True)]
     # Time-travel to when it was valid: visible.
     assert mid in [m.id for m in store.list_memories(SearchFilter(workspace_id=wid, as_of=1500.0))]
+
+
+def test_empty_scope_and_type_filters_match_nothing(store):
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="scoped fact", workspace_id=wid,
+        scope=Scope.WORKSPACE, mtype=MemoryType.SEMANTIC,
+    ))
+    record = store.get_memory(mid)
+    assert record is not None
+
+    # ``None`` means the caller omitted the filter; an explicit empty allow-list
+    # must not widen a read to every scope/type.
+    assert store.list_memories(SearchFilter(workspace_id=wid, scopes=[])) == []
+    assert store.list_memories(SearchFilter(workspace_id=wid, mtypes=[])) == []
+    assert not memory_matches_filter(record, SearchFilter(workspace_id=wid, scopes=[]))
+    assert not memory_matches_filter(record, SearchFilter(workspace_id=wid, mtypes=[]))
 
 
 def test_add_memory_rejects_inverted_validity_interval(store):

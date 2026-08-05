@@ -101,7 +101,7 @@ def test_native_upsert_failure_rolls_back_the_whole_owned_batch(monkeypatch):
 
     def fail_second_insert(connection, statement, *args, **kwargs):
         nonlocal inserts
-        if "INSERT OR REPLACE INTO mem_vec_ann" in str(statement):
+        if "INSERT INTO mem_vec_ann" in str(statement):
             inserts += 1
             if inserts == 2:
                 raise RuntimeError("native index unavailable")
@@ -117,6 +117,29 @@ def test_native_upsert_failure_rolls_back_the_whole_owned_batch(monkeypatch):
         "SELECT COUNT(*) FROM mem_vec_ann WHERE id IN (?, ?)", ids,
     ).fetchone()[0] == 0
     store.close()
+
+
+def test_native_upsert_replaces_existing_rows_after_reopen():
+    """Persistent vec0 rows must be safely rehydrated on the next process start."""
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as temp:
+        db_path = str(Path(temp) / "restart.db")
+        first = MemoryEngine.create(
+            db_path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False
+        )
+        workspace_id = first.store.get_or_create_workspace("restart")
+        first.remember("A persisted restart marker.", workspace_id=workspace_id)
+        first.store.close()
+
+        second = MemoryEngine.create(
+            db_path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False
+        )
+        assert second.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_vec_ann"
+        ).fetchone()[0] == 1
+        second.store.close()
 
 
 def test_native_upsert_does_not_commit_a_caller_owned_transaction():

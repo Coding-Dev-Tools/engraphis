@@ -285,7 +285,7 @@ def test_manual_release_dispatch_cannot_publish():
         assert "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in body
     assert "Require tag and package version to match" in workflow
     assert "python -m twine check dist/*" in workflow
-    assert "python -m pip_audit --local" in workflow
+    assert "python -m pip_audit --local --skip-editable" in workflow
     assert "github-release:" in workflow
     assert "needs: publish" in workflow
     assert "contents: write" in workflow

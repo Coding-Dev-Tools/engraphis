@@ -2146,14 +2146,15 @@ def _record_gateway_execution(
             ).fetchone()
             if repo_row is not None:
                 repo_id = str(repo_row["id"])
-        usage = result.get("usage") if isinstance(result, dict) else None
         metadata: dict[str, Any] = {
             "action_id": spec.canonical_id,
             "schema_version": _CAPABILITY_VERSION,
             "result_mode": str(validated_arguments.get("response_mode") or "gateway"),
         }
-        if isinstance(usage, dict):
-            metadata["token_usage"] = usage
+        # The classic handler already appends the authoritative operation receipt,
+        # including token_usage when it delivered context.  Gateway telemetry is a
+        # supplementary receipt for the outer dispatch and must not copy that usage,
+        # or one gateway call would count twice in context_savings().
         svc.store.record_receipt(
             "smart_gateway", workspace_id=workspace_id, repo_id=repo_id, actor="agent",
             target_count=int(result.get("count", 1)) if isinstance(result, dict) else 1,

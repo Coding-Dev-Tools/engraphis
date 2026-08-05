@@ -307,7 +307,7 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
             },
             {
                 "id": "dependency-audit",
-                "command": ["python", "-m", "pip_audit", "--local"],
+                "command": ["python", "-m", "pip_audit", "--local", "--skip-editable"],
                 "inputs": [],
             },
             {
