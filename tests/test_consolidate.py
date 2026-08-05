@@ -1013,8 +1013,15 @@ def test_distill_cursor_carries_interleaved_partial_cluster(monkeypatch):
         )
         for index in range(9)
     ]
+    # The maintenance cursor is a keyset cursor over sorted ULIDs.  Several writes can
+    # share a millisecond, so insertion order is not a stable proxy for page order.
+    ordered_ids = [
+        memory.id for memory in eng.store.list_memories_page(
+            SearchFilter(workspace_id=wid, repo_id=rid), limit=len(source_ids),
+        )
+    ]
     recurring = {
-        source_ids[index]: f"Recurring deploy failure during run {index}."
+        ordered_ids[index]: f"Recurring deploy failure during run {index}."
         for index in (0, 3, 6)
     }
     for memory_id, content in recurring.items():
