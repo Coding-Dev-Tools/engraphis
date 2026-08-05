@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from engraphis.backends import DeterministicEmbedder
+from eval import external
 from eval.external import load_locomo, load_longmemeval, main, source_case_count
 from eval.harness import run
 
@@ -164,3 +166,76 @@ def test_canonical_external_mode_rejects_partial_limit_before_model_loading(tmp_
     with pytest.raises(SystemExit) as error:
         main(["--dataset", path, "--format", "locomo", "--canonical", "--limit", "1"])
     assert error.value.code == 2
+
+
+def test_canonical_external_mode_requires_a_pinned_semantic_revision_before_loading(tmp_path, monkeypatch):
+    path = _locomo_fixture(tmp_path)
+    monkeypatch.setattr(
+        external, 'get_embedder',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('must not load')),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main(['--dataset', path, '--format', 'locomo', '--canonical'])
+
+    assert error.value.code == 2
+
+
+def test_canonical_external_mode_forwards_the_pinned_revision(tmp_path, monkeypatch):
+    path = _locomo_fixture(tmp_path)
+    captured = {}
+
+    class SemanticEmbedder:
+        supports_semantic_search = True
+        model_name = 'example/embedder'
+        revision = 'a' * 40
+        dim = 128
+
+    def create_embedder(model, *, revision=None, require_immutable_models=None):
+        captured.update(
+            model=model,
+            revision=revision,
+            require_immutable_models=require_immutable_models,
+        )
+        return SemanticEmbedder()
+
+    monkeypatch.setattr(external, 'get_embedder', create_embedder)
+    monkeypatch.setattr(
+        external, 'run',
+        lambda *_args, **_kwargs: {
+            'questions': 1, 'recall_at_k': 1.0, 'hit_at_k': 1.0,
+            'answer_token_recall': 1.0, 'scored_questions': 1, 'exclusions': [],
+        },
+    )
+
+    assert main([
+        '--dataset', path, '--format', 'locomo', '--canonical',
+        '--embed-revision', 'a' * 40,
+    ]) == 0
+    assert captured == {
+        'model': 'sentence-transformers/all-MiniLM-L6-v2', 'revision': 'a' * 40,
+        'require_immutable_models': True,
+    }
+
+
+def test_external_refuses_silent_semantic_embedder_fallback(tmp_path, monkeypatch, capsys):
+    path = _locomo_fixture(tmp_path)
+    monkeypatch.setattr(external, 'get_embedder', lambda *_args, **_kwargs: DeterministicEmbedder())
+
+    assert main(['--dataset', path, '--format', 'locomo']) == 2
+    assert 'semantic embedder was unavailable' in capsys.readouterr().err
+
+
+def test_external_offline_report_records_dataset_and_embedding_provenance(tmp_path):
+    path = _locomo_fixture(tmp_path)
+    output = tmp_path / 'external-report.json'
+
+    assert main([
+        '--dataset', path, '--format', 'locomo', '--offline', '--json', str(output),
+    ]) == 0
+
+    report = json.loads(output.read_text(encoding='utf-8'))
+    assert report['dataset_sha256'] == external.dataset_sha256(path)
+    assert report['source_cases'] == report['normalized_cases'] == 1
+    assert report['embedding']['revision'] is None
+    assert report['configuration'] == {'k': 10, 'limit': None, 'resolve_conflicts': True}

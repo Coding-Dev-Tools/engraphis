@@ -3,12 +3,20 @@ import pytest
 
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType
+from engraphis.core.retention_policy import MAX_STABILITY_DAYS
 
 
 def test_retention_full_at_zero_and_decays():
     now = 1_000_000.0
     assert scoring.retention(2.0, now, now) == 1.0
     assert 0.0 < scoring.retention(2.0, now - 2 * 86400, now) < 1.0
+
+
+def test_retention_caps_out_of_policy_stability():
+    now = 1_000_000.0
+    last_access = now - 365 * 86400
+    expected = scoring.retention(MAX_STABILITY_DAYS, last_access, now)
+    assert scoring.retention(1e300, last_access, now) == pytest.approx(expected)
 
 
 def test_recency_bounds_and_monotonic():

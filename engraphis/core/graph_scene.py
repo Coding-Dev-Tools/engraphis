@@ -94,6 +94,25 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    """Coerce an untrusted row value without allowing NaN/Infinity into physics."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _edge_weight(value: Any) -> float:
+    """Return a bounded edge weight, retaining the legacy falsy default."""
+    # Existing graph rows use zero as an unspecified value, not a request for a
+    # nearly invisible relation. Preserve that contract while rejecting malformed
+    # non-finite/string values before physics consumes them.
+    if not value:
+        return 1.0
+    return _clamp(_finite_float(value, 1.0), 0.05, 4.0)
+
+
 def _quantile(values: Sequence[float], fraction: float) -> float:
     if not values:
         return 0.0
@@ -170,7 +189,8 @@ def _combined_confidence(values: Iterable[float]) -> float:
     seen = False
     for value in values:
         seen = True
-        complement *= 1.0 - _clamp(float(value), 0.05, 0.99)
+        safe_value = _finite_float(value, 0.50)
+        complement *= 1.0 - _clamp(safe_value, 0.05, 0.99)
     return 1.0 - complement if seen else 0.50
 
 
@@ -373,7 +393,7 @@ def build_canonical_graph(
                 "relation": relation,
                 "layer": layer,
                 "directed": directed,
-                "weight": max(0.05, min(4.0, float(edge.get("weight") or 1.0))),
+                "weight": _edge_weight(edge.get("weight")),
                 "_confidence_by_support": {},
                 "_support_ids": set(),
                 "_support_rows": [],
@@ -382,12 +402,13 @@ def build_canonical_graph(
                 "underlying_edge_ids": [],
             }
             bundled[key] = item
-        item["weight"] = max(item["weight"], float(edge.get("weight") or 1.0))
+        item["weight"] = max(item["weight"], _edge_weight(edge.get("weight")))
         for index, row in enumerate(evidence):
             memory_id = str(row.get("memory_id") or "")
             support_key = memory_id or f"anonymous:{edge_id}:{index}"
-            support_confidence = float(
-                row.get("confidence") if row.get("confidence") is not None else 0.50
+            support_confidence = _finite_float(
+                row.get("confidence") if row.get("confidence") is not None else 0.50,
+                0.50,
             )
             item["_confidence_by_support"][support_key] = max(
                 support_confidence,
@@ -399,10 +420,13 @@ def build_canonical_graph(
             str(row.get("memory_type") or "") for row in evidence
             if row.get("memory_type")
         )
-        item["_support_times"].extend(
-            float(row["support_time"]) for row in evidence
-            if row.get("support_time") is not None
-        )
+        for row in evidence:
+            raw_support_time = row.get("support_time")
+            if raw_support_time is None:
+                continue
+            support_time = _finite_float(raw_support_time, float("nan"))
+            if math.isfinite(support_time):
+                item["_support_times"].append(support_time)
         item["underlying_edge_ids"].append(edge_id)
 
     edges = []
@@ -894,8 +918,11 @@ def _complete_relations(
             memory_id = str(support.get("memory_id") or "")
             support_key = memory_id or f"anonymous:{edge_id}:{index}"
             confidence_by_support[support_key] = max(
-                float(support.get("confidence")
-                      if support.get("confidence") is not None else 0.50),
+                _finite_float(
+                    support.get("confidence")
+                    if support.get("confidence") is not None else 0.50,
+                    0.50,
+                ),
                 confidence_by_support.get(support_key, 0.0),
             )
             if memory_id:
@@ -908,7 +935,7 @@ def _complete_relations(
                 and not include_weak_cooccurrence):
             continue
 
-        weight = max(0.05, min(4.0, float(edge.get("weight") or 1.0)))
+        weight = _edge_weight(edge.get("weight"))
         support_boost = 1.0 + min(math.log2(1.0 + support_count) / 4.0, 0.75)
         raw_log = math.log1p(
             weight * confidence * support_boost * _relation_factor(layer, relation)
@@ -937,10 +964,15 @@ def _complete_relations(
             if not memory_id or memory_id not in memory_ids:
                 continue
             source_kind = str(support.get("source_kind") or "legacy_unknown")
-            evidence_confidence = _clamp(float(
-                support.get("confidence")
-                if support.get("confidence") is not None else 0.50
-            ), 0.05, 0.99)
+            evidence_confidence = _clamp(
+                _finite_float(
+                    support.get("confidence")
+                    if support.get("confidence") is not None else 0.50,
+                    0.50,
+                ),
+                0.05,
+                0.99,
+            )
             for endpoint in sorted({source, target}):
                 evidence_pending.append({
                     "id": _stable_id(
@@ -1112,7 +1144,7 @@ def _build_complete_scene(
     memory_link_edges = []
     for raw in sorted(memory_link_rows, key=lambda item: (
         str(item.get("a") or ""), str(item.get("b") or ""),
-        str(item.get("relation") or ""), float(item.get("created_at") or 0.0),
+        _finite_float(item.get("created_at"), 0.0),
     )):
         row = _row(raw)
         source, target = str(row.get("a") or ""), str(row.get("b") or "")
@@ -1163,7 +1195,11 @@ def _build_complete_scene(
             continue
         if relations is not None and relation not in relations:
             continue
-        confidence = _clamp(float(row.get("confidence") or 1.0), 0.05, 1.0)
+        confidence = _clamp(
+            _finite_float(row.get("confidence") or 1.0, 1.0),
+            0.05,
+            1.0,
+        )
         memory_degree[memory_id] += 1
         code_memory_edges.append({
             "id": str(row.get("id") or _stable_id(
@@ -1196,7 +1232,7 @@ def _build_complete_scene(
         content = str(memory.get("content") or "").strip()
         label = title or summary or content or memory_id
         label = " ".join(label.split())[:160]
-        importance = _clamp(float(memory.get("importance") or 0.0))
+        importance = _clamp(_finite_float(memory.get("importance"), 0.0))
         degree_percentile = _mass_percentile(
             float(memory_degree[memory_id]), degree_values
         )

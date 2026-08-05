@@ -96,6 +96,7 @@ class GroundedAnswer:
     semantic_support: bool = True
     embedding_mode: str = "semantic"
     degraded_reason: str = ""
+    vector_search_ready: bool = True
 
     def to_dict(self) -> dict:
         payload = {
@@ -122,6 +123,7 @@ class GroundedAnswer:
             "semantic_support": self.semantic_support,
             "embedding_mode": self.embedding_mode,
             "degraded_reason": self.degraded_reason,
+            "vector_search_ready": self.vector_search_ready,
         }
         if self.retrieval_trace is not None:
             payload["retrieval_trace"] = self.retrieval_trace
@@ -411,8 +413,12 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "planning_mode": result.planning_mode,
         "planning_details": result.planning_details,
         "graph_traversal_details": result.graph_traversal_details,
-        **embedder_capabilities(embedder),
-    }
+            "degraded_mode": result.degraded_mode,
+            "semantic_support": result.semantic_support,
+            "embedding_mode": result.embedding_mode,
+            "degraded_reason": result.degraded_reason,
+            "vector_search_ready": result.vector_search_ready,
+        }
     recall_metadata["usage"]["answer_tokens"] = 0
 
     if not chunks or support < min_support:

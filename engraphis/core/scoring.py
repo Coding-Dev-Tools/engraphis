@@ -15,20 +15,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from engraphis.core.interfaces import MemoryRecord, MemoryType
+from engraphis.core.retention_policy import (
+    DEFAULT_STABILITY_DAYS as DEFAULT_STABILITY_DAYS,
+    effective_stability,
+)
 
 # Interaction signals → stability boost (interaction-aware reinforcement).
 INTERACTION_BOOST = {
     "view": 0.05, "read": 0.05, "recall": 0.15, "react": 0.20,
     "engage": 0.30, "reply": 0.50, "create": 1.00,
 }
-
-# ``0`` can occur as an "unspecified" value in legacy or synchronized data.  v2
-# treats it as the normal default rather than silently turning an otherwise ordinary
-# memory into a near-instantly forgotten one.  New v2 writes are validated positive.
-DEFAULT_STABILITY_DAYS = 1.0
 
 @dataclass(frozen=True)
 class Weights:
@@ -53,7 +52,7 @@ DEFAULT_WEIGHTS: dict[MemoryType, Weights] = {
 def weights_for(mtype: MemoryType) -> Weights:
     return DEFAULT_WEIGHTS.get(mtype, Weights())
 
-def _finite_number(value: object, default: float = 0.0) -> float:
+def _finite_number(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -82,11 +81,7 @@ def retention(stability: float, last_access: Optional[float], now: float) -> flo
     inverted or non-finite score.  None of these values requests hard deletion;
     forgetting only lowers priority.
     """
-    try:
-        supplied = float(stability)
-    except (TypeError, ValueError, OverflowError):
-        supplied = DEFAULT_STABILITY_DAYS
-    S = supplied if math.isfinite(supplied) and supplied > 0 else DEFAULT_STABILITY_DAYS
+    S = effective_stability(stability)
     current = _finite_number(now, float("nan"))
     if not math.isfinite(current):
         return 0.0

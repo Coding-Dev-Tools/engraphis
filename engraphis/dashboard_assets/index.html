@@ -129,6 +129,12 @@
               <p class="eyebrow">Memory composition</p>
               <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
             </section>
+            <section class="rail-section" id="context-savings-summary">
+              <p class="eyebrow">Runtime savings</p>
+              <h2>Estimated context saved</h2>
+              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
+              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
+            </section>
             <section class="rail-section rail-action">
               <p class="eyebrow">Local-first</p>
               <h2>Ask before assuming</h2>
@@ -429,6 +435,7 @@
                 <button id="export-receipts" class="secondary-button" type="button">Export receipts</button>
               </div>
             </div>
+            <div id="savings-detail" class="savings-detail" aria-live="polite"><p class="empty-state">Loading context savings…</p></div>
             <div id="audit-list" class="audit-list"><p class="empty-state">Loading audit records…</p></div>
           </section>
 

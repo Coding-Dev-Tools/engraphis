@@ -2,8 +2,9 @@
 
 Engraphis is a **local-first, open AI memory engine for agents** — Ebbinghaus decay,
 interaction-aware reinforcement, bi-temporal facts, hybrid recall, and a native
-`workspace → repo → session → memory` hierarchy. Python 3.11 / FastAPI, SQLite, local
-embeddings; the external LLM is optional and pluggable.
+`workspace → repo → session → memory` hierarchy. Python 3.9+ for the core (Python 3.10+
+for the server/MCP stack), FastAPI, SQLite, and local embeddings; the external LLM is optional
+and pluggable.
 
 This is the canonical operating manual for any AI agent working in this repo. `CLAUDE.md`
 imports it. Read §0 before editing anything.
@@ -20,7 +21,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 9`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 11`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -42,6 +43,8 @@ python -m pytest tests/ -q                                          # unit tests
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5   # retrieval eval gate
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # larger eval; covers conflict resolution
 python -m eval.ablation                                             # vector-only vs 1-hop vs PPR
+python -m eval.reinforcement                                        # bounded retention trajectory
+python -m eval.adversarial_memory_security                          # poisoning + prompt graph boundary
 ruff check .                                    # lint (line-length 100, py39, pinned rule set)
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
@@ -93,7 +96,7 @@ query
   └─ SearchFilter (scope + valid_at/known_at anchors)    core/interfaces.py
      └─ optional QueryPlanner (off by default; original + at most 2 routes)
                                                        core/query_planner.py
-     └─ 4 retrieval arms (run in parallel, then fused):
+     └─ 4 retrieval arms (executed deterministically, then fused):
         • vector   — VectorIndex.search (cosine)         backends/vector_*.py
         • lexical  — Store.fts_search (FTS5/BM25 + LIKE fallback)   core/store.py
         • graph    — Personalized PageRank over entities+links      core/recall.py + core/graphrank.py
@@ -171,8 +174,9 @@ is distilled into discrete facts first; the offline default is passthrough.
   Recency (`c`) is used only by the separate queryless proactive agenda, avoiding a second
   age penalty alongside retention in ordinary recall. Default weights: `r1.0 s1.0 l0.5 g0.7 i0.6 c0.3 x0.8`, overridden per memory type.
 - **Ebbinghaus retention:** `R(t) = exp(−Δt_days / S)`.
-- **Reinforcement (spacing effect):** `S_new = S·(1 + α·ln(1 + access_count)) + boost`, `α = 0.3`.
-  Stability grows sub-linearly with use; this is `Store.reinforce()`.
+- **Reinforcement (spacing effect):** each event adds
+  `(α·min(S, 1) + boost)·ln(1 + 1/access_count)`, `α = 0.3`, with a 100-day cap.
+  The cumulative trajectory is logarithmic and bounded; this is `Store.reinforce()`.
 - **Interaction boosts** (`scoring.INTERACTION_BOOST`): view/read 0.05 · recall 0.15 ·
   react 0.20 · engage 0.30 · reply 0.50 · create 1.00.
 - **Reciprocal Rank Fusion:** `1 / (k + rank + 1)`, `k = 60`.
@@ -182,7 +186,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 9`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 11`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -202,8 +206,9 @@ These are pure, unit-tested functions — change them only with a corresponding 
 ## 6. Gotchas
 
 - **Offline by default in core:** `MemoryEngine.create()` uses a deterministic hashing
-  embedder + NumPy index, so tests need no model download or network. Real models load only
-  when you pass `embed_model=...` / `vector_backend="sqlite-vec"`.
+  embedder + NumPy index, so tests need no model download or network. Pass `embed_model=...`
+  to load a real embedding model; choose `vector_backend="sqlite-vec"` separately when you
+  need native exact-KNN acceleration.
 - **First full-stack run downloads `all-MiniLM-L6-v2` (~80 MB)** for the ST embedder.
 - **FTS5 may be missing** on some SQLite builds → `Store` auto-falls back to `LIKE`
   (`self.has_fts5`). Don't assume BM25 is available.

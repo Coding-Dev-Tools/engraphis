@@ -1,9 +1,11 @@
 """Deterministic retrieval-profile selection.
 
-``balanced`` preserves the established hybrid path.  ``auto`` is explicit and
-conservative: it only selects a specialized profile when the query has a strong,
-locally-observable signal.  This keeps automatic routing measurable and prevents
-an unbenchmarked policy change from silently altering existing callers.
+``balanced`` preserves the established hybrid path.  ``fast`` is an explicit
+small-vault profile that keeps vector + lexical recall but skips graph traversal.
+``auto`` is explicit and conservative: it only selects a specialized profile when
+the query has a strong, locally-observable signal.  This keeps automatic routing
+measurable and prevents an unbenchmarked policy change from silently altering
+existing callers.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ import re
 from dataclasses import dataclass
 
 
-RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "lexical", "graph", "code"})
+RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "fast", "lexical", "graph", "code"})
 CANDIDATE_DEPTH_MODES = frozenset({"fixed", "adaptive"})
 
 _CODE_RE = re.compile(
@@ -42,10 +44,17 @@ class ProfileConfig:
     code_scale: float = 1.0
     graph_presence_bonus: float = 0.0
     code_presence_bonus: float = 0.0
+    # Controlled ablations may use the vector backend's raw cosine as an
+    # additional confidence signal. Keep this opt-in: established profiles
+    # preserve rank-only semantic fusion by default.
+    semantic_confidence_calibration: bool = False
 
 
 _CONFIGS = {
     "balanced": ProfileConfig("balanced", True, True, True, False),
+    # Small-vault / latency-sensitive path: retain dense + lexical evidence while
+    # avoiding graph traversal when multi-hop evidence is not the caller's goal.
+    "fast": ProfileConfig("fast", True, True, False, False),
     "lexical": ProfileConfig("lexical", False, True, False, False),
     # Specialized profiles retain supporting arms but make their declared
     # evidence type decisive. ``balanced`` stays byte-for-byte equivalent to
@@ -120,6 +129,7 @@ class DeterministicRetrievalPolicy:
         # remain larger because their useful evidence may enter through a bridge
         # that is not top-ranked by the first retrieval arm.
         floors = {
+            "fast": max(8, k * 2),
             "lexical": max(8, k * 2),
             "balanced": max(12, k * 3),
             "graph": max(30, k * 6),

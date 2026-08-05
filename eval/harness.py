@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 import subprocess
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
@@ -44,7 +44,8 @@ from engraphis.core.engine import MemoryEngine
 from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
 from engraphis.core.grounded import build_grounded_answer
 from engraphis.core.interfaces import (
-    ContextUsage, Edge, MemoryRecord, MemoryType, Node, PackedChunk, Scope, SearchFilter,
+    ContextUsage, Edge, Embedder, MemoryRecord, MemoryType, Node, PackedChunk, Reranker,
+    Scope, SearchFilter,
 )
 from engraphis.core.recall import RecallResult
 from engraphis.core.retrieval_policy import ProfileConfig
@@ -82,7 +83,7 @@ class _PinnedReaderTokenCounter:
 def _load_pinned_reader_token_counter(model: str, revision: str) -> Callable[[str], int]:
     """Load the canonical reader tokenizer without affecting the offline default."""
     try:
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
     except ImportError as exc:  # pragma: no cover - optional canonical benchmark dependency
         raise ValueError(
             "canonical output requires transformers and the pinned reader tokenizer"
@@ -176,7 +177,9 @@ def executable_baseline(label: str) -> BaselineSpec:
     return _EXECUTABLE_BASELINES[normalized]
 
 
-def _validate_baseline_dataset(dataset: list[dict], baseline: BaselineSpec, reranker: object) -> None:
+def _validate_baseline_dataset(
+    dataset: list[dict], baseline: BaselineSpec, reranker: Reranker,
+) -> None:
     """Fail before an artifact when a claimed ablation has no representable input."""
     if baseline.mode == "whole_document" and not dataset:
         raise ValueError("whole_document requires a non-empty dataset")
@@ -505,7 +508,9 @@ def _v2_metrics(records: list[dict], *, bootstrap_iterations: int) -> dict:
         "mrr_at_1", "mrr_at_5", "mrr_at_10",
         "ndcg_at_1", "ndcg_at_5", "ndcg_at_10",
     ]
-    summary = {field: round(_mean(scored, field), 6) for field in metric_fields}
+    summary: dict[str, Any] = {
+        field: round(_mean(scored, field), 6) for field in metric_fields
+    }
     summary["answer_token_recall"] = round(_mean(scored, "answer_token_recall"), 6)
     summary["confidence_intervals"] = {
         field: stratified_bootstrap_ci(
@@ -600,11 +605,11 @@ def paired_v2_bootstrap(
 
 
 def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
-        embedder: Optional[DeterministicEmbedder] = None,
-        reranker: Optional[object] = None, grounded: bool = False,
+        embedder: Optional[Embedder] = None,
+        reranker: Optional[Reranker] = None, grounded: bool = False,
         resolve_conflicts: bool = True, v2: bool = False,
         dataset_path: Optional[str] = None, token_budget: Optional[int] = None,
-        canonical: bool = False, canonical_profile: Optional[dict] = None,
+        canonical: bool = False, canonical_profile: Optional[dict[str, Any]] = None,
         bootstrap_iterations: int = 1000,
         baseline_label: str = "full_hybrid") -> dict:
     """Run the offline gate, or build the opt-in reproducible v2 envelope.
@@ -635,11 +640,17 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
     baseline = executable_baseline(baseline_label)
     configured_reranker = reranker if reranker is not None else IdentityReranker()
     _validate_baseline_dataset(dataset, baseline, configured_reranker)
+    validated_profile: Optional[dict[str, Any]] = None
     if canonical:
+        if canonical_profile is None:
+            raise ValueError(
+                "canonical output requires pinned revisions: canonical_profile is missing"
+            )
         profile_errors = validate_canonical_profile(canonical_profile)
         if profile_errors:
             raise ValueError("canonical output requires pinned revisions: " + "; ".join(profile_errors))
-        if canonical_profile["baseline_label"] != baseline.label:
+        validated_profile = canonical_profile
+        if validated_profile["baseline_label"] != baseline.label:
             raise ValueError(
                 "canonical_profile.baseline_label must match the executed baseline_label "
                 f"({baseline.label})"
@@ -654,7 +665,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             raise ValueError(
                 "canonical output requires a positive bootstrap_iterations value"
             )
-        reader_profile = canonical_profile["reader"]
+        reader_profile = validated_profile["reader"]
         context_token_counter = _load_pinned_reader_token_counter(
             reader_profile["model"], reader_profile["revision"]
         )
@@ -761,7 +772,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             )
             latency_ms = (time.perf_counter_ns() - started) / 1_000_000
             retrieved_ids = [c["id"] for c in res.chunks]
-            retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [None])]
+            retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
             excluded = None
             if q.get("answerable") is False:
@@ -825,7 +836,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                     # would credit gold memories that the reader never received.
                     budget_ids = [chunk.id for chunk in budget_result.packed_chunks]
                     budget_tags = [
-                        tag for memory_id in budget_ids for tag in id_to_tags.get(memory_id, [None])
+                        tag for memory_id in budget_ids for tag in id_to_tags.get(memory_id, [])
                     ]
                     budget_depth = metrics.retrieval_metrics_at_depths(
                         budget_tags, supporting, depths=(1, 5, 10),
@@ -863,7 +874,9 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
     if not v2:
         return report
 
-    profile = canonical_profile if canonical else None
+    if dataset_path is None:  # guarded above; keeps the artifact call type-safe too
+        raise RuntimeError("v2 dataset path validation was bypassed")
+    profile = validated_profile if canonical else None
     config = {
         "k": int(k),
         "dim": int(dim),
@@ -875,6 +888,8 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         "baseline_execution": baseline.as_dict(),
     }
     if canonical:
+        if profile is None:  # guarded above; defensive against future control-flow edits
+            raise RuntimeError("canonical profile validation was bypassed")
         config.update(canonical_benchmark_config(
             run_label="eval.harness", baseline_label=baseline.label,
             token_budgets=CANONICAL_TOKEN_BUDGETS, profile=profile,
@@ -905,6 +920,8 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
     envelope["models"] = {"embedder": {**model, "sha256": sha256_text(json.dumps(model, sort_keys=True))}}
     envelope["legacy_summary"] = {key: value for key, value in report.items() if key != "detail"}
     if canonical:
+        if profile is None:  # guarded above; keeps the model check fail closed
+            raise RuntimeError("canonical profile validation was bypassed")
         expected_embedding = profile["embedding"]
         if model["model_id"] != expected_embedding["model"] or model["revision"] != expected_embedding["revision"]:
             raise ValueError(

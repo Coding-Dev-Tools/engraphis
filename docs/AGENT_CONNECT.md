@@ -81,6 +81,18 @@ Copy the command from your account portal and run it on the machine you are conn
 engraphis connect --token engr_ct_...
 ```
 
+Before redeeming a short-lived token, you can validate the configured control/compute endpoints
+and the private session-file path without reading, sending, or storing any credential:
+
+```bash
+engraphis connect --preflight --control-url https://api.engraphis.com
+```
+
+This local preflight validates endpoint safety and DNS resolution plus session-file storage. It
+does not make an authenticated request and cannot verify private-service membership, billing,
+token validity, seats, roles, or workspace access; redeeming the portal-issued token remains the
+real integration step.
+
 That redeems the token against `POST /v1/devices/connect` on the control plane and writes the
 owner-only session file `~/.engraphis/cloud_session.json` (mode `0600`). The dashboard, the MCP
 server, and Cloud Sync all read that file, so no environment secret is needed afterwards. Rerun
@@ -91,6 +103,7 @@ Useful options:
 | Option | Effect |
 | --- | --- |
 | `--token -` | Read the token from stdin, so it never enters shell history. |
+| `--preflight` | Validate endpoints and session storage without a token or control-plane HTTP request. |
 | `--workspace WS_ID` | Bind this device to a single workspace. |
 | `--label TEXT` | Name this installation in your account portal. |
 | `--device-name TEXT` | Override the device name (defaults to the hostname). |

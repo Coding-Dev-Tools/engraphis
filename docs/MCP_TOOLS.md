@@ -42,11 +42,15 @@ The following inventory applies to the Classic compatibility server. Start with
 
 Retrieval responses (`engraphis_recall`, `engraphis_recall_context`,
 `engraphis_recall_grounded`, and `engraphis_answer`) always declare
-`degraded_mode`, `semantic_support`, and `embedding_mode`. A `true` degraded flag means
-the active backend is not a declared semantic embedder (the bundled deterministic fallback
-is feature hashing with lexical overlap). In that mode vector retrieval and semantic-cosine
-evidence are disabled; recall remains lexical/graph/code based and grounded answers use
-lexical support only.
+`degraded_mode`, `semantic_support`, `embedding_mode`, and `vector_search_ready`. A `true`
+degraded flag means the active backend is not a declared semantic embedder (the bundled
+deterministic fallback is feature hashing with lexical overlap), the persistent vector space is
+rebuilding or does not match the configured embedder, or the vector index failed for that
+request. `vector_search_ready` is the authoritative vector-arm status. When
+`semantic_support=false`, vector retrieval and semantic-cosine evidence are both disabled;
+recall remains lexical/graph/code based and grounded answers use lexical support only. A
+request-local index failure instead reports `vector_search_ready=false` while semantic support
+can remain available for exact support scoring from the configured embedder and stored vectors.
 
 Trust boundary: normal local-agent memory creation is prompt-visible immediately after validation;
 it does not require owner approval. The default `agent` source covers `engraphis_remember`,
@@ -57,17 +61,19 @@ prompt-ready MCP recall or context, `engraphis_why`, or `engraphis_timeline`, no
 resolution, links, graph/code backfill, or derived prompt context. `include_untrusted=True` is
 inspection-only and must never be copied into a model prompt.
 
-MCP deliberately has no approval tool. Approval is only for external or quarantined evidence: it
+MCP deliberately has no approval tool. Approval is only for external evidence: it
 creates a fresh, audited `approved` successor while retaining the reviewed source and its
 provenance. In the local product it is available only through the CSRF-bound dashboard review
 action (with `ENGRAPHIS_API_TOKEN`) or the interactive TTY command
 `python -m scripts.approve_memory MEM_ID --reason "..."`; the command rejects redirected input
-and requires a typed confirmation. Hosted approval is an owner/admin action of the private hosted
-service. Direct in-process `MemoryEngine` use is a trusted-code boundary for code that already has
-local database authority, not a transport permission.
+and requires a typed confirmation. Local operators can use `engraphis-cli review list` and the
+dry-run-first `engraphis-cli review approve` for scoped batches; quarantined records are excluded.
+Hosted approval is an owner/admin action of the private hosted service. Direct in-process
+`MemoryEngine` use is a trusted-code boundary for code that already has local database authority,
+not a transport permission.
 
-For the full memory trust model and existing-store migration procedure, see the
-[memory write trust model](WRITE_REVIEW.md).
+For the full memory trust model, automatic schema-11 classification, and operator recovery, see
+the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECALL_RECOVERY.md).
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -91,7 +97,7 @@ For the full memory trust model and existing-store migration procedure, see the
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |
 | Code | `engraphis_export_code_graph` | Exports graph JSON, Markdown, and HTML. |
 | Audit | `engraphis_receipts` | Lists content-free hashed operation receipts. |
-| Audit | `engraphis_context_savings` | Summarizes packed-context usage by workspace, repository, and token-counter identity. |
+| Audit | `engraphis_context_savings` | Reports receipt-backed estimated context tokens saved, eligible/excluded deliveries, basis, confidence, and token-counter identity; optional `from_ts`, `to_ts`, and `release_version` filters are supported. This is estimated prompt-context reduction, not provider billing. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
 | Audit | `engraphis_export_receipts` | Exports a shareable receipt-only audit bundle. |
 | Governance | `engraphis_retire` | Retires a memory by closing its validity window. It does not delete history. |

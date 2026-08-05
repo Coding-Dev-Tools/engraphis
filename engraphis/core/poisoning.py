@@ -27,6 +27,80 @@ EXTERNAL_SOURCES = frozenset({
 })
 
 
+_LEGACY_LLM_DIGEST_SUFFIX = re.compile(
+    r"\n\n\(Consolidated from [1-9]\d* episodes: .*\)\Z",
+    re.DOTALL,
+)
+_LEGACY_LLM_PROFILE_SUFFIX = re.compile(
+    r"\n\n\(Profile of .+, from [1-9]\d* memories\)\Z",
+    re.DOTALL,
+)
+
+
+def llm_consolidation_kind(provenance: object, content: object = "") -> Optional[str]:
+    """Identify current and pre-marker LLM consolidation output deterministically.
+
+    Structured facts always came from an LLM, so their producer label is sufficient.
+    Older optional digest/profile summaries predate ``derived_by_llm``; their writers
+    appended fixed suffixes that deterministic quote-based output never emits.  This
+    classifier lets schema migration and retry repair demote only model-authored rows
+    while preserving approval for deterministic local consolidation.
+    """
+    details = _mapping(provenance)
+    source = str(details.get("source") or "").strip().casefold()
+    if source == "structured_consolidation":
+        return "structured_fact"
+    if details.get("derived_by_llm") is True:
+        return "entity_profile" if source == "profile_consolidation" else "digest_summary"
+    text = str(content or "")
+    if source == "consolidation" and _LEGACY_LLM_DIGEST_SUFFIX.search(text):
+        return "digest_summary"
+    if source == "profile_consolidation" and _LEGACY_LLM_PROFILE_SUFFIX.search(text):
+        return "entity_profile"
+    return None
+
+
+def pending_llm_consolidation_envelope(
+    provenance: object,
+    metadata: object,
+    content: object = "",
+) -> tuple[dict[str, Any], dict[str, Any], Optional[str]]:
+    """Return the canonical pending envelope for model-authored consolidation.
+
+    LLM entity/relation output is preserved for inspection, but moved outside the
+    graph-hint keys that the engine can execute.  Callers retire any graph state that
+    an older trusted write already materialized before setting ``derived_graph_inert``.
+    """
+    details = _mapping(provenance)
+    kind = llm_consolidation_kind(details, content)
+    meta = _mapping(metadata)
+    if kind is None:
+        return details, meta, None
+
+    details.update({
+        "trusted": False,
+        "review_state": REVIEW_PENDING,
+        "trust_origin": "llm_consolidation",
+        "derived_by_llm": True,
+    })
+    hints: dict[str, Any] = {}
+    for key in ("entities", "relations", "structured_extraction"):
+        if key in meta:
+            hints[key] = meta.pop(key)
+    existing_hints = meta.get("unverified_derived_graph")
+    if isinstance(existing_hints, Mapping):
+        hints = {**dict(existing_hints), **hints}
+    if hints:
+        hints["source"] = "llm_consolidation"
+        meta["unverified_derived_graph"] = hints
+    review = meta.get("llm_consolidation")
+    review = dict(review) if isinstance(review, Mapping) else {}
+    review.update({"review_required": True, "kind": kind})
+    meta["llm_consolidation"] = review
+    meta["provenance"] = dict(details)
+    return details, meta, kind
+
+
 @dataclass(frozen=True)
 class PoisoningDecision:
     """A content-free policy result safe to persist in metadata and audit records."""
@@ -274,8 +348,9 @@ def _segment_signal_words(letters: str) -> tuple[str, ...]:
         choices: list[tuple[str, ...]] = []
         for start in range(max(0, end - 16), end):
             word = lower[start:end]
-            if word in _SPACED_SIGNAL_WORDS and best[start] is not None:
-                choices.append((*best[start], word))
+            prefix = best[start]
+            if word in _SPACED_SIGNAL_WORDS and prefix is not None:
+                choices.append((*prefix, word))
         if choices:
             # Prefer the fewest, then longest-leading, words for deterministic output.
             best[end] = min(choices, key=lambda words: (len(words), tuple(-len(w) for w in words)))
@@ -362,10 +437,16 @@ def provenance_is_trusted(provenance: object) -> bool:
 
 def provenance_is_approved(provenance: object) -> bool:
     """Require both explicit trust and an explicit human/local approval state."""
+    details = _mapping(provenance)
+    # LLM-derived text is not semantically verified merely because its cited source IDs
+    # exist. Older structured-consolidation rows predate the explicit marker, so the
+    # source label itself is a fail-closed compatibility signal. Governed approval writes
+    # a distinct ``human_review`` successor and therefore clears this condition.
+    unverified_llm_derivation = llm_consolidation_kind(details) is not None
     return (
         provenance_is_trusted(provenance)
-        and isinstance(provenance, Mapping)
-        and provenance.get("review_state") == REVIEW_APPROVED
+        and not unverified_llm_derivation
+        and details.get("review_state") == REVIEW_APPROVED
     )
 
 
@@ -410,6 +491,29 @@ def prompt_eligible(provenance: object, metadata: object = None) -> bool:
         and metadata_is_trusted(metadata)
         and inspection_eligible(provenance, metadata)
     )
+
+
+def edge_provenance_prompt_eligible(provenance: object) -> bool:
+    """Reject explicit edge distrust while preserving marker-less legacy edges.
+
+    Older direct edges predate review metadata and remain compatible. Once a writer
+    supplies a trust, quarantine, or review marker, however, that assertion is
+    authoritative and prompt traversal must honor it even without memory supports.
+    """
+    edge = _mapping(provenance)
+    quarantine = _mapping(edge.get("quarantine"))
+    # ``trusted`` is authority-bearing: if present, only literal ``True`` is
+    # accepted.  This keeps marker-less legacy edges readable without letting a
+    # malformed JSON value such as 0 or "false" become an implicit approval.
+    if "trusted" in edge and edge.get("trusted") is not True:
+        return False
+    if edge.get("quarantined") is True:
+        return False
+    if quarantine.get("state") == QUARANTINE_STATE:
+        return False
+    if "review_state" in edge and edge.get("review_state") != REVIEW_APPROVED:
+        return False
+    return True
 
 
 def source_is_external(source: object) -> bool:

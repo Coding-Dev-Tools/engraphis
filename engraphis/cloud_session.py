@@ -145,7 +145,14 @@ def _reachable_cloud_base_url(value: str) -> str:
 
 def _session_path() -> Path:
     root = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
-    base = Path(root).expanduser() if root else Path.home() / ".engraphis"
+    try:
+        base = Path(root).expanduser() if root else Path.home() / ".engraphis"
+    except (OSError, RuntimeError) as exc:
+        raise CloudSessionError(
+            "The Engraphis state directory could not be resolved; set "
+            "ENGRAPHIS_STATE_DIR to a writable directory.",
+            status=409,
+        ) from exc
     return base / "cloud_session.json"
 
 
@@ -266,6 +273,8 @@ def _load() -> dict:
         raise CloudSessionError(
             "The saved cloud session has unsafe filesystem permissions.", status=409
         ) from exc
+    except CloudSessionError:
+        raise
     except (OSError, RuntimeError) as exc:
         # An unreadable or stale state mount (and Path.home() failing outright) must
         # surface as a structured, retryable cloud error rather than escaping as an
@@ -532,7 +541,8 @@ def record_billing_denial() -> bool:
     surfaces disagreeing.
 
     The plan name is deliberately kept so the UI can still say which plan lapsed; only the
-    access flag and the grants are cleared. Never raises: this runs on the boot path.
+    access flag and the grants are cleared. A local state failure raises `CloudSessionError`
+    so the caller can keep its in-process entitlement view fail-closed.
 
     A denial is also an *authoritative entitlement read*, so it stamps
     ``entitlement_checked_at`` — on the repeat denial too, which is the steady state for a
@@ -575,8 +585,12 @@ def record_billing_denial() -> bool:
             # Inside the lock: a save that lands after release is exactly the race above.
             _save(saved)
             return not already_denied
-    except Exception:
-        return False
+    except CloudSessionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - translate state failures without hiding them
+        raise CloudSessionError(
+            "The authoritative cloud denial could not be saved locally."
+        ) from exc
 
 
 def text_field(response: dict, key: str, *, max_bytes: int = _MAX_CREDENTIAL_BYTES) -> str:
@@ -603,11 +617,40 @@ def text_field(response: dict, key: str, *, max_bytes: int = _MAX_CREDENTIAL_BYT
         return ""
 
 
+def credential_text(value: object) -> str:
+    """Return a bounded visible-ASCII HTTP credential, or an empty string."""
+    credential = text_field({"credential": value}, "credential")
+    if not credential or any(ord(character) < 0x21 or ord(character) > 0x7E
+                             for character in credential):
+        return ""
+    return credential
+
+
+def credential_field(response: dict, key: str) -> str:
+    """Validate one untrusted provider field as an HTTP-safe credential."""
+    return credential_text(response.get(key))
+
+
+def _selected_refresh(saved: dict) -> str:
+    persisted = saved.get("refresh_credential")
+    if persisted is not None and (not isinstance(persisted, str) or persisted.strip()):
+        return credential_text(persisted)
+    return credential_text(os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""))
+
+
+def _selected_refresh_is_invalid(saved: dict) -> bool:
+    persisted = saved.get("refresh_credential")
+    if persisted is not None and (not isinstance(persisted, str) or persisted.strip()):
+        return bool(persisted) and not credential_text(persisted)
+    environment = os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "")
+    return bool(environment.strip()) and not credential_text(environment)
+
+
 def save_bootstrap(response: dict, *, control_url: str,
                    compute_url: Optional[str] = None) -> None:
     """Persist the one-time bootstrap/refresh material returned by the control plane."""
 
-    refresh = text_field(response, "refresh_credential")
+    refresh = credential_field(response, "refresh_credential")
     organization_id = text_field(response, "organization_id")
     if not refresh or not organization_id:
         raise CloudSessionError("Cloud bootstrap did not return a refresh credential.")
@@ -807,7 +850,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
 def configured(*, require_compute: bool = True) -> bool:
     """Return whether enough non-secret configuration exists to attempt a refresh."""
 
-    direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "").strip()
+    direct_token = credential_text(os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", ""))
     direct_org = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
     direct_compute = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
     if direct_token and direct_org and (direct_compute or not require_compute):
@@ -816,8 +859,7 @@ def configured(*, require_compute: bool = True) -> bool:
     # A configured environment value is bootstrap material. After its first successful
     # use, the server-returned rotation is persisted and must take precedence; otherwise
     # every subsequent call would replay the now-invalid bootstrap credential.
-    refresh = str(saved.get("refresh_credential") or "").strip()
-    refresh = refresh or os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "").strip()
+    refresh = _selected_refresh(saved)
     if _refresh_is_unusable(saved, refresh):
         refresh = ""
     control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
@@ -837,9 +879,12 @@ def access_for_workspace(
     unbound token; the refresh body then omits the field rather than sending ``null``.
     """
 
-    direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "").strip()
+    raw_direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
+    direct_token = credential_text(raw_direct_token)
     direct_org = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
     direct_compute = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
+    if raw_direct_token.strip() and not direct_token:
+        raise CloudSessionError("The cloud access credential is invalid.", status=409)
     if direct_token and direct_org and (direct_compute or not require_compute):
         compute_url = _reachable_cloud_base_url(direct_compute) if direct_compute else ""
         return direct_token, direct_org, compute_url
@@ -852,10 +897,9 @@ def access_for_workspace(
     # offer a trial even though retrying that credential would be a replay. The authoritative
     # session record is still loaded again under the lock below before any credential is used.
     preflight_saved = _load()
-    preflight_refresh = str(preflight_saved.get("refresh_credential") or "").strip()
-    preflight_refresh = preflight_refresh or os.environ.get(
-        "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""
-    ).strip()
+    if _selected_refresh_is_invalid(preflight_saved):
+        raise CloudSessionError("The cloud refresh credential is invalid.", status=409)
+    preflight_refresh = _selected_refresh(preflight_saved)
     if _refresh_is_unusable(preflight_saved, preflight_refresh):
         raise CloudSessionError(
             "The saved cloud refresh credential cannot be reused; connect this "
@@ -872,10 +916,9 @@ def access_for_workspace(
         # single-use credential; reading it before the lock lets two workers spend the
         # same value and causes one request to fail as a replay.
         saved = _load()
-        refresh = str(saved.get("refresh_credential") or "").strip()
-        refresh = refresh or os.environ.get(
-            "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""
-        ).strip()
+        if _selected_refresh_is_invalid(saved):
+            raise CloudSessionError("The cloud refresh credential is invalid.", status=409)
+        refresh = _selected_refresh(saved)
         if _refresh_is_unusable(saved, refresh):
             raise CloudSessionError(
                 "The saved cloud refresh credential cannot be reused; connect this "
@@ -900,11 +943,11 @@ def access_for_workspace(
             raise
         # Same untrusted-provider boundary as ``save_bootstrap``: a non-string credential
         # would otherwise be stored as its ``repr`` and submitted on the next refresh.
-        access = text_field(body, "access_token")
+        access = credential_field(body, "access_token")
         organization_id = (
             text_field(body, "organization_id") or text_field(saved, "organization_id")
         )
-        rotated = text_field(body, "refresh_credential")
+        rotated = credential_field(body, "refresh_credential")
         if not access or not organization_id or not rotated:
             # Also post-response: the submitted credential is spent and no rotation was
             # saved, so this must not be reported as a retryable outage either.

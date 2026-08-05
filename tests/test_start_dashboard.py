@@ -69,6 +69,62 @@ def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(
     ]
 
 
+def test_dashboard_health_probe_accepts_a_local_health_payload_without_redirects(monkeypatch):
+    requests = []
+    handlers = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit):
+            assert limit == 16 * 1024
+            return b'{"status":"healthy"}'
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+    def build_opener(*received):
+        handlers.extend(received)
+        return Opener()
+
+    monkeypatch.setattr(start_dashboard.urllib.request, "build_opener", build_opener)
+
+    assert start_dashboard._is_engraphis_dashboard("http://127.0.0.1:8700/") is True
+    assert len(requests) == 1
+    assert requests[0][0].full_url == "http://127.0.0.1:8700/api/health"
+    assert requests[0][1] == 0.75
+    assert len(handlers) == 1
+    assert handlers[0].redirect_request(
+        None, None, 302, "Found", {}, "http://example.test"
+    ) is None
+
+
+def test_dashboard_health_probe_refuses_redirect_without_a_second_request(monkeypatch):
+    calls = []
+
+    class Opener:
+        def open(self, request, *, timeout):
+            calls.append((request.full_url, timeout))
+            raise start_dashboard.urllib.error.HTTPError(
+                request.full_url, 302, "Found", {}, None,
+            )
+
+    monkeypatch.setattr(
+        start_dashboard.urllib.request,
+        "build_opener",
+        lambda *_handlers: Opener(),
+    )
+
+    assert start_dashboard._is_engraphis_dashboard("http://127.0.0.1:8700") is False
+    assert calls == [("http://127.0.0.1:8700/api/health", 0.75)]
+
+
 def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypatch):
     uvicorn = pytest.importorskip("uvicorn")
 

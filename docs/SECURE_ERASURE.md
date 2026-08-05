@@ -12,7 +12,7 @@ compatibility aliases only.
 
 For an already stored credential, use `engraphis_secure_erase`, `POST /api/secure-erase`, or
 `MemoryService.secure_erase()`. This is intentionally irreversible. It removes the specified
-memory from the main row, FTS, vector/ANN tables, memory links, code links, graph evidence, and
+memory from the main row, FTS and vector tables, memory links, code links, graph evidence, and
 unreferenced extracted entities. It removes the record's old audit details, records a
 content-free erasure marker, enables SQLite `secure_delete`, checkpoints/truncates the WAL when
 SQLite permits it, and runs `VACUUM` to rebuild the live database without free-page/FTS tombstone

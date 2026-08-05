@@ -91,13 +91,23 @@ token accounting, exclusions, complete baseline coverage, and resumability. Only
 holdout. For external datasets, use the complete dataset and canonical mode where supported:
 
 ```bash
-python -m eval.external --dataset longmemeval_s.json --format longmemeval --canonical
-python -m eval.external --dataset locomo10.json --format locomo --canonical
+python -m eval.external --dataset longmemeval_s.json --format longmemeval --canonical \
+  --embed-revision <40-character-model-commit>
+python -m eval.external --dataset locomo10.json --format locomo --canonical \
+  --embed-revision <40-character-model-commit> \
+  --locomo-repair-manifest eval/datasets/locomo10_repair_manifest.json
 ```
 
-For `eval.external`, `--canonical` enforces complete source-case coverage only. Its ordinary JSON
-is a private diagnostic report, not an `engraphis-benchmark/v2` public artifact, and must not be
-passed to `eval.benchmark --canonical`.
+For `eval.external`, `--canonical` enforces complete source-case coverage and a pinned semantic
+embedding revision. Its JSON records the source-data SHA-256 and selected embedding provenance,
+but remains a private diagnostic report, not an `engraphis-benchmark/v2` public artifact, and
+must not be passed to `eval.benchmark --canonical`.
+
+The LoCoMo repair manifest is SHA-256-bound to the official raw file and covers only three
+otherwise-unresolvable evidence references. Mechanical delimiter/zero-padding typos are normalized
+separately. The adapter rejects mismatched source hashes, stale repairs, and every unresolved final
+ID, and records the applied manifest in its report. This is reference-integrity repair for the
+private retrieval diagnostic, not correction of the benchmark's semantic QA labels.
 
 Execute each frozen point from its locked manifest rather than composing a new shell command at
 release time. The point runner currently accepts only the in-repo canonical harness. Keep the

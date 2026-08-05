@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from engraphis.backends import sync_relay
+from engraphis.backends import encrypted_db
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
@@ -15,6 +16,7 @@ from engraphis.private_state import (
     publish_private_text_if_absent,
     read_private_text,
 )
+from scripts import init as init_script
 
 
 def _adversarial_link(target, link):
@@ -52,6 +54,27 @@ def test_sync_token_link_and_malformed_state_fail_closed(
     assert sync_relay.has_sync_token() is False
     with pytest.raises(sync_relay.RelayError, match="unsafe|unreadable"):
         sync_relay._current_bearer("https://relay.example")
+
+
+def test_sqlcipher_key_files_reject_links_and_unbounded_reads(monkeypatch, tmp_path):
+    key = "b3" * 32
+    victim = tmp_path / "victim.key"
+    victim.write_text(key + "\n", encoding="utf-8")
+    key_file = tmp_path / "database.key"
+    _adversarial_link(victim, key_file)
+    monkeypatch.delenv("ENGRAPHIS_DB_KEY", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY_FILE", str(key_file))
+
+    with pytest.raises(encrypted_db.EncryptionError, match="could not be read safely"):
+        encrypted_db._resolve_key()
+    with pytest.raises(RuntimeError, match="could not read database key file"):
+        init_script._private_file_content(key_file)
+    assert victim.read_text(encoding="utf-8") == key + "\n"
+
+    key_file.unlink()
+    key_file.write_bytes(b"x" * (encrypted_db._MAX_DB_KEY_FILE_BYTES + 1))
+    with pytest.raises(encrypted_db.EncryptionError, match="could not be read safely"):
+        encrypted_db._resolve_key()
 
 
 def test_sync_policy_link_and_malformed_state_are_read_only(monkeypatch, tmp_path):
