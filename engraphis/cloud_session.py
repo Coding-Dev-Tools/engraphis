@@ -145,7 +145,14 @@ def _reachable_cloud_base_url(value: str) -> str:
 
 def _session_path() -> Path:
     root = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
-    base = Path(root).expanduser() if root else Path.home() / ".engraphis"
+    try:
+        base = Path(root).expanduser() if root else Path.home() / ".engraphis"
+    except (OSError, RuntimeError) as exc:
+        raise CloudSessionError(
+            "The Engraphis state directory could not be resolved; set "
+            "ENGRAPHIS_STATE_DIR to a writable directory.",
+            status=409,
+        ) from exc
     return base / "cloud_session.json"
 
 
@@ -266,6 +273,8 @@ def _load() -> dict:
         raise CloudSessionError(
             "The saved cloud session has unsafe filesystem permissions.", status=409
         ) from exc
+    except CloudSessionError:
+        raise
     except (OSError, RuntimeError) as exc:
         # An unreadable or stale state mount (and Path.home() failing outright) must
         # surface as a structured, retryable cloud error rather than escaping as an
