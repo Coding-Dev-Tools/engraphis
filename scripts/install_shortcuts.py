@@ -239,7 +239,7 @@ StartupWMClass=engraphis-dashboard
     desktop_file_path.write_text(desktop_file)
     # Desktop shells commonly require the executable bit before offering a launcher
     # from the user's Desktop.  This copy intentionally remains user-launchable.
-    desktop_file_path.chmod(0o755)
+    os.chmod(desktop_file_path, 0o755)
 
     # Also install to applications directory for Start Menu
     app_entry = app_dir / "engraphis-dashboard.desktop"
