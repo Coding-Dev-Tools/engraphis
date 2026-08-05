@@ -164,7 +164,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > **Upgrading to 1.5:** schema 10 bounds legacy retention state and schema 11 backfills explicit
 > approval only for eligible pre-review local memories. Pending and quarantined evidence remains
 > gated. Existing 1.4.x databases migrate automatically when Engraphis 1.5 opens them; see the
-> [1.5.0 release notes](CHANGELOG.md#150---2026-08-04).
+> [1.5 release notes](CHANGELOG.md#150---2026-08-04).
 
 ---
 
