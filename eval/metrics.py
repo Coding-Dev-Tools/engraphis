@@ -1,8 +1,4 @@
-"""Retrieval metrics.
-
-Kept deliberately simple and transparent so scores are explainable. Phase 1 adds
-RAGAS-style context precision/recall and an optional LLM-as-judge answer metric.
-"""
+"""Deterministic, explainable retrieval metrics used by the evaluation harnesses."""
 from __future__ import annotations
 
 import math

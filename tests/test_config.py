@@ -22,7 +22,9 @@ RETIRED_RELAY_URLS = (
 
 def test_rerank_model_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_RERANK_REVISION", raising=False)
     assert Settings().rerank_model == ""
+    assert Settings().rerank_revision == ""
 
 
 def test_cors_default_origins_follow_configured_port():
@@ -62,6 +64,7 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     assert "docker-compose.lan.yml" in example
     assert "# ENGRAPHIS_DASHBOARD_URL=http://192.168.10.151:8700" in example
     assert "# ENGRAPHIS_DASHBOARD_URL=http://engraphis.local" in example
+    assert "# ENGRAPHIS_HTTP_PORT=8711" in example
 
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
     assert Settings().llm_auto_extract is False
@@ -92,7 +95,9 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
 
 def test_rerank_model_read_from_env(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    monkeypatch.setenv("ENGRAPHIS_RERANK_REVISION", "a" * 40)
     assert Settings().rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert Settings().rerank_revision == "a" * 40
 
 
 def test_empty_rerank_model_normalizes_to_none(monkeypatch):
@@ -124,9 +129,25 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
-def test_vector_backend_defaults_to_numpy(monkeypatch):
+def test_model_provenance_settings_read_environment_and_are_documented(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_EMBED_REVISION", "a" * 40)
+    monkeypatch.setenv("ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS", "true")
+
+    configured = Settings()
+
+    assert configured.embed_revision == "a" * 40
+    assert configured.require_immutable_models is True
+    assert "ENGRAPHIS_EMBED_REVISION" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS" in (REPO_ROOT / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_server_vector_backend_defaults_to_safe_auto(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_VECTOR_BACKEND", raising=False)
-    assert Settings().vector_backend == "numpy"
+    assert Settings().vector_backend == "auto"
 
 
 def test_vector_backend_reads_env(monkeypatch):

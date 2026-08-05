@@ -1,5 +1,7 @@
 """Tests for embedder thread-safety (double-checked locking) and warmup()."""
+import sys
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -96,3 +98,88 @@ def test_warmup_idempotent():
         assert emb_mod.warmup() is True
 
     assert load_count == 1
+
+
+def test_legacy_embedder_forwards_pinned_revision_and_disables_remote_code(monkeypatch):
+    """The legacy reference loader must preserve the v2 source-policy guarantees."""
+    import engraphis.engines.embedder as emb_mod
+
+    captured = {}
+    fake_model = MagicMock()
+    fake_model.get_embedding_dimension.return_value = 384
+
+    def load(name, **kwargs):
+        captured.update(name=name, **kwargs)
+        return fake_model
+
+    monkeypatch.setattr(emb_mod.settings, "embed_model", "organization/semantic-model")
+    monkeypatch.setattr(emb_mod.settings, "embed_revision", "a" * 40)
+    monkeypatch.setattr(emb_mod.settings, "require_immutable_models", True)
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=load)
+    )
+
+    assert emb_mod._get_model() is fake_model
+    assert captured == {
+        "name": "organization/semantic-model",
+        "revision": "a" * 40,
+        "trust_remote_code": False,
+    }
+
+
+def test_legacy_embedder_local_selector_is_offline_only(monkeypatch):
+    import engraphis.engines.embedder as emb_mod
+
+    captured = {}
+    fake_model = MagicMock()
+    fake_model.get_embedding_dimension.return_value = 384
+
+    def load(name, **kwargs):
+        captured.update(name=name, **kwargs)
+        return fake_model
+
+    monkeypatch.setattr(emb_mod.settings, "embed_model", "local:C:/models/bge-small")
+    monkeypatch.setattr(emb_mod.settings, "embed_revision", "")
+    monkeypatch.setattr(emb_mod.settings, "require_immutable_models", True)
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=load)
+    )
+
+    assert emb_mod._get_model() is fake_model
+    assert captured == {
+        "name": "C:/models/bge-small",
+        "local_files_only": True,
+        "trust_remote_code": False,
+    }
+
+
+def test_legacy_embedder_strict_policy_rejects_before_loader_import(monkeypatch):
+    import engraphis.engines.embedder as emb_mod
+
+    monkeypatch.setattr(emb_mod.settings, "embed_model", "organization/semantic-model")
+    monkeypatch.setattr(emb_mod.settings, "embed_revision", "main")
+    monkeypatch.setattr(emb_mod.settings, "require_immutable_models", True)
+
+    with pytest.raises(ValueError, match="ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS"):
+        emb_mod._get_model()
+
+
+def test_legacy_embedder_warmup_redacts_loader_error(monkeypatch, caplog):
+    import engraphis.engines.embedder as emb_mod
+
+    marker = "signed-provider-url-secret"
+    monkeypatch.setattr(emb_mod.settings, "embed_model", "organization/semantic-model")
+    monkeypatch.setattr(emb_mod.settings, "embed_revision", "")
+    monkeypatch.setattr(emb_mod.settings, "require_immutable_models", False)
+
+    def load(*_args, **_kwargs):
+        raise RuntimeError(marker)
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=load)
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.embedder"):
+        assert emb_mod.warmup() is False
+
+    assert marker not in caplog.text

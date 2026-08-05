@@ -114,8 +114,11 @@ def db_with_workspace(tmp_path):
     """A persisted v2 DB file containing a workspace named 'acme'."""
     path = str(tmp_path / "sync.db")
     eng = MemoryEngine.create(path)
-    eng.store.get_or_create_workspace("acme")
-    eng.store.conn.commit()
+    try:
+        eng.store.get_or_create_workspace("acme")
+        eng.store.conn.commit()
+    finally:
+        eng.store.close()
     return path
 
 

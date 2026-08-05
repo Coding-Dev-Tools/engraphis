@@ -1,13 +1,13 @@
 # Engraphis MCP tools: reference
 
-All 33 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
+All 40 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
 
 Group index: [Write](#write) · [Recall and read](#recall-and-read) · [History](#history-bi-temporal) · [Governance](#governance) ·
-[Code](#code) · [Sessions](#sessions) · [Ops](#ops).
+[Code](#code) · [Sessions](#sessions) · [Smart gateway](#smart-gateway) · [Ops](#ops).
 
 ---
 
@@ -388,6 +388,78 @@ semantic *profile* digest, a per-subject knowledge profile linked via `profiles`
 Returns `{clusters_found, digests_created, archived, skipped_already_consolidated, compaction, dry_run}`.
 The `compaction` field is the context tokens the sweep saved (before → after). With `profiles=true` a
 `profiles` block is added (`entities_considered, profiles_created, skipped_existing, compaction`).
+
+## Smart gateway
+
+These nine tools are the default Smart MCP surface. The seven tools below expose session,
+discovery, execution, inspection, update, and review operations that are not part of the classic
+direct-tool inventory above. Discovery returns the exact capability schema; executors reject stale
+or mismatched schemas and enforce the declared side-effect boundary.
+
+### `engraphis_session`
+Start or resume a session, or end it with a next-session handoff.
+
+- `action (str, "start")`: `start` or `end`.
+- `workspace (str, "default")`, `repo (str, None)`, `agent (str, "")`, `goal (str, "")`.
+- `session_id (str, "")`: required when `action="end"`.
+- `summary (str, "")`, `outcome (str, "")`, `open_threads (list[str], None)`: end-session handoff.
+- `force_new (bool, false)`: start a new session instead of reusing an exact active task.
+- `token_budget (int, 512)`: bounded goal context, `0..32768`.
+
+Returns a bounded session/bootstrap or end-session handoff response.
+
+### `engraphis_discover_actions`
+Return the exact schemas needed for a small set of matching advanced capabilities.
+
+- `task (str)`: describe the needed capability without pasting memory content.
+- `category (str, "")`: optional `memory`, `governance`, `code`, `audit`, or `ops` filter.
+- `intent (str, "any")`: `any` | `read` | `write` | `admin` | `destructive`.
+- `limit (int, 1)`: ranked actions to return, `1..3`.
+
+Returns `{actions:[{capability_id, schema_digest, ...}]}` or an empty action list.
+
+### `engraphis_execute_read`
+Execute only a discovered action that is truthfully read-only and idempotent.
+
+- `capability_id (str)`, `schema_digest (str)`: exact values returned by `discover_actions`.
+- `arguments (dict)`: arguments matching the discovered schema.
+
+Returns a bounded action result; stale, mismatched, or stateful capabilities are rejected.
+
+### `engraphis_execute_action`
+Execute a discovered write, administrative, or destructive-capable action safely.
+
+- `capability_id (str)`, `schema_digest (str)`: exact values returned by `discover_actions`.
+- `arguments (dict)`: arguments matching the discovered schema.
+
+Returns a bounded action result with the canonical action identity and execution receipt when
+applicable. Never invent capability IDs or arguments.
+
+### `engraphis_get_memory`
+Read one governed memory record without reinforcing it.
+
+- `memory_id (str)`, `workspace (str, "default")`, `repo (str, None)`.
+
+Returns the scoped record only when it is prompt-eligible; pending or quarantined content returns a
+governance error rather than exposing untrusted text.
+
+### `engraphis_update_memory`
+Edit safe memory metadata fields while preserving the governed content-correction path.
+
+- `memory_id (str)`, `workspace (str, "default")`, `repo (str, None)`.
+- `title (str, None)`, `mtype (str, None)`, `importance (float, None)`: at least one is required;
+  `mtype` is `working` | `episodic` | `semantic` | `procedural`, and `importance` is `0..1`.
+- `actor (str, "user")`: audit actor label.
+
+Content, provenance, trust, and sensitivity are not editable through this tool; use
+`engraphis_correct` for content changes.
+
+### `engraphis_conflict_review`
+List pending, quarantined, or conflicting memories for a reviewer.
+
+- `workspace (str, "default")`, `repo (str, None)`, `limit (int, 50)`: `1..100`.
+
+Returns scoped review records without exposing pending/quarantined bodies to an agent.
 
 ## Ops
 

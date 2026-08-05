@@ -408,8 +408,10 @@ def _node_kind(node: Any) -> str:
     """
     if hasattr(node, "type"):
         val = node.type
-        return val() if callable(val) else val
-    return _cg(node, "kind")
+        value = val() if callable(val) else val
+    else:
+        value = _cg(node, 'kind')
+    return value if isinstance(value, str) else str(value or '')
 
 
 def _text(src: bytes, node: Any) -> str:

@@ -15,13 +15,17 @@ so we wrap the connection in a tiny adapter that re-raises the matching ``sqlite
 """
 from __future__ import annotations
 
+import importlib
 import os
 import re
 import sqlite3
 from pathlib import Path
 from typing import Callable, Optional
 
+from engraphis.private_state import read_private_text
+
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+_MAX_DB_KEY_FILE_BYTES = 4096
 
 
 class EncryptionError(RuntimeError):
@@ -41,10 +45,15 @@ def _resolve_key() -> Optional[str]:
     path = os.environ.get("ENGRAPHIS_DB_KEY_FILE", "").strip()
     if path:
         try:
-            key = Path(path).read_text(encoding="utf-8").strip()
+            # Key files are credential state, not arbitrary files to follow. The
+            # helper rejects links, reparse points, hard links, races, invalid UTF-8,
+            # and unbounded reads.
+            key = (read_private_text(
+                Path(path), max_bytes=_MAX_DB_KEY_FILE_BYTES
+            ) or "").strip()
         except OSError as exc:
             raise EncryptionError(
-                "ENGRAPHIS_DB_KEY_FILE=%s could not be read: %s" % (path, exc)) from exc
+                "ENGRAPHIS_DB_KEY_FILE=%s could not be read safely: %s" % (path, exc)) from exc
         if not key:
             raise EncryptionError("ENGRAPHIS_DB_KEY_FILE=%s is empty" % path)
         return key
@@ -68,9 +77,9 @@ def _translate_exc(exc: Exception) -> Exception:
     """Map a sqlcipher3 exception to the stdlib ``sqlite3`` class of the same name so the
     stdlib-only core's ``except sqlite3.*`` handlers catch it."""
     target = getattr(sqlite3, type(exc).__name__, sqlite3.Error)
-    if not (isinstance(target, type) and issubclass(target, BaseException)):
-        target = sqlite3.Error
-    return target(*exc.args)
+    if isinstance(target, type) and issubclass(target, Exception):
+        return target(*exc.args)
+    return sqlite3.Error(*exc.args)
 
 
 def _guard(fn, *args, **kwargs):
@@ -158,7 +167,7 @@ def make_connector(key: str) -> Callable[[str], object]:
     SQLCipher database keyed with *key*. Raises :class:`EncryptionError` with an actionable
     message if the driver is missing or the key does not unlock an existing file."""
     try:
-        import sqlcipher3  # noqa: F401  (optional dependency)
+        sqlcipher3 = importlib.import_module("sqlcipher3")
     except Exception as exc:  # noqa: BLE001
         raise EncryptionError(
             "ENGRAPHIS_DB_KEY is set but no compatible SQLCipher driver is importable. "
@@ -171,7 +180,6 @@ def make_connector(key: str) -> Callable[[str], object]:
     pragma = _key_pragma(key)
 
     def _connect(path: str):
-        import sqlcipher3
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         raw = sqlcipher3.connect(path, timeout=30, check_same_thread=False)

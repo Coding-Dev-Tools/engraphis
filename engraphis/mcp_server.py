@@ -101,8 +101,13 @@ def service() -> MemoryService:
         _service = MemoryService.create(
             settings.db_path,
             embed_model=settings.embed_model or None,
+            embed_revision=getattr(settings, "embed_revision", "") or None,
+            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+            embed_dim=settings.embed_dim or 384,
             allowed_workspaces=settings.allowed_workspaces,
             vector_backend=settings.vector_backend,
+            rerank_model=getattr(settings, "rerank_model", "") or None,
+            rerank_revision=getattr(settings, "rerank_revision", "") or None,
             extractor=settings.extractor,
         )
     return _service
@@ -262,6 +267,12 @@ def engraphis_remember(
             valid_from=valid_from,
             subject_key=subject_key, claim_kind=claim_kind,
             resolve_conflicts=dedupe,
+            # Stdio is an operator-launched local capability. The dashboard's
+            # MCP-over-HTTP mount is protected by its loopback/token/role gate before
+            # FastMCP dispatches this binding. The service still checks the narrow
+            # local-agent source allow-list, so imported/external labels stay pending.
+            _local_agent_operator=bool(trusted),
+            _ingress="mcp",
         ))
     except Exception as exc:  # noqa: BLE001 - surface a safe, actionable message
         return _err(exc)
@@ -299,8 +310,9 @@ def engraphis_recall(
         description="Hard packed-context budget under the named token counter (0-32768).",
         ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="Retrieval profile: balanced (legacy hybrid), auto, lexical, graph, "
-                    "or code. Auto is opt-in until benchmarks demonstrate a win.")] = "balanced",
+        description="Retrieval profile: balanced (hybrid), fast (vector + lexical, no graph), "
+                    "auto, lexical, graph, or code. Auto is opt-in until benchmarks demonstrate "
+                    "a win.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in "
                     "profile-aware performance experiment.")] = "fixed",
@@ -372,7 +384,7 @@ def engraphis_recall_context(
         description="Hard packed-context budget under the reported token counter.",
         ge=0, le=32_768)] = 1024,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     as_of: Annotated[Optional[float], Field(
@@ -490,7 +502,7 @@ def engraphis_recall_grounded(
     token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(
@@ -577,7 +589,7 @@ def engraphis_answer(
     token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
-        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+        description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(
@@ -818,7 +830,7 @@ def engraphis_secure_erase(
 ) -> str:
     """Irreversibly remove one accidentally stored secret from local persistence.
 
-    Unlike retirement, this removes the memory, FTS/vector/ANN and derived graph/link
+    Unlike retirement, this removes the memory, FTS/vector-index and derived graph/link
     rows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised
     local SQLite recovery backups. It cannot erase copied exports, snapshots, remote
     peers, or data already read by a compromised/running agent; rotate the credential.
@@ -1304,10 +1316,20 @@ def engraphis_context_savings(
                                     min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Optional repo scope within the workspace.",
                                          max_length=200)] = None,
+    from_ts: Annotated[Optional[float], Field(description="Optional inclusive Unix timestamp.")] = None,
+    to_ts: Annotated[Optional[float], Field(description="Optional exclusive Unix timestamp.")] = None,
+    release_version: Annotated[Optional[str], Field(description="Optional semantic release filter.",
+                                                     max_length=64)] = None,
 ) -> str:
-    """Summarize content-free context savings, separated by token-counter identity."""
+    """Summarize receipt-backed context savings with optional time/release filters."""
     try:
-        return _ok(service().context_savings(workspace=workspace, repo=repo))
+        return _ok(service().context_savings(
+            workspace=workspace,
+            repo=repo,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            release_version=release_version,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1450,6 +1472,8 @@ def engraphis_ingest(
             # service gives this local-agent source immediate prompt eligibility;
             # explicitly external sources and detector matches remain contained.
             mtype=mtype, scope=scope, source="agent", trusted=False,
+            _local_agent_operator=True,
+            _ingress="mcp",
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -2123,14 +2147,15 @@ def _record_gateway_execution(
             ).fetchone()
             if repo_row is not None:
                 repo_id = str(repo_row["id"])
-        usage = result.get("usage") if isinstance(result, dict) else None
         metadata: dict[str, Any] = {
             "action_id": spec.canonical_id,
             "schema_version": _CAPABILITY_VERSION,
             "result_mode": str(validated_arguments.get("response_mode") or "gateway"),
         }
-        if isinstance(usage, dict):
-            metadata["token_usage"] = usage
+        # The classic handler already appends the authoritative operation receipt,
+        # including token_usage when it delivered context.  Gateway telemetry is a
+        # supplementary receipt for the outer dispatch and must not copy that usage,
+        # or one gateway call would count twice in context_savings().
         svc.store.record_receipt(
             "smart_gateway", workspace_id=workspace_id, repo_id=repo_id, actor="agent",
             target_count=int(result.get("count", 1)) if isinstance(result, dict) else 1,

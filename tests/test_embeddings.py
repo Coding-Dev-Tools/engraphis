@@ -136,7 +136,7 @@ def test_api_per_item_fallback_is_cardinality_safe_and_normalized(monkeypatch):
     np.testing.assert_allclose(result, [[0.6, 0.8], [0.0, 1.0]])
 
 
-def test_api_per_item_fallback_fills_malformed_rows_at_the_valid_width(monkeypatch):
+def test_api_per_item_fallback_rejects_partial_failure_instead_of_zero_vector(monkeypatch):
     httpx = pytest.importorskip("httpx")
     responses = [
         {"data": [{"index": "private-index", "embedding": [9.0]}]},
@@ -170,10 +170,25 @@ def test_api_per_item_fallback_fills_malformed_rows_at_the_valid_width(monkeypat
 
     monkeypatch.setattr(httpx, "Client", _Client)
 
-    result = ApiEmbedder(model="model", api_key="key").embed(["a", "b"])
+    with pytest.raises(RuntimeError, match="incomplete response"):
+        ApiEmbedder(model="model", api_key="key").embed(["a", "b"])
 
-    assert result.shape == (2, 2)
-    np.testing.assert_allclose(result, [[0.0, 0.0], [0.0, 1.0]])
+
+def test_api_embedding_identity_is_credential_free_and_space_specific():
+    first = ApiEmbedder(
+        model="model-a", base_url="https://provider.example", api_key="secret-a", dim=2,
+    )
+    same = ApiEmbedder(
+        model="model-a", base_url="https://provider.example", api_key="secret-b", dim=2,
+    )
+    other = ApiEmbedder(
+        model="model-b", base_url="https://provider.example", api_key="secret-a", dim=2,
+    )
+
+    assert first.embedding_identity == "api_embeddings"
+    assert first.embedding_version == same.embedding_version
+    assert first.embedding_version != other.embedding_version
+    assert "secret" not in first.embedding_version
 
 
 def test_api_rejects_all_failed_fallback_without_a_known_dimension():
@@ -182,6 +197,16 @@ def test_api_rejects_all_failed_fallback_without_a_known_dimension():
     with pytest.raises(RuntimeError, match="no usable vectors"):
         embedder._finalize_vectors([None, None], 2)
     assert embedder._dim is None
+
+
+def test_api_normalizes_finite_extreme_vectors_without_float32_overflow():
+    embedder = ApiEmbedder(model="model", api_key="key")
+    extreme = float(np.finfo(np.float32).max)
+
+    result = embedder._finalize_vectors([[extreme, extreme]], 1)
+
+    assert np.isfinite(result).all()
+    np.testing.assert_allclose(np.linalg.norm(result[0]), 1.0, rtol=1e-6)
 
 
 def test_api_rejects_configured_dimension_mismatch_from_batch_response(monkeypatch):

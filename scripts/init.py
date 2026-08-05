@@ -27,6 +27,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from engraphis.private_state import read_private_text
+from engraphis.backends.encrypted_db import connector_from_env
+
 
 _HEX64 = set("0123456789abcdef")
 
@@ -76,7 +79,12 @@ def cmd_check() -> int:
     db = Path(settings.db_path).expanduser()
     try:
         db.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db))
+        connector = connector_from_env()
+        conn = (
+            connector(str(db))
+            if connector is not None
+            else sqlite3.connect(str(db))
+        )
         conn.execute("PRAGMA user_version")
         conn.close()
         _ok("database writable", str(db))
@@ -157,7 +165,7 @@ def _key_path_for(db_path: Path) -> Path:
 def _private_file_content(path: Path) -> str:
     """Read an existing generated key without printing its contents."""
     try:
-        value = path.read_text(encoding="utf-8").strip()
+        value = (read_private_text(path, max_bytes=128) or "").strip()
     except OSError as exc:
         raise RuntimeError(f"could not read database key file {path}: {exc}") from exc
     if len(value) != 64 or any(character not in _HEX64 for character in value.casefold()):

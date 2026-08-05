@@ -73,6 +73,17 @@ class _Connection:
         self.closed = True
 
 
+def test_postgres_introspection_rejects_missing_current_database_row(monkeypatch):
+    connection = _Connection()
+    connection.cursor_obj.fetchone = lambda: None
+    monkeypatch.setattr(postgres_schema, '_connect', lambda _dsn: connection)
+
+    with pytest.raises(postgres_schema.PostgresIntrospectionError, match='did not return a database name'):
+        postgres_schema.PostgresSchemaIntrospector().inspect('postgresql://db.example/appdb')
+
+    assert connection.closed is True
+
+
 def test_postgres_connect_and_statement_timeouts_are_bounded(monkeypatch):
     captured = {}
     connection = _Connection()

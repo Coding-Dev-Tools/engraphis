@@ -32,21 +32,28 @@ frontier-model QA score.
   sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline.
   The checked-in corpus is explicitly marked trusted eval data so the measurement isolates
   chunking from the production trust gate, which excludes arbitrary raw imports from normal
-  agent context. This is the first cut of the context-reduction metric (item 3 below). On the
-  deterministic embedder:
-  **recall@5 1.000 for both, at ~73% fewer context tokens (809 → 219) and ~4× smaller
-  tokens-to-evidence (162 → 42).** Pass `--embed-model sentence-transformers/all-MiniLM-L6-v2`
-  for a real retrieval number (recall should then favour chunked on larger corpora, not just
-  tie).
+  agent context. On the deterministic embedder, **recall@5 is 1.000 for both modes; mean
+  retrieved top-5 content falls from 740.3 to 214.1 tokens (526.2 fewer, 71.1% lower, about
+  3.5× smaller), while the smallest returned evidence-holding memory falls from 162.2 to 42.4
+  tokens (119.8 fewer, 73.9% lower, about 3.8× smaller).** Pass `--embed-model
+  sentence-transformers/all-MiniLM-L6-v2` for a real retrieval number (recall should then favour
+  chunked on larger corpora, not just tie).
 - **Full-pipeline latency + quality**: `eval/performance.py` times the shipped semantic +
   lexical + graph + fusion + scoring + rerank + packing path after warmup, with reinforcement
   disabled so repeated measurements do not mutate their corpus. It reports p50/p95/p99 latency,
-  retrieval quality, and packed context tokens in one JSON-safe schema. `--filler-memories`
-  provides deterministic corpus scaling, and every report records the runtime, architecture,
-  embedder, vector backend, corpus size, warmups, and iteration count. `--candidate-k` and
-  `--retrieval-profile` make adaptive-depth/routing experiments executable instead of changing
-  production defaults from an unmeasured hunch.
-- **NumPy vector scale envelope**: `eval/vector_scale.py` measures the production
+  retrieval quality, packed context tokens, and full/compact JSON-shape payload proxies in one
+  JSON-safe schema. Payload proxies are sampled once per question, independently of the number
+  of timed iterations; they are not serialized MCP envelopes or transport responses. In the
+  documented CodeMem run (`--iterations 10`), 26 payload samples total **23,810** full-proxy
+  `engraphis.regex.v1` tokens versus **10,202** compact-proxy tokens, avoiding **13,608** proxy
+  tokens (**57.15% lower**), while 260 recalls are timed. Packed context across the same 26
+  samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
+  hit@5, and answer-token recall remain 1.000. `--filler-memories` provides deterministic corpus
+  scaling, and every report records the runtime, architecture, embedder, vector backend, corpus
+  size, warmups, and iteration count. `--candidate-k` and `--retrieval-profile` make
+  adaptive-depth/routing experiments executable instead of changing production defaults from an
+  unmeasured hunch.
+- **Exact vector scale envelope**: `eval/vector_scale.py` measures the production
   `NumpyVectorIndex` directly at requested corpus sizes with deterministic normalized vectors and
   queries. It records a corpus fingerprint, result hashes, environment, and observed
   p50/p95/p99 search envelopes. It intentionally has no pass/fail latency threshold: the output
@@ -134,12 +141,44 @@ python -m eval.proactive_ranking
 # Canonical latency/resource protocol: requires >=1,000 queries and five processes.
 python -m eval.performance --dataset fixed-1000-plus.jsonl --acceptance-matrix --processes 5
 
-# Real retrieval numbers (downloads all-MiniLM-L6-v2)
+# External retrieval diagnostics (downloads all-MiniLM-L6-v2; not QA/leaderboard results)
 python -m eval.external --dataset longmemeval_s.json --format longmemeval --k 10
 python -m eval.external --dataset locomo10.json      --format locomo      --k 10
+# Complete external-dataset coverage with an immutable embedding revision. This remains a
+# private diagnostic; it is not an official benchmark-harness or public evidence artifact.
+python -m eval.external --dataset longmemeval_s.json --format longmemeval --canonical \
+  --embed-revision <40-character-model-commit> --json external-longmemeval.json
+python -m eval.external --dataset locomo10.json --format locomo --canonical --no-resolve \
+  --embed-revision <40-character-model-commit> \
+  --locomo-repair-manifest eval/datasets/locomo10_repair_manifest.json \
+  --json external-locomo.json
 python -m eval.context_economy --dataset locomo10.json --format locomo \
   --embed-model sentence-transformers/all-MiniLM-L6-v2 --token-budget 512 --k 10 --no-resolve
 ```
+
+Canonical external mode requires an exact lowercase 40-character embedding commit and a semantic
+embedder; dependency or model-load failure is fatal instead of silently falling back to hashing.
+Every report records `embedding`, `dataset_sha256`, `source_cases`, `normalized_cases`, and
+`configuration` provenance so a result can be attributed to the actual data and retrieval setup.
+
+The official ten-conversation LoCoMo JSON contains delimiter-packed IDs, two mechanical ID
+typos, and three references that cannot be normalized syntactically. The adapter normalizes only
+the unambiguous forms. The checked-in repair manifest is bound to the official source SHA-256,
+names every remaining replacement/removal, must be fully consumed, and is recorded in the JSON
+report with its own hash. Any source update, unused repair, or unresolved ID fails the run. This
+repairs retrieval references only; it does not claim to correct LoCoMo's semantic answer labels.
+
+The pinned full-dataset private retrieval diagnostic run on 2026-08-04 used official-source
+SHA-256 `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`, repair-manifest
+SHA-256 `7bb74979b98778aafbbe72d44a93593743ff5ba166c9c95cd4702ab7376d7c2b`, and
+`sentence-transformers/all-MiniLM-L6-v2` revision
+`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`. With `k=10` and conflict resolution disabled,
+all 10 conversations, 5,882 memories, and 1,986 questions were processed; 1,982 questions had
+gold evidence and were scored. The result was recall@10 **0.6045**, hit@10 **0.6625**,
+MRR@10 **0.4138**, NDCG@10 **0.4424**, and answer-token recall **0.4607**. Six questions used
+mechanical ID normalization, three source-audited manifest repairs were applied, and four
+questions were explicitly excluded as `no_gold_evidence`. These values measure evidence
+retrieval only; they are not end-to-end QA accuracy or an official LoCoMo leaderboard score.
 
 ## What we do NOT yet claim
 

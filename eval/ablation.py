@@ -17,6 +17,7 @@ from engraphis.backends.reranker import IdentityReranker
 from engraphis.core import scoring
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
+from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 from eval import metrics
 from eval.harness import load_dataset
@@ -199,6 +200,82 @@ def _ordinary_recall_age_delta() -> float:
     )
 
 
+class _SemanticEvalEmbedder(DeterministicEmbedder):
+    """Offline test embedder that declares the vector arm semantic."""
+
+    supports_semantic_search = True
+    embedding_mode = "semantic"
+
+
+class _FixedScoreIndex:
+    """One weak vector candidate for the semantic-confidence micro-ablation."""
+
+    def __init__(self, scores: list[tuple[str, float]]) -> None:
+        self.scores = scores
+
+    def search(self, _query, k: int, *, filter=None) -> list[tuple[str, float]]:
+        del filter
+        return self.scores[:k]
+
+
+def _semantic_confidence_calibration_contrast() -> tuple[bool, bool]:
+    """Check the known weak-singleton mode without claiming benchmark gain.
+
+    The contrast is deterministic: a 0.01 cosine vector distractor competes
+    with exact lexical evidence. It demonstrates only the opt-in score-control
+    invariant; external semantic benchmarks remain the quality authority.
+    """
+    store = Store(":memory:")
+    try:
+        embedder = _SemanticEvalEmbedder(256)
+        workspace_id = store.get_or_create_workspace("semantic-calibration")
+        weak_id = store.add_memory(MemoryRecord(
+            id="",
+            content="The parking garage closes at dusk.",
+            workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            embedding=embedder.embed(["The parking garage closes at dusk."])[0],
+        ))
+        lexical_id = store.add_memory(MemoryRecord(
+            id="",
+            content="PASETO is the approved token format.",
+            workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            embedding=embedder.embed(["PASETO is the approved token format."])[0],
+        ))
+        engine = RecallEngine(
+            store,
+            embedder,
+            _FixedScoreIndex([(weak_id, 0.01)]),
+            IdentityReranker(),
+        )
+        base_config = ProfileConfig("vector_lexical", True, True, False, False)
+        default_id = engine.recall(
+            "PASETO",
+            SearchFilter(workspace_id=workspace_id),
+            k=1,
+            include_untrusted=True,
+            arm_config=base_config,
+        ).chunks[0]["id"]
+        calibrated_id = engine.recall(
+            "PASETO",
+            SearchFilter(workspace_id=workspace_id),
+            k=1,
+            include_untrusted=True,
+            arm_config=ProfileConfig(
+                "vector_lexical_calibrated",
+                True,
+                True,
+                False,
+                False,
+                semantic_confidence_calibration=True,
+            ),
+        ).chunks[0]["id"]
+        return default_id == weak_id, calibrated_id == lexical_id
+    finally:
+        store.close()
+
+
 def main() -> None:
     ds = load_dataset(str(Path(__file__).resolve().parent / "datasets" / "sample.jsonl"))
     print("Engraphis ablation — recall@5")
@@ -210,6 +287,10 @@ def main() -> None:
         "  equal-reinforcement score delta (recent - 1y old): "
         f"{_ordinary_recall_age_delta():.8f}  (expected 0.00000000)"
     )
+    default_weak_first, calibrated_lexical_first = _semantic_confidence_calibration_contrast()
+    print("\nEngraphis semantic-confidence micro-ablation (not a benchmark)")
+    print(f"  default weak singleton wins : {default_weak_first}")
+    print(f"  opt-in calibrated lexical wins: {calibrated_lexical_first}")
 
     mh_path = Path(__file__).resolve().parent / "datasets" / "graph_multihop.jsonl"
     if mh_path.exists():

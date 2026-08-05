@@ -23,6 +23,8 @@ endpoint returning a GitHub-release, PyPI, or ``{"version": ..., "url": ...}`` p
 from __future__ import annotations
 
 import json
+import ipaddress
+import math
 import os
 import re
 import sys
@@ -31,11 +33,14 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 # Stdlib-only itself (see the module docstring): importing it keeps this module free of
 # the config/server stack while giving the probe the package's vetted HTTPS connector.
 from engraphis.hosted_client import build_pinned_https_opener
+from engraphis.private_state import UnsafeStateFile, atomic_private_text, read_private_text
 
 try:  # installed distribution → real version; source tree → pinned fallback
     from engraphis import __version__ as CURRENT_VERSION
@@ -47,6 +52,10 @@ DEFAULT_REPO = "Coding-Dev-Tools/engraphis"
 CACHE_TTL_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT = 3.5          # keep short: never stall an interactive request
 _MAX_BYTES = 512 * 1024        # cap the response body we are willing to read
+_MAX_CACHE_BYTES = 64 * 1024
+_MAX_VERSION_TEXT = 256
+_MAX_VERSION_PARTS = 16
+_MAX_VERSION_DIGITS = 9
 _TRUTHY = {"1", "true", "yes", "on", "enable", "enabled"}
 
 _CACHE_LOCK = threading.Lock()
@@ -102,10 +111,17 @@ def parse_version(text: object) -> Optional[tuple]:
     """
     if not isinstance(text, str):
         return None
+    if len(text) > _MAX_VERSION_TEXT:
+        return None
     m = re.match(r"\s*[vV]?(\d+(?:\.\d+)*)", text)
     if not m:
         return None
-    return tuple(int(part) for part in m.group(1).split("."))
+    parts = m.group(1).split(".")
+    if len(parts) > _MAX_VERSION_PARTS or any(
+        len(part) > _MAX_VERSION_DIGITS for part in parts
+    ):
+        return None
+    return tuple(int(part) for part in parts)
 
 
 def is_newer(latest: object, current: object) -> bool:
@@ -161,23 +177,38 @@ def _fetch(url: str, timeout: float) -> Optional[dict]:
 
     Only ``https`` (or loopback ``http``) endpoints are contacted; redirects are blocked.
     """
-    scheme, _, rest = url.partition("://")
-    scheme = scheme.lower()
-    host = rest.split("/", 1)[0].split("@")[-1].split(":", 1)[0].lower()
-    loopback = host in ("localhost", "127.0.0.1", "::1", "[::1]")
-    if scheme != "https" and not (scheme == "http" and loopback):
+    if not isinstance(url, str) or "\\" in url or any(
+        ord(character) <= 0x20 or ord(character) == 0x7F for character in url
+    ):
         return None
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Engraphis/%s update-check" % CURRENT_VERSION,
-        "Accept": "application/vnd.github+json, application/json;q=0.9, */*;q=0.1",
-    })
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port
+        host = parsed.hostname or ""
+    except (TypeError, ValueError):
+        return None
+    if not host or parsed.username is not None or parsed.password is not None:
+        return None
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+        literal_loopback = address.is_loopback
+    except ValueError:
+        literal_loopback = False
+    scheme = parsed.scheme.casefold()
+    if scheme != "https" and not (scheme == "http" and literal_loopback):
+        return None
     # ``ENGRAPHIS_UPDATE_URL`` makes this endpoint operator-controllable, so the probe
-    # gets the same pinned opener every other outbound client uses (hosted_client,
+    # gets the same pinned HTTPS opener every other outbound client uses (hosted_client,
     # cloud_session, sync_relay): the vetted address is the one actually dialled, which
     # rejects private/reserved targets and closes the DNS-rebinding window between the
-    # scheme check above and the connect. A plain ``build_opener`` had neither guard.
-    opener = build_pinned_https_opener(_NoRedirect())
+    # scheme check above and the connect. HTTP is allowed only for literal loopback
+    # addresses because urllib's ordinary HTTP handler cannot pin a hostname lookup.
     try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Engraphis/%s update-check" % CURRENT_VERSION,
+            "Accept": "application/vnd.github+json, application/json;q=0.9, */*;q=0.1",
+        })
+        opener = build_pinned_https_opener(_NoRedirect())
         with opener.open(req, timeout=timeout) as resp:  # nosec B310 - scheme checked above
             raw = resp.read(_MAX_BYTES + 1)
         if len(raw) > _MAX_BYTES:
@@ -194,10 +225,13 @@ def _read_cache() -> dict:
     if not path:
         return {}
     try:
-        with _CACHE_LOCK, open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        with _CACHE_LOCK:
+            raw = read_private_text(
+                Path(path), max_bytes=_MAX_CACHE_BYTES, allow_missing=True,
+            )
+        data = json.loads(raw) if raw else {}
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (UnsafeStateFile, OSError, ValueError, RecursionError):
         return {}
 
 
@@ -208,12 +242,21 @@ def _write_cache(latest: str, url: str, error: str = "") -> None:
     payload = {"latest": latest, "url": url, "error": error, "checked_at": time.time()}
     try:
         with _CACHE_LOCK:
-            tmp = "%s.%d.tmp" % (path, os.getpid())
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
-            os.replace(tmp, path)
-    except OSError:
+            atomic_private_text(
+                Path(path),
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                + "\n",
+            )
+    except (UnsafeStateFile, OSError, ValueError):
         pass  # unwritable cache is fine; we just re-probe next time
+
+
+def _checked_at(cache: dict) -> float:
+    try:
+        value = float(cache.get("checked_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
 
 
 def _snapshot_from_cache(cache: dict) -> dict:
@@ -226,7 +269,7 @@ def _snapshot_from_cache(cache: dict) -> dict:
         "latest": latest,
         "update_available": bool(latest) and is_newer(latest, CURRENT_VERSION),
         "url": str(cache.get("url") or ""),
-        "checked_at": float(cache.get("checked_at") or 0.0),
+        "checked_at": _checked_at(cache),
         "error": str(cache.get("error") or ""),
     }
 
@@ -243,10 +286,13 @@ def check(force: bool = False, timeout: float = DEFAULT_TIMEOUT) -> dict:
     if not enabled():
         return _disabled_snapshot()
     cache = _read_cache()
-    fresh = (time.time() - float(cache.get("checked_at") or 0.0)) < CACHE_TTL_SECONDS
+    fresh = (time.time() - _checked_at(cache)) < CACHE_TTL_SECONDS
     if cache and fresh and not force:
         return _snapshot_from_cache(cache)
-    result = _fetch(_endpoint(), timeout)
+    try:
+        result = _fetch(_endpoint(), timeout)
+    except Exception:  # noqa: BLE001 — update checks are explicitly fail-silent
+        result = None
     if result is None:
         # Preserve the last good answer; only stamp the failure if we had nothing.
         _write_cache(str(cache.get("latest") or ""), str(cache.get("url") or ""),
@@ -266,7 +312,7 @@ def snapshot() -> dict:
     if not enabled():
         return _disabled_snapshot()
     cache = _read_cache()
-    fresh = cache and (time.time() - float(cache.get("checked_at") or 0.0)) < CACHE_TTL_SECONDS
+    fresh = cache and (time.time() - _checked_at(cache)) < CACHE_TTL_SECONDS
     if not fresh:
         refresh_in_background()
     return _snapshot_from_cache(cache)

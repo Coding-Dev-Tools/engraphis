@@ -1,4 +1,5 @@
 import io
+import json
 import sqlite3
 import sys
 
@@ -98,9 +99,42 @@ def test_migration_writes_scoped_v2(tmp_path):
     assert any(m.provenance.get("v1_namespace") == "preferences" for m in mems)
     assert all(m.provenance.get("trusted") is False for m in mems)
     assert all(m.provenance.get("trust_origin") == "v1_migration" for m in mems)
+    edge = store.conn.execute(
+        "SELECT e.src, e.dst, e.provenance, src.name AS src_name, dst.name AS dst_name "
+        "FROM edges e JOIN entities src ON src.id=e.src "
+        "JOIN entities dst ON dst.id=e.dst"
+    ).fetchone()
+    assert {edge["src_name"], edge["dst_name"]} == {"staging", "PostgreSQL"}
+    assert json.loads(edge["provenance"])["trusted"] is False
     # vector carried across for the row that had one
     vrows = store.conn.execute("SELECT COUNT(*) AS c FROM mem_vectors").fetchone()["c"]
     assert vrows >= 1
+    store.close()
+
+
+def test_migration_preserves_same_name_entities_with_distinct_types(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    new = tmp_path / "engraphis_v2.db"
+    _build_v1_db(str(old))
+    with sqlite3.connect(old) as connection:
+        connection.execute(
+            "INSERT INTO entities (namespace, name, entity_type, created_at) "
+            "VALUES (?,?,?,?)",
+            ("infra", "PostgreSQL", "company", 1002.0),
+        )
+
+    migrate(str(old), str(new))
+
+    store = Store(str(new))
+    rows = store.conn.execute(
+        "SELECT etype FROM entities WHERE name='PostgreSQL' ORDER BY etype"
+    ).fetchall()
+    assert {row["etype"] for row in rows} == {"", "company", "tech"}
+    edge = store.conn.execute(
+        "SELECT dst.etype AS dst_type FROM edges e "
+        "JOIN entities dst ON dst.id=e.dst WHERE e.relation='uses'"
+    ).fetchone()
+    assert edge["dst_type"] == ""
     store.close()
 
 
@@ -174,3 +208,28 @@ def test_migration_refuses_an_existing_target_without_modifying_it(tmp_path):
     assert target.read_bytes() == before
     assert migrate(str(old), str(target), dry_run=True)["memories"] == 2
     assert target.read_bytes() == before
+
+
+def test_migration_failure_never_publishes_a_partial_target(tmp_path, monkeypatch):
+    old = tmp_path / "engraphis_v1.db"
+    target = tmp_path / "engraphis_v2.db"
+    _build_v1_db(str(old))
+    original = Store.add_memory
+    calls = 0
+
+    def fail_second_memory(self, record, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected migration write failure")
+        return original(self, record, **kwargs)
+
+    monkeypatch.setattr(Store, "add_memory", fail_second_memory)
+
+    with pytest.raises(RuntimeError, match="injected migration write failure"):
+        migrate(str(old), str(target))
+
+    assert not target.exists()
+    assert list(tmp_path.glob(f".{target.name}.migration-*.db*")) == []
+    with sqlite3.connect(old) as source:
+        assert source.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2

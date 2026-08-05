@@ -129,6 +129,52 @@ def _state_files(root: Path):
 # --------------------------------------------------------------------------- happy path
 
 
+def test_preflight_validates_configuration_without_touching_credentials_or_network(
+    monkeypatch, tmp_path
+):
+    """Operators can prove local prerequisites before consuming a one-use token."""
+
+    def unexpected_request(*args, **kwargs):
+        raise AssertionError("preflight must not send a control-plane request")
+
+    monkeypatch.setattr(device_connect, "post_connect", unexpected_request)
+
+    result = device_connect.preflight(
+        control_url=CONTROL_URL, compute_url=COMPUTE_URL
+    )
+
+    assert result == {
+        "control_url": CONTROL_URL,
+        "compute_url": COMPUTE_URL,
+        "session_path": str(tmp_path / "cloud_session.json"),
+        "connect_request_sent": False,
+        "ready_to_connect": True,
+    }
+    assert _state_files(tmp_path) == []
+
+
+def test_cli_preflight_needs_no_token_and_emits_only_redacted_setup(monkeypatch, capsys):
+    expected = {
+        "control_url": CONTROL_URL,
+        "compute_url": COMPUTE_URL,
+        "session_path": "C:/private/cloud_session.json",
+        "connect_request_sent": False,
+        "ready_to_connect": True,
+    }
+    calls = []
+    monkeypatch.setattr(
+        connect_cli, "preflight", lambda **kwargs: calls.append(kwargs) or expected
+    )
+
+    assert connect_cli.main([
+        "--preflight", "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL,
+        "--json",
+    ]) == 0
+
+    assert calls == [{"control_url": CONTROL_URL, "compute_url": COMPUTE_URL}]
+    assert json.loads(capsys.readouterr().out) == expected
+
+
 def test_connect_writes_a_session_the_rest_of_the_client_can_use(monkeypatch, tmp_path):
     """The whole point: after connect, ``cloud_session.configured()`` is true.
 

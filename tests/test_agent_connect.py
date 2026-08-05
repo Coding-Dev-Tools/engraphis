@@ -58,6 +58,66 @@ def test_remote_open_runtime_fails_closed_without_token(monkeypatch, tmp_path):
         assert response.json()["auth"] == "local-token-required"
 
 
+def test_remote_authenticated_api_cannot_self_approve_agent_memory(monkeypatch, tmp_path):
+    app = _app(monkeypatch, tmp_path, token="service-token-with-enough-entropy")
+    with TestClient(app, client=("203.0.113.10", 50000)) as client:
+        response = client.post(
+            "/api/remember",
+            headers={"Authorization": "bearer service-token-with-enough-entropy"},
+            json={
+                "content": "Remote caller supplied this candidate.",
+                "workspace": "demo",
+                "source": "agent",
+                "trusted": True,
+            },
+        )
+        assert response.status_code == 200
+        record = app.state.service.store.get_memory(response.json()["id"])
+        assert record.provenance["trusted"] is False
+        assert record.provenance["review_state"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/remember",
+            {
+                "content": "A proxied caller supplied this candidate.",
+                "workspace": "demo",
+                "source": "agent",
+                "trusted": True,
+            },
+        ),
+        (
+            "/api/intent/remember",
+            {
+                "text": "A proxied intent supplied this candidate.",
+                "workspace": "demo",
+            },
+        ),
+    ],
+)
+def test_authenticated_reverse_proxy_cannot_mint_local_write_attestation(
+    monkeypatch, tmp_path, path, payload,
+):
+    app = _app(monkeypatch, tmp_path, token="service-token-with-enough-entropy")
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        response = client.post(
+            path,
+            headers={
+                "Authorization": "bearer service-token-with-enough-entropy",
+                "X-Forwarded-For": "203.0.113.10",
+            },
+            json=payload,
+        )
+        assert response.status_code == 200
+        record = app.state.service.store.get_memory(response.json()["id"])
+        assert record.provenance["trusted"] is False
+        assert record.provenance["review_state"] == "pending"
+        assert record.provenance["ingress"] == "http"
+
+
 def test_auth_metadata_points_team_to_cloud(monkeypatch, tmp_path):
     with TestClient(
         _app(monkeypatch, tmp_path), client=("127.0.0.1", 50000)

@@ -77,7 +77,8 @@ def test_ci_audits_the_stripped_image_without_mutating_it():
 
     assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in workflow
     assert 'python -m pip_audit --path "$audit_dir"' in workflow
-    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in workflow
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir' in workflow
+    assert 'pip-audit==2.10.1' in workflow
 
 
 def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):
