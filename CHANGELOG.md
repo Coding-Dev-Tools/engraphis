@@ -5,7 +5,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-08-04
+## [1.5] - 2026-08-04
 
 Minor release advancing the v2 engine to schema 11 with governed recall recovery,
 embedding-space safety, reproducible release evidence, and stronger offline memory-quality gates.
