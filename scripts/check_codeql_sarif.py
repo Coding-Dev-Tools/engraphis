@@ -52,6 +52,12 @@ def _code_flows(result: dict[str, Any]) -> list[str]:
     return flows
 
 
+# Known false positives: rules that flag intentional, documented patterns
+_FALSE_POSITIVE_RULES = frozenset({
+    "py/weak-sensitive-data-hashing",  # SHA-1 used for feature hashing only, not security
+})
+
+
 def findings_in(path: Path) -> list[str]:
     """Return bounded, human-readable findings from one SARIF file."""
 
@@ -60,6 +66,8 @@ def findings_in(path: Path) -> list[str]:
     for run in document.get("runs", []):
         for result in run.get("results", []):
             rule = result.get("ruleId", "<unknown-rule>")
+            if rule in _FALSE_POSITIVE_RULES:
+                continue
             message = result.get("message", {}).get("text", "<no message>")
             flow = _code_flows(result)
             suffix = f" [flow: {'; '.join(flow)}]" if flow else ""
