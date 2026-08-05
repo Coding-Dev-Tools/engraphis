@@ -12,6 +12,9 @@ name: "Engraphis CodeQL config"
 
 disable-default-queries: false
 
-# Exclude the specific file that triggers the false positive
-paths-ignore:
-  - engraphis/backends/embedder_deterministic.py
+# Exclude the specific false-positive query. The SHA-1 in embedder_deterministic.py
+# is feature hashing (hashing trick), not a security primitive. usedforsecurity=False
+# is already set but CodeQL does not honour that Python keyword argument.
+queries:
+  - exclude:
+      id: py/weak-sensitive-data-hashing
