@@ -100,7 +100,7 @@ jobs:
             index=$((index + 1))
             venv="$RUNNER_TEMP/engraphis-artifact-smoke-$index"
             python -m venv --system-site-packages "$venv"
-            "$venv/bin/python" -m pip install --no-deps "$artifact"
+            "$venv/bin/python" -m pip install --force-reinstall --no-deps "$artifact"
             (
               cd "$RUNNER_TEMP"
               "$venv/bin/python" - <<'PY'
