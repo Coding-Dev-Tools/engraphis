@@ -97,7 +97,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |
 | Code | `engraphis_export_code_graph` | Exports graph JSON, Markdown, and HTML. |
 | Audit | `engraphis_receipts` | Lists content-free hashed operation receipts. |
-| Audit | `engraphis_context_savings` | Summarizes packed-context usage by workspace, repository, and token-counter identity. |
+| Audit | `engraphis_context_savings` | Reports receipt-backed estimated context tokens saved, eligible/excluded deliveries, basis, confidence, and token-counter identity; optional `from_ts`, `to_ts`, and `release_version` filters are supported. This is estimated prompt-context reduction, not provider billing. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
 | Audit | `engraphis_export_receipts` | Exports a shareable receipt-only audit bundle. |
 | Governance | `engraphis_retire` | Retires a memory by closing its validity window. It does not delete history. |

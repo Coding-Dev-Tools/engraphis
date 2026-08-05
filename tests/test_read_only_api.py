@@ -129,12 +129,14 @@ def test_read_only_api_serves_content_free_context_savings():
     svc.recall("context savings", workspace="w", token_budget=64)
 
     response = TestClient(create_read_only_app(svc)).get(
-        "/context-savings", params={"workspace": "w"}
+        "/context-savings",
+        params={"workspace": "w", "from_ts": 0, "to_ts": 9_999_999_999},
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["format"] == "engraphis-context-savings/1"
+    assert body["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
     assert body["savings_receipt_count"] == 1
     assert body["by_token_counter"][0]["source_tokens"] >= body["by_token_counter"][0]["saved_tokens"]
 

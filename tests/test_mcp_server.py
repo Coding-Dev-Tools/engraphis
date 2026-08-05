@@ -736,9 +736,12 @@ def test_receipt_tools(monkeypatch):
     )
     listed = json.loads(srv.engraphis_receipts(workspace="acme"))
     assert listed["entries"][0]["operation"] == "remember"
-    savings = json.loads(srv.engraphis_context_savings(workspace="acme"))
+    savings = json.loads(srv.engraphis_context_savings(
+        workspace="acme", from_ts=0, to_ts=9_999_999_999,
+    ))
     assert savings["receipt_count"] == 1
     assert savings["savings_receipt_count"] == 0
+    assert savings["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
     verified = json.loads(srv.engraphis_verify_receipts(workspace="acme"))
     assert verified["valid"] is True
     exported = json.loads(srv.engraphis_export_receipts(workspace="acme"))

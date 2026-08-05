@@ -1442,9 +1442,22 @@ def receipts(workspace: Optional[str] = None,
 
 
 @router.get("/context-savings")
-def context_savings(workspace: Optional[str] = None, repo: Optional[str] = None):
+def context_savings(
+    workspace: Optional[str] = None,
+    repo: Optional[str] = None,
+    from_ts: Optional[float] = None,
+    to_ts: Optional[float] = None,
+    release_version: Optional[str] = None,
+):
     ws = workspace or _require_ws()
-    return _run(service().context_savings, workspace=ws, repo=repo)
+    return _run(
+        service().context_savings,
+        workspace=ws,
+        repo=repo,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        release_version=release_version,
+    )
 
 
 @router.get("/receipts/verify")

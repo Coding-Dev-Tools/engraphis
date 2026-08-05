@@ -1315,10 +1315,20 @@ def engraphis_context_savings(
                                     min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Optional repo scope within the workspace.",
                                          max_length=200)] = None,
+    from_ts: Annotated[Optional[float], Field(description="Optional inclusive Unix timestamp.")] = None,
+    to_ts: Annotated[Optional[float], Field(description="Optional exclusive Unix timestamp.")] = None,
+    release_version: Annotated[Optional[str], Field(description="Optional semantic release filter.",
+                                                     max_length=64)] = None,
 ) -> str:
-    """Summarize content-free context savings, separated by token-counter identity."""
+    """Summarize receipt-backed context savings with optional time/release filters."""
     try:
-        return _ok(service().context_savings(workspace=workspace, repo=repo))
+        return _ok(service().context_savings(
+            workspace=workspace,
+            repo=repo,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            release_version=release_version,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

@@ -32,6 +32,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
+from engraphis import __version__
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.graph_scene import (
@@ -43,6 +44,7 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.ids import new_id as make_id
+from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
@@ -67,6 +69,27 @@ from engraphis.core.store import (
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 logger = logging.getLogger("engraphis.service")
+
+
+def _annotate_context_usage(
+    usage: dict[str, Any],
+    *,
+    operation: str,
+    intent: Optional[str] = None,
+    adaptive_mode: Optional[str] = None,
+    baseline_tokens: Any = None,
+    emitted_tokens: Any = None,
+) -> dict[str, Any]:
+    """Attach release-stamped, privacy-safe runtime savings telemetry."""
+    return annotate_usage(
+        usage,
+        operation=operation,
+        intent=intent,
+        adaptive_mode=adaptive_mode,
+        baseline_tokens=baseline_tokens,
+        emitted_tokens=emitted_tokens,
+        release_version=__version__,
+    )
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
 MAX_CONTENT_CHARS = 100_000
@@ -2170,6 +2193,11 @@ class MemoryService:
             "omitted_count": 0,
             "token_counter": "unknown",
         }
+        usage = _annotate_context_usage(
+            usage,
+            operation="recall",
+            intent=str(intent or "recall"),
+        )
         packed_sources = [{
             "id": packed.id,
             "tokens": packed.tokens,
@@ -2386,6 +2414,13 @@ class MemoryService:
             "omitted_count": int(getattr(recall_usage, "omitted_count", 0) or 0),
             "token_counter": result.token_counter,
         }
+        usage = _annotate_context_usage(
+            usage,
+            operation="adaptive_context",
+            adaptive_mode=result.mode,
+            baseline_tokens=result.history_tokens,
+            emitted_tokens=result.context_tokens,
+        )
         out = {
             "query": clean_query,
             "context": result.context,
@@ -2554,6 +2589,10 @@ class MemoryService:
         out = {"query": query, **ans.to_dict()}
         out["response_mode"] = response_mode
         out["mtype_limits"] = dict(mtype_limits)
+        out["usage"] = _annotate_context_usage(
+            out.get("usage") or {},
+            operation="grounded_recall",
+        )
         if response_mode == "compact":
             compact_citations = []
             for citation in out.get("citations") or []:
@@ -2951,6 +2990,10 @@ class MemoryService:
                 getattr(counter, "identity", type(counter).__name__),
             ),
         }
+        usage = _annotate_context_usage(
+            usage,
+            operation="proactive_context",
+        )
         self.store.record_receipt(
             "proactive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
             target_count=len(sources), status="ok",
@@ -4600,15 +4643,37 @@ class MemoryService:
             "entries": entries,
         }
 
-    def context_savings(self, *, workspace: str, repo: Optional[str] = None) -> dict:
-        """Return cumulative packed-context savings from content-free operation receipts."""
+    def context_savings(
+        self,
+        *,
+        workspace: str,
+        repo: Optional[str] = None,
+        from_ts: Any = None,
+        to_ts: Any = None,
+        release_version: Optional[str] = None,
+    ) -> dict:
+        """Return receipt-backed context savings for an optional time/release window."""
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
+        from_value = _optional_timestamp(from_ts, field="from_ts")
+        to_value = _optional_timestamp(to_ts, field="to_ts")
+        if from_value is not None and to_value is not None and from_value > to_value:
+            raise ValidationError("from_ts must be less than or equal to to_ts")
+        if release_version is not None:
+            release_version = normalize_release_version(release_version)
+            if not release_version:
+                raise ValidationError("release_version must be a semantic version")
         wid, rid = self._require_scope(ws, rp)
         return {
             "format": "engraphis-context-savings/1",
             "scope": {"workspace": ws, **({"repo": rp} if rp else {})},
-            **self.store.context_savings(workspace_id=wid, repo_id=rid),
+            **self.store.context_savings(
+                workspace_id=wid,
+                repo_id=rid,
+                from_ts=from_value,
+                to_ts=to_value,
+                release_version=release_version,
+            ),
         }
 
     def verify_receipts(self, *, workspace: str, expected_head: str = "",

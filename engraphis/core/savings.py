@@ -7,6 +7,7 @@ avoided prompt context, not provider billing or end-to-end task cost.
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -27,6 +28,11 @@ class SavingsEstimate:
     eligible: bool
     token_counter: str = "unknown"
     release_version: Optional[str] = None
+
+    @property
+    def estimated_saved_tokens(self) -> int:
+        """Name used by receipt metadata for the same saved-token value."""
+        return self.saved_tokens
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,7 +60,7 @@ def normalize_release_version(value: Any) -> Optional[str]:
 def _count(value: Any) -> int:
     if type(value) not in (int, float):
         return 0
-    if value < 0:
+    if not math.isfinite(float(value)) or value < 0:
         return 0
     return int(value)
 

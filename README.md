@@ -29,6 +29,17 @@
 
 ## Measured token and context savings
 
+### Runtime estimator
+
+The dashboard Overview and Audit/Receipts views also show a receipt-backed estimate from
+real context deliveries. It compares the host history or retrieved source baseline with the
+context Engraphis actually emitted, keeps token counters and release versions separate, and
+labels adaptive history reductions separately from packing savings. Receipts without estimator
+metadata remain historical/unclassified. This measures estimated prompt-context reduction; it
+does not measure provider billing. The `/context-savings` API and
+`engraphis_context_savings` MCP tool accept optional `from_ts`, `to_ts`, and `release_version`
+filters.
+
 <p align="center">
   <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 71.1 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 57.15 percent smaller recall payload proxy, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>

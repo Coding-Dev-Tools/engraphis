@@ -200,8 +200,21 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         return run(svc.receipt_log, workspace=workspace, limit=limit)
 
     @app.get("/context-savings")
-    def context_savings(workspace: str, repo: Optional[str] = None):
-        return run(svc.context_savings, workspace=workspace, repo=repo)
+    def context_savings(
+        workspace: str,
+        repo: Optional[str] = None,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+        release_version: Optional[str] = None,
+    ):
+        return run(
+            svc.context_savings,
+            workspace=workspace,
+            repo=repo,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            release_version=release_version,
+        )
 
     @app.get("/receipts/verify")
     def verify_receipts(workspace: str, expected_head: str = "",

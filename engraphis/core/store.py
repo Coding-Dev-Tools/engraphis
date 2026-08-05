@@ -5946,9 +5946,11 @@ class Store:
             raise ValueError("to_ts must be finite")
         if from_ts is not None and to_ts is not None and from_ts > to_ts:
             raise ValueError("from_ts must be less than or equal to to_ts")
-        release_version = normalize_release_version(release_version)
-        if release_version is not None and not release_version:
-            raise ValueError("release_version must be a semantic version")
+        if release_version is not None:
+            normalized_release = normalize_release_version(release_version)
+            if not normalized_release:
+                raise ValueError("release_version must be a semantic version")
+            release_version = normalized_release
         verification = self.verify_receipts(workspace_id=workspace_id)
         where = "workspace_id=?"
         params: list[Any] = [workspace_id]
@@ -6091,8 +6093,7 @@ class Store:
             baseline = int(usage["baseline_tokens"])
             emitted = int(usage["emitted_tokens"])
             saved = int(usage["estimated_saved_tokens"])
-            expected = max(0, baseline - emitted) if usage["savings_eligible"] else 0
-            if saved != expected:
+            if saved != expected_saved or saved > baseline:
                 estimate_totals["invalid_estimate_count"] += 1
                 return
             if not usage["savings_eligible"]:
@@ -6103,20 +6104,11 @@ class Store:
             estimate_totals["baseline_tokens"] += baseline
             estimate_totals["emitted_tokens"] += emitted
             estimate_totals["saved_tokens"] += saved
-            estimate_bucket(estimate_totals["_bases"], basis, confidence).update({
-                "receipt_count": estimate_bucket(
-                    estimate_totals["_bases"], basis, confidence
-                )["receipt_count"] + 1,
-                "baseline_tokens": estimate_bucket(
-                    estimate_totals["_bases"], basis, confidence
-                )["baseline_tokens"] + baseline,
-                "emitted_tokens": estimate_bucket(
-                    estimate_totals["_bases"], basis, confidence
-                )["emitted_tokens"] + emitted,
-                "saved_tokens": estimate_bucket(
-                    estimate_totals["_bases"], basis, confidence
-                )["saved_tokens"] + saved,
-            })
+            basis_bucket = estimate_bucket(estimate_totals["_bases"], basis, confidence)
+            basis_bucket["receipt_count"] += 1
+            basis_bucket["baseline_tokens"] += baseline
+            basis_bucket["emitted_tokens"] += emitted
+            basis_bucket["saved_tokens"] += saved
             counter_bucket = estimate_bucket(
                 estimate_totals["_counters"], counter, confidence
             )
@@ -6125,8 +6117,10 @@ class Store:
             counter_bucket["emitted_tokens"] += emitted
             counter_bucket["saved_tokens"] += saved
 
-        def finish_estimate(target: dict) -> dict:
+        def finish_estimate(target: dict, label: str) -> dict:
             target = dict(target)
+            key = target.pop("basis")
+            target[label] = key
             target["savings_ratio"] = (
                 target["saved_tokens"] / target["baseline_tokens"]
                 if target["baseline_tokens"] else 0.0
@@ -6171,9 +6165,12 @@ class Store:
                 str(receipt["operation"]),
             )
             add_estimate(usage)
-        bases = [finish_estimate(value) for _, value in sorted(estimate_totals["_bases"].items())]
+        bases = [
+            finish_estimate(value, "basis")
+            for _, value in sorted(estimate_totals["_bases"].items())
+        ]
         counters = [
-            finish_estimate(value)
+            finish_estimate(value, "token_counter")
             for _, value in sorted(estimate_totals["_counters"].items())
         ]
         estimate_totals.pop("_bases")
