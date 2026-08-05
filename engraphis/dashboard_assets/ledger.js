@@ -12,6 +12,7 @@
     editorReturnFocus: null,
     view: 'today',
     provenanceTab: 'belief',
+    savingsPreset: 'all',
     manageTab: 'workspaces',
     refreshEpoch: 0,
     graphWorkspace: '',
@@ -595,6 +596,107 @@
     });
   }
 
+  function savingsQuery(workspace, preset = 'all') {
+    const base = query(workspace);
+    if (preset === 'current') return `${base}&release_version=1.5.0`;
+    if (preset === '7d') return `${base}&from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
+    return base;
+  }
+
+  function formatSavingsTokens(value) {
+    return Math.max(0, Math.round(number(value))).toLocaleString();
+  }
+
+  function savingsCounts(payload) {
+    const estimate = payload && payload.estimated ? payload.estimated : {};
+    return {
+      estimate,
+      eligible: number(estimate.eligible_receipt_count),
+      excluded: number(estimate.excluded_receipt_count)
+        + number(estimate.unclassified_receipt_count)
+        + number(estimate.invalid_estimate_count),
+    };
+  }
+
+  function renderSavingsOverview(payload) {
+    const target = byId('context-savings-summary-body');
+    if (!target) return;
+    const { estimate, eligible, excluded } = savingsCounts(payload);
+    target.replaceChildren();
+    if (!eligible) {
+      target.append(
+        empty('No receipt-backed context savings yet.'),
+        node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'} so far.`),
+      );
+      return;
+    }
+    target.append(
+      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
+      node('p', '', `Across ${eligible} eligible context deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(0)}% estimated reduction`),
+      node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
+      node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}.`),
+    );
+  }
+
+  function renderSavingsDetail(payload) {
+    const target = byId('savings-detail');
+    if (!target) return;
+    const { estimate, eligible, excluded } = savingsCounts(payload);
+    target.replaceChildren();
+    const header = node('div', 'savings-detail-header');
+    header.append(
+      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
+      node('span', '', eligible
+        ? `${eligible} eligible deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(1)}% estimated reduction`
+        : 'No eligible estimates in this range.'),
+    );
+    const presets = node('div', 'savings-presets');
+    [
+      ['since', 'Since tracking started'],
+      ['current', 'Current release'],
+      ['7d', 'Last 7 days'],
+      ['all', 'All time'],
+    ].forEach(([value, label]) => {
+      const control = button(label, '', () => {
+        state.savingsPreset = value;
+        loadAudit();
+      });
+      control.classList.toggle('active', state.savingsPreset === value);
+      presets.append(control);
+    });
+    header.append(presets);
+    target.append(header);
+    if (eligible) {
+      target.append(node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`));
+      target.append(node('p', 'field-note', 'Packed context is packing savings; adaptive history is estimated avoided prompt context.'));
+      const basisTitle = node('h3', '', 'Savings basis');
+      const basisRows = node('div', 'savings-breakdown');
+      (estimate.by_basis || []).forEach(row => {
+        const item = node('div', 'savings-breakdown-row');
+        item.append(
+          node('span', '', `${text(row.basis || 'unclassified').replaceAll('_', ' ')} · ${text(row.confidence || 'unknown')}`),
+          node('span', '', `${formatSavingsTokens(row.baseline_tokens)} → ${formatSavingsTokens(row.emitted_tokens)} · ${formatSavingsTokens(row.saved_tokens)} saved`),
+        );
+        basisRows.append(item);
+      });
+      target.append(basisTitle, basisRows);
+      if ((estimate.by_token_counter || []).length) {
+        target.append(node('h3', '', 'Token counters'));
+        const counterRows = node('div', 'savings-breakdown');
+        (estimate.by_token_counter || []).forEach(row => {
+          const item = node('div', 'savings-breakdown-row');
+          item.append(
+            node('span', '', text(row.token_counter || 'unknown')),
+            node('span', '', `${formatSavingsTokens(row.saved_tokens)} saved · ${row.receipt_count || 0} eligible delivery`),
+          );
+          counterRows.append(item);
+        });
+        target.append(counterRows);
+      }
+    }
+    target.append(node('p', 'savings-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
+  }
+
   function renderDecisions(memories) {
     const target = byId('decision-list');
     target.replaceChildren();
@@ -702,6 +804,17 @@
     renderTypeBars(stats);
   }
 
+  async function loadSavings(workspace, epoch) {
+    try {
+      const payload = await api(`/context-savings?${savingsQuery(workspace)}`);
+      if (epoch !== state.refreshEpoch) return;
+      renderSavingsOverview(payload);
+    } catch (error) {
+      if (epoch !== state.refreshEpoch) return;
+      byId('context-savings-summary-body').replaceChildren(empty(`Could not load savings: ${error.message}`));
+    }
+  }
+
   async function loadMemories(workspace, epoch) {
     const payload = await api(`/memories?${query(workspace)}&limit=500`);
     if (epoch !== state.refreshEpoch) return;
@@ -765,6 +878,7 @@
     try {
       await Promise.all([
         loadStats(name, epoch),
+        loadSavings(name, epoch),
         loadMemories(name, epoch),
         loadToday(name, epoch),
       ]);
@@ -2142,10 +2256,12 @@
     const target = byId('audit-list');
     target.replaceChildren(empty('Loading audit records and receipts…'));
     try {
-      const [audit, receipts] = await Promise.all([
+      const [audit, receipts, savings] = await Promise.all([
         api(`/audit?${query()}&limit=100`),
         api(`/receipts?${query()}&limit=100`),
+        api(`/context-savings?${savingsQuery(undefined, state.savingsPreset)}`),
       ]);
+      renderSavingsDetail(savings);
       renderAuditCards(auditItems(audit), receiptItems(receipts));
     } catch (error) {
       target.replaceChildren(empty(`Could not load provenance records: ${error.message}`));

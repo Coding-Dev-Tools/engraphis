@@ -94,6 +94,14 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         savings = client.get("/api/context-savings", params={"workspace": "demo"})
         assert savings.status_code == 200
         assert savings.json()["format"] == "engraphis-context-savings/1"
+        filtered = client.get(
+            "/api/context-savings",
+            params={"workspace": "demo", "from_ts": 0, "to_ts": 9_999_999_999,
+                    "release_version": "1.5.0"},
+        )
+        assert filtered.status_code == 200
+        assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
+        assert "Estimated context saved" in page.text
 
 
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):

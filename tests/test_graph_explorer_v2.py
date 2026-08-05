@@ -1,6 +1,7 @@
 """Focused schema/API coverage for the analytical Galaxy Graph vertical slice."""
 # ruff: noqa: E402 -- optional-stack guard must run before importing FastAPI routes
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -18,6 +19,7 @@ from engraphis.backends.graph_extractor import GraphExtraction, get_graph_extrac
 from engraphis.core import graph_scene as graph_scene_module
 from engraphis.core.graph_scene import build_graph_scene
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope
+from engraphis.core.schema import SCHEMA_VERSION
 from engraphis.core.store import Store
 from engraphis.routes import v2_api
 from engraphis import service as service_module
@@ -59,7 +61,7 @@ def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
     ).fetchall()]
     supports = store.edge_supports_in_scope(["edg_a"], at=2)
 
-    assert store.schema_version == 9
+    assert store.schema_version == SCHEMA_VERSION
     assert {row["normalized_name"] for row in rows} == {"redis"}
     assert len({row["canonical_id"] for row in rows}) == 1
     assert all(row["canonical_confidence"] == 1.0 for row in rows)
@@ -613,6 +615,48 @@ def test_edge_support_count_includes_identified_and_anonymous_evidence():
 
     assert edge["support_count"] == 2
     assert edge["support_memory_ids"] == ["known"]
+
+
+@pytest.mark.parametrize("bad", [None, "bad", float("nan"), float("inf")])
+def test_graph_scene_sanitizes_malformed_support_confidence(bad):
+    entities = [
+        {"id": "a", "name": "Alpha", "etype": "concept"},
+        {"id": "b", "name": "Beta", "etype": "concept"},
+    ]
+    edges = [{
+        "id": "edge", "src": "a", "dst": "b", "relation": "uses",
+        "layer": "entity", "weight": float("nan"), "provenance": "{}",
+    }]
+    supports = [{
+        "edge_id": "edge", "memory_id": "known", "confidence": bad,
+        "provenance": "{}",
+    }]
+
+    edge = graph_scene_module.build_canonical_graph(entities, edges, supports)["edges"][0]
+
+    assert math.isfinite(edge["weight"])
+    assert math.isfinite(edge["confidence"])
+    assert edge["confidence"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("weight", [0, float("nan"), float("inf"), "bad"])
+def test_graph_scene_preserves_falsy_weight_default_and_sanitizes_bad_weights(weight):
+    entities = [
+        {"id": "a", "name": "Alpha", "etype": "concept"},
+        {"id": "b", "name": "Beta", "etype": "concept"},
+    ]
+    edges = [{
+        "id": "edge", "src": "a", "dst": "b", "relation": "uses",
+        "layer": "entity", "weight": weight, "provenance": "{}",
+    }]
+
+    canonical = graph_scene_module.build_canonical_graph(entities, edges, [])
+    complete = build_graph_scene("w", entities, edges, [], level="complete")
+    relation = next(edge for edge in complete["edges"]
+                    if edge["connector_kind"] == "entity_relation")
+
+    assert canonical["edges"][0]["weight"] == 1.0
+    assert relation["weight"] == 1.0
 
 
 def test_overview_ranks_communities_by_the_mass_sent_to_physics(monkeypatch):

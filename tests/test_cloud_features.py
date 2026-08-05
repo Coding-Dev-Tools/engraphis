@@ -177,6 +177,24 @@ def test_cloud_client_reports_invalid_session_configuration_as_conflict(monkeypa
     assert "private configuration detail" not in str(caught.value)
 
 
+def test_direct_cloud_client_rejects_header_control_characters(monkeypatch) -> None:
+    client = CloudFeatureClient(
+        base_url="https://compute.example.test",
+        organization_id="org_1",
+        access_token="token\r\nX-Evil: 1",
+    )
+    monkeypatch.setattr(
+        cloud_features,
+        "build_pinned_https_opener",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("network must not be opened")),
+    )
+
+    with pytest.raises(CloudFeatureError) as caught:
+        client._request("GET", "/v1/jobs")
+
+    assert caught.value.status == 409
+
+
 def test_explicit_false_consent_cannot_be_overridden_by_environment(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
 
@@ -222,6 +240,49 @@ def test_snapshot_fails_closed_on_unknown_sensitivity() -> None:
 
     assert snapshot["memories"] == []
     assert snapshot["excluded_secret_count"] == 2
+
+
+def test_snapshot_excludes_pending_and_quarantined_memory() -> None:
+    service = MemoryService.create(":memory:")
+    approved = service.remember("Approved release fact.", workspace="acme")
+    pending = service.remember("Pending imported fact.", workspace="acme")
+    quarantined = service.remember("Quarantined imported fact.", workspace="acme")
+    service.store.conn.execute(
+        "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+        (
+            json.dumps({"source": "import", "trusted": False, "review_state": "pending"}),
+            json.dumps({
+                "provenance": {
+                    "source": "import", "trusted": False, "review_state": "pending",
+                }
+            }),
+            pending["id"],
+        ),
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+        (
+            json.dumps({
+                "source": "import", "trusted": False, "review_state": "pending",
+                "quarantined": True,
+            }),
+            json.dumps({
+                "provenance": {
+                    "source": "import", "trusted": False, "review_state": "pending",
+                    "quarantined": True,
+                },
+                "quarantine": {"state": "quarantined"},
+            }),
+            quarantined["id"],
+        ),
+    )
+    service.store.conn.commit()
+
+    _, snapshot = build_managed_snapshot(service, "acme", consent=True)
+
+    assert [item["id"] for item in snapshot["memories"]] == [approved["id"]]
+    assert "Pending imported fact" not in repr(snapshot)
+    assert "Quarantined imported fact" not in repr(snapshot)
 
 
 def test_workspace_snapshot_never_uploads_session_scoped_content() -> None:

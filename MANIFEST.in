@@ -9,6 +9,8 @@ recursive-include engraphis/dashboard_assets *.html *.css *.js *.png *.ico
 recursive-include engraphis/dashboard_assets/vendor *
 include engraphis/commercial_manifest.json
 include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md
+include docs/RECALL_RECOVERY.md
+include docs/images/context-efficiency.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml
@@ -18,4 +20,5 @@ include eval/BASELINES.md
 include eval/EVIDENCE.md
 recursive-include eval/configs *.json
 recursive-include eval/datasets *.jsonl
+include eval/datasets/locomo10_repair_manifest.json
 recursive-include tests *.py

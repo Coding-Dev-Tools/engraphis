@@ -1,14 +1,14 @@
 """Engraphis v2 schema.
 
 The scoped, bi-temporal, code-aware schema that replaces the flat-namespace v1
-tables. Vectors live in ``mem_vectors`` (BLOB) for the Phase-0 NumPy reference
-index; Phase 1 swaps this for a ``sqlite-vec`` virtual table behind the same
+tables. The portable NumPy backend stores vectors in ``mem_vectors``; the optional
+native sqlite-vec backend maintains its own ``vec0`` table behind the same
 ``VectorIndex`` interface. Full-text lives in ``mem_fts`` (FTS5 when available,
 with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -115,16 +115,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entity_live_unique
     ON memory_entities(memory_id, entity_id, source_kind)
     WHERE valid_to IS NULL AND expired_at IS NULL;
 
--- Vectors (Phase 0 reference store; Phase 1 → sqlite-vec vec0 virtual table).
+-- Portable vector store used by the NumPy backend. Native backends maintain
+-- backend-specific indexes behind the VectorIndex interface.
 CREATE TABLE IF NOT EXISTS mem_vectors (
     id     TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     dim    INTEGER NOT NULL,
     vector BLOB    NOT NULL,
     model  TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_mem_vectors_model ON mem_vectors(model);
 
--- Versioned embedding mappings. A mapping change requires a one-time rebuild of
--- persisted vectors before mixed old/new cosine scores can be trusted.
+-- Versioned embedding mappings. Reserved identities __active__ and __rebuilding__
+-- describe the one vector space currently stored and any in-progress replacement.
+-- Backend-specific rows remain as an operator-facing history only.
 CREATE TABLE IF NOT EXISTS embedding_state (
     identity   TEXT PRIMARY KEY,
     version    TEXT NOT NULL,

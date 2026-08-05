@@ -31,6 +31,13 @@ _DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _ADDRESS_IN_USE_ERRNOS = {errno.EADDRINUSE, errno.EACCES, 10013, 10048}
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep the occupied-port health probe at the address we just bind-checked."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def _embed_model_from_environment() -> str:
     """Use the production model by default, while preserving an explicit offline opt-out."""
     configured = os.environ.get("ENGRAPHIS_EMBED_MODEL")
@@ -94,7 +101,8 @@ def _is_engraphis_dashboard(url: str) -> bool:
         url.rstrip("/") + "/api/health", headers={"Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=0.75) as response:  # noqa: S310 -- local URL
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=0.75) as response:
             raw = response.read(16 * 1024)
     except (OSError, TimeoutError, urllib.error.HTTPError, ValueError):
         return False

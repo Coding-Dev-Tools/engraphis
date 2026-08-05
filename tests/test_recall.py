@@ -1,9 +1,12 @@
+from types import SimpleNamespace
+
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.recall import (
     RecallEngine,
     _absolute_retrieval_support,
+    _fuse_query_runs,
     _mtype_limits_can_fill,
     _ranked,
 )
@@ -72,6 +75,16 @@ class _RecordingOrderedIndex(_OrderedIndex):
         return super().search(query, k, filter=filter)
 
 
+class _FixedScoreIndex:
+    """Semantic-index double for calibration regressions."""
+
+    def __init__(self, scores):
+        self.scores = list(scores)
+
+    def search(self, query, k, *, filter=None):
+        return self.scores[:k]
+
+
 class _FailingIndex:
     """Proves degraded recall never reaches the semantic vector backend."""
 
@@ -81,6 +94,11 @@ class _FailingIndex:
     def search(self, query, k, *, filter=None):
         self.calls += 1
         raise AssertionError("degraded recall must not query the vector index")
+
+
+class _RuntimeFailingIndex:
+    def search(self, query, k, *, filter=None):
+        raise RuntimeError("credentialed-provider-detail")
 
 
 def test_ranked_drops_nonfinite_and_malformed_arm_evidence():
@@ -121,6 +139,90 @@ def test_degraded_recall_skips_vector_arm_and_uses_lexical_fallback():
     assert result.semantic_support is False
     assert result.chunks[0]["arm"] == "lexical"
     assert result.retrieval_trace[0]["raw"]["semantic"] is None
+
+
+def test_semantic_index_runtime_failure_preserves_lexical_recall_and_is_redacted(caplog):
+    store = Store(":memory:")
+    emb = _SemanticTestEmbedder(256)
+    eng = RecallEngine(store, emb, _RuntimeFailingIndex(), IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    memory_id = _add(
+        store, emb, wid, None,
+        "pnpm is the package manager for frontend projects.",
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.core.recall"):
+        result = eng.recall(
+            "package manager", SearchFilter(workspace_id=wid), k=1,
+            diagnostics=True,
+        )
+
+    assert result.chunks[0]["id"] == memory_id
+    assert result.degraded_mode is True
+    # The semantic embedder remains usable for exact support scoring; only the
+    # retrieval index failed for this request.
+    assert result.semantic_support is True
+    assert result.vector_search_ready is False
+    assert result.retrieval_trace[0]["raw"]["semantic"] is None
+    assert "RuntimeError" in caplog.text
+    assert "credentialed-provider-detail" not in caplog.text
+
+
+def test_reranker_mutate_then_raise_uses_pristine_fused_fallback(caplog):
+    class MutatingFailingReranker:
+        def rerank(self, query, candidates, k):
+            for candidate in candidates:
+                candidate.score = 999_999.0
+            raise RuntimeError("private-reranker-detail")
+
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    eng = RecallEngine(store, emb, NumpyVectorIndex(store), MutatingFailingReranker())
+    wid = store.get_or_create_workspace("w")
+    memory_id = _add(
+        store, emb, wid, None,
+        "pnpm is the package manager for frontend projects.",
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.core.recall"):
+        result = eng.recall(
+            "package manager", SearchFilter(workspace_id=wid), k=1,
+            diagnostics=True,
+        )
+
+    assert result.chunks[0]["id"] == memory_id
+    assert result.chunks[0]["score"] < 999_999.0
+    assert result.retrieval_trace[0]["rerank_score"] is None
+    assert "RuntimeError" in caplog.text
+    assert "private-reranker-detail" not in caplog.text
+
+
+def test_reranker_malformed_output_uses_pristine_fused_fallback(caplog):
+    class MutatingMalformedReranker:
+        def rerank(self, query, candidates, k):
+            for candidate in candidates:
+                candidate.score = 888_888.0
+            return [object()]
+
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    eng = RecallEngine(store, emb, NumpyVectorIndex(store), MutatingMalformedReranker())
+    wid = store.get_or_create_workspace("w")
+    memory_id = _add(
+        store, emb, wid, None,
+        "Poetry manages dependencies for backend projects.",
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.core.recall"):
+        result = eng.recall(
+            "backend dependencies", SearchFilter(workspace_id=wid), k=1,
+            diagnostics=True,
+        )
+
+    assert result.chunks[0]["id"] == memory_id
+    assert result.chunks[0]["score"] < 888_888.0
+    assert result.retrieval_trace[0]["rerank_score"] is None
+    assert "reranker returned no valid candidates" in caplog.text
 
 
 def test_degraded_recall_uses_inflection_aware_like_fallback_without_fts5():
@@ -170,6 +272,69 @@ def test_absolute_support_treats_non_finite_cosine_as_no_evidence():
         "credential rotation", "unrelated prose", title="credential rotation",
         semantic_cosine=10 ** 1000,
     ) == 0.0
+
+
+def test_opt_in_semantic_confidence_calibration_rejects_weak_singleton_distractor():
+    """Default rank fusion is unchanged; the explicit calibration is safer.
+
+    A single vector hit normally min-max normalizes to 1.0. Its raw cosine is
+    nevertheless only 0.01 here, while the other record has exact lexical
+    support. The controlled flag must use the former as weak evidence without
+    changing the established default profile behavior.
+    """
+    store = Store(":memory:")
+    emb = _SemanticTestEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    weak_id = _add(store, emb, wid, None, "The parking garage closes at dusk.")
+    lexical_id = _add(store, emb, wid, None, "PASETO is the approved token format.")
+    engine = RecallEngine(
+        store,
+        emb,
+        _FixedScoreIndex([(weak_id, 0.01)]),
+        IdentityReranker(),
+    )
+    base_config = ProfileConfig("vector_lexical", True, True, False, False)
+
+    default_result = engine.recall(
+        "PASETO", SearchFilter(workspace_id=wid), k=1, arm_config=base_config,
+    )
+    calibrated_result = engine.recall(
+        "PASETO",
+        SearchFilter(workspace_id=wid),
+        k=1,
+        arm_config=ProfileConfig(
+            "vector_lexical_calibrated",
+            True,
+            True,
+            False,
+            False,
+            semantic_confidence_calibration=True,
+        ),
+    )
+
+    assert [chunk["id"] for chunk in default_result.chunks] == [weak_id]
+    assert [chunk["id"] for chunk in calibrated_result.chunks] == [lexical_id]
+
+
+def test_semantic_confidence_calibration_leaves_presence_bonus_explicit():
+    """Future semantic bonuses are not silently attenuated by cosine confidence."""
+    config = SimpleNamespace(
+        semantic_scale=1.0,
+        semantic_presence_bonus=0.4,
+        semantic_confidence_calibration=True,
+    )
+    run = {
+        "query": SimpleNamespace(priority=1),
+        "config": config,
+        "vector": {"mem_weak": 0.1},
+    }
+    recs = {"mem_weak": MemoryRecord(id="mem_weak", content="weak")}
+
+    state, _rrf = _fuse_query_runs([run], recs)
+
+    # The rank contribution is calibrated (1.0 * 0.1); the explicit bonus is
+    # then added as a distinct piece of configuration intent.
+    assert state["adjusted"]["semantic"]["mem_weak"] == 0.5
 
 
 def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
@@ -432,6 +597,32 @@ def test_graph_arm_excludes_pending_edge_support_bridges_before_ppr():
 
     assert pending not in scores
     assert approved not in scores
+
+
+def test_recall_edge_filter_rejects_untrusted_source_less_edges():
+    from engraphis.core.interfaces import Edge
+
+    store, _emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    edges = [
+        Edge(id="legacy", src="a", dst="b", relation="uses", workspace_id=wid),
+        Edge(
+            id="approved", src="a", dst="c", relation="uses", workspace_id=wid,
+            provenance={"trusted": True, "review_state": "approved"},
+        ),
+        Edge(
+            id="pending", src="a", dst="d", relation="uses", workspace_id=wid,
+            provenance={"trusted": True, "review_state": "pending"},
+        ),
+        Edge(
+            id="untrusted", src="a", dst="e", relation="uses", workspace_id=wid,
+            provenance={"trusted": False},
+        ),
+    ]
+
+    assert {edge.id for edge in eng._prompt_eligible_edges(edges)} == {
+        "legacy", "approved",
+    }
 
 
 def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():

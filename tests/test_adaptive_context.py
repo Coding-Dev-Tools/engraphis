@@ -29,9 +29,10 @@ def test_history_that_fits_bypasses_embedding_and_retrieval(monkeypatch) -> None
     engine, workspace_id, repo_id = _seed_engine()
 
     def fail(*args, **kwargs):
-        raise AssertionError("recall must not run when supplied history already fits")
+        raise AssertionError("adaptive bypass must not invoke retrieval or embedding")
 
     monkeypatch.setattr(engine.recall_engine, "recall", fail)
+    monkeypatch.setattr(engine.embedder, "embed", fail)
     result = engine.adaptive_context(
         "Who approves deployment?",
         "The release manager approves deployment.",
@@ -45,6 +46,21 @@ def test_history_that_fits_bypasses_embedding_and_retrieval(monkeypatch) -> None
     assert result.context == "The release manager approves deployment."
     assert result.context_tokens == result.history_tokens
     assert result.to_dict()["reason"] == "provided history already fits the prompt budget"
+
+
+@pytest.mark.parametrize("value", [True, -1, "not-a-count"])
+def test_adaptive_context_rejects_invalid_token_counter_results(monkeypatch, value) -> None:
+    engine, workspace_id, repo_id = _seed_engine()
+    monkeypatch.setattr(engine.recall_engine.context_packer, "count_tokens", lambda _text: value)
+
+    with pytest.raises(ValueError, match="token counter must return a non-negative integer"):
+        engine.adaptive_context(
+            "Who approves deployment?",
+            "The release manager approves deployment.",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            max_context_tokens=64,
+        )
 
 
 def test_large_history_uses_compact_retrieval_when_absolute_support_is_strong() -> None:

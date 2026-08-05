@@ -207,10 +207,11 @@ def test_api_embedder_failure_logs_do_not_include_api_key(monkeypatch, caplog):
 
     monkeypatch.setattr(httpx, "Client", _Client)
     with caplog.at_level(logging.INFO, logger="engraphis.embedder_api"):
-        result = ApiEmbedder(model="safe-model", api_key=api_key, dim=2).embed(["hello"])
+        with pytest.raises(RuntimeError, match="incomplete response") as caught:
+            ApiEmbedder(model="safe-model", api_key=api_key, dim=2).embed(["hello"])
 
-    assert result.shape == (1, 2)
     assert api_key not in caplog.text
+    assert api_key not in str(caught.value)
 
 
 @pytest.mark.parametrize("status", [402, 500])

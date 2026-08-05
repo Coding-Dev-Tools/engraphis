@@ -1,16 +1,19 @@
-"""sqlite-vec ANN backend + factory.
+"""sqlite-vec native exact-KNN backend + factory.
 
-Replaces the O(n) NumPy reference with an embedded ANN index that lives in the
+Replaces Python/NumPy scan orchestration with an embedded native vector index in the
 same SQLite file — preserving the local-first, single-file story. If the
 ``sqlite-vec`` extension is not installable in the current environment, the
 factory transparently falls back to ``NumpyVectorIndex`` (so nothing breaks),
 which is exactly what happens in restricted CI sandboxes.
 
+Stable ``vec0`` performs exact KNN; it is not a sublinear ANN algorithm.
+
 Note: sqlite-vec cannot apply Engraphis' bi-temporal/workspace filter inside the vec0
-MATCH directly, so ``search`` expands the ANN window until it has enough visible hits.
+MATCH directly, so ``search`` expands the KNN window until it has enough visible hits.
 """
 from __future__ import annotations
 
+import importlib
 import re
 import sys
 from numbers import Integral
@@ -59,7 +62,7 @@ def _vector_batch(vecs: np.ndarray, dim: int) -> np.ndarray:
     if values.ndim != 2 or values.shape[1] != dim:
         actual = values.shape[1] if values.ndim == 2 else "?"
         raise ValueError(
-            f"vector dimension {actual} does not match the ANN index dimension {dim}"
+            f"vector dimension {actual} does not match the index dimension {dim}"
         )
     if not np.isfinite(values).all():
         raise ValueError("vectors must contain only finite values")
@@ -74,7 +77,7 @@ def _vector_query(vec: np.ndarray, dim: int) -> np.ndarray:
     if values.ndim != 1 or values.shape[0] != dim:
         actual = values.shape[0] if values.ndim == 1 else "?"
         raise ValueError(
-            f"query dimension {actual} does not match the ANN index dimension {dim}"
+            f"query dimension {actual} does not match the index dimension {dim}"
         )
     if not np.isfinite(values).all():
         raise ValueError("query vector must contain only finite values")
@@ -82,7 +85,9 @@ def _vector_query(vec: np.ndarray, dim: int) -> np.ndarray:
 
 
 class SqliteVecVectorIndex:
-    """ANN over embeddings using the sqlite-vec extension."""
+    """Native exact KNN over embeddings using the sqlite-vec extension."""
+
+    shares_store_vector_table = False
 
     def __init__(self, store: Store, dim: int) -> None:
         dimension = _validated_dimension(dim)
@@ -97,7 +102,7 @@ class SqliteVecVectorIndex:
                 "sqlite-vec cannot share a process with SQLCipher; use "
                 "vector_backend='numpy' or run the accelerated backend in a fresh process"
             )
-        import sqlite_vec  # lazy: optional dependency / native extension
+        sqlite_vec = importlib.import_module('sqlite_vec')  # lazy optional extension
         self.store = store
         self.dim = dimension
         conn = store.conn
@@ -115,7 +120,7 @@ class SqliteVecVectorIndex:
             match = re.search(r"FLOAT\s*\[\s*(\d+)\s*\]", existing["sql"], re.IGNORECASE)
             if match and int(match.group(1)) != dimension:
                 raise ValueError(
-                    f"existing ANN index dimension {match.group(1)} does not match "
+                    f"existing vector index dimension {match.group(1)} does not match "
                     f"requested dimension {dimension}"
                 )
         conn.execute(
@@ -137,30 +142,60 @@ class SqliteVecVectorIndex:
             )
         if any(not isinstance(mid, str) or not mid for mid in ids):
             raise ValueError("ids must contain non-empty strings")
+        if meta is not None and len(meta) != count:
+            raise ValueError("meta length must match the vector batch")
         if not count:
             return
-        for i, mid in enumerate(ids):
-            v = values[i]
-            with np.errstate(over="ignore", invalid="ignore"):
-                n = float(np.linalg.norm(v))
-            if not np.isfinite(n):
-                raise ValueError("vector norm must be finite")
-            if n > 0:
-                v = v / n
-            self.store.conn.execute(
-                "INSERT OR REPLACE INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
-                (mid, v.tobytes()),
-            )
-        if commit:
-            self.store.conn.commit()
+        normalized = values.astype(np.float64, copy=True)
+        with np.errstate(over="ignore", invalid="ignore"):
+            norms = np.linalg.norm(normalized, axis=1)
+        if not np.isfinite(norms).all():
+            raise ValueError("vector norm must be finite")
+        nonzero = norms > 0
+        normalized[nonzero] /= norms[nonzero, None]
+        normalized = normalized.astype(np.float32)
+
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            # ``vec0`` virtual tables do not implement SQLite's conflict-resolution
+            # algorithms consistently: INSERT OR REPLACE can still raise a UNIQUE
+            # constraint error when a persisted row is hydrated after reopening a
+            # database. Delete the batch first, then insert the replacement rows in
+            # the same transaction so restart hydration remains idempotent and
+            # failures roll back to the previous index state.
+            marks = ",".join("?" for _ in ids)
+            conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+            for mid, vector in zip(ids, normalized):
+                conn.execute(
+                    "INSERT INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
+                    (mid, vector.tobytes()),
+                )
+            if commit and owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
 
     def delete(self, ids: list[str], *, commit: bool = True) -> None:
         if not ids:
             return
         marks = ",".join("?" for _ in ids)
-        self.store.conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
-        if commit:
-            self.store.conn.commit()
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+            if commit and owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
@@ -174,13 +209,15 @@ class SqliteVecVectorIndex:
             raise ValueError("query vector norm must be finite")
         if n > 0:
             v = v / n
-        total = k
-        if filter is not None:
-            total = int(self.store.conn.execute(
-                "SELECT COUNT(*) AS n FROM mem_vec_ann").fetchone()["n"])
-            if total == 0:
-                return []
-        limit = min(k, total)
+        total_row = self.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM mem_vec_ann"
+        ).fetchone()
+        total = int(total_row["n"]) if total_row is not None else 0
+        if total == 0:
+            return []
+        # Fetch one look-ahead row so the common unique-distance case can prove the
+        # kth boundary complete without issuing a second metadata hydration query.
+        limit = min(k + 1, total)
         while True:
             # The KNN cap uses vec0's explicit `k = ?` constraint, NOT `LIMIT ?`.
             rows = self.store.conn.execute(
@@ -188,21 +225,43 @@ class SqliteVecVectorIndex:
                 "AND k = ? ORDER BY distance",
                 (v.tobytes(), int(limit)),
             ).fetchall()
-            out: list[tuple[str, float]] = []
+            # Match NumPy's live-record contract even for direct callers that omit a
+            # filter; orphaned, closed, and future ANN rows must never leak.
+            effective_filter = filter if filter is not None else SearchFilter()
+            visible_records = self.store.get_memories(row["id"] for row in rows)
+            eligible = []
             for row in rows:
-                if filter is not None:
-                    rec = self.store.get_memory(row["id"])
-                    if rec is None or not _visible(rec, filter):
-                        continue
+                rec = visible_records.get(row["id"])
+                if rec is None or not _visible(rec, effective_filter):
+                    continue
+                eligible.append(row)
+            eligible.sort(key=lambda row: (float(row["distance"]), str(row["id"])))
+
+            # vec0 may choose an unspecified subset when equal-distance rows straddle
+            # its k boundary. Widen until the raw boundary is strictly farther than
+            # the kth visible row; then the complete tie group is present and the
+            # memory-id secondary order is deterministic across backends and runs.
+            exhausted = len(rows) < limit or limit >= total
+            enough = len(eligible) >= k
+            boundary_complete = (
+                enough
+                and (
+                    exhausted
+                    or float(rows[-1]["distance"]) > float(eligible[k - 1]["distance"])
+                )
+            )
+            if boundary_complete or exhausted:
+                selected = eligible[:k]
                 # A zero query has no direction; retain the NumPy backend's
                 # deterministic zero similarity rather than converting its
                 # distance to the mathematically unrelated 0.5.
-                score = 0.0 if n == 0 else _cosine_from_l2(row["distance"])
-                out.append((row["id"], score))
-                if len(out) >= k:
-                    return out
-            if filter is None or len(rows) < limit or limit >= total:
-                return out
+                return [
+                    (
+                        row["id"],
+                        0.0 if n == 0 else _cosine_from_l2(row["distance"]),
+                    )
+                    for row in selected
+                ]
             # Filtered search widens geometrically until k visible hits are found.
             limit = total if limit * 2 >= total // 4 else limit * 2
 

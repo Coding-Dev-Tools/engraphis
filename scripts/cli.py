@@ -17,11 +17,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
 
 from engraphis.config import settings
+from engraphis.core.interfaces import SearchFilter
+from engraphis.core.poisoning import REVIEW_APPROVED, REVIEW_PENDING, inspection_eligible
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -39,9 +42,26 @@ def _service() -> MemoryService:
     return MemoryService.create(
         settings.db_path,
         embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+        embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
         allowed_workspaces=settings.allowed_workspaces,
         extractor=settings.extractor,
     )
+
+
+def _metadata_object(value: str) -> dict:
+    """Parse CLI metadata as a JSON object, never as a scalar or sequence."""
+    try:
+        metadata = json.loads(value)
+    except (ValueError, RecursionError) as exc:
+        raise argparse.ArgumentTypeError("metadata must be a valid JSON object") from exc
+    if not isinstance(metadata, dict):
+        raise argparse.ArgumentTypeError("metadata must be a JSON object")
+    return metadata
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -52,7 +72,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         args.content,
         workspace=args.namespace,
         title=args.key or "",
-        metadata={"source": "cli"} | (args.metadata or {}),
+        metadata=(args.metadata or {}) | {"source": "cli"},
     )
     print(f"Stored: {out['id']} (workspace={out['workspace']}, op={out['op']})")
     if out.get("resolution"):
@@ -88,7 +108,7 @@ def cmd_recall(args: argparse.Namespace) -> None:
 def cmd_chat(args: argparse.Namespace) -> None:
     # Grounded, citation-backed answer built strictly from stored memories —
     # offline and deterministic (no LLM/API key needed, unlike the old REST chat).
-    out = _service().grounded_recall(args.prompt)
+    out = _service().grounded_recall(args.prompt, workspace=args.namespace)
     if not out.get("grounded"):
         print(f"(no grounded answer: {out.get('reason') or 'insufficient supporting memories'})")
         return
@@ -133,6 +153,137 @@ def cmd_delete_ns(args: argparse.Namespace) -> None:
     print(f"Deleted {len(rows)} memories from '{args.namespace}' (audited soft-delete)")
 
 
+def _pending_review_candidates(args: argparse.Namespace, service: MemoryService) -> list:
+    """Return live, non-quarantined pending rows without exposing their content."""
+    workspace_id = service._lookup_workspace(args.namespace)
+    if workspace_id is None:
+        return []
+    repo_id = None
+    if getattr(args, "repo", None):
+        repo_id = service._lookup_repo(workspace_id, args.repo)
+        if repo_id is None:
+            return []
+    scope_filter = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+    records = service.store.list_memories(
+        scope_filter,
+        include_invalid=False,
+    )
+    history = service.store.list_memories(
+        scope_filter,
+        include_invalid=True,
+    )
+    approved_sources = {
+        str(record.provenance.get("approved_from"))
+        for record in history
+        if record.provenance.get("review_state") == REVIEW_APPROVED
+        and record.provenance.get("approved_from")
+    }
+    sources = set(getattr(args, "source", None) or [])
+    legacy_only = bool(getattr(args, "legacy_agent_only", False))
+    candidates = []
+    for record in records:
+        provenance = record.provenance or {}
+        if record.id in approved_sources:
+            continue
+        if provenance.get("review_state") != REVIEW_PENDING:
+            continue
+        if not inspection_eligible(provenance, record.metadata):
+            continue
+        if sources and str(provenance.get("source") or "") not in sources:
+            continue
+        if legacy_only and not (
+            provenance.get("source") in {"agent", "intent_api"}
+            and provenance.get("trusted") is False
+            and provenance.get("trust_origin") == "service_review_gate"
+            and provenance.get("trust_downgraded") is True
+        ):
+            continue
+        candidates.append(record)
+    return sorted(candidates, key=lambda record: (record.ingested_at or 0.0, record.id))
+
+
+def cmd_review_list(args: argparse.Namespace) -> None:
+    service = _service()
+    try:
+        limit = max(1, min(10_000, int(args.limit)))
+        candidates = _pending_review_candidates(args, service)[:limit]
+        if not candidates:
+            print("(no pending, non-quarantined memories)")
+            return
+        for record in candidates:
+            provenance = record.provenance or {}
+            print(json.dumps({
+                "id": record.id,
+                "source": str(provenance.get("source") or ""),
+                "trust_origin": str(provenance.get("trust_origin") or ""),
+                "scope": record.scope.value,
+                "mtype": record.mtype.value,
+                "ingested_at": record.ingested_at,
+            }, sort_keys=True))
+        print(f"Pending candidates: {len(candidates)}")
+    finally:
+        service.store.close()
+
+
+def cmd_review_approve(args: argparse.Namespace) -> None:
+    service = _service()
+    try:
+        candidates = _pending_review_candidates(args, service)
+        by_id = {record.id: record for record in candidates}
+        requested = list(dict.fromkeys(args.memory_ids))
+        if args.all and requested:
+            raise ValidationError("use either memory ids or --all, not both")
+        if not args.all and not requested:
+            raise ValidationError("provide memory ids or --all")
+        if requested:
+            missing = [memory_id for memory_id in requested if memory_id not in by_id]
+            if missing:
+                raise ValidationError(
+                    "not a live, pending, non-quarantined candidate in this scope: "
+                    + ", ".join(missing)
+                )
+            selected = [by_id[memory_id] for memory_id in requested]
+        else:
+            selected = candidates
+        if not selected:
+            print("(no pending, non-quarantined memories)")
+            return
+        print(
+            f"{'Would approve' if not args.apply else 'Selected'} "
+            f"{len(selected)} memories in '{args.namespace}'."
+        )
+        if not args.apply:
+            print("Dry run only; add --apply to create approved successors.")
+            return
+        if not args.yes:
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise ValidationError("bulk approval requires an interactive TTY or --yes")
+            phrase = f"APPROVE {len(selected)}"
+            entered = input(f"Type '{phrase}' to approve this batch: ").strip()
+            if entered != phrase:
+                raise ValidationError("approval confirmation did not match")
+        approved = []
+        failures = []
+        for record in selected:
+            try:
+                result = service.engine.approve_for_prompt(
+                    record.id, reviewer=args.reviewer, reason=args.reason,
+                )
+                approved.append(result["id"])
+            except (KeyError, ValueError):
+                failures.append(record.id)
+        print(f"Approved {len(approved)} memories.")
+        for memory_id in approved:
+            print(memory_id)
+        if failures:
+            raise ValidationError(
+                f"{len(failures)} approvals failed after selection: "
+                + ", ".join(failures)
+            )
+    finally:
+        service.store.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="engraphis-cli", description="Engraphis CLI",
@@ -145,7 +296,8 @@ def main() -> None:
     p.add_argument("content", help="Memory content text")
     p.add_argument("--namespace", "-n", default="default", help="Namespace")
     p.add_argument("--key", "-k", help="Document key/ID")
-    p.add_argument("--metadata", help="JSON metadata string", default=None)
+    p.add_argument("--metadata", type=_metadata_object,
+                   help="JSON metadata object", default=None)
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("ingest-file", help="Store a file as a memory")
@@ -162,6 +314,7 @@ def main() -> None:
 
     p = sub.add_parser("chat", help="Grounded answer from memory (offline, cited)")
     p.add_argument("prompt", help="Your question")
+    p.add_argument("--namespace", "-n", default=None, help="Namespace")
     p.set_defaults(func=cmd_chat)
 
     p = sub.add_parser("thoughts", help="Generate consolidated thoughts")
@@ -179,9 +332,37 @@ def main() -> None:
     p.add_argument("--force", action="store_true", help="Confirm deletion")
     p.set_defaults(func=cmd_delete_ns)
 
+    review = sub.add_parser(
+        "review", help="Inspect or bulk-approve prompt review candidates"
+    )
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+
+    p = review_sub.add_parser(
+        "list", help="List pending candidates without displaying memory content"
+    )
+    p.add_argument("--namespace", "-n", default="default")
+    p.add_argument("--repo")
+    p.add_argument("--source", action="append")
+    p.add_argument("--legacy-agent-only", action="store_true")
+    p.add_argument("--limit", type=int, default=1000)
+    p.set_defaults(func=cmd_review_list)
+
+    p = review_sub.add_parser(
+        "approve", help="Approve a governed batch (dry-run unless --apply)"
+    )
+    p.add_argument("memory_ids", nargs="*")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--namespace", "-n", default="default")
+    p.add_argument("--repo")
+    p.add_argument("--source", action="append")
+    p.add_argument("--legacy-agent-only", action="store_true")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--reviewer", default=getpass.getuser())
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(func=cmd_review_approve)
+
     args = parser.parse_args()
-    if getattr(args, "metadata", None):
-        args.metadata = json.loads(args.metadata)
     _emit_update_notice()
     try:
         args.func(args)

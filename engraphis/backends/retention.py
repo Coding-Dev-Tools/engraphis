@@ -11,6 +11,7 @@ import re
 from typing import Optional
 
 from engraphis.core.interfaces import MemoryType, RetentionDecision
+from engraphis.core.retention_policy import MAX_STABILITY_DAYS, MIN_STABILITY_DAYS
 
 _SCHEMA = {
     "type": "object",
@@ -18,7 +19,11 @@ _SCHEMA = {
         "label": {"type": "string", "enum": ["ephemeral", "normal", "critical"]},
         "retain": {"type": "boolean"},
         "importance": {"type": "number", "minimum": 0, "maximum": 1},
-        "stability": {"type": "number", "minimum": 0.05, "maximum": 100},
+        "stability": {
+            "type": "number",
+            "minimum": MIN_STABILITY_DAYS,
+            "maximum": MAX_STABILITY_DAYS,
+        },
         "reason": {"type": "string"},
     },
     "required": ["label", "retain", "importance", "stability", "reason"],
@@ -79,7 +84,8 @@ class LLMRetentionSupervisor:
                 raw.get("importance", 0.5), minimum=0.0, maximum=1.0
             ),
             stability=_bounded_number(
-                raw.get("stability", 1.0), minimum=0.05, maximum=100.0
+                raw.get("stability", 1.0),
+                minimum=MIN_STABILITY_DAYS, maximum=MAX_STABILITY_DAYS,
             ),
             reason=_CONTROL_RE.sub("", str(raw.get("reason") or ""))[:500],
         )

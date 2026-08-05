@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
+import venv
 from pathlib import Path
 
 import pytest
@@ -106,9 +109,29 @@ def test_release_evidence_is_canonical_and_contains_only_public_release_inputs(t
     assert evidence["provenance"]["builder"]["sbom_generator"]["version"] == "7.3.0"
     assert evidence["provenance"]["builder"]["job"] == "release-evidence"
     assert evidence["provenance"]["builder"]["completed_gate_jobs"] == [
-        "build", "python-matrix", "encryption", "browser-accessibility", "docker-smoke"
+        "build", "python-matrix", "artifact-core-py39", "encryption",
+        "browser-accessibility", "pi-extension", "docker-smoke", "code-security",
+    ]
+    checks = {check["id"]: check for check in evidence["checks"]["tests"]}
+    assert "pyright-core-backends" in checks
+    assert checks["codeql"]["workflow_job"] == "code-security"
+    assert checks["reproducible-distributions"]["workflow_steps"] == [
+        "Build source and universal wheel distributions",
+        "Validate distributions",
+    ]
+    assert checks["installed-artifact-smoke"]["workflow_steps"] == [
+        "Smoke installed wheel and source distribution",
+    ]
+    assert checks["installed-artifact-smoke"]["command"] == [
+        "python", "-m", "scripts.smoke_entry_points", "--timeout", "20",
+    ]
+    assert checks["installed-artifact-smoke-py39"]["workflow_job"] == "artifact-core-py39"
+    assert checks["installed-artifact-smoke-py39"]["workflow_steps"] == [
+        "Download exact release distributions",
+        "Install, verify, and smoke wheel and source distribution",
     ]
     assert any(check["id"] == "encryption-at-rest" for check in evidence["checks"]["tests"])
+    assert any(check["id"] == "pi-extension" for check in evidence["checks"]["tests"])
     assert evidence["checks"]["tests"][-1]["workflow_steps"] == [
         "Validate Compose configuration",
         "Verify production image OCR runtime",
@@ -127,6 +150,16 @@ def test_release_evidence_fails_closed_when_checks_are_missing_or_unknown(tmp_pa
         build_evidence(
             root, root / "dist", commit=COMMIT, tag=TAG, sbom=_sbom(root),
             verified_checks=_check_ids(root) + ["made-up"],
+        )
+
+def test_release_evidence_requires_one_wheel_and_one_source_distribution(tmp_path):
+    root = _root(tmp_path)
+    dist = _dist(root)
+    (dist / "engraphis-1.2.3.tar.gz").unlink()
+    with pytest.raises(EvidenceError, match="exactly one wheel"):
+        build_evidence(
+            root, dist, commit=COMMIT, tag=TAG, sbom=_sbom(root),
+            verified_checks=_check_ids(root),
         )
 
 
@@ -171,10 +204,13 @@ def test_release_evidence_fails_closed_for_unmatched_tags_and_invalid_sboms(tmp_
 @pytest.mark.skipif(shutil.which("cyclonedx-py") is None, reason="release-only CycloneDX tool")
 def test_release_environment_command_emits_a_cyclonedx_sbom(tmp_path):
     output = tmp_path / "engraphis.cdx.json"
+    environment = tmp_path / "sbom-environment"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    interpreter = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     result = subprocess.run(
         [
             "cyclonedx-py", "environment", "--output-reproducible", "--of", "JSON",
-            "--pyproject", "pyproject.toml", "-o", str(output),
+            "--pyproject", "pyproject.toml", "-o", str(output), str(interpreter),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -184,7 +220,8 @@ def test_release_environment_command_emits_a_cyclonedx_sbom(tmp_path):
     assert result.returncode == 0, result.stderr
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["bomFormat"] == "CycloneDX"
-    assert isinstance(payload["components"], list)
+    assert payload["metadata"]["component"]["name"] == "engraphis"
+    assert isinstance(payload.get("components", []), list)
 
 
 def test_release_workflow_publishes_evidence_separately_from_package_artifacts():
@@ -203,13 +240,21 @@ def test_release_workflow_publishes_evidence_separately_from_package_artifacts()
     assert "--tag \"$GITHUB_REF_NAME\"" in workflow
     assert "--sbom \"$sbom\"" in workflow
     assert "--verified-check retrieval-ablation" in workflow
+    assert "--verified-check reinforcement-state-transition" in workflow
+    assert "--verified-check adversarial-memory-security" in workflow
     for check_id in (
-        "privacy-boundary", "token-efficiency", "benchmark-schema-evidence", "browser-e2e",
-        "dependency-audit", "container-smoke",
+        "pyright-core-backends", "privacy-boundary", "token-efficiency", "benchmark-schema-evidence",
+        "browser-e2e", "pi-extension", "dependency-audit", "container-smoke",
+        "codeql", "reproducible-distributions", "installed-artifact-smoke",
+        "installed-artifact-smoke-py39",
     ):
         assert "--verified-check " + check_id in evidence_job
+    workflow_check_ids = re.findall(r"--verified-check\s+([a-z0-9-]+)", evidence_job)
+    manifest_check_ids = _check_ids(ROOT)
+    assert len(workflow_check_ids) == len(set(workflow_check_ids))
+    assert set(workflow_check_ids) == set(manifest_check_ids)
     assert (
-        "needs: [build, python-matrix, encryption, browser-accessibility, pi-extension, docker-smoke]"
+        "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]"
         in evidence_job
     )
     assert "--verified-check encryption-at-rest" in evidence_job
@@ -222,7 +267,8 @@ def test_release_workflow_publishes_evidence_separately_from_package_artifacts()
     assert "Download public release evidence" in github_release
     assert "dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json" in github_release
     assert "--name public-release-evidence" in repair
-    assert "dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json" in repair
+    assert "verified-dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json" in repair
+    assert '"$RELEASE_TAG" dist/*' not in repair
 
 
 def test_receipt_export_has_a_stable_canonical_verification_view():

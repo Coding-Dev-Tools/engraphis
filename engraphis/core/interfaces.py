@@ -7,6 +7,8 @@ Rust one is a configuration change rather than a refactor.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,8 +76,8 @@ class MemoryRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     importance: float = 0.0          # 0..1, salience scored at creation
     surprise: float = 1.0            # novelty weight (1 + |prediction error|)
-    stability: float = 1.0           # Ebbinghaus S; grows with reinforcement
-    access_count: int = 0
+    stability: float = 1.0           # Ebbinghaus S; bounded reinforcement growth
+    access_count: int = 0            # successful reinforcement-event count
     last_access: Optional[float] = None
     valid_from: Optional[float] = None   # world-time: when the fact became true
     valid_to: Optional[float] = None     # world-time: when it stopped being true
@@ -285,6 +287,32 @@ class Embedder(Protocol):
     def embed(self, texts: list[str], *, kind: Literal["text", "code"] = "text") -> np.ndarray: ...
 
 
+def embedding_space_fingerprint(embedder: Any) -> str:
+    """Return the durable identity of one persisted embedding vector space.
+
+    embedding_identity names the backend family while embedding_version identifies
+    its configured model/mapping. Dimension is part of the space even when a backend
+    already includes it in its version. An empty result means the adapter is not safe
+    to use with persisted vectors because upgrades cannot be distinguished from the
+    stored mapping.
+    """
+    identity = str(getattr(embedder, "embedding_identity", "") or "").strip()
+    version = str(getattr(embedder, "embedding_version", "") or "").strip()
+    try:
+        dimension = int(getattr(embedder, "dim"))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    if not identity or not version or dimension <= 0:
+        return ""
+    canonical = json.dumps(
+        {"dimension": dimension, "identity": identity, "version": version},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "emb:v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def embedder_capabilities(embedder: Any) -> dict[str, Any]:
     """Return public retrieval capabilities for an embedder.
 
@@ -312,6 +340,7 @@ def embedder_capabilities(embedder: Any) -> dict[str, Any]:
         "semantic_support": semantic_support,
         "embedding_mode": mode,
         "degraded_reason": reason,
+        "vector_search_ready": semantic_support,
     }
 
 
@@ -321,11 +350,34 @@ class VectorIndex(Protocol):
 
     ``commit=False`` keeps derived-index writes inside a caller-owned transaction;
     existing callers retain the historical committing default.
+
+    An index whose complete search state is the canonical Store's ``mem_vectors``
+    table may expose ``shares_store_vector_table = True``. Core write paths use
+    :func:`vector_index_requires_sync` to avoid writing that same row twice. The
+    optimization is accepted only when the index and caller share the identical Store
+    object; unknown and separately-backed indexes retain the historical explicit sync.
     """
     def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
                *, commit: bool = True) -> None: ...
     def search(self, vec: np.ndarray, k: int, *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]: ...
     def delete(self, ids: list[str], *, commit: bool = True) -> None: ...
+
+
+def vector_index_requires_sync(index: Optional[VectorIndex], store: object) -> bool:
+    """Return whether a Store vector mutation must also update ``index``.
+
+    Third-party indexes default to ``True`` so the optional capability is
+    backward-compatible. A backend can skip the post-Store write only by explicitly
+    declaring that it searches the same Store table and by exposing that exact Store
+    instance. The identity check prevents a miswired store-backed index from silently
+    missing updates.
+    """
+    if index is None:
+        return False
+    return not (
+        getattr(index, "shares_store_vector_table", False) is True
+        and getattr(index, "store", None) is store
+    )
 
 
 @runtime_checkable

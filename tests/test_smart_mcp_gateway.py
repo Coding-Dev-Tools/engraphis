@@ -305,6 +305,27 @@ def test_stateful_executor_records_only_content_free_gateway_telemetry(monkeypat
     assert "acme" not in json.dumps(telemetry)
 
 
+def test_gateway_context_usage_counts_authoritative_receipt_once(monkeypatch):
+    server = _memory_server(monkeypatch)
+    _payload(server.engraphis_remember(content="Gateway savings fixture.", workspace="acme"))
+    action = server._action_payload(server.ACTION_SPECS["recall_context"])
+
+    _payload(server.engraphis_execute_action(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={"query": "gateway savings", "workspace": "acme", "token_budget": 64},
+    ))
+
+    summary = server._service.context_savings(workspace="acme")
+    assert summary["estimated"]["eligible_receipt_count"] == 1
+    assert summary["savings_receipt_count"] == 1
+    telemetry = server._service.store.conn.execute(
+        "SELECT payload FROM operation_receipts WHERE operation='smart_gateway' "
+        "ORDER BY sequence DESC LIMIT 1"
+    ).fetchone()
+    assert "token_usage" not in json.loads(telemetry["payload"])["metadata"]
+
+
 @pytest.mark.parametrize(("tool_name", "required_role"), [
     ("engraphis_discover_actions", "viewer"),
     ("engraphis_execute_read", "viewer"),

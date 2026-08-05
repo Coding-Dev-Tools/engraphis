@@ -12,6 +12,7 @@ from typing import Optional
 
 import numpy as np
 
+from engraphis.backends.model_source import validate_model_source
 from engraphis.config import settings
 
 logger = logging.getLogger("engraphis.embedder")
@@ -32,10 +33,30 @@ def _get_model():
     with _lock:
         if _model is not None:  # double-checked: another thread won the race
             return _model
+        model_name = str(settings.embed_model or "").strip()
+        revision = settings.embed_revision or None
+        # Validate before sentence-transformers can resolve a remote source, so
+        # strict mode cannot continue through a mutable-model fallback.
+        validate_model_source(
+            model_name,
+            revision,
+            require_immutable_models=settings.require_immutable_models,
+            loader="legacy sentence-transformers model",
+        )
+        local_files_only = model_name.startswith("local:")
+        if local_files_only:
+            model_name = model_name[len("local:"):].strip()
+            if not model_name:
+                raise ValueError("local embedder selector requires a path or cached model name")
         from sentence_transformers import SentenceTransformer
 
-        logger.info("Loading embedding model: %s", settings.embed_model)
-        _model = SentenceTransformer(settings.embed_model)
+        kwargs = {"trust_remote_code": False}
+        if revision:
+            kwargs["revision"] = revision
+        if local_files_only:
+            kwargs["local_files_only"] = True
+        logger.info("Loading configured embedding model")
+        _model = SentenceTransformer(model_name, **kwargs)
         get_dimension = getattr(_model, "get_embedding_dimension", None)
         if get_dimension is None:
             get_dimension = _model.get_sentence_embedding_dimension
@@ -53,7 +74,8 @@ def warmup():
         _get_model()
         return True
     except Exception as exc:  # pragma: no cover - defensive; model may be missing
-        logger.warning("Embedder warmup failed (%s): %s", type(exc).__name__, exc)
+        # Loader/provider messages can expose credentialed URLs or local paths.
+        logger.warning("Embedder warmup failed (%s)", type(exc).__name__)
         return False
 
 

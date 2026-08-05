@@ -669,6 +669,30 @@ def test_record_billing_denial_stamps_every_denial_including_the_repeat() -> Non
     )
     assert cloud_session.saved_entitlement()["entitlement_checked_at"] >= stamped
 
+
+def test_record_billing_denial_surfaces_a_local_state_write_failure(
+    monkeypatch,
+) -> None:
+    """Callers must know when only their in-process fail-closed guard was updated."""
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: {
+        "plan": "team",
+        "cloud_access_active": True,
+        "cloud_features": ["team"],
+    })
+
+    def _save_failed(_value):
+        raise OSError("state mount is read-only")
+
+    monkeypatch.setattr(cloud_session, "_save", _save_failed)
+
+    with pytest.raises(
+        cloud_session.CloudSessionError,
+        match="authoritative cloud denial could not be saved",
+    ):
+        cloud_session.record_billing_denial()
+
+
 def test_record_billing_denial_writes_under_the_refresh_lock(tmp_path, monkeypatch) -> None:
     """The denial is a load-modify-save on the shared session file, so it must be serialized.
 
@@ -794,6 +818,38 @@ def test_bootstrap_rejects_an_oversized_provider_credential_before_persisting(tm
     assert not cloud_session._session_path().exists()
 
 
+def test_bootstrap_rejects_control_characters_in_provider_credential(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value)
+
+    with pytest.raises(cloud_session.CloudSessionError, match="did not return a refresh"):
+        cloud_session.save_bootstrap(
+            {
+                "refresh_credential": "engr_rt_good\r\nX-Evil: 1",
+                "organization_id": "org_1",
+            },
+            control_url="https://control.example.test",
+        )
+
+    assert not cloud_session._session_path().exists()
+
+
+def test_direct_access_token_rejects_control_characters_before_state_read(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "token\r\nX-Evil: 1")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_1")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_COMPUTE_URL", "https://compute.example.test")
+    monkeypatch.setattr(
+        cloud_session,
+        "_load",
+        lambda: (_ for _ in ()).throw(AssertionError("invalid direct token read state")),
+    )
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws")
+
+    assert caught.value.status == 409
+
+
 def test_session_writer_rejects_a_payload_its_reader_would_refuse(tmp_path, monkeypatch):
     """Future provider fields cannot bypass the private-state read limit by aggregation."""
 
@@ -835,6 +891,42 @@ def test_oversized_rotated_credential_is_retired_without_a_replay(tmp_path, monk
     with pytest.raises(cloud_session.CloudSessionError, match="incomplete session credentials"):
         cloud_session.access_for_workspace("ws", require_compute=False)
 
+    with pytest.raises(cloud_session.CloudSessionError, match="cannot be reused"):
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("invalid_field", ["access_token", "refresh_credential"])
+def test_control_character_rotation_retires_predecessor_without_replay(
+    tmp_path, monkeypatch, invalid_field,
+):
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cloud_session, "_UNUSABLE_REFRESHES", set())
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    calls = []
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value)
+
+    def response(*args):
+        calls.append(args)
+        body = {
+            "access_token": "short-lived-access",
+            "organization_id": "org_1",
+            "refresh_credential": "rotated-refresh",
+            "token_subject": "member",
+        }
+        body[invalid_field] = "credential\r\nX-Evil: 1"
+        return body
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", response)
+
+    with pytest.raises(cloud_session.CloudSessionError, match="incomplete session credentials"):
+        cloud_session.access_for_workspace("ws", require_compute=False)
     with pytest.raises(cloud_session.CloudSessionError, match="cannot be reused"):
         cloud_session.access_for_workspace("ws", require_compute=False)
     assert len(calls) == 1

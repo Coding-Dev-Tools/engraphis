@@ -1,10 +1,10 @@
-"""NumPy brute-force vector index — the Phase-0 reference ``VectorIndex``.
+"""Portable NumPy exact-vector reference backend.
 
-This is intentionally simple and correct, not fast: it scans the (scope-filtered)
-vectors for each query — the exact O(n) behaviour that is the #1 scale gap.
-It exists so the rest of the system is runnable and testable *today*.
-Phase 1 swaps in an ANN index (sqlite-vec / LanceDB / Qdrant) behind this same
-interface; nothing above the ``VectorIndex`` boundary changes.
+The backend scans the scope-filtered vectors for every query, then performs a stable
+exact top-k selection. It keeps the core dependency-light and deterministic; deployments
+that need lower direct-search latency can select sqlite-vec's native exact-KNN backend.
+The ``VectorIndex`` boundary also permits a future approximate index without changing
+the recall pipeline.
 """
 from __future__ import annotations
 
@@ -53,8 +53,39 @@ def _vector_query(vec: np.ndarray) -> np.ndarray:
     return values
 
 
+def _top_k_indices(scores: np.ndarray, ids: list[str], k: int) -> list[int]:
+    """Select the exact stable top-k without sorting an entire finite corpus.
+
+    Search results promise descending cosine score with the memory id as the
+    deterministic tie-breaker. ``partition`` finds the score cutoff in linear
+    time, then we sort only scores above it plus the (usually tiny) tie boundary.
+    A corpus made entirely of equal scores intentionally sorts that boundary,
+    because every id participates in the observable ordering.
+    """
+    if k <= 0:
+        return []
+    if k >= len(ids) or not np.isfinite(scores).all():
+        # A legacy caller can write non-finite vectors directly through Store. Keep
+        # the prior Python ordering for that unsupported data rather than assigning
+        # it new semantics in this hot-path optimization.
+        return sorted(
+            range(len(ids)), key=lambda index: (-float(scores[index]), ids[index])
+        )[:k]
+
+    cutoff_position = len(ids) - k
+    cutoff = float(np.partition(scores, cutoff_position)[cutoff_position])
+    above = np.flatnonzero(scores > cutoff).tolist()
+    needed = k - len(above)
+    boundary = np.flatnonzero(scores == cutoff).tolist()
+    above.extend(sorted(boundary, key=ids.__getitem__)[:needed])
+    above.sort(key=lambda index: (-float(scores[index]), ids[index]))
+    return above
+
+
 class NumpyVectorIndex:
     """Store-backed brute-force cosine index. Vectors are stored normalized."""
+
+    shares_store_vector_table = True
 
     def __init__(self, store: Store, *, dim: Optional[int] = None) -> None:
         self.store = store
@@ -77,19 +108,56 @@ class NumpyVectorIndex:
             )
         if any(not isinstance(mid, str) or not mid for mid in ids):
             raise ValueError("ids must contain non-empty strings")
+        if meta is not None and len(meta) != count:
+            raise ValueError("meta length must match the vector batch")
         if not count:
             return
-        for i, mid in enumerate(ids):
-            self.store.put_vector(mid, values[i])
-        if commit:
-            self.store.conn.commit()
+        default_model = str(
+            self.store.embedding_rebuild_target()
+            or self.store.active_embedding_space()
+            or ""
+        )
+        models = [
+            str(
+                (meta[i] if meta is not None and isinstance(meta[i], dict) else {}).get(
+                    "model"
+                )
+                or default_model
+            )
+            for i in range(count)
+        ]
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            for mid, value, model in zip(ids, values, models):
+                self.store.put_vector(mid, value, model=model)
+            # ``commit=True`` means settle a transaction this batch opened. It must
+            # never steal a transaction already owned by the caller.
+            if commit and owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
+
     def delete(self, ids: list[str], *, commit: bool = True) -> None:
         marks = ",".join("?" for _ in ids)
         if not ids:
             return
-        self.store.conn.execute(f"DELETE FROM mem_vectors WHERE id IN ({marks})", ids)
-        if commit:
-            self.store.conn.commit()
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(f"DELETE FROM mem_vectors WHERE id IN ({marks})", ids)
+            if commit and owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
@@ -107,26 +175,14 @@ class NumpyVectorIndex:
             raise ValueError("query vector norm must be finite")
         if n > 0:
             q = q / n
-        rows = list(self.store.iter_vectors(
+        ids, mat = self.store.vector_matrix(
             filter, dim=self.dim if self.dim is not None else int(q.shape[0])
-        ))
-        if not rows:
+        )
+        if not ids:
             return []
-        # Guard against heterogeneous stored dimensions (an embedder model or
-        # ENGRAPHIS_EMBED_DIM change can leave legacy rows at a different width).
-        # Skipping mismatched rows keeps the semantic arm alive instead of
-        # raising on np.vstack and turning recall into a 500.
-        matched = [(r[0], r[1]) for r in rows if r[1].shape[0] == q.shape[0]]
-        if not matched:
-            return []
-        ids = [r[0] for r in matched]
-        mat = np.vstack([r[1] for r in matched])       # already normalized on write
+        # Store filters by both the declared dimension and blob width, so legacy
+        # rows from another embedding space cannot break this exact matrix scan.
         scores = mat @ q                                # cosine == dot for unit vectors
         k = min(k, len(ids))
-        # ``argpartition`` does not define which equal-scored rows survive at
-        # the top-k boundary. Hashing embeddings produce ties frequently, so
-        # use the memory id as an explicit stable secondary key.
-        top = sorted(
-            range(len(ids)), key=lambda index: (-float(scores[index]), ids[index])
-        )[:k]
+        top = _top_k_indices(scores, ids, k)
         return [(ids[index], float(scores[index])) for index in top]

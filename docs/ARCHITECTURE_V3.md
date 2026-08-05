@@ -81,11 +81,15 @@ selected layers are never reclassified when a database is reopened.
 `sqlite-vec` is installed, so the default remains portable and deterministic. `sqlite-vec` and
 SQLCipher load incompatible SQLite native libraries in one process: with `vector_backend="auto"`
 Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails with an actionable
-error. Run accelerated search in a fresh process when using the SQLCipher extra.
+error. Packaged dashboard, REST, and MCP entrypoints use the `auto` setting, so an installed
+`vector` extra is selected without changing the deterministic constructor contract. Run accelerated
+search in a fresh process when using the SQLCipher extra.
 
 ## Query planning
 
-Recall defaults to the `balanced` retrieval profile and `planning="off"`. Opt-in
+Recall defaults to the `balanced` retrieval profile and `planning="off"`. The explicit `fast`
+profile keeps vector + lexical retrieval while skipping graph traversal for small or
+latency-sensitive vaults. Opt-in
 `planning="auto"` keeps the original query, admits at most two deterministic or injected query
 routes, and fuses them before reranking against the original query. `mtype_limits`, when provided,
 are post-rerank maximum counts rather than relevance boosts. Every packed response has a stable
