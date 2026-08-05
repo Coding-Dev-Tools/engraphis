@@ -1,12 +1,19 @@
 import hashlib
+import logging
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
-from engraphis.backends.embedder_st import get_embedder
-from engraphis.backends.reranker import IdentityReranker, get_reranker
+from engraphis.backends.embedder_st import SentenceTransformerEmbedder, get_embedder
+from engraphis.backends.model_source import validate_model_source
+from engraphis.backends.reranker import (
+    CrossEncoderReranker,
+    IdentityReranker,
+    get_reranker,
+)
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.engine import MemoryEngine
@@ -59,10 +66,243 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
             captured.update(model_name=model_name, revision=revision)
 
     monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _PinnedEmbedder)
-    result = get_embedder("Qwen/example", 128, revision="a" * 40)
+    result = get_embedder(
+        "Qwen/example", 128, revision="a" * 40, require_immutable_models=True,
+    )
 
     assert isinstance(result, _PinnedEmbedder)
     assert captured == {"model_name": "Qwen/example", "revision": "a" * 40}
+
+
+@pytest.mark.parametrize("revision", [None, "main", "A" * 40, "a" * 39])
+def test_embedder_strict_mode_rejects_mutable_remote_revision_before_load(monkeypatch, revision):
+    import engraphis.backends.embedder_st as embedder_st
+
+    attempts = []
+    monkeypatch.setattr(
+        embedder_st,
+        "SentenceTransformerEmbedder",
+        lambda *args, **kwargs: attempts.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS"):
+        get_embedder(
+            "organization/remote-model",
+            128,
+            revision=revision,
+            require_immutable_models=True,
+        )
+
+    assert attempts == []
+
+
+def test_embedder_default_mode_keeps_mutable_remote_tag_compatibility(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
+    captured = {}
+
+    class _Embedder:
+        dim = 128
+
+        def __init__(self, model_name, *, revision=None):
+            captured.update(model_name=model_name, revision=revision)
+
+    monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _Embedder)
+    result = get_embedder("organization/remote-model", 128, revision="main")
+
+    assert isinstance(result, _Embedder)
+    assert captured == {"model_name": "organization/remote-model", "revision": "main"}
+
+
+def test_embedder_strict_mode_permits_existing_local_selector(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
+    captured = {}
+
+    class _Embedder:
+        dim = 128
+
+        def __init__(self, model_name, *, revision=None, local_files_only=False):
+            captured.update(
+                model_name=model_name,
+                revision=revision,
+                local_files_only=local_files_only,
+            )
+
+    monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _Embedder)
+    result = get_embedder(
+        "local:C:/models/bge-small", 128, require_immutable_models=True,
+    )
+
+    assert isinstance(result, _Embedder)
+    assert captured == {
+        "model_name": "C:/models/bge-small",
+        "revision": None,
+        "local_files_only": True,
+    }
+
+
+def test_model_policy_permits_an_existing_local_directory_without_a_revision(tmp_path):
+    validate_model_source(
+        str(tmp_path), None, require_immutable_models=True, loader="test model",
+    )
+
+
+def test_model_policy_permits_drive_relative_windows_path_without_a_revision():
+    validate_model_source(
+        r"C:models\bge-small", None, require_immutable_models=True, loader="test model",
+    )
+
+
+def test_sentence_transformer_disables_remote_code(monkeypatch):
+    captured = {}
+
+    class _Model:
+        def __init__(self, _name, **kwargs):
+            captured.update(kwargs)
+
+        def get_embedding_dimension(self):
+            return 128
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_Model),
+    )
+
+    SentenceTransformerEmbedder("organization/remote-model", revision="a" * 40)
+
+    assert captured == {"trust_remote_code": False, "revision": "a" * 40}
+
+
+def test_cross_encoder_reranker_pins_revision_and_disables_remote_code(monkeypatch):
+    captured = {}
+
+    class _Model:
+        def __init__(self, name, **kwargs):
+            captured.update(name=name, **kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(CrossEncoder=_Model),
+    )
+
+    CrossEncoderReranker("organization/reranker", revision="a" * 40)
+
+    assert captured == {
+        "name": "organization/reranker",
+        "trust_remote_code": False,
+        "revision": "a" * 40,
+    }
+
+
+def test_cross_encoder_reranker_local_selector_avoids_remote_load(monkeypatch):
+    captured = {}
+
+    class _Model:
+        def __init__(self, name, **kwargs):
+            captured.update(name=name, **kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(CrossEncoder=_Model),
+    )
+
+    CrossEncoderReranker("local:C:/models/reranker")
+
+    assert captured == {
+        "name": "C:/models/reranker",
+        "trust_remote_code": False,
+        "local_files_only": True,
+    }
+
+
+def test_reranker_strict_mode_rejects_mutable_remote_revision_before_load(monkeypatch):
+    import engraphis.backends.reranker as reranker
+
+    attempts = []
+    monkeypatch.setattr(
+        reranker,
+        "CrossEncoderReranker",
+        lambda *args, **kwargs: attempts.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS"):
+        get_reranker(
+            "organization/reranker",
+            revision="main",
+            require_immutable_models=True,
+        )
+
+    assert attempts == []
+
+
+def test_reranker_fallback_logs_only_the_exception_class(monkeypatch, caplog):
+    import engraphis.backends.reranker as reranker
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("token=super-secret model=private/reranker")
+
+    monkeypatch.setattr(reranker, "CrossEncoderReranker", unavailable)
+    with caplog.at_level(logging.WARNING, logger="engraphis"):
+        result = get_reranker("private/reranker")
+
+    assert isinstance(result, IdentityReranker)
+    assert "RuntimeError" in caplog.text
+    assert "super-secret" not in caplog.text
+    assert "private/reranker" not in caplog.text
+
+
+def test_memory_service_forwards_model_provenance_to_the_engine(monkeypatch):
+    import engraphis.service as service_module
+
+    captured = {}
+
+    class _Store:
+        allowed_workspaces = None
+
+    engine = SimpleNamespace(store=_Store())
+
+    def create(_cls, db_path, **kwargs):
+        captured.update(db_path=db_path, **kwargs)
+        return engine
+
+    monkeypatch.setattr(service_module.MemoryEngine, "create", classmethod(create))
+    monkeypatch.setattr("engraphis.backends.encrypted_db.connector_from_env", lambda: None)
+
+    MemoryService = service_module.MemoryService
+    service = MemoryService.create(
+        ":memory:",
+        embed_model="organization/remote-model",
+        embed_revision="a" * 40,
+        require_immutable_models=True,
+        rerank_model="organization/reranker",
+        rerank_revision="b" * 40,
+    )
+
+    assert service.engine is engine
+    assert captured["embed_model"] == "organization/remote-model"
+    assert captured["embed_revision"] == "a" * 40
+    assert captured["require_immutable_models"] is True
+    assert captured["rerank_model"] == "organization/reranker"
+    assert captured["rerank_revision"] == "b" * 40
+
+
+def test_sentence_transformer_identity_changes_with_model_or_revision():
+    first = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    first.model_name = "Qwen/example"
+    first.revision = "a" * 40
+    second = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    second.model_name = "Qwen/example"
+    second.revision = "b" * 40
+    other = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    other.model_name = "BGE/example"
+    other.revision = "a" * 40
+
+    assert first.embedding_identity == "sentence_transformers"
+    assert len({first.embedding_version, second.embedding_version, other.embedding_version}) == 3
 
 
 def test_embedder_factory_local_selector_requires_only_local_model_files(monkeypatch):

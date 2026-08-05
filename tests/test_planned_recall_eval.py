@@ -11,6 +11,7 @@ from eval.planned_recall import (
     _validate_dataset,
     run,
 )
+from engraphis.core.schema import SCHEMA_VERSION
 
 
 DATASET = (
@@ -37,7 +38,7 @@ def test_planned_recall_ablation_reports_budget_curves_and_gates():
     report = run(load_dataset(str(DATASET)))
 
     assert report["workload"]["tasks"] == 40
-    assert report["benchmark"]["schema_versions"] == [9]
+    assert report["benchmark"]["schema_versions"] == [SCHEMA_VERSION]
     assert set(report["methods"]) == set(ABLATIONS)
     for method in ABLATIONS:
         assert set(report["methods"][method]) == {str(value) for value in TOKEN_BUDGETS}

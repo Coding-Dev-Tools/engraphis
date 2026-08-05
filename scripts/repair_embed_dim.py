@@ -16,7 +16,12 @@ def repair(db_path: str, *, model_name: Optional[str] = None,
            dim: Optional[int] = None, backup: bool = True) -> dict:
     """Re-embed dimension-mismatched rows into the active model's vector space."""
     configured_model = settings.embed_model if model_name is None else model_name
-    embedder = get_embedder(configured_model or None, dim or settings.embed_dim or 384)
+    embedder = get_embedder(
+        configured_model or None,
+        dim or settings.embed_dim or 384,
+        revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+    )
     if configured_model and isinstance(embedder, DeterministicEmbedder):
         raise RuntimeError(
             "configured embedder %r is unavailable; install its dependency before repair"

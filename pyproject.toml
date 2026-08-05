@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "1.4.5"
+version = "1.5.0"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = "Apache-2.0"
@@ -44,7 +44,7 @@ hosted-eval = [
 # Managed Cloud Sync encrypts every bundle client-side with ChaCha20-Poly1305.  Keep this
 # outside the NumPy-only core so local/offline users do not acquire a crypto runtime.
 cloud-sync = [
-    "cryptography>=48.0.1; python_version >= '3.10'",
+    "cryptography>=50.0.0; python_version >= '3.10'",
 ]
 # The REST server + real embeddings (the full self-hosted stack).
 server = [
@@ -66,7 +66,14 @@ server = [
     # Marked for the same reason as fastapi/starlette: every release satisfying this
     # floor requires 3.10, so an unmarked entry makes the whole extra unresolvable on 3.9.
     "python-multipart>=0.0.31; python_version >= '3.10'",
-    "sentence-transformers>=2.7",
+    "sentence-transformers>=2.7; python_version >= '3.10'",
+]
+# Native exact-KNN acceleration for the local SQLite vector index. Kept separate
+# from ``all`` because upstream does not publish a musl wheel or source distribution,
+# and ``all`` is intentionally resolvable on musl. v0.1.9 fixes incorrect DELETE
+# behavior for vec0 rows with longer text primary keys.
+vector = [
+    "sqlite-vec>=0.1.9,<0.2",
 ]
 # The MCP server — plug Engraphis into Claude Code, Cursor, Cline, Zed, etc.
 # The upstream MCP SDK requires Python 3.10+; the numpy-only core remains Python 3.9.
@@ -77,14 +84,14 @@ mcp = [
     "python-multipart>=0.0.31; python_version >= '3.10'",
     "starlette>=1.3.1,<2; python_version >= '3.10'",
     "pydantic-settings>=2.14.2; python_version >= '3.10'",
-    "cryptography>=48.0.1; python_version >= '3.10'",
+    "cryptography>=50.0.0; python_version >= '3.10'",
     "pydantic>=2.0",
-    "sentence-transformers>=2.7",
+    "sentence-transformers>=2.7; python_version >= '3.10'",
 ]
 # Code-symbol graph indexing. Optional: index_repo()/search_code()
 # fall back to a dependency-free regex indexer without this — see backends/codegraph.py.
 code = [
-    "tree-sitter>=0.23",
+    "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
     "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
 ]
@@ -127,11 +134,11 @@ all = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.31; python_version >= '3.10'",
-    "sentence-transformers>=2.7",
+    "sentence-transformers>=2.7; python_version >= '3.10'",
     "mcp>=1.28.1,<2; python_version >= '3.10'",
     "pydantic-settings>=2.14.2; python_version >= '3.10'",
-    "cryptography>=48.0.1; python_version >= '3.10'",
-    "tree-sitter>=0.23",
+    "cryptography>=50.0.0; python_version >= '3.10'",
+    "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
     "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
     "pypdf>=4.0",
@@ -141,16 +148,25 @@ all = [
     "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
 ]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.15.22,<0.17"]
+# The tmpdir-handling fix shipped only in pytest 9.0.3, whose supported line starts
+# at Python 3.10. The isolated Python 3.9 CI lane installs its last compatible pytest
+# separately and always supplies a private runner-owned --basetemp.
+dev = [
+    "pytest>=9.0.3; python_version >= '3.10'",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.15.22,<0.17",
+    "pyright==1.1.411",
+]
 # Everything needed to run the general offline gate in CI (lint + all safe extras-gated
 # tests) WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
 # SQLCipher is deliberately excluded: loading its SQLite extension beside the stdlib sqlite
 # extension makes current bundled Linux wheels unsafe in a long-running mixed test process.
 # The ``encryption`` extra is exercised in its own short-lived CI job instead.
 test = [
-    "pytest>=8.0",
+    "pytest>=9.0.3; python_version >= '3.10'",
     "pytest-asyncio>=0.23",
     "ruff>=0.15.22,<0.17",
+    "pyright==1.1.411",
     "python-dotenv>=1.0",
     "uvicorn[standard]>=0.29",
     "fastapi>=0.133.1,<1; python_version >= '3.10'",
@@ -159,12 +175,13 @@ test = [
     # explicit rather than transitive via mcp, so the dependency is stated where it is
     # used (fastapi Form routes) instead of riding on another extra's resolution.
     "python-multipart>=0.0.31; python_version >= '3.10'",
-    # exercises the real sqlite-vec ANN backend (k=? KNN + filtered widening) in CI.
-    "sqlite-vec>=0.1.6",
+    # exercises the real sqlite-vec native KNN backend (k=? + filtered widening) in CI.
+    # 0.1.9 fixes DELETE behavior for vec0 rows with longer text primary keys.
+    "sqlite-vec>=0.1.9,<0.2",
     "mcp>=1.28.1,<2; python_version >= '3.10'",
     "pydantic-settings>=2.14.2; python_version >= '3.10'",
-    "cryptography>=48.0.1; python_version >= '3.10'",
-    "tree-sitter>=0.23",
+    "cryptography>=50.0.0; python_version >= '3.10'",
+    "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
     "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
     "pypdf>=4.0",
@@ -213,7 +230,13 @@ include = ["engraphis*", "scripts*", "eval*"]
 "engraphis.classic_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis.dashboard_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis" = ["commercial_manifest.json"]
-"eval" = ["BASELINES.md", "EVIDENCE.md", "configs/*.json", "datasets/*.jsonl"]
+"eval" = [
+    "BASELINES.md",
+    "EVIDENCE.md",
+    "configs/*.json",
+    "datasets/*.jsonl",
+    "datasets/locomo10_repair_manifest.json",
+]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]
@@ -228,6 +251,16 @@ target-version = "py39"
 # 0.15.x enabled by default, so behaviour is unchanged; widening is now a deliberate edit.
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
+
+[tool.pyright]
+include = [
+    "engraphis/core",
+    "engraphis/backends",
+    "eval/harness.py",
+    "eval/external.py",
+]
+pythonVersion = "3.9"
+typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

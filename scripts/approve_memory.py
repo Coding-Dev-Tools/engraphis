@@ -29,8 +29,12 @@ def main() -> None:
     service = MemoryService.create(
         args.db,
         embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
         embed_dim=settings.embed_dim or 384,
+        vector_backend=settings.vector_backend,
         rerank_model=settings.rerank_model or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
         allowed_workspaces=settings.allowed_workspaces,
     )
     try:

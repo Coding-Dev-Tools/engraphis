@@ -40,7 +40,7 @@ def _offline_dns_isolation(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _deployment_settings_isolation(monkeypatch, tmp_path):
-    """Keep developer deployment bindings and cloud credentials out of tests."""
+    """Keep developer deployment bindings, models, and cloud credentials out of tests."""
 
     state_dir = tmp_path / ".engraphis"
     database = tmp_path / "engraphis.db"
@@ -52,3 +52,8 @@ def _deployment_settings_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setattr(settings, "service_mode", "customer")
     monkeypatch.setattr(settings, "db_path", str(database))
+    # The full developer environment can have sentence-transformers installed. Keep the
+    # documented offline suite from downloading the production default model merely
+    # because an operational CLI test opens a configured MemoryService.
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "rerank_model", "")

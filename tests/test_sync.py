@@ -284,7 +284,14 @@ def test_sync_rehomes_forged_provenance_and_quarantines_payload():
     assert audit is not None and "Ignore all previous" not in audit["detail"]
 
 
-def test_sync_quarantine_overwrite_removes_existing_vector():
+def test_sync_quarantine_overwrite_removes_existing_vector(caplog):
+    commits = []
+
+    class BrokenDeleteIndex:
+        def delete(self, _ids, *, commit=True):
+            commits.append(commit)
+            raise RuntimeError("sensitive-index-detail")
+
     store = Store(":memory:")
     workspace_id = store.get_or_create_workspace("w")
     store.add_memory(MemoryRecord(
@@ -317,13 +324,28 @@ def test_sync_quarantine_overwrite_removes_existing_vector():
         "mem_links": [],
     }
 
-    report = SyncEngine(store).apply_bundle(bundle)
+    with caplog.at_level("WARNING", logger="engraphis.sync"):
+        report = SyncEngine(
+            store, vector_index=BrokenDeleteIndex()
+        ).apply_bundle(bundle)
 
     assert report["updated"] == 1
     assert store.get_memory("mem_existing").provenance["quarantined"] is True
     assert store.conn.execute(
         "SELECT 1 FROM mem_vectors WHERE id='mem_existing'"
     ).fetchone() is None
+    assert commits == [False]
+    audit = store.conn.execute(
+        "SELECT actor, action, target, detail FROM audit "
+        "WHERE action='index_delete_failed'"
+    ).fetchone()
+    assert dict(audit) == {
+        "actor": "sync",
+        "action": "index_delete_failed",
+        "target": "mem_existing",
+        "detail": "failure_type=RuntimeError",
+    }
+    assert "sensitive-index-detail" not in caplog.text
 
 
 def test_sync_benign_overwrite_cannot_clear_an_existing_quarantine_marker():
@@ -590,7 +612,9 @@ def test_dry_run_writes_nothing():
     assert rep["added"] == 2 and rep["links_added"] == 1 and rep["dry_run"] is True
     assert store.get_memory("mem_a") is None
     assert store.conn.execute("SELECT COUNT(*) c FROM workspaces").fetchone()["c"] == 0
-    assert store.conn.execute("SELECT COUNT(*) c FROM audit").fetchone()["c"] == 0
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM audit WHERE actor <> 'schema_migration'"
+    ).fetchone()["c"] == 0
 
 
 def test_apply_rejects_memory_with_undeclared_remote_repo():
@@ -865,6 +889,39 @@ def test_two_devices_converge(tmp_path):
     assert {m.id for m in _live(a, wa)} == {m.id for m in _live(b, wb)}
 
 
+def test_numpy_sync_persists_each_canonical_vector_once(monkeypatch):
+    source = MemoryEngine.create(":memory:", vector_backend="numpy")
+    target = MemoryEngine.create(":memory:", vector_backend="numpy")
+    source_workspace = source.store.get_or_create_workspace("acme")
+    target.store.get_or_create_workspace("acme")
+    memory_id = source.remember(
+        "The synchronized vector marker is indigo.",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+        resolve_conflicts=False,
+    )
+    bundle = SyncEngine(
+        source.store, embedder=source.embedder, vector_index=source.index,
+    ).export_bundle(source_workspace)
+    calls = []
+    original = target.store.put_vector
+
+    def traced_put_vector(mid, vector, *, model=""):
+        calls.append(mid)
+        return original(mid, vector, model=model)
+
+    monkeypatch.setattr(target.store, "put_vector", traced_put_vector)
+    report = SyncEngine(
+        target.store, embedder=target.embedder, vector_index=target.index,
+    ).apply_bundle(bundle)
+
+    assert report["added"] == 1
+    assert calls == [memory_id]
+    assert memory_id in target.store.get_vectors([memory_id])
+    source.store.close()
+    target.store.close()
+
+
 def test_resync_is_a_noop(tmp_path):
     a = MemoryEngine.create(":memory:")
     b = MemoryEngine.create(":memory:")
@@ -1045,9 +1102,35 @@ def test_nonfinite_numeric_fields_are_clamped():
     assert se.apply_bundle(bundle)["added"] == 1                    # no crash
     got = store.get_memory("mem_p")
     import math as _m
-    assert _m.isfinite(got.stability) and got.stability <= 1e6
+    from engraphis.core.retention_policy import MAX_STABILITY_DAYS
+    assert _m.isfinite(got.stability) and got.stability <= MAX_STABILITY_DAYS
     assert _m.isfinite(got.importance) and 0.0 <= got.importance <= 1.0
     assert got.last_access is None or _m.isfinite(got.last_access)
+
+
+def test_oversized_direct_retention_state_converges_after_sync_round_trip():
+    from engraphis.core.retention_policy import MAX_ACCESS_COUNT, MAX_STABILITY_DAYS
+
+    source = Store(":memory:")
+    source_workspace = source.get_or_create_workspace("w")
+    source.add_memory(MemoryRecord(
+        id="mem_retention", content="bounded", workspace_id=source_workspace,
+        scope=Scope.WORKSPACE, stability=MAX_STABILITY_DAYS * 10,
+        access_count=MAX_ACCESS_COUNT + 10,
+    ))
+    bundle = SyncEngine(source).export_bundle(source_workspace)
+
+    peer = Store(":memory:")
+    SyncEngine(peer).apply_bundle(bundle, into_workspace="w")
+    echoed = SyncEngine(peer).export_bundle(peer.get_or_create_workspace("w"))
+
+    source_state = bundle["memories"][0]
+    echoed_state = echoed["memories"][0]
+    assert echoed_state["stability"] == source_state["stability"]
+    assert echoed_state["access_count"] == source_state["access_count"]
+    result = peer.get_memory("mem_retention")
+    assert result.stability == MAX_STABILITY_DAYS
+    assert result.access_count == MAX_ACCESS_COUNT
 
 
 def test_control_and_ansi_chars_are_stripped():
@@ -1368,7 +1451,10 @@ def test_sync_auditing_for_adds_updates_and_links():
         "memories": [{"id": "mem_a", "content": "hello", "last_access": 100.0}], "mem_links": []
     }
     se.apply_bundle(bundle)
-    audits = store.conn.execute("SELECT action, target, detail FROM audit").fetchall()
+    audits = store.conn.execute(
+        "SELECT action, target, detail FROM audit "
+        "WHERE actor <> 'schema_migration' ORDER BY ts ASC"
+    ).fetchall()
     assert len(audits) == 1
     assert audits[0]["action"] == "sync_add"
     assert audits[0]["target"] == "mem_a"
@@ -1379,7 +1465,10 @@ def test_sync_auditing_for_adds_updates_and_links():
         "memories": [{"id": "mem_a", "content": "hello updated", "last_access": 200.0}], "mem_links": []
     }
     se.apply_bundle(bundle_update)
-    audits = store.conn.execute("SELECT action, target FROM audit ORDER BY ts ASC").fetchall()
+    audits = store.conn.execute(
+        "SELECT action, target FROM audit "
+        "WHERE actor <> 'schema_migration' ORDER BY ts ASC"
+    ).fetchall()
     assert len(audits) == 2
     assert audits[1]["action"] == "sync_overwrite"
     assert audits[1]["target"] == "mem_a"
@@ -1398,7 +1487,10 @@ def test_sync_auditing_for_adds_updates_and_links():
         }]
     }
     se.apply_bundle(bundle_link)
-    audits = store.conn.execute("SELECT action, target FROM audit ORDER BY ts ASC").fetchall()
+    audits = store.conn.execute(
+        "SELECT action, target FROM audit "
+        "WHERE actor <> 'schema_migration' ORDER BY ts ASC"
+    ).fetchall()
     assert len(audits) == 4  # +1 for mem_b add, +1 for link
     assert audits[2]["action"] == "sync_add"
     assert audits[2]["target"] == "mem_b"
@@ -1703,6 +1795,68 @@ def _bundle(n, *, links=()):
     }
 
 
+def test_sync_index_upsert_failure_keeps_canonical_vectors_and_batch_ownership(caplog):
+    commits = []
+
+    class BrokenUpsertIndex:
+        def upsert(self, _ids, _vecs, meta=None, *, commit=True):
+            commits.append(commit)
+            raise RuntimeError("sensitive-index-detail")
+
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=BrokenUpsertIndex(),
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.sync"):
+        report = syncer.apply_bundle(_bundle(3))
+
+    assert report["added"] == 3
+    assert commits == [False, False, False]
+    assert engine.store.conn.execute(
+        "SELECT COUNT(*) FROM mem_vectors"
+    ).fetchone()[0] == 3
+    audits = engine.store.conn.execute(
+        "SELECT action, target, detail FROM audit "
+        "WHERE action='index_upsert_failed' ORDER BY target"
+    ).fetchall()
+    assert [dict(row) for row in audits] == [
+        {
+            "action": "index_upsert_failed",
+            "target": "mem_%d" % index,
+            "detail": "failure_type=RuntimeError",
+        }
+        for index in range(3)
+    ]
+    assert "sensitive-index-detail" not in caplog.text
+
+
+def test_sync_configured_embedder_failure_aborts_before_memory_write(caplog):
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+
+    class BrokenEmbedder:
+        embedding_identity = engine.embedder.embedding_identity
+        embedding_version = engine.embedder.embedding_version
+
+        def embed(self, _texts):
+            raise RuntimeError("sensitive-embedder-detail")
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=BrokenEmbedder(),
+        vector_index=engine.index,
+    )
+    with caplog.at_level("WARNING", logger="engraphis.sync"):
+        with pytest.raises(RuntimeError, match="sync embedding unavailable"):
+            syncer.apply_bundle(_bundle(1))
+
+    assert engine.store.get_memory("mem_0") is None
+    assert "sensitive-embedder-detail" not in caplog.text
+    assert engine.store.conn.in_transaction is False
+
+
 def test_apply_bundle_commits_per_batch_not_per_row(monkeypatch):
     from engraphis.core import store as store_mod
     from engraphis.core import sync as sync_mod
@@ -1789,6 +1943,31 @@ def test_apply_bundle_failure_keeps_committed_batches_and_frees_the_connection(m
     assert store.get_memory("mem_2") is not None
     assert store.get_memory("mem_3") is not None
     store.create_workspace("still-usable")            # the connection is not deadlocked
+
+
+def test_apply_bundle_rolls_back_a_failed_inflight_store_write(monkeypatch):
+    """A failure after SQLite has inserted a row must not leak the current batch."""
+    from engraphis.core import sync as sync_mod
+
+    store = Store(":memory:")
+    syncer = SyncEngine(store)
+    monkeypatch.setattr(sync_mod, "APPLY_BATCH", 2)
+    real_fts_upsert = store._fts_upsert
+
+    def exploding_fts_upsert(mid, title, content, keywords):
+        if mid == "mem_2":
+            raise RuntimeError("fts on fire")
+        return real_fts_upsert(mid, title, content, keywords)
+
+    monkeypatch.setattr(store, "_fts_upsert", exploding_fts_upsert)
+    with pytest.raises(RuntimeError, match="fts on fire"):
+        syncer.apply_bundle(_bundle(4))
+
+    assert store.get_memory("mem_0") is not None
+    assert store.get_memory("mem_1") is not None
+    assert store.get_memory("mem_2") is None
+    assert store.get_memory("mem_3") is None
+    assert store.conn.in_transaction is False
 
 
 # ── regression: one bad bundle must not kill the rest of the sync round ───────

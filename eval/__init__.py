@@ -1,7 +1,7 @@
-"""Engraphis evaluation harness.
+"""Dependency-light retrieval, memory, and grounded-answer evaluation tools.
 
-A small, dependency-light runner so retrieval quality is measured from day one and
-can gate CI. Phase 0 ships the harness + metrics + a tiny multi-session fixture;
-later phases plug in LoCoMo, LongMemEval, and the new Engraphis-CodeMem suite, and
-swap the deterministic embedder for a real model behind the same interface.
+The package includes deterministic CI fixtures, Engraphis-CodeMem, LoCoMo and
+LongMemEval adapters, ablations, adversarial-memory checks, and optional hosted or
+model-backed runners. Evaluators report their backend and configuration so local
+smoke results are not confused with canonical benchmark evidence.
 """

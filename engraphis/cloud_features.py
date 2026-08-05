@@ -20,9 +20,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import quote
 
-from engraphis.cloud_session import CloudSessionError, access_for_workspace
+from engraphis.cloud_session import (
+    CloudSessionError,
+    access_for_workspace,
+    credential_text,
+)
 from engraphis.cloud_session import configured as cloud_session_configured
 from engraphis.hosted_client import account_url, build_pinned_https_opener
+from engraphis.core.poisoning import prompt_eligible
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -360,7 +365,7 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     rows = service.store.conn.execute(
         "SELECT id, title, content, mtype, scope, ingested_at, last_access, valid_from, "
         "valid_to, valid_to_recorded_at, expired_at, subject_key, claim_kind, "
-        "stability, importance, pinned, sensitivity, metadata "
+        "stability, importance, pinned, sensitivity, metadata, provenance "
         "FROM memories WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
         "ORDER BY ingested_at, id",
         (workspace_id,),
@@ -382,6 +387,9 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
         item = dict(row)
         sensitivity = str(item.get("sensitivity") or "normal").strip().casefold()
         metadata = _metadata(item.get("metadata"))
+        provenance = _metadata(item.get("provenance"))
+        if not prompt_eligible(provenance, metadata):
+            continue
         metadata_sensitivity = str(metadata.get("sensitivity") or "").strip().casefold()
         allowed = {"", "normal", "sensitive"}
         if sensitivity not in allowed - {""} or metadata_sensitivity not in allowed:
@@ -475,6 +483,10 @@ class CloudFeatureClient:
                    access_token=access_token)
 
     def _request(self, method: str, path: str, payload: Optional[dict] = None) -> dict:
+        if credential_text(self.access_token) != self.access_token:
+            raise CloudFeatureError(
+                "The cloud access credential is invalid.", status=409,
+            )
         encoded = None
         headers = {
             "Accept": "application/json",

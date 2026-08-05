@@ -53,10 +53,19 @@ import json
 import logging
 import math
 import re
+from collections.abc import Iterator
 from typing import Any, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    MemoryRecord,
+    MemoryType,
+    Scope,
+    SearchFilter,
+    SyncTransport,
+    embedding_space_fingerprint,
+    vector_index_requires_sync,
+)
 from engraphis.core.poisoning import (
     PoisoningDecision,
     apply_quarantine_metadata,
@@ -65,7 +74,8 @@ from engraphis.core.poisoning import (
     prompt_eligible,
     provenance_is_approved,
 )
-from engraphis.core.secrets import SecretDetectedError, reject_secrets
+from engraphis.core.secrets import SecretDetectedError, reject_secrets, secret_kind
+from engraphis.core.retention_policy import effective_access_count, effective_stability
 from engraphis.core.store import Store, now_ts
 
 
@@ -88,8 +98,6 @@ MAX_SUMMARY_CHARS = 20_000
 MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 200
 MAX_JSON_CHARS = 40_000            # metadata / provenance serialized cap
-MAX_STABILITY = 1e6                # clamp so a bundle can't dominate retention scoring
-MAX_ACCESS_COUNT = 1_000_000_000
 MAX_SESSION_ID_CHARS = 128
 MAX_REPOS = 10_000                 # cap repos map so an empty-memories bundle can't bloat
 # Rows applied per transaction / per batched existence lookup. Bounded so applying a
@@ -583,9 +591,9 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         keywords=kws, metadata=_safe_json_obj(d.get("metadata")),
         importance=_clamp_num(d.get("importance"), 0.0, 1.0, 0.0),
         surprise=_clamp_num(d.get("surprise"), 0.0, 100.0, 1.0),
-        stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0),
+        stability=effective_stability(d.get("stability")),
         confidence=_clamp_num(d.get("confidence"), 0.0, 1.0, 1.0),
-        access_count=min(MAX_ACCESS_COUNT, max(0, _as_int(d.get("access_count"), 0))),
+        access_count=effective_access_count(d.get("access_count")),
         last_access=_clamp_ts(d.get("last_access"), now),
         # World-time validity may be in the future; the system timestamps below may not
         # (they are the version key's primary ordering / anti-poison defense).
@@ -622,6 +630,9 @@ class SyncEngine:
                  allowed_workspaces: Optional[frozenset] = None) -> None:
         self.store = store
         self.embedder = embedder
+        self.embedding_space = (
+            embedding_space_fingerprint(embedder) if embedder is not None else ""
+        )
         self.index = vector_index
         self.device_id = device_id or store.device_id()
 
@@ -870,12 +881,12 @@ class SyncEngine:
                               only_repo_id, src_device, dry_run)
         except BaseException:
             # Never leave the shared connection pinned in an open transaction — that would
-            # stall every other thread on _SerializedConnection's lock. Keep whatever
-            # already applied, matching the old per-row-commit failure behaviour.
+            # stall every other thread on _SerializedConnection's lock. Roll back only the
+            # in-flight batch; earlier APPLY_BATCH commits already preserve partial apply.
             try:
-                self.store.conn.commit()
-            except Exception:  # noqa: BLE001 — best-effort cleanup
                 self.store.conn.rollback()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
             raise
         return report
 
@@ -1134,8 +1145,11 @@ class SyncEngine:
                 continue
             a, b = ln.get("a"), ln.get("b")
             rel = _clamp_str(ln.get("relation") or "related", 64) or "related"
-            layer = normalize_graph_layer(ln.get("layer"), rel).value
+            layer = normalize_graph_layer(ln.get("layer"), rel)
             reason = _clamp_str(ln.get("reason") or "", MAX_TITLE_CHARS)
+            if secret_kind(reason):
+                report["rejected"] += 1
+                continue
             if not isinstance(a, str) or not isinstance(b, str) or a == b:
                 continue
             if a not in accepted or b not in accepted:
@@ -1179,7 +1193,7 @@ class SyncEngine:
                     "AND valid_to_recorded_at IS ? AND ingested_at IS ? AND expired_at IS ? "
                     "LIMIT 1",
                     (
-                        a, b, b, a, rel, layer, reason,
+                        a, b, b, a, rel, layer.value, reason,
                         valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
                     ),
                 ).fetchone()
@@ -1210,11 +1224,9 @@ class SyncEngine:
             if existing_link:
                 # Link metadata has no clock in sync format v1. Resolve concurrent
                 # metadata deterministically so peers converge regardless of arrival.
-                merged_layer = merge_graph_layers(
-                    existing_link["layer"], layer, rel
-                ).value
+                merged_layer = merge_graph_layers(existing_link["layer"], layer, rel)
                 merged_reason = max(existing_link["reason"] or "", reason)
-                if (merged_layer, merged_reason) == (
+                if (merged_layer.value, merged_reason) == (
                     existing_link["layer"] or "semantic",
                     existing_link["reason"] or "",
                 ):
@@ -1259,8 +1271,10 @@ class SyncEngine:
             deleted_at = _as_float(t.get("deleted_at"), None)
             if not isinstance(mid, str) or not mid or deleted_at is None:
                 continue
-            mid = _clamp_str(mid, 128)
-            if not mid:
+            # Identity fields are never normalized: control characters or whitespace
+            # must not be stripped into another valid memory id before secure erase.
+            if (mid != mid.strip() or any(char.isspace() for char in mid)
+                    or mid != _clamp_str(mid, 128)):
                 continue
             deleted_at = max(0.0, min(deleted_at, now + TS_FUTURE_SKEW))
             device = _clamp_str(t.get("device"), 128) if t.get("device") else ""
@@ -1286,39 +1300,107 @@ class SyncEngine:
             if key[1] is None or key[0] not in global_ids
         ]
 
+    def _audit_index_failure(
+        self,
+        action: str,
+        memory_id: str,
+        exc: Exception,
+    ) -> None:
+        """Record derived-index repair debt without reflecting provider details."""
+        failure_type = type(exc).__name__
+        logger.warning(
+            "sync vector-index %s failed for %s (%s)",
+            action,
+            memory_id,
+            failure_type,
+        )
+        try:
+            self.store.audit(
+                "sync",
+                "index_%s_failed" % action,
+                memory_id,
+                "failure_type=%s" % failure_type,
+                commit=False,
+            )
+        except Exception as audit_exc:
+            logger.warning(
+                "could not audit sync vector-index failure (%s)",
+                type(audit_exc).__name__,
+            )
+
     def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
         derived state coherent: re-embed for the vector arm when an embedder is wired.
 
         ``commit=False`` leaves the transaction open for the caller's batch (apply_bundle)."""
         quarantined = metadata_is_quarantined(rec.metadata)
-        if self.embedder is not None and not quarantined:
+        persistent_store = (
+            self.store.path != ":memory:"
+            and not self.store.path.startswith("file::memory:")
+        )
+        embedder = self.embedder
+        rebuild_target = (
+            self.store.embedding_rebuild_target() if persistent_store else None
+        )
+        if rebuild_target and rebuild_target != self.embedding_space:
+            raise RuntimeError(
+                "sync embedding space does not match the active rebuild target"
+            )
+        vector_writes_ready = (
+            not persistent_store
+            or self.store.embedding_space_ready(self.embedding_space)
+            or rebuild_target == self.embedding_space
+        )
+        if embedder is not None and vector_writes_ready and not quarantined:
             try:
                 text = f"{rec.title}\n{rec.content}" if rec.title else rec.content
-                rec.embedding = self.embedder.embed([text])[0]
-            except Exception:
-                rec.embedding = None
+                rec.embedding = embedder.embed([text])[0]
+                rec.metadata = {
+                    **(rec.metadata or {}),
+                    "embed_model": self.embedding_space,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "sync embedding failed for %s (%s)",
+                    rec.id,
+                    type(exc).__name__,
+                )
+                raise RuntimeError("sync embedding unavailable") from exc
         # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False
-        self.store.add_memory(rec, audit=False, commit=commit)
+        self.store.add_memory(rec, audit=False, commit=False)
         if quarantined:
             # ``add_memory(..., embedding=None)`` deliberately leaves an existing
             # vector untouched for ordinary metadata updates. A sync overwrite that
             # becomes quarantined is different: retaining the prior vector leaves
             # stale derived state for a payload the policy has removed from retrieval.
             self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (rec.id,))
-            if self.index is not None:
+            if (
+                self.index is not None
+                and vector_index_requires_sync(self.index, self.store)
+            ):
                 try:
-                    self.index.delete([rec.id])
-                except Exception:
-                    pass
+                    self.index.delete([rec.id], commit=False)
+                except Exception as exc:
+                    self._audit_index_failure("delete", rec.id, exc)
             if commit:
                 self.store.conn.commit()
             return
-        if rec.embedding is not None and not quarantined and self.index is not None:
+        if (
+            rec.embedding is not None
+            and not quarantined
+            and self.index is not None
+            and vector_index_requires_sync(self.index, self.store)
+        ):
             try:
-                self.index.upsert([rec.id], rec.embedding.reshape(1, -1))
-            except Exception:
-                pass
+                self.index.upsert(
+                    [rec.id], rec.embedding.reshape(1, -1),
+                    [{"model": self.embedding_space}],
+                    commit=False,
+                )
+            except Exception as exc:
+                self._audit_index_failure("upsert", rec.id, exc)
+        if commit:
+            self.store.conn.commit()
 
     @staticmethod
     def _rehome_external_record(rec: MemoryRecord, *, src_device: object) -> None:
@@ -1364,7 +1446,7 @@ class SyncEngine:
         rec.provenance = dict(metadata["provenance"])
 
     # ── one round-trip over a transport ─────────────────────────────────────────
-    def sync(self, transport, workspace_id: str, *, repo_id: Optional[str] = None,
+    def sync(self, transport: SyncTransport, workspace_id: str, *, repo_id: Optional[str] = None,
              dry_run: bool = False, push: bool = True) -> dict:
         """Push this device's snapshot, then pull and apply every *other* device's.
 
@@ -1392,7 +1474,14 @@ class SyncEngine:
         # longer stall sync indefinitely. Nothing here weakens the trust boundary: every
         # bundle that IS produced still goes through apply_bundle's validation, clamping,
         # workspace authorization and confinement checks unchanged.
-        bundles = iter(transport.pull())
+        bundles: Iterator[tuple[str, bytes]]
+        try:
+            bundles = iter(transport.pull())
+        except Exception as exc:  # noqa: BLE001 — transport setup failure
+            logger.warning("sync transport pull failed (%s)", type(exc).__name__)
+            applied.append({"bundle": "?", "error": "transport failure",
+                            "error_type": type(exc).__name__})
+            bundles = iter(())
         while True:
             try:
                 name, data = next(bundles)

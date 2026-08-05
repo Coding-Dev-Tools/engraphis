@@ -20,6 +20,8 @@ import stat
 import threading
 import time
 import unicodedata
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -37,6 +39,22 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.secrets import reject_secrets
+from engraphis.core.poisoning import (
+    REVIEW_APPROVED,
+    REVIEW_PENDING,
+    llm_consolidation_kind,
+    pending_llm_consolidation_envelope,
+)
+from engraphis.core.retention_policy import (
+    DEFAULT_STABILITY_DAYS,
+    MAX_ACCESS_COUNT,
+    MAX_STABILITY_DAYS,
+    MIN_STABILITY_DAYS,
+    effective_access_count,
+    effective_stability,
+    reinforced_stability,
+)
+from engraphis.core.savings import normalize_release_version
 from engraphis.core.schema import (
     FTS_SQL_FALLBACK,
     FTS_SQL_FTS5,
@@ -55,6 +73,10 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+_LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
+_LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
+
+
 def now_ts() -> float:
     return time.time()
 
@@ -84,6 +106,14 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _close_connection_quietly(conn: Any) -> None:
+    """Best-effort cleanup for a Store abandoned without an explicit close."""
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
 def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
     """Use the one trust predicate before exposing a derived bridge.
 
@@ -97,6 +127,30 @@ def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
     prov = provenance if isinstance(provenance, dict) else _loads(provenance, {})
     meta = metadata if isinstance(metadata, dict) else _loads(metadata, {})
     return prompt_eligible(prov, meta)
+
+
+def _merge_provenance_envelopes(dedicated: dict, nested: dict) -> dict:
+    """Merge trust envelopes without losing a restrictive assertion."""
+    provenance = {**dedicated, **nested}
+    envelopes = (dedicated, nested)
+    if any(item.get("trusted") is False for item in envelopes):
+        provenance["trusted"] = False
+    if any(item.get("quarantined") is True for item in envelopes):
+        provenance["quarantined"] = True
+    for item in envelopes:
+        state = item.get("review_state")
+        if state and state != REVIEW_APPROVED:
+            provenance["review_state"] = state
+            break
+    return provenance
+
+
+def _edge_is_prompt_eligible(provenance: Any) -> bool:
+    """Apply the canonical direct-edge trust predicate at the store boundary."""
+    from engraphis.core.poisoning import edge_provenance_prompt_eligible
+
+    prov = provenance if isinstance(provenance, dict) else _loads(provenance, {})
+    return edge_provenance_prompt_eligible(prov)
 
 
 def _provenance_memory_ids(provenance: Any) -> list[str]:
@@ -270,6 +324,11 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     "adaptive_mode": {
         "history_bypass", "retrieval", "history_fallback", "low_confidence_abstain",
     },
+    "savings_basis": {
+        "history_retrieval", "history_fallback", "history_bypass",
+        "low_confidence_abstain", "packed_context", "unclassified",
+    },
+    "savings_confidence": {"high", "medium", "none", "unknown"},
 }
 
 
@@ -304,11 +363,14 @@ def _receipt_metadata(metadata: dict) -> dict:
                 name: value[name]
                 for name in (
                     "budget_tokens", "context_tokens", "source_tokens", "saved_tokens",
-                    "savings_ratio", "packed_count", "omitted_count",
+                    "savings_ratio", "packed_count", "omitted_count", "baseline_tokens",
+                    "emitted_tokens", "estimated_saved_tokens", "estimated_savings_ratio",
                 )
                 if type(value.get(name)) in (int, float)
                 and math.isfinite(float(value[name]))
             }
+            if type(value.get("savings_eligible")) is bool:
+                numeric["savings_eligible"] = value["savings_eligible"]
             counter = value.get("token_counter")
             if isinstance(counter, str):
                 if counter in {"engraphis.regex.v1", "estimate_tokens"}:
@@ -317,6 +379,13 @@ def _receipt_metadata(metadata: dict) -> dict:
                     numeric["token_counter"] = (
                         "sha256:" + hashlib.sha256(counter.encode("utf-8")).hexdigest()
                     )
+            for key in ("savings_basis", "savings_confidence"):
+                label = value.get(key)
+                if isinstance(label, str):
+                    numeric[key] = content_free_label(key, label)
+            release_version = normalize_release_version(value.get("release_version"))
+            if release_version:
+                numeric["release_version"] = release_version
             out[safe_key] = numeric
         elif isinstance(value, bool) or value is None:
             out[safe_key] = value
@@ -464,6 +533,9 @@ def _public_receipt_row(row: dict) -> dict:
             allowed_usage = {
                 "budget_tokens", "context_tokens", "source_tokens", "saved_tokens",
                 "savings_ratio", "packed_count", "omitted_count", "token_counter",
+                "baseline_tokens", "emitted_tokens", "estimated_saved_tokens",
+                "estimated_savings_ratio", "savings_basis", "savings_confidence",
+                "savings_eligible", "release_version",
             }
             if not set(value).issubset(allowed_usage):
                 return invalid
@@ -476,6 +548,24 @@ def _public_receipt_row(row: dict) -> dict:
                             and _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(usage_value)
                         )
                     ):
+                        return invalid
+                elif usage_key == "savings_basis":
+                    if not (
+                        usage_value in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_basis"]
+                        or (
+                            isinstance(usage_value, str)
+                            and _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(usage_value)
+                        )
+                    ):
+                        return invalid
+                elif usage_key == "savings_confidence":
+                    if usage_value not in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_confidence"]:
+                        return invalid
+                elif usage_key == "savings_eligible":
+                    if type(usage_value) is not bool:
+                        return invalid
+                elif usage_key == "release_version":
+                    if normalize_release_version(usage_value) != usage_value:
                         return invalid
                 elif (
                     type(usage_value) not in (int, float)
@@ -496,7 +586,7 @@ def _public_receipt_row(row: dict) -> dict:
     return {**payload, "hash": raw_hash}
 
 
-def _fts5_available(conn: sqlite3.Connection) -> bool:
+def _fts5_available(conn: sqlite3.Connection | _SerializedConnection) -> bool:
     try:
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
         conn.execute("DROP TABLE IF EXISTS _fts_probe")
@@ -575,9 +665,9 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
                 return False
             if flt.session_id and rec.session_id != flt.session_id:
                 return False
-        if flt.scopes and rec.scope not in flt.scopes:
+        if flt.scopes is not None and rec.scope not in flt.scopes:
             return False
-        if flt.mtypes and rec.mtype not in flt.mtypes:
+        if flt.mtypes is not None and rec.mtype not in flt.mtypes:
             return False
     if include_invalid:
         return True
@@ -597,6 +687,72 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
     return True
 
 
+class _MaterializedCursor:
+    """Cursor-compatible snapshot whose rows were drained under the connection lock.
+
+    A live sqlite cursor is tied to its connection's current statement state. Returning
+    one after releasing the shared-connection lock lets another thread mutate that state
+    before ``fetchone()``, ``fetchall()``, or iteration completes. Query results are
+    therefore materialized while serialized, then exposed through this small cursor
+    facade. DML cursors remain native so ``rowcount`` and ``lastrowid`` keep their exact
+    sqlite semantics.
+    """
+
+    def __init__(self, connection: "_SerializedConnection", raw, rows: list[Any]) -> None:
+        self._connection = connection
+        self._raw = raw
+        self._rows = rows
+        self._index = 0
+        self.arraysize = raw.arraysize
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+    def fetchone(self):
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchmany(self, size: Optional[int] = None) -> list[Any]:
+        count = self.arraysize if size is None else int(size)
+        if count < 0:
+            raise ValueError("fetchmany size must be non-negative")
+        end = min(len(self._rows), self._index + count)
+        rows = self._rows[self._index:end]
+        self._index = end
+        return rows
+
+    def fetchall(self) -> list[Any]:
+        rows = self._rows[self._index:]
+        self._index = len(self._rows)
+        return rows
+
+    def execute(self, *a, **k):
+        return self._connection.execute(*a, **k)
+
+    def executemany(self, *a, **k):
+        return self._connection.executemany(*a, **k)
+
+    def executescript(self, *a, **k):
+        return self._connection.executescript(*a, **k)
+
+    def close(self) -> None:
+        self._rows = []
+        self._index = 0
+        self._connection._run(self._raw.close)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+
 class _SerializedConnection:
     """Serializes access to one sqlite3 connection shared across threads.
 
@@ -611,12 +767,13 @@ class _SerializedConnection:
 
     This wrapper holds a reentrant lock for the DURATION of each write transaction —
     pinned on the first statement that opens one (detected via ``in_transaction``) and
-    released on commit/rollback — so transactions never interleave. Read-only statements
-    lock only for the individual call. Two safety nets keep a stuck transaction from
-    deadlocking the process: a statement that raises while a transaction is open rolls it
-    back and frees the pin, and lock acquisition times out (raising, not blocking forever).
-    Non-statement attributes/methods (``in_transaction``, ``enable_load_extension`` at
-    setup, ...) pass straight through.
+    released on commit/rollback — so transactions never interleave. Query cursors are
+    drained into immutable snapshots before the per-statement lock is released, preventing
+    a later fetch from racing another thread's write. Two safety nets keep a stuck
+    transaction from deadlocking the process: a statement that raises while a transaction
+    is open rolls it back and frees the pin, and lock acquisition times out (raising, not
+    blocking forever). Non-statement attributes/methods (``in_transaction``,
+    ``enable_load_extension`` at setup, ...) pass straight through.
     """
 
     _ACQUIRE_TIMEOUT = 60.0
@@ -644,6 +801,48 @@ class _SerializedConnection:
         must open and settle their own transaction after that waiter is released.
         """
         return self._pinned()
+
+    @contextmanager
+    def defer_commits(self):
+        """Keep nested Store helpers inside the caller's transaction boundary.
+
+        Many Store methods preserve their standalone API by committing their own write.
+        A service operation that composes several such helpers needs one atomic boundary,
+        and a service invoked inside a caller-owned transaction must not commit that
+        caller's work. This thread-local barrier turns nested ``commit()`` calls into
+        no-ops. A savepoint also redirects nested ``rollback()`` calls so a failed helper
+        can discard this service operation without settling work the caller wrote before
+        entering it. The outer owner commits or rolls back after leaving the scope.
+        """
+        depth = int(getattr(self._pin, "defer_commits", 0))
+        if depth:
+            self._pin.defer_commits = depth + 1
+            try:
+                yield
+            finally:
+                self._pin.defer_commits = depth
+            return
+        if not self.transaction_owned_by_current_thread():
+            raise RuntimeError("commit deferral requires a caller-owned transaction")
+        savepoint = f"engraphis_service_{threading.get_ident()}_{time.monotonic_ns()}"
+        self.execute(f"SAVEPOINT {savepoint}")
+        self._pin.defer_savepoint = savepoint
+        self._pin.defer_commits = depth + 1
+        try:
+            try:
+                yield
+            except BaseException:
+                self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            else:
+                self.execute(f"RELEASE SAVEPOINT {savepoint}")
+        finally:
+            for attribute in ("defer_commits", "defer_savepoint"):
+                try:
+                    delattr(self._pin, attribute)
+                except AttributeError:
+                    pass
 
     def _acquire(self) -> None:
         if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
@@ -696,17 +895,46 @@ class _SerializedConnection:
             self._lock.release()              # no open transaction; release now
 
     def _finish(self, fn):
-        self._acquire()
+        # Finalizers may run while a test or embedding application temporarily
+        # instruments the acquire hook.  Teardown must use the primitive lock directly;
+        # dispatching through ``self._acquire`` can invoke an observer after its owning
+        # Store has become unreachable and can crash CPython while closing SQLite on
+        # Windows.
+        if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
+            raise sqlite3.OperationalError(
+                "store write lock timeout — a transaction appears stuck"
+            )
+        succeeded = False
         try:
             fn()
+            succeeded = True
         finally:
-            if self._pinned():
+            # A deferred constraint can make commit() raise while SQLite deliberately
+            # leaves the transaction open. Preserve this thread's pin in that case so a
+            # waiter cannot adopt the failed transaction; the owner can still roll back.
+            keep_pin = False
+            if self._pinned() and not succeeded:
+                try:
+                    keep_pin = bool(self._raw.in_transaction)
+                except Exception:  # noqa: BLE001 - a failed/closed connector cannot be kept
+                    keep_pin = False
+            if self._pinned() and not keep_pin:
                 self._pin.held = False
                 self._lock.release()          # release the transaction pin
             self._lock.release()              # release this call's acquire
 
     def execute(self, *a, **k):
-        return self._run(self._raw.execute, *a, **k)
+        def execute_and_snapshot(*aa, **kk):
+            cursor = self._raw.execute(*aa, **kk)
+            if cursor.description is None:
+                return cursor
+            return _MaterializedCursor(self, cursor, cursor.fetchall())
+
+        return self._run(execute_and_snapshot, *a, **k)
+
+    def fetchone(self, *a, **k):
+        """Execute and drain a one-row read in one locked section."""
+        return self._run(lambda *aa, **kk: self._raw.execute(*aa, **kk).fetchone(), *a, **k)
 
     def fetchall(self, *a, **k):
         """Execute and drain a read in ONE locked section.
@@ -725,13 +953,22 @@ class _SerializedConnection:
         return self._run(self._raw.executescript, *a, **k)
 
     def commit(self):
+        if getattr(self._pin, "defer_commits", 0):
+            return
         self._finish(self._raw.commit)
 
     def rollback(self):
+        savepoint = getattr(self._pin, "defer_savepoint", "")
+        if getattr(self._pin, "defer_commits", 0) and savepoint:
+            self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            return
         self._finish(self._raw.rollback)
 
     def close(self):
-        self._raw.close()
+        # Closing participates in the same lock as statements and transaction
+        # settlement. This prevents shutdown from racing a thread that still owns the
+        # shared connection's write transaction.
+        self._finish(self._raw.close)
 
     def __enter__(self):
         return self
@@ -778,13 +1015,17 @@ class Store:
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        self._close_lock = threading.Lock()
+        self._connection_finalizer = weakref.finalize(
+            self, _close_connection_quietly, self.conn
+        )
         self.has_fts5 = False
         self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
         try:
+            self.conn.execute("PRAGMA foreign_keys=ON")
             if self.read_only:
                 # ``query_only`` also protects injected connectors whose implementation
                 # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
@@ -811,10 +1052,10 @@ class Store:
                 self.conn.execute("PRAGMA journal_mode=WAL")
         except BaseException:
             try:
-                if self.conn.in_transaction:
+                if self.conn.transaction_owned_by_current_thread():
                     self.conn.rollback()
             finally:
-                self.conn.close()
+                self.close()
             raise
 
     def _open_connection(self, path: str):
@@ -1087,7 +1328,7 @@ class Store:
             self._apply_schema(previous_version)
             self.conn.commit()
         except BaseException:
-            if self.conn.in_transaction:
+            if self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -1235,6 +1476,54 @@ class Store:
                 "UPDATE memories SET pinned_at=0.0 "
                 "WHERE pinned=1 AND pinned_at IS NULL"
             )
+        if previous_version < 10:
+            # v9 and earlier compounded the already-grown stability by a larger
+            # multiplier on every reinforcement. Repair unsafe values and establish
+            # the same finite domain used by live scoring and sync.
+            self.conn.execute(
+                "UPDATE memories SET stability=CASE "
+                "WHEN stability IS NULL OR typeof(stability) NOT IN ('integer','real') "
+                "OR stability<=0 THEN ? "
+                "WHEN stability<? THEN ? "
+                "WHEN stability>? THEN ? "
+                "ELSE stability END, "
+                "access_count=CASE "
+                "WHEN access_count IS NULL OR typeof(access_count)!='integer' "
+                "OR access_count<0 THEN 0 "
+                "WHEN access_count>? THEN ? "
+                "ELSE access_count END",
+                (
+                    DEFAULT_STABILITY_DAYS,
+                    MIN_STABILITY_DAYS, MIN_STABILITY_DAYS,
+                    MAX_STABILITY_DAYS, MAX_STABILITY_DAYS,
+                    MAX_ACCESS_COUNT, MAX_ACCESS_COUNT,
+                ),
+            )
+        if previous_version < 11:
+            # v10 made prompt approval and backend version markers authoritative but
+            # did not classify rows written under the preceding contracts. Preserve
+            # explicit legacy trust, recover the exact local-agent downgrade emitted
+            # by the pre-1.4.5 service gate, and force one verified vector rebuild.
+            self._migrate_prompt_review_state_v11()
+            if self.conn.execute(
+                "SELECT 1 FROM mem_vectors LIMIT 1"
+            ).fetchone() is not None:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO embedding_state(identity, version, updated_at) "
+                    "VALUES (?,?,?)",
+                    ("__active__", "legacy-unverified", now_ts()),
+                )
+            self.conn.execute(
+                "DELETE FROM embedding_state WHERE identity='__rebuilding__'"
+            )
+        # Schema 11 was still pre-release when model-derived consolidation stopped
+        # inheriting source approval. Databases already opened by an earlier v11 build
+        # have no version transition left to trigger the backfill, so use one durable
+        # transactional marker to repair them exactly once. Pre-v11 upgrades were fully
+        # classified above and only need the marker written.
+        self._ensure_llm_consolidation_trust_repair_v11(
+            scan_legacy=previous_version >= 11,
+        )
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -1342,6 +1631,209 @@ class Store:
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),
+        )
+
+    def _migrate_prompt_review_state_v11(self) -> None:
+        """Classify memories created before explicit prompt review existed.
+
+        A trusted deterministic row was prompt-visible under the old contract, so adding
+        the equivalent approval stamp preserves upgrade behavior rather than granting a
+        new capability. Model-authored consolidation is the exception: valid source IDs
+        prove lineage, not entailment, so those rows become reviewable pending records and
+        any materialized graph derivatives are retired. The second approved shape is the
+        exact local-agent downgrade emitted by the short-lived service gate before local
+        agent writes were restored. Everything else is labelled pending and remains
+        outside prompt context.
+        """
+        rows = self.conn.execute(
+            "SELECT id, content, metadata, provenance FROM memories ORDER BY id"
+        ).fetchall()
+        counts = {"approved": 0, "agent_recovered": 0, "pending": 0,
+                  "llm_pending": 0}
+        for row in rows:
+            metadata = _loads(row["metadata"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            dedicated = _loads(row["provenance"], {})
+            dedicated = dedicated if isinstance(dedicated, dict) else {}
+            nested = metadata.get("provenance")
+            nested = dict(nested) if isinstance(nested, dict) else {}
+            dedicated_restrictive = bool(
+                dedicated.get("trusted") is False
+                or (
+                    "review_state" in dedicated
+                    and dedicated.get("review_state") != REVIEW_APPROVED
+                )
+                or dedicated.get("quarantined") is True
+            )
+            nested_restrictive = bool(
+                nested.get("trusted") is False
+                or (
+                    "review_state" in nested
+                    and nested.get("review_state") != REVIEW_APPROVED
+                )
+                or nested.get("quarantined") is True
+            )
+            # Contradictory legacy envelopes resolve to the stricter assertion so
+            # migration cannot turn a nested distrust marker into prompt approval.
+            provenance = _merge_provenance_envelopes(dedicated, nested)
+            review_state = str(provenance.get("review_state") or "").strip().casefold()
+            quarantine = metadata.get("quarantine")
+            quarantined = bool(
+                provenance.get("quarantined") is True
+                or isinstance(quarantine, dict)
+                and quarantine.get("state") == "quarantined"
+            )
+            legacy_agent_gate = bool(
+                review_state == "pending"
+                and provenance.get("trusted") is False
+                and str(provenance.get("source") or "").strip().casefold()
+                in {"agent", "intent_api"}
+                and provenance.get("trust_origin") == "service_review_gate"
+                and provenance.get("trust_downgraded") is True
+            )
+            legacy_llm_kind = llm_consolidation_kind(provenance, row["content"])
+            basis = ""
+            if legacy_llm_kind is not None:
+                # A valid source ID establishes lineage, not entailment.  Historical
+                # structured facts and optional prose summaries were model-authored but
+                # predated that explicit marker, so never auto-approve them during the
+                # review-state upgrade.  Retire graph/code derivatives while preserving
+                # the source links an owner needs for governed review.
+                provenance, metadata, _ = pending_llm_consolidation_envelope(
+                    provenance, metadata, row["content"],
+                )
+                self.retire_memory_graph_state(
+                    row["id"],
+                    preserve_link_relations=("consolidates", "profiles"),
+                    commit=False,
+                )
+                provenance["derived_graph_inert"] = True
+                review_state = REVIEW_PENDING
+                basis = "legacy_llm_consolidation"
+                counts["pending"] += 1
+                counts["llm_pending"] += 1
+            elif not quarantined and nested_restrictive and not dedicated_restrictive:
+                # A nested distrust marker is a stricter legacy assertion than
+                # a contradictory dedicated approval; never recover it implicitly.
+                provenance["trusted"] = False
+                review_state = REVIEW_PENDING
+                basis = "legacy_unreviewed"
+                counts["pending"] += 1
+            elif not quarantined and not review_state and provenance.get("trusted") is True:
+                review_state = "approved"
+                basis = "legacy_explicit_trust"
+                counts["approved"] += 1
+            elif not quarantined and legacy_agent_gate:
+                provenance["trusted"] = True
+                review_state = "approved"
+                basis = "legacy_local_agent_gate"
+                counts["approved"] += 1
+                counts["agent_recovered"] += 1
+                provenance["trust_origin"] = "legacy_local_agent_upgrade"
+                provenance["trust_recovered"] = True
+            elif not review_state:
+                provenance["trusted"] = False
+                review_state = "pending"
+                basis = "legacy_unreviewed"
+                counts["pending"] += 1
+                provenance.setdefault("trust_origin", "legacy_review_upgrade")
+            else:
+                continue
+
+            provenance["review_state"] = review_state
+            provenance["review_basis"] = basis
+            provenance["review_policy_version"] = 11
+            metadata["provenance"] = dict(provenance)
+            self.conn.execute(
+                "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+                (_dumps(provenance), _dumps(metadata), row["id"]),
+            )
+            self.audit(
+                "schema_migration",
+                "prompt_review_backfill",
+                row["id"],
+                f"schema=11; state={review_state}; basis={basis}",
+                commit=False,
+            )
+        if rows:
+            self.audit(
+                "schema_migration",
+                "prompt_review_backfill_summary",
+                "schema_v11",
+                "approved=%d; agent_recovered=%d; pending=%d; llm_pending=%d"
+                % (counts["approved"], counts["agent_recovered"], counts["pending"],
+                   counts["llm_pending"]),
+                commit=False,
+            )
+
+    def _ensure_llm_consolidation_trust_repair_v11(
+        self, *, scan_legacy: bool,
+    ) -> None:
+        """Repair same-schema v11 LLM output once, then atomically mark completion.
+
+        The outer ``init_schema`` transaction owns both graph retirement and this local
+        state marker. Any exception therefore rolls back the entire scan and leaves no
+        marker, so the next open retries from a coherent pre-repair state. New databases
+        and pre-v11 upgrades already ran the full review-state migration and only write
+        the marker; an older v11 database performs the compatibility scan first.
+        """
+        marker = self.conn.execute(
+            "SELECT value FROM sync_state WHERE key=?",
+            (_LLM_CONSOLIDATION_REPAIR_STATE_KEY,),
+        ).fetchone()
+        if (
+            marker is not None
+            and marker["value"] == _LLM_CONSOLIDATION_REPAIR_STATE_VALUE
+        ):
+            return
+
+        if scan_legacy:
+            rows = self.conn.execute(
+                "SELECT id, content, metadata, provenance FROM memories ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                metadata = _loads(row["metadata"], {})
+                metadata = metadata if isinstance(metadata, dict) else {}
+                dedicated = _loads(row["provenance"], {})
+                dedicated = dedicated if isinstance(dedicated, dict) else {}
+                nested = metadata.get("provenance")
+                nested = dict(nested) if isinstance(nested, dict) else {}
+                provenance = _merge_provenance_envelopes(dedicated, nested)
+                kind = llm_consolidation_kind(provenance, row["content"])
+                if kind is None:
+                    continue
+
+                provenance, metadata, _ = pending_llm_consolidation_envelope(
+                    provenance, metadata, row["content"],
+                )
+                self.retire_memory_graph_state(
+                    row["id"],
+                    preserve_link_relations=("consolidates", "profiles"),
+                    commit=False,
+                )
+                provenance["derived_graph_inert"] = True
+                provenance["review_basis"] = "legacy_llm_consolidation"
+                provenance["review_policy_version"] = 11
+                metadata["provenance"] = dict(provenance)
+                self.conn.execute(
+                    "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+                    (_dumps(provenance), _dumps(metadata), row["id"]),
+                )
+                self.audit(
+                    "schema_migration",
+                    "llm_consolidation_trust_repair",
+                    row["id"],
+                    f"schema=11; state={REVIEW_PENDING}; kind={kind}",
+                    commit=False,
+                )
+
+        # ``sync_state`` is local-only bookkeeping and never enters user audit or sync
+        # bundles. This completion marker must remain the final repair write; deferring
+        # its commit to ``init_schema`` keeps it atomic with every graph/provenance edit.
+        self.set_sync_state(
+            _LLM_CONSOLIDATION_REPAIR_STATE_KEY,
+            _LLM_CONSOLIDATION_REPAIR_STATE_VALUE,
+            commit=False,
         )
 
     def _migrate_code_history_v5(self) -> None:
@@ -1695,7 +2187,8 @@ class Store:
             )
             for candidate in candidates:
                 other = dict(candidate)
-                pair = tuple(sorted((str(row["id"]), str(other["id"]))))
+                row_id, other_id = str(row["id"]), str(other["id"])
+                pair = (row_id, other_id) if row_id <= other_id else (other_id, row_id)
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
@@ -1911,7 +2404,23 @@ class Store:
         return int(row["v"]) if row and row["v"] is not None else 0
 
     def close(self) -> None:
-        self.conn.close()
+        with self._close_lock:
+            finalizer = getattr(self, "_connection_finalizer", None)
+            if finalizer is None:
+                self.conn.close()
+                return
+            if not finalizer.alive:
+                return
+            # Explicit shutdown retains the historical error contract. Detach only after
+            # close succeeds so a failed close still gets one best-effort finalizer attempt.
+            self.conn.close()
+            finalizer.detach()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     # ── tenancy ───────────────────────────────────────────────────────────────
     def _authorize_workspace(self, name: str) -> str:
@@ -2165,18 +2674,35 @@ class Store:
         # explicitly so prompt-facing recall can fail closed for genuinely legacy
         # rows without making current low-level integrations silently disappear.
         # External ingress (service/sync) provides its own stricter provenance.
-        provenance = dict(rec.provenance or {})
+        metadata = dict(rec.metadata or {})
+        nested_provenance = metadata.get("provenance")
+        dedicated = dict(rec.provenance or {})
+        nested = (
+            dict(nested_provenance)
+            if isinstance(nested_provenance, dict) else {}
+        )
+        # Contradictory trust envelopes resolve to the stricter assertion. This
+        # preserves fail-closed behavior for direct/sync callers while serializing one
+        # canonical value into both storage locations for all subsequent reads.
+        provenance = _merge_provenance_envelopes(dedicated, nested)
         if "trusted" not in provenance:
             provenance.update({"source": provenance.get("source", "local_store"),
                                "trusted": True,
                                "trust_origin": provenance.get(
                                    "trust_origin", "local_store"
                                )})
+        if provenance.get("trusted") is True:
+            provenance.setdefault("review_state", REVIEW_APPROVED)
+        else:
+            provenance.setdefault("review_state", REVIEW_PENDING)
         rec.provenance = provenance
-        metadata = dict(rec.metadata or {})
-        if not isinstance(metadata.get("provenance"), dict):
-            metadata["provenance"] = dict(provenance)
+        metadata["provenance"] = dict(provenance)
         rec.metadata = metadata
+        # Canonicalize retention state at the common persistence boundary. Direct
+        # Store writes and sync imports must serialize identically or replicas can
+        # diverge after an oversized/invalid value makes a round trip.
+        rec.stability = effective_stability(rec.stability)
+        rec.access_count = effective_access_count(rec.access_count)
         if not rec.id:
             rec.id = ids.new_id("memory")
         existing = self.conn.execute(
@@ -2253,7 +2779,9 @@ class Store:
             # vector mirror (L2-normalized for cosine-as-dot)
             if rec.embedding is not None:
                 self.put_vector(
-                    rec.id, rec.embedding, model=str(rec.metadata.get("embed_model", ""))
+                    rec.id,
+                    rec.embedding,
+                    model=str(rec.metadata.get("embed_model", "")),
                 )
         except BaseException:
             if commit:
@@ -2335,6 +2863,53 @@ class Store:
             sql += " WHERE " + " AND ".join(where)
         row = self.conn.execute(sql, params).fetchone()
         return int(row["count"] if row is not None else 0)
+
+    def prompt_eligibility_counts(
+        self, flt: Optional[SearchFilter] = None, *, include_invalid: bool = False
+    ) -> dict[str, int]:
+        """Return content-free review diagnostics for one recall scope."""
+        from engraphis.core.poisoning import inspection_eligible, prompt_eligible
+
+        sql = "SELECT provenance, metadata FROM memories"
+        where, params = self._where(flt, include_invalid)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        counts = {
+            "total": 0,
+            "prompt_eligible": 0,
+            "pending": 0,
+            "quarantined": 0,
+            "legacy_trusted_unreviewed": 0,
+            "legacy_local_agent_gate": 0,
+        }
+        for row in self.conn.execute(sql, params):
+            provenance = _loads(row["provenance"], {})
+            metadata = _loads(row["metadata"], {})
+            provenance = provenance if isinstance(provenance, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            counts["total"] += 1
+            if prompt_eligible(provenance, metadata):
+                counts["prompt_eligible"] += 1
+                continue
+            if not inspection_eligible(provenance, metadata):
+                counts["quarantined"] += 1
+                continue
+            if (
+                provenance.get("source") in {"agent", "intent_api"}
+                and provenance.get("trusted") is False
+                and provenance.get("review_state") == REVIEW_PENDING
+                and provenance.get("trust_origin") == "service_review_gate"
+                and provenance.get("trust_downgraded") is True
+            ):
+                counts["legacy_local_agent_gate"] += 1
+            elif (
+                provenance.get("trusted") is True
+                and "review_state" not in provenance
+            ):
+                counts["legacy_trusted_unreviewed"] += 1
+            else:
+                counts["pending"] += 1
+        return counts
 
     def list_proactive_overrides(self, flt: Optional[SearchFilter] = None,
                                  *, prompt_only: bool = False) -> list[MemoryRecord]:
@@ -2437,10 +3012,20 @@ class Store:
 
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
-                       actor: str = "system", reason: str = "contradicted") -> None:
+                       actor: str = "system", reason: str = "contradicted",
+                       commit: bool = True) -> None:
         """Bi-temporal invalidation (§8.3): shorten a fact's validity without deleting."""
         recorded_at = now_ts()
         at = at if at is not None else recorded_at
+        row = self.conn.execute(
+            "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        if (
+            row is not None
+            and row["valid_from"] is not None
+            and at < row["valid_from"]
+        ):
+            raise ValueError("valid_to cannot predate valid_from")
         updated = self.conn.execute(
             "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
             "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
@@ -2453,7 +3038,8 @@ class Store:
         # repeated request keeps its own audit evidence while avoiding a second edge
         # invalidation or widening a closed interval.
         self.audit(actor, "invalidate", memory_id, reason, commit=False)
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def set_pinned(self, memory_id: str, pinned: bool) -> None:
         """Pinned memories are exempt from automatic decay/pruning (AGENTS.md §3.2);
@@ -2492,18 +3078,34 @@ class Store:
         ).fetchone()
         if not row:
             return
-        n = row["access_count"] + 1
-        new_stab = row["stability"] * (1 + alpha * np.log(1 + n)) + boost
+        new_stab, new_count = reinforced_stability(
+            row["stability"], row["access_count"], alpha=alpha, boost=boost,
+        )
         self.conn.execute(
             "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
-            (float(new_stab), n, now_ts(), memory_id),
+            (new_stab, new_count, now_ts(), memory_id),
         )
         self.conn.commit()
 
     # ── vectors ───────────────────────────────────────────────────────────────
     def put_vector(self, memory_id: str, vec: np.ndarray, *, model: str = "") -> None:
-        v = np.asarray(vec, dtype=np.float32)
-        norm = float(np.linalg.norm(v))
+        model = str(model or "")
+        active = self.active_embedding_space()
+        rebuilding = self.embedding_rebuild_target()
+        expected = rebuilding or active
+        if expected and model != expected:
+            raise RuntimeError(
+                "vector model does not match the active embedding-space contract"
+            )
+        try:
+            v = np.asarray(vec, dtype=np.float32)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("vector must be a finite, non-empty 1-D array") from exc
+        if v.ndim != 1 or v.size == 0 or not np.isfinite(v).all():
+            raise ValueError("vector must be a finite, non-empty 1-D array")
+        # Compute in float64 so large finite float32 inputs cannot overflow the
+        # norm and silently turn into an all-zero vector during normalization.
+        norm = float(np.linalg.norm(v.astype(np.float64, copy=False)))
         if norm > 0:
             v = v / norm
         self.conn.execute(
@@ -2538,6 +3140,105 @@ class Store:
             "SELECT version FROM embedding_state WHERE identity=?", (identity,)
         ).fetchone()
         return str(row["version"]) if row is not None else None
+
+    def active_embedding_space(self) -> Optional[str]:
+        """Return the one vector-space fingerprint represented by stored vectors."""
+        return self.embedding_version("__active__")
+
+    def embedding_rebuild_target(self) -> Optional[str]:
+        """Return the target fingerprint while a rebuild is incomplete."""
+        return self.embedding_version("__rebuilding__")
+
+    def embedding_space_ready(self, fingerprint: str) -> bool:
+        """Whether every stored vector is safe for queries from fingerprint."""
+        if not (
+            fingerprint
+            and self.embedding_rebuild_target() is None
+            and self.active_embedding_space() == fingerprint
+        ):
+            return False
+        # Three indexed existence probes avoid a full vector-table scan while
+        # detecting null, older, or newer model fingerprints. This catches manual
+        # repairs and interrupted pre-v11 tooling even when the active marker itself
+        # was incorrectly stamped current.
+        for predicate, params in (
+            ("model IS NULL", ()),
+            ("model < ?", (fingerprint,)),
+            ("model > ?", (fingerprint,)),
+        ):
+            if self.conn.execute(
+                f"SELECT 1 FROM mem_vectors WHERE {predicate} LIMIT 1", params
+            ).fetchone() is not None:
+                return False
+        return True
+
+    def begin_embedding_rebuild(self, fingerprint: str) -> None:
+        """Durably disable vector recall before the first replacement batch."""
+        if not fingerprint:
+            raise ValueError("embedding fingerprint is required")
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            ("__rebuilding__", fingerprint, now_ts()),
+        )
+        self.conn.commit()
+
+    def finish_embedding_rebuild(
+        self, fingerprint: str, *, identity: str, version: str
+    ) -> None:
+        """Atomically publish a complete vector space and clear its rebuild gate."""
+        if not fingerprint or not identity or not version:
+            raise ValueError("complete embedding identity is required")
+        if self.embedding_rebuild_target() != fingerprint:
+            raise RuntimeError("embedding rebuild target changed before publication")
+        stamp = now_ts()
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            ("__active__", fingerprint, stamp),
+        )
+        # Retain the backend row as operator-facing history. Recall never uses it as
+        # authority, which prevents an A -> B -> A switch from accepting stale A vectors.
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            (identity, version, stamp),
+        )
+        self.conn.execute(
+            "DELETE FROM embedding_state WHERE identity='__rebuilding__'"
+        )
+        self.conn.commit()
+
+    def embedding_space_health(self, configured_fingerprint: str) -> dict[str, Any]:
+        """Return content-free vector coverage and rebuild diagnostics."""
+        total_row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM mem_vectors"
+        ).fetchone()
+        total = 0
+        if total_row is not None:
+            total = int(total_row["n"])
+        current = 0
+        if configured_fingerprint:
+            current_row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM mem_vectors WHERE model=?",
+                (configured_fingerprint,),
+            ).fetchone()
+            if current_row is not None:
+                current = int(current_row["n"])
+        active = self.active_embedding_space() or ""
+        rebuilding = self.embedding_rebuild_target() or ""
+        return {
+            "configured": configured_fingerprint,
+            "active": active,
+            "rebuilding": rebuilding,
+            "ready": self.embedding_space_ready(configured_fingerprint),
+            "vectors": total,
+            "current_vectors": current,
+            "stale_vectors": max(0, total - current),
+        }
 
     def set_embedding_version(self, identity: str, version: str) -> None:
         self.conn.execute(
@@ -2578,6 +3279,36 @@ class Store:
             if len(rows) < VECTOR_SCAN_BATCH:
                 return
             cursor_id = rows[-1]["id"]
+
+    def vector_matrix(self, flt: Optional[SearchFilter] = None,
+                      *, include_invalid: bool = False, dim: int) -> tuple[list[str], np.ndarray]:
+        """Materialize one filtered, fixed-width vector matrix for an exact scan.
+
+        NumpyVectorIndex needs every candidate at once for its exact dot-product
+        search. Fetching that set in one locked statement avoids repeated joins and
+        avoids constructing one NumPy view per vector before vstack copies them.
+        The store remains the source of truth: this is deliberately a read-through
+        helper, not an index cache. The blob-length predicate retains iter_vectors'
+        behaviour of ignoring malformed legacy rows whose stored dimension does not
+        match their actual payload.
+        """
+        if dim < 1:
+            raise ValueError("vector matrix dimension must be a positive integer")
+        where, params = self._where(flt, include_invalid, alias="m")
+        where.extend(("v.dim=?", "length(v.vector)=?"))
+        params.extend((int(dim), int(dim) * np.dtype(np.float32).itemsize))
+        sql = (
+            "SELECT v.id AS id, v.vector AS vector FROM mem_vectors v "
+            "JOIN memories m ON m.id = v.id WHERE "
+            + " AND ".join(where)
+            + " ORDER BY v.id"
+        )
+        rows = self.conn.fetchall(sql, params)
+        if not rows:
+            return [], np.empty((0, dim), dtype=np.float32)
+        ids = [str(row["id"]) for row in rows]
+        payload = b"".join(row["vector"] for row in rows)
+        return ids, np.frombuffer(payload, dtype=np.float32).reshape(len(ids), dim)
 
     # ── full text ─────────────────────────────────────────────────────────────
     def _fts_upsert(self, mid: str, title: str, content: str, keywords: str) -> None:
@@ -2807,7 +3538,7 @@ class Store:
         """Irreversibly erase one memory plus local index copies and known backups.
 
         This is a breach-remediation operation, not the normal ``retire`` lifecycle.
-        It clears current SQLite rows, FTS/vector/ANN derivatives, related graph/link
+        It clears current SQLite rows, FTS/vector-index derivatives, related graph/link
         state, audit details for that record, WAL contents when SQLite can checkpoint,
         and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
         peers, and a process that already read the secret cannot be recalled or erased.
@@ -2911,8 +3642,11 @@ class Store:
             query_params: list[Any] = []
             for term in search_terms:
                 like = f"%{_escape_like(term)}%"
-                clauses.append("(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')")
-                query_params.extend((like, like))
+                clauses.append(
+                    "(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\' "
+                    "OR f.keywords LIKE ? ESCAPE '\\')"
+                )
+                query_params.extend((like, like, like))
             if not clauses or limit <= 0:
                 return []
             exclusions = ""
@@ -3299,6 +4033,9 @@ class Store:
 
     def _upsert_edge_impl(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")
+        edge_valid_from = edge.valid_from if edge.valid_from is not None else now_ts()
+        if edge.valid_to is not None and edge.valid_to < edge_valid_from:
+            raise ValueError("edge valid_to cannot predate valid_from")
         layer = normalize_graph_layer(edge.layer, edge.relation).value
         source, target = edge.src, edge.dst
         if edge.relation in {"co_occurs", "related", "associated_with"} and target < source:
@@ -3450,7 +4187,7 @@ class Store:
             "ingested_at=excluded.ingested_at, expired_at=excluded.expired_at, "
             "provenance=excluded.provenance",
             (eid, edge.workspace_id, edge.repo_id, source, target, edge.relation, layer,
-             edge.weight, edge.valid_from if edge.valid_from is not None else now_ts(),
+             edge.weight, edge_valid_from,
              edge.valid_to, edge.valid_to_recorded_at,
              edge.ingested_at if edge.ingested_at is not None else now_ts(),
              edge.expired_at,
@@ -3469,6 +4206,19 @@ class Store:
     def invalidate_edge(self, edge_id: str, at: Optional[float] = None) -> None:
         recorded_at = now_ts()
         ts = recorded_at if at is None else at
+        row = self.conn.execute(
+            "SELECT valid_from FROM edges WHERE id=?", (edge_id,)
+        ).fetchone()
+        if (
+            row is not None
+            and row["valid_from"] is not None
+            and ts < row["valid_from"]
+        ):
+            # A caller may supply an old world-time anchor for an edge whose
+            # implicit start was recorded at ingestion.  Clamp the close time to
+            # the recorded start so the interval remains valid without allowing
+            # an inverted temporal row.
+            ts = row["valid_from"]
         self.conn.execute(
             "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
             "WHERE id=? AND valid_to IS NULL",
@@ -3494,6 +4244,8 @@ class Store:
         timestamp = now_ts()
         support_valid_from = valid_from if valid_from is not None else timestamp
         support_ingested_at = ingested_at if ingested_at is not None else timestamp
+        if valid_to is not None and valid_to < support_valid_from:
+            raise ValueError("edge support valid_to cannot predate valid_from")
         for memory_id in _provenance_memory_ids(provenance):
             if valid_to is None and expired_at is None:
                 current = self.conn.execute(
@@ -3706,14 +4458,22 @@ class Store:
         if commit:
             self.conn.commit()
 
-    def retire_memory_graph_state(self, memory_id: str, *, at: Optional[float] = None,
-                                  commit: bool = True) -> None:
+    def retire_memory_graph_state(
+        self,
+        memory_id: str,
+        *,
+        at: Optional[float] = None,
+        preserve_link_relations: Iterable[str] = (),
+        commit: bool = True,
+    ) -> None:
         """Close live graph derivatives of one memory without deleting their history.
 
         A trust downgrade can leave the memory itself valid for inspection while making
         its previously trusted graph evidence unsafe to traverse. Retire every current
         support, incidence, and memory/code link at one scan-time boundary so historical
         reads remain explainable but current graph recall cannot route through it.
+        ``preserve_link_relations`` keeps explicitly named audit/lineage relations live
+        while retiring associative links such as automatic evolution bridges.
         """
         recorded_at = now_ts()
         ts = at if at is not None else recorded_at
@@ -3723,11 +4483,19 @@ class Store:
             "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
             (ts, recorded_at, memory_id),
         )
-        self.conn.execute(
+        preserved = tuple(dict.fromkeys(
+            str(relation) for relation in preserve_link_relations if str(relation)
+        ))
+        link_sql = (
             "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
-            "WHERE (a=? OR b=?) AND valid_to IS NULL AND expired_at IS NULL",
-            (ts, recorded_at, memory_id, memory_id),
+            "WHERE (a=? OR b=?) AND valid_to IS NULL AND expired_at IS NULL"
         )
+        link_params: tuple[Any, ...] = (ts, recorded_at, memory_id, memory_id)
+        if preserved:
+            marks = ",".join("?" for _ in preserved)
+            link_sql += f" AND relation NOT IN ({marks})"
+            link_params = (*link_params, *preserved)
+        self.conn.execute(link_sql, link_params)
         self.conn.execute(
             "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
             "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
@@ -3819,11 +4587,17 @@ class Store:
         """Idempotent per (pair, relation): re-linking the same two memories with the
         same relation is a no-op in either direction, so auto-evolution and explicit
         ``engraphis_link`` calls can't accrete duplicate rows."""
+        reject_secrets((("link reason", reason),))
         requested_layer = (
             normalize_graph_layer(layer, relation).value
             if layer is not None else None
         )
         graph_layer = requested_layer or normalize_graph_layer(None, relation).value
+        stamp = now_ts()
+        world_start = stamp if valid_from is None else valid_from
+        system_start = stamp if ingested_at is None else ingested_at
+        if valid_to is not None and valid_to < world_start:
+            raise ValueError("link valid_to cannot predate valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -3901,9 +4675,6 @@ class Store:
                     # for ``commit=False``; the old no-op path never opened a transaction.
                     self.conn.commit()
                 return
-            stamp = now_ts()
-            world_start = stamp if valid_from is None else valid_from
-            system_start = stamp if ingested_at is None else ingested_at
             self.conn.execute(
                 "INSERT INTO mem_links("
                 "a, b, relation, layer, reason, created_at, valid_from, valid_to, "
@@ -3935,10 +4706,13 @@ class Store:
         for a convergent historical graph. This method appends that exact observation and
         returns whether it was new, while replaying the same version remains a no-op.
         """
+        reject_secrets((("link reason", reason),))
         graph_layer = normalize_graph_layer(layer, relation).value
         stamp = now_ts()
         world_start = stamp if valid_from is None else valid_from
         system_start = stamp if ingested_at is None else ingested_at
+        if valid_to is not None and valid_to < world_start:
+            raise ValueError("link valid_to cannot predate valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -4250,6 +5024,8 @@ class Store:
             )) if edges else set()
             memories = self.get_memories(sorted(source_ids))
             for edge in edges:
+                if not _edge_is_prompt_eligible(edge.provenance):
+                    continue
                 sources = _provenance_memory_ids(edge.provenance)
                 if sources and not all(
                     (memory := memories.get(memory_id))
@@ -5014,10 +5790,10 @@ class Store:
             # The Python lock serializes threads sharing this Store. BEGIN IMMEDIATE also
             # serializes separate Store/process connections before predecessor selection,
             # preventing two Team workers from forking the same workspace chain.
-            transaction_started = False
+            transaction_started = not self.conn.transaction_owned_by_current_thread()
             try:
-                self.conn.execute("BEGIN IMMEDIATE")
-                transaction_started = True
+                if transaction_started:
+                    self.conn.execute("BEGIN IMMEDIATE")
                 ts = now_ts()
                 receipt_id = ids.new_id("receipt")
                 scope_digest = _receipt_scope_digest(workspace_id, repo_id)
@@ -5137,7 +5913,8 @@ class Store:
                     "updated_at=excluded.updated_at",
                     (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
                 )
-                self.conn.commit()
+                if transaction_started:
+                    self.conn.commit()
                 return {**payload_obj, "hash": receipt_hash}
             except Exception:
                 if transaction_started:
@@ -5154,7 +5931,15 @@ class Store:
         ).fetchall()
         return [_public_receipt_row(dict(row)) for row in rows]
 
-    def context_savings(self, *, workspace_id: str, repo_id: Optional[str] = None) -> dict:
+    def context_savings(
+        self,
+        *,
+        workspace_id: str,
+        repo_id: Optional[str] = None,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+        release_version: Optional[str] = None,
+    ) -> dict:
         """Aggregate validated, content-free context usage from scoped receipts.
 
         Token counts are kept separate by counter identity: a tokenizer change must not turn
@@ -5163,24 +5948,53 @@ class Store:
         workspace-wide receipt-chain validity is returned alongside any repo-scoped aggregate
         so callers can distinguish useful local accounting from evidence eligible for audit.
         """
+        if from_ts is not None and not math.isfinite(float(from_ts)):
+            raise ValueError("from_ts must be finite")
+        if to_ts is not None and not math.isfinite(float(to_ts)):
+            raise ValueError("to_ts must be finite")
+        if from_ts is not None and to_ts is not None and from_ts > to_ts:
+            raise ValueError("from_ts must be less than or equal to to_ts")
+        if release_version is not None:
+            normalized_release = normalize_release_version(release_version)
+            if not normalized_release:
+                raise ValueError("release_version must be a semantic version")
+            release_version = normalized_release
         verification = self.verify_receipts(workspace_id=workspace_id)
         where = "workspace_id=?"
-        params: list[str] = [workspace_id]
+        params: list[Any] = [workspace_id]
         if repo_id is not None:
             where += " AND repo_id=?"
             params.append(repo_id)
+        if from_ts is not None:
+            where += " AND ts>=?"
+            params.append(float(from_ts))
+        if to_ts is not None:
+            where += " AND ts<?"
+            params.append(float(to_ts))
         rows = self.conn.execute(
-            "SELECT id, repo_id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
+            "SELECT id, repo_id, ts, payload, prev_hash, receipt_hash "
+            "FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
         totals = {
-            "receipt_count": len(rows),
+            "receipt_count": 0,
             "usage_receipt_count": 0,
             "savings_receipt_count": 0,
             "invalid_receipt_count": 0,
             "incomplete_usage_receipt_count": 0,
         }
         buckets: dict[str, dict] = {}
+        estimate_totals = {
+            "eligible_receipt_count": 0,
+            "excluded_receipt_count": 0,
+            "unclassified_receipt_count": 0,
+            "invalid_estimate_count": 0,
+            "baseline_tokens": 0,
+            "emitted_tokens": 0,
+            "saved_tokens": 0,
+            "_bases": {},
+            "_counters": {},
+        }
 
         def bucket(counter: str) -> dict:
             return buckets.setdefault(counter, {
@@ -5195,14 +6009,21 @@ class Store:
                 "_operations": {},
             })
 
+        def nonnegative_builtin_number(value: object) -> Optional[int | float]:
+            # Metadata is untrusted persisted JSON. Use exact built-in numeric
+            # types to preserve the receipt format's existing contract.
+            if type(value) is int or type(value) is float:
+                return value if value >= 0 else None
+            return None
+
         def add(target: dict, usage: dict, operation: str) -> None:
             target["receipt_count"] += 1
             for key in (
                 "source_tokens", "context_tokens", "saved_tokens", "budget_tokens",
                 "packed_count", "omitted_count",
             ):
-                value = usage.get(key)
-                if type(value) in (int, float) and value >= 0:
+                value = nonnegative_builtin_number(usage.get(key))
+                if value is not None:
                     target[key] += value
             operation_totals = target["_operations"].setdefault(operation, {
                 "operation": operation,
@@ -5219,8 +6040,8 @@ class Store:
                 "source_tokens", "context_tokens", "saved_tokens", "budget_tokens",
                 "packed_count", "omitted_count",
             ):
-                value = usage.get(key)
-                if type(value) in (int, float) and value >= 0:
+                value = nonnegative_builtin_number(usage.get(key))
+                if value is not None:
                     operation_totals[key] += value
 
         def finished(target: dict) -> dict:
@@ -5238,6 +6059,99 @@ class Store:
             ]
             return target
 
+        def estimate_bucket(container: dict, key: str, confidence: str) -> dict:
+            return container.setdefault(key, {
+                "basis": key,
+                "confidence": confidence,
+                "receipt_count": 0,
+                "baseline_tokens": 0,
+                "emitted_tokens": 0,
+                "saved_tokens": 0,
+            })
+
+        def add_estimate(usage: dict) -> None:
+            required = (
+                "baseline_tokens", "emitted_tokens", "estimated_saved_tokens",
+                "estimated_savings_ratio", "savings_basis", "savings_confidence",
+                "savings_eligible",
+            )
+            if not all(key in usage for key in required):
+                estimate_totals["unclassified_receipt_count"] += 1
+                return
+            numeric = (
+                "baseline_tokens", "emitted_tokens", "estimated_saved_tokens",
+                "estimated_savings_ratio",
+            )
+            if any(
+                type(usage.get(key)) not in (int, float)
+                or not math.isfinite(float(usage[key]))
+                or usage[key] < 0
+                for key in numeric
+            ):
+                estimate_totals["invalid_estimate_count"] += 1
+                return
+            if type(usage.get("savings_eligible")) is not bool:
+                estimate_totals["invalid_estimate_count"] += 1
+                return
+            basis = usage.get("savings_basis")
+            confidence = usage.get("savings_confidence")
+            if not isinstance(basis, str) or not isinstance(confidence, str):
+                estimate_totals["invalid_estimate_count"] += 1
+                return
+            if (
+                basis not in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_basis"]
+                or confidence not in _PUBLIC_RECEIPT_LABELS_BY_KEY["savings_confidence"]
+            ):
+                estimate_totals["invalid_estimate_count"] += 1
+                return
+            baseline = int(usage["baseline_tokens"])
+            emitted = int(usage["emitted_tokens"])
+            saved = int(usage["estimated_saved_tokens"])
+            expected_saved = max(0, baseline - emitted) if usage["savings_eligible"] else 0
+            expected_ratio = expected_saved / baseline if baseline else 0.0
+            if (
+                saved != expected_saved
+                or saved > baseline
+                or not math.isclose(
+                    float(usage["estimated_savings_ratio"]),
+                    expected_ratio,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                estimate_totals["invalid_estimate_count"] += 1
+                return
+            if not usage["savings_eligible"]:
+                estimate_totals["excluded_receipt_count"] += 1
+                return
+            counter = str(usage.get("token_counter") or "unknown")
+            estimate_totals["eligible_receipt_count"] += 1
+            estimate_totals["baseline_tokens"] += baseline
+            estimate_totals["emitted_tokens"] += emitted
+            estimate_totals["saved_tokens"] += saved
+            basis_bucket = estimate_bucket(estimate_totals["_bases"], basis, confidence)
+            basis_bucket["receipt_count"] += 1
+            basis_bucket["baseline_tokens"] += baseline
+            basis_bucket["emitted_tokens"] += emitted
+            basis_bucket["saved_tokens"] += saved
+            counter_bucket = estimate_bucket(
+                estimate_totals["_counters"], counter, confidence
+            )
+            counter_bucket["receipt_count"] += 1
+            counter_bucket["baseline_tokens"] += baseline
+            counter_bucket["emitted_tokens"] += emitted
+            counter_bucket["saved_tokens"] += saved
+
+        def finish_estimate(target: dict, label: str) -> dict:
+            target = dict(target)
+            key = target.pop("basis")
+            target[label] = key
+            target["savings_ratio"] = (
+                target["saved_tokens"] / target["baseline_tokens"]
+                if target["baseline_tokens"] else 0.0
+            )
+            return target
+
         for raw_row in rows:
             receipt = _public_receipt_row(dict(raw_row))
             if (
@@ -5245,11 +6159,26 @@ class Store:
                 or receipt.get("scope_digest")
                 != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
             ):
-                totals["invalid_receipt_count"] += 1
+                if release_version is None:
+                    totals["receipt_count"] += 1
+                    totals["invalid_receipt_count"] += 1
                 continue
             metadata = receipt.get("metadata")
             usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+            operation = str(receipt["operation"])
+            if release_version is not None and (
+                operation == "smart_gateway"
+                or not isinstance(usage, dict)
+                or usage.get("release_version") != release_version
+            ):
+                continue
+            totals["receipt_count"] += 1
             if not isinstance(usage, dict):
+                continue
+            # Smart gateway telemetry is supplementary to the authoritative classic
+            # handler receipt. Older databases may contain copied token_usage here;
+            # ignore it so those historical rows cannot double-count a delivery.
+            if operation == "smart_gateway":
                 continue
             totals["usage_receipt_count"] += 1
             required = ("source_tokens", "context_tokens", "saved_tokens")
@@ -5273,11 +6202,36 @@ class Store:
                 usage,
                 str(receipt["operation"]),
             )
+            add_estimate(usage)
+        bases = [
+            finish_estimate(value, "basis")
+            for _, value in sorted(estimate_totals["_bases"].items())
+        ]
+        counters = [
+            finish_estimate(value, "token_counter")
+            for _, value in sorted(estimate_totals["_counters"].items())
+        ]
+        estimate_totals.pop("_bases")
+        estimate_totals.pop("_counters")
+        estimate_totals["savings_ratio"] = (
+            estimate_totals["saved_tokens"] / estimate_totals["baseline_tokens"]
+            if estimate_totals["baseline_tokens"] else 0.0
+        )
+        estimate_totals["by_basis"] = bases
+        estimate_totals["by_token_counter"] = counters
+        confidence_values = {row["confidence"] for row in bases}
+        estimate_totals["confidence"] = (
+            next(iter(confidence_values)) if len(confidence_values) == 1
+            else "mixed" if confidence_values else "none"
+        )
         return {
             **totals,
             "receipt_chain_valid": bool(verification["valid"]),
             "receipt_chain_error_count": len(verification["errors"]),
             "by_token_counter": [finished(value) for _, value in sorted(buckets.items())],
+            "period": {"from_ts": from_ts, "to_ts": to_ts},
+            "release_version": release_version,
+            "estimated": estimate_totals,
         }
 
     def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
@@ -5539,14 +6493,20 @@ class Store:
                 if flt.session_id:
                     where.append(f"{p}session_id=?")
                     params.append(flt.session_id)
-            if flt.scopes:
-                marks = ",".join("?" for _ in flt.scopes)
-                where.append(f"{p}scope IN ({marks})")
-                params.extend(_enum(s) for s in flt.scopes)
-            if flt.mtypes:
-                marks = ",".join("?" for _ in flt.mtypes)
-                where.append(f"{p}mtype IN ({marks})")
-                params.extend(_enum(m) for m in flt.mtypes)
+            if flt.scopes is not None:
+                if not flt.scopes:
+                    where.append("0")
+                else:
+                    marks = ",".join("?" for _ in flt.scopes)
+                    where.append(f"{p}scope IN ({marks})")
+                    params.extend(_enum(s) for s in flt.scopes)
+            if flt.mtypes is not None:
+                if not flt.mtypes:
+                    where.append("0")
+                else:
+                    marks = ",".join("?" for _ in flt.mtypes)
+                    where.append(f"{p}mtype IN ({marks})")
+                    params.extend(_enum(m) for m in flt.mtypes)
         if not include_invalid:
             valid_at, known_at = _temporal_anchors(flt)
             where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")

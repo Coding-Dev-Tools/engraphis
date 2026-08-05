@@ -94,6 +94,35 @@ def test_create_rejects_duplicate_name():
         svc.create_workspace("lazy")
 
 
+def test_create_workspace_preserves_a_caller_owned_transaction():
+    svc = _svc()
+    conn = svc.store.conn
+    conn.execute("BEGIN IMMEDIATE")
+
+    created = svc.create_workspace("caller-owned")
+
+    assert created["created"] is True
+    assert conn.in_transaction is True
+    assert conn.transaction_owned_by_current_thread() is True
+    conn.rollback()
+    assert svc._lookup_workspace("caller-owned") is None
+
+
+def test_create_workspace_rolls_back_if_the_audit_write_fails(monkeypatch):
+    svc = _svc()
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(svc.store, "audit", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        svc.create_workspace("atomic-audit")
+
+    assert svc.store.conn.in_transaction is False
+    assert svc._lookup_workspace("atomic-audit") is None
+
+
 def test_create_respects_workspace_binding():
     """A bound instance (ENGRAPHIS_WORKSPACES) must refuse folders outside its allow-list —
     the create path can't become a hole in the isolation boundary every read/write honors."""
