@@ -47,7 +47,7 @@ def local_artifacts(directory: Path) -> dict[str, str]:
 
 
 def pypi_artifacts(version: str) -> dict[str, str]:
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
         raise ArtifactMismatch("release version must be stable semantic version syntax")
     url = "https://pypi.org/pypi/engraphis/%s/json" % quote(version, safe="")
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
