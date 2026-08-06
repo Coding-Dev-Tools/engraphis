@@ -219,12 +219,12 @@ def test_apply_bundle_rejection_continues_round_and_marks_incomplete(tmp_path):
         "links": [], "tombstones": [],
     }
     bad_bundle = {
-        "format": "not-engraphis",  # Wrong format triggers SyncError in apply_bundle
+        "format": "not-engraphis",
         "version": 2,
         "device_id": "remote-bad",
         "workspace_name": "w",
         "repos": {},
-        "memories": [{"id": "mem_bad", "content": "bad payload",
+        "memories": [{"id": "mem_bad", "content": "rejected",
                       "scope": "workspace", "mtype": "semantic",
                       "last_access": 1.0, "ingested_at": 1.0, "valid_from": 1.0}],
         "links": [], "tombstones": [],
