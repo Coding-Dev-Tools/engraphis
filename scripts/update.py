@@ -33,7 +33,7 @@ LATEST_TAG = ""
 # Stable SemVer only. Bounded components prevent an untrusted remote ref containing
 # millions of digits from turning int() conversion into a local denial of service.
 _SEMVER = re.compile(
-    r"^v?((?:0|[1-9]\d{0,8}))\.((?:0|[1-9]\d{0,8}))\.((?:0|[1-9]\d{0,8}))$"
+    r"^v?((?:0|[1-9]\d{0,8}))\.((?:0|[1-9]\d{0,8}))(?:\.((?:0|[1-9]\d{0,8})))?$"
 )
 
 
@@ -365,7 +365,8 @@ def _select_latest_tag(tags) -> str:
         tag = str(raw).strip()
         match = _SEMVER.fullmatch(tag)
         if match:
-            version = tuple(int(part) for part in match.groups())
+            groups = [g for g in match.groups() if g is not None]
+            version = tuple(int(part) for part in groups)
             parsed.append((version, "v" + ".".join(str(part) for part in version)))
     return max(parsed)[1] if parsed else ""
 

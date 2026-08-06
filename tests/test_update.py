@@ -60,7 +60,7 @@ def test_updater_has_no_hard_coded_historical_git_target():
 
 
 @pytest.mark.parametrize("value", [
-    "main", "v1.0", "v1.0.0rc1", "v01.0.0", "--upload-pack=owned", "../v1.0.0",
+    "main", "v1", "v1.0.0rc1", "v01.0.0", "--upload-pack=owned", "../v1.0.0", "v1.0.0.0",
 ])
 def test_requested_version_must_be_a_stable_semver(value):
     with pytest.raises(SystemExit) as exc:
