@@ -106,8 +106,7 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
-CREATE INDEX IF NOT EXISTS idx_mem_team    ON memories(team_id, scope)
-    WHERE team_id IS NOT NULL AND scope='team';
+
 
 -- Persisted memory↔entity incidence lets graph retrieval attach evidence without
 -- rescanning every memory's prose.  Temporal fields preserve historical walks.

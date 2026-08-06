@@ -171,7 +171,7 @@ def main(argv=None) -> int:
         try:
             result = engine.index_repo_incremental(rid, root, paths)
             scanned = result.get("files_scanned", 0)
-            symbols = result.get("symbols_found", 0)
+            symbols = result.get("symbols_indexed", 0)
             logger.info("reindex complete: %d files, %d symbols", scanned, symbols)
         except Exception as exc:
             logger.error("reindex failed: %s", exc)

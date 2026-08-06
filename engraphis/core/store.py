@@ -1153,6 +1153,13 @@ class Store:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # idx_mem_team references the team_id column just added by ALTER TABLE above.
+        # This cannot live in SCHEMA_SQL: on a v9→v10 upgrade the CREATE INDEX would
+        # run before the ALTER TABLE and fail with 'no such column: team_id'.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_team ON memories(team_id, scope) "
+            "WHERE team_id IS NOT NULL AND scope='team'"
+        )
         tombstone_index_columns = [
             str(row["name"])
             for row in self.conn.execute(
@@ -5303,7 +5310,8 @@ class Store:
             where += " AND repo_id=?"
             params.append(repo_id)
         rows = self.conn.execute(
-            "SELECT id, ts, repo_id, actor, payload FROM operation_receipts WHERE " + where,
+            "SELECT id, ts, repo_id, actor, payload, prev_hash, receipt_hash "
+            "FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
         import time as _time

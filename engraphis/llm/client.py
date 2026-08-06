@@ -428,12 +428,13 @@ class LLMProviderChain:
 
     # ── Cost tracking ───────────────────────────────────────────────────────
 
-    def _estimate_cost(self, client: LLMClient, response_text: str) -> float:
-        """Rough cost estimate from response length and provider pricing."""
-        # Approximate tokens as chars / 4 (rough English tokenization)
-        approx_tokens = max(1, len(response_text) // 4)
+    def _estimate_cost(self, client: LLMClient, response_text: str,
+                       input_text: str = "") -> float:
+        """Rough cost estimate from input + output length and provider pricing."""
+        approx_output = max(1, len(response_text) // 4)
+        approx_input = max(1, len(input_text) // 4) if input_text else approx_output
         rate = _PROVIDER_PRICING.get(client.provider, 0.002)
-        return (approx_tokens / 1000.0) * rate
+        return ((approx_input + approx_output) / 1000.0) * rate
 
     def _record_cost(self, idx: int, cost: float) -> None:
         with self._lock:
@@ -447,11 +448,12 @@ class LLMProviderChain:
             return self._cumulative_cost.get(idx, 0.0) >= ceiling
 
     # ── Fallback dispatch ───────────────────────────────────────────────────
-
     def _dispatch(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        skipped_by_ceiling = 0
         for idx, client in enumerate(self._clients):
             if self._is_exhausted(idx):
+                skipped_by_ceiling += 1
                 logger.debug(
                     "Skipping provider %d (%s/%s): cost ceiling exceeded",
                     idx, client.provider, client.model,
@@ -459,25 +461,41 @@ class LLMProviderChain:
                 continue
             try:
                 result = getattr(client, method_name)(*args, **kwargs)
-                # Estimate and record cost for successful calls
+                # Estimate and record cost for successful calls.  Input length is
+                # approximated from the serialized positional + keyword arguments so
+                # the estimate covers both sides of the API bill.
+                try:
+                    input_blob = json.dumps(args, default=str) + json.dumps(
+                        kwargs, default=str)
+                except (TypeError, ValueError):
+                    input_blob = str(args) + str(kwargs)
                 if isinstance(result, str):
-                    cost = self._estimate_cost(client, result)
+                    cost = self._estimate_cost(client, result, input_blob)
                 elif isinstance(result, dict):
-                    cost = self._estimate_cost(client, json.dumps(result))
+                    cost = self._estimate_cost(client, json.dumps(result), input_blob)
                 else:
-                    cost = self._estimate_cost(client, str(result))
+                    cost = self._estimate_cost(client, str(result), input_blob)
                 self._record_cost(idx, cost)
                 return result
-            except (_LLMProviderError, TimeoutError) as exc:
+            except (_LLMProviderError, TimeoutError, ValueError) as exc:
+                # ValueError covers "No LLM API key configured" — treat as retryable
+                # so the chain advances to the next provider rather than aborting.
                 logger.warning(
                     "Provider %d (%s/%s) failed with %s; trying next in chain",
                     idx, client.provider, client.model, type(exc).__name__,
                 )
                 last_exc = exc
                 continue
-        # All providers exhausted or failed
+        # All providers exhausted or failed — distinguish the reasons so callers
+        # don't chase network issues when the real cause is a budget ceiling.
         if last_exc is not None:
             raise last_exc
+        if skipped_by_ceiling:
+            raise _LLMProviderError(
+                "All %d provider(s) skipped: cumulative cost ceiling exceeded. "
+                "Raise the ceiling or wait for the budget window to reset."
+                % skipped_by_ceiling
+            ) from None
         raise _LLMProviderError(unreachable=True) from None
 
     # ── Public API (mirrors LLMClient) ──────────────────────────────────────
