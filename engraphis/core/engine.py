@@ -2498,6 +2498,141 @@ class MemoryEngine:
             "code_memory_links": code_memory_links,
         }
 
+    def index_repo_incremental(self, repo_id: str, root_path: str, paths: list[str], *,
+                               languages: Optional[set] = None,
+                               prefer: str = "auto",
+                               max_file_bytes: int = 2_000_000) -> dict:
+        """Re-index only the explicitly listed *paths* (absolute or repo-relative).
+
+        Designed for filesystem-watcher integration: the caller has already determined
+        which files changed and passes them here.  Files that no longer exist on disk
+        are treated as deletions (their symbols/edges are removed).  Unchanged files
+        (same content hash) are skipped without re-parsing.
+
+        Returns a summary dict compatible with :meth:`index_repo` so callers can
+        treat both entry points uniformly.
+        """
+        from engraphis.backends.codegraph import (
+            detect_lang,
+            get_code_indexer,
+        )
+
+        indexer = get_code_indexer(prefer=prefer)
+        backend_name = type(indexer).__name__
+
+        canonical_root = os.path.normcase(
+            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
+        )
+        canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
+        safe_root: Optional[str] = None
+        for approved_root in _approved_local_index_roots():
+            normalized_approved = os.path.normcase(os.path.realpath(approved_root))
+            approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
+            if canonical_root_with_sep.startswith(approved_prefix):
+                safe_root = canonical_root_with_sep
+                break
+        if safe_root is None:
+            raise ValueError("repo root is outside approved local roots")
+        root = Path(safe_root)
+        if not root.is_dir():
+            raise ValueError(f"repo root is not a directory: {root_path}")
+
+        existing = {
+            row["file"]: row
+            for row in self.store.list_code_files(repo_id, languages=languages)
+        }
+        max_file_bytes = max(1, int(max_file_bytes))
+        files_scanned = files_indexed = files_unchanged = files_failed = files_removed = 0
+        symbols_indexed = edges_indexed = 0
+
+        for raw_path in paths:
+            candidate = Path(raw_path)
+            # Accept absolute paths inside root or repo-relative paths.
+            if candidate.is_absolute():
+                try:
+                    source_file = candidate.resolve(strict=False)
+                    rel = source_file.relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    files_failed += 1
+                    continue
+            else:
+                rel = candidate.as_posix()
+                source_file = root / rel
+            lang = detect_lang(rel)
+            if lang is None or (languages and lang not in languages):
+                continue
+            if not indexer.supports(lang):
+                continue
+            files_scanned += 1
+            # Deletion: file no longer on disk → remove its graph rows.
+            if not source_file.exists():
+                if rel in existing:
+                    self.store.remove_code_file(repo_id, rel, commit=False)
+                    files_removed += 1
+                continue
+            try:
+                stat = source_file.stat()
+                if stat.st_size > max_file_bytes:
+                    files_failed += 1
+                    continue
+                raw = source_file.read_bytes()
+            except OSError:
+                files_failed += 1
+                continue
+            content_hash = hashlib.sha256(raw).hexdigest()
+            previous = existing.get(rel)
+            if previous and previous.get("content_hash") == content_hash:
+                files_unchanged += 1
+                continue
+            content = raw.decode("utf-8", errors="replace")
+            try:
+                fi = indexer.index_file(rel, content, lang)
+            except Exception:
+                files_failed += 1
+                continue
+            self.store.clear_symbols_for_file(repo_id, rel, commit=False)
+            for sym in fi.symbols:
+                self.store.upsert_symbol(
+                    repo_id=repo_id, kind=sym.kind, name=sym.name, fqname=sym.fqname,
+                    file=sym.file, span=sym.span, signature=sym.signature,
+                    docstring=sym.docstring, lang=sym.lang,
+                    exported=sym.exported, content_hash=sym.content_hash,
+                    commit=False,
+                )
+                symbols_indexed += 1
+            for edge in fi.edges:
+                self.store.add_code_edge(
+                    repo_id=repo_id, src=edge.src, dst=edge.dst,
+                    relation=edge.relation, file=edge.file, line=edge.line,
+                    commit=False,
+                )
+                edges_indexed += 1
+            self.store.upsert_code_file(
+                repo_id=repo_id, file=rel, lang=lang, content_hash=content_hash,
+                size_bytes=stat.st_size, mtime_ns=getattr(stat, "st_mtime_ns", 0),
+                backend=backend_name, commit=False,
+            )
+            files_indexed += 1
+
+        self.store.conn.commit()
+        code_memory_links = self.rebuild_code_memory_links(repo_id=repo_id)
+        return {
+            "root_path": str(root),
+            "files_scanned": files_scanned,
+            "files_indexed": files_indexed,
+            "files_unchanged": files_unchanged,
+            "files_removed": files_removed,
+            "files_failed": files_failed,
+            "symbols_indexed": symbols_indexed,
+            "edges_indexed": edges_indexed,
+            "symbols": self.store.count_symbols(repo_id),
+            "edges": self.store.count_code_edges(repo_id),
+            "backend": backend_name,
+            "incremental": True,
+            "scan_complete": False,
+            "code_memory_links": code_memory_links,
+        }
+
     def search_code(self, query: str, *, repo_id: str, limit: int = 20,
                     flt: Optional[SearchFilter] = None) -> dict:
         """Symbol-graph + lexical code search — far cheaper than

@@ -30,6 +30,7 @@ class Scope(str, Enum):
     SESSION = "session"
     REPO = "repo"
     WORKSPACE = "workspace"
+    TEAM = "team"
     USER = "user"
 
 
@@ -93,6 +94,9 @@ class MemoryRecord:
     pinned_at: Optional[float] = None     # system-time when a pin last became effective
     unpinned_at: Optional[float] = None   # system-time when an unpin became effective
     confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
+    team_id: Optional[str] = None        # team scope ownership (team-scoped memories)
+
+
 
 
 @dataclass
@@ -115,6 +119,11 @@ class SearchFilter:
     # Appended after every 1.x field so positional construction remains compatible.
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
+    # Team scope: when set, team-scoped memories visible to this team are included.
+    # The caller's team membership and role are resolved at the service/store layer.
+    team_id: Optional[str] = None
+    # Caller's user identity for team RBAC checks (email or user id).
+    caller_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.as_of = _finite_timestamp(self.as_of, "as_of")

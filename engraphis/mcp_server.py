@@ -121,6 +121,63 @@ def _err(exc: Exception) -> str:
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
+
+def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) -> dict:
+    """Truncate packed context from the end until the serialized response fits.
+
+    Only memory body content is truncated; citations and source references are
+    preserved intact.  Returns the payload with ``actual_response_tokens`` (and
+    optionally ``response_budget``) merged into the ``usage`` block.
+    """
+    counter = RegexTokenCounter()
+    serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+    current_tokens = counter(serialized)
+
+    usage = payload.get("usage") or {}
+
+    if max_response_tokens is None or max_response_tokens <= 0:
+        usage["actual_response_tokens"] = current_tokens
+        payload["usage"] = usage
+        return payload
+
+    if current_tokens <= max_response_tokens:
+        usage["actual_response_tokens"] = current_tokens
+        usage["response_budget"] = max_response_tokens
+        payload["usage"] = usage
+        return payload
+
+    # --- over budget: truncate body content from the end -----------------
+    # 1. Shrink the packed ``context`` string chunk-by-chunk (last first).
+    context = payload.get("context", "")
+    context_parts = context.split("\n\n") if context else []
+
+    while current_tokens > max_response_tokens and context_parts:
+        context_parts.pop()
+        payload["context"] = "\n\n".join(context_parts)
+        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        current_tokens = counter(serialized)
+
+    # 2. If still over, halve full-mode memory ``content`` fields (last first).
+    if current_tokens > max_response_tokens:
+        memories = payload.get("memories", [])
+        for mem in reversed(memories):
+            if current_tokens <= max_response_tokens:
+                break
+            content = mem.get("content", "")
+            while content and current_tokens > max_response_tokens:
+                half = max(1, len(content) // 2)
+                content = content[:half].rstrip()
+                mem["content"] = content
+                serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+                current_tokens = counter(serialized)
+            if not content:
+                mem["content"] = ""
+
+    usage["actual_response_tokens"] = current_tokens
+    usage["response_budget"] = max_response_tokens
+    payload["usage"] = usage
+    return payload
+
 _READ_ONLY_TOOLS = frozenset({
     "engraphis_recall",
     "engraphis_recall_grounded",
@@ -144,6 +201,7 @@ _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
     "engraphis_index_repo",
     "engraphis_ingest_postgres_schema",
+    "engraphis_link_symbol",
 })
 _SMART_GATEWAY_ROLES = {
     "engraphis_discover_actions": "viewer",
@@ -315,6 +373,11 @@ def engraphis_recall(
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type; limits never boost "
                     "relevance.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context and memory bodies from the end; citations and "
+                    "source references are preserved. None means no cap.",
+        ge=1, le=1_000_000)] = None,
 ) -> str:
     """Retrieve the memories most relevant to a query (semantic vector + lexical + graph).
 
@@ -336,7 +399,7 @@ def engraphis_recall(
         Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
     try:
-        return _ok(service().recall(
+        payload = service().recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
@@ -345,7 +408,9 @@ def engraphis_recall(
             diagnostics=diagnostics,
             planning=planning,
             mtype_limits=mtype_limits,
-        ))
+        )
+        payload = _apply_response_budget(payload, max_response_tokens)
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -387,6 +452,11 @@ def engraphis_recall_context(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context from the end; citations and source references "
+                    "are preserved. None means no cap.",
+        ge=1, le=1_000_000)] = None,
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -446,6 +516,7 @@ def engraphis_recall_context(
                 source["reason"] = reason
             sources.append(source)
         payload["sources"] = sources
+        payload = _apply_response_budget(payload, max_response_tokens)
         return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1198,6 +1269,46 @@ def engraphis_export_code_graph(
 
 
 @mcp.tool(
+    name="engraphis_link_symbol",
+    annotations={"title": "Link a code symbol to a memory", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_link_symbol(
+    symbol_id: Annotated[str, Field(description="Symbol ID, short name, or fully-qualified "
+                                    "name from an indexed repo.",
+                                    min_length=1, max_length=500)],
+    memory_id: Annotated[str, Field(description="Memory ID to link to the symbol.",
+                                    min_length=1, max_length=500)],
+    workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[str, Field(description="Indexed repo containing the symbol.",
+                               min_length=1, max_length=200)],
+    relation: Annotated[str, Field(description="Relationship type (e.g. 'mentions', "
+                                   "'implements', 'fixes'). Defaults to 'mentions'.",
+                                   max_length=100)] = "mentions",
+    confidence: Annotated[float, Field(description="Link confidence 0..1.",
+                          ge=0.0, le=1.0)] = 1.0,
+) -> str:
+    """Manually create a link between a code symbol and a memory.
+
+    Use this when automatic indexing misses a relationship you know about — for example,
+    linking a deployment function to the incident memory it resolved, or connecting a
+    config constant to the decision that set its value. The link is idempotent: repeating
+    the same call returns the existing link without duplication.
+
+    Returns:
+        str: JSON ``{"link_id","symbol_id","memory_id","relation","workspace","repo"}``.
+    """
+    try:
+        return _ok(service().link_symbol(
+            symbol_id, memory_id, workspace=workspace, repo=repo,
+            relation=relation, confidence=confidence,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1304,10 +1415,22 @@ def engraphis_context_savings(
                                     min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Optional repo scope within the workspace.",
                                          max_length=200)] = None,
+    group_by: Annotated[Optional[str], Field(
+        description="Group results by dimension: 'repo', 'agent' (actor digest), "
+                    "or 'day' (UTC date). Omit for the flat workspace aggregate.",
+        max_length=20)] = None,
+    format: Annotated[str, Field(
+        description="Output format: 'json' (default) or 'csv' (adds a csv field).",
+        max_length=10)] = "json",
 ) -> str:
-    """Summarize content-free context savings, separated by token-counter identity."""
+    """Summarize content-free context savings, separated by token-counter identity.
+
+    Optionally group by repo, agent, or day and export as CSV for spreadsheet analysis.
+    """
     try:
-        return _ok(service().context_savings(workspace=workspace, repo=repo))
+        return _ok(service().context_savings(
+            workspace=workspace, repo=repo, group_by=group_by, format=format,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1614,6 +1737,7 @@ _ACTION_PREREQUISITES = {
     "engraphis_code_path": "Run index_repo for the repository first.",
     "engraphis_code_impact": "Run index_repo for the repository first.",
     "engraphis_export_code_graph": "Run index_repo for the repository first.",
+    "engraphis_link_symbol": "Run index_repo for the repository first.",
     "engraphis_secure_erase": "Requires the host's destructive-action approval.",
 }
 

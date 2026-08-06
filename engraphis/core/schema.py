@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -23,6 +23,22 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_at REAL,
     settings   TEXT DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS teams (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at REAL,
+    settings   TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',   -- owner|admin|member
+    joined_at  REAL,
+    PRIMARY KEY (team_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id, role);
 
 CREATE TABLE IF NOT EXISTS repos (
     id           TEXT PRIMARY KEY,
@@ -84,11 +100,14 @@ CREATE TABLE IF NOT EXISTS memories (
     provenance   TEXT DEFAULT '{}',
     pinned_at    REAL,                              -- system-time when a pin last became effective
     unpinned_at  REAL,                              -- system-time when an unpin became effective
-    sort_order   REAL                              -- manual drag-to-reorder position (dashboard); NULL = unordered
+    sort_order   REAL,                              -- manual drag-to-reorder position (dashboard); NULL = unordered
+    team_id      TEXT                                 -- team scope ownership; NULL when not team-scoped
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
+CREATE INDEX IF NOT EXISTS idx_mem_team    ON memories(team_id, scope)
+    WHERE team_id IS NOT NULL AND scope='team';
 
 -- Persisted memory↔entity incidence lets graph retrieval attach evidence without
 -- rescanning every memory's prose.  Temporal fields preserve historical walks.
@@ -521,6 +540,18 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
 -- Sync exports scope tombstones by workspace; keep that read bounded as erasures grow.
 CREATE INDEX IF NOT EXISTS idx_memory_tombstones_workspace
     ON memory_tombstones(workspace_id, repo_id, memory_id);
+
+-- Per-device byte transfer counters for sync monitoring (v10).
+-- Tracks bytes_sent and bytes_received per device_id for bandwidth accounting.
+-- These are local counters, never part of sync bundles; device identity is metadata.
+CREATE TABLE IF NOT EXISTS sync_stats (
+    device_id       TEXT PRIMARY KEY,
+    bytes_sent      INTEGER NOT NULL DEFAULT 0,
+    bytes_received  INTEGER NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_stats_updated
+    ON sync_stats(updated_at);
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

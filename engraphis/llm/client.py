@@ -10,6 +10,8 @@ import ipaddress
 import json
 import logging
 import math
+import os
+import threading
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -392,6 +394,204 @@ class LLMClient:
                 and last_exc.response.status_code) from None
         raise _LLMProviderError(unreachable=True) from None
 
+
+# Rough per-1K-token pricing (USD) for cost estimation. Keys are provider names.
+_PROVIDER_PRICING: dict[str, float] = {
+    "openai": 0.002,
+    "anthropic": 0.003,
+    "google": 0.001,
+    "openrouter": 0.002,
+}
+
+
+class LLMProviderChain:
+    """Ordered fallback chain of LLM clients with optional cost ceilings.
+
+    Tries each client in order for chat/synthesize_thought/extract_json.
+    On _LLMProviderError or TimeoutError, logs a warning and tries the next.
+    Tracks cumulative estimated cost per client; skips clients whose ceiling
+    is exceeded. Thread-safe cost tracking via threading.Lock.
+    """
+
+    def __init__(
+        self,
+        clients: list[LLMClient],
+        cost_ceilings: Optional[dict[int, float]] = None,
+    ) -> None:
+        if not clients:
+            raise ValueError("LLMProviderChain requires at least one LLMClient")
+        self._clients = list(clients)
+        # cost_ceilings maps client index -> USD ceiling. None = unlimited.
+        self._cost_ceilings = cost_ceilings or {}
+        self._cumulative_cost: dict[int, float] = {i: 0.0 for i in range(len(clients))}
+        self._lock = threading.Lock()
+
+    # ── Cost tracking ───────────────────────────────────────────────────────
+
+    def _estimate_cost(self, client: LLMClient, response_text: str) -> float:
+        """Rough cost estimate from response length and provider pricing."""
+        # Approximate tokens as chars / 4 (rough English tokenization)
+        approx_tokens = max(1, len(response_text) // 4)
+        rate = _PROVIDER_PRICING.get(client.provider, 0.002)
+        return (approx_tokens / 1000.0) * rate
+
+    def _record_cost(self, idx: int, cost: float) -> None:
+        with self._lock:
+            self._cumulative_cost[idx] = self._cumulative_cost.get(idx, 0.0) + cost
+
+    def _is_exhausted(self, idx: int) -> bool:
+        ceiling = self._cost_ceilings.get(idx)
+        if ceiling is None:
+            return False
+        with self._lock:
+            return self._cumulative_cost.get(idx, 0.0) >= ceiling
+
+    # ── Fallback dispatch ───────────────────────────────────────────────────
+
+    def _dispatch(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        last_exc: Optional[Exception] = None
+        for idx, client in enumerate(self._clients):
+            if self._is_exhausted(idx):
+                logger.debug(
+                    "Skipping provider %d (%s/%s): cost ceiling exceeded",
+                    idx, client.provider, client.model,
+                )
+                continue
+            try:
+                result = getattr(client, method_name)(*args, **kwargs)
+                # Estimate and record cost for successful calls
+                if isinstance(result, str):
+                    cost = self._estimate_cost(client, result)
+                elif isinstance(result, dict):
+                    cost = self._estimate_cost(client, json.dumps(result))
+                else:
+                    cost = self._estimate_cost(client, str(result))
+                self._record_cost(idx, cost)
+                return result
+            except (_LLMProviderError, TimeoutError) as exc:
+                logger.warning(
+                    "Provider %d (%s/%s) failed with %s; trying next in chain",
+                    idx, client.provider, client.model, type(exc).__name__,
+                )
+                last_exc = exc
+                continue
+        # All providers exhausted or failed
+        if last_exc is not None:
+            raise last_exc
+        raise _LLMProviderError(unreachable=True) from None
+
+    # ── Public API (mirrors LLMClient) ──────────────────────────────────────
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        return self._dispatch(
+            "chat", messages,
+            system=system, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout,
+        )
+
+    def synthesize_thought(
+        self,
+        context: str,
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 512,
+        thought_prompt: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return self._dispatch(
+            "synthesize_thought", context,
+            temperature=temperature, max_tokens=max_tokens,
+            thought_prompt=thought_prompt,
+        )
+
+    def extract_json(
+        self,
+        prompt: str,
+        schema: dict,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        return self._dispatch("extract_json", prompt, schema, timeout=timeout)
+
+    def close(self) -> None:
+        for client in self._clients:
+            client.close()
+
+    def __enter__(self) -> "LLMProviderChain":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def parse_provider_chain(env_var: str = "ENGRAPHIS_LLM_PROVIDERS") -> LLMProviderChain:
+    """Factory: build an LLMProviderChain from an env var.
+
+    Format: comma-separated tuples of 'provider:model:key:url:ceiling'.
+    URL field may contain '://' — parsed by splitting from the right for
+    ceiling, then from the left for provider/model/key, leaving the rest as URL.
+    Example: 'openai:gpt-4o-mini:sk-abc:https://api.openai.com/v1:0.50'
+    Empty fields fall back to defaults (provider=openai, model=gpt-4o-mini, etc.).
+    """
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        # Single-provider fallback from existing settings
+        return LLMProviderChain([LLMClient()])
+
+    clients: list[LLMClient] = []
+    cost_ceilings: dict[int, float] = {}
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    for idx, entry in enumerate(entries):
+        # Split from the right to extract optional ceiling (last field after last ':')
+        # But ceiling is numeric, so we check if the last segment is a valid float
+        ceiling_str: Optional[str] = None
+        remainder = entry
+        # Try to extract ceiling: split on last ':' and check if it's numeric
+        last_colon = remainder.rfind(":")
+        if last_colon >= 0:
+            candidate = remainder[last_colon + 1:].strip()
+            # Only treat as ceiling if it looks numeric and isn't part of a URL scheme
+            if candidate and not candidate.startswith("//"):
+                try:
+                    float(candidate)
+                    ceiling_str = candidate
+                    remainder = remainder[:last_colon]
+                except ValueError:
+                    pass
+
+        # Now split remainder into provider:model:key:url
+        # Split from left: first 3 colons give provider, model, key; rest is url
+        parts = remainder.split(":", 3)
+        provider = parts[0].strip() if len(parts) > 0 and parts[0].strip() else None
+        model = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+        api_key = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+        base_url = parts[3].strip() if len(parts) > 3 and parts[3].strip() else None
+
+        client = LLMClient(
+            provider=provider, model=model,
+            api_key=api_key, base_url=base_url,
+        )
+        clients.append(client)
+
+        if ceiling_str is not None:
+            try:
+                cost_ceilings[idx] = float(ceiling_str)
+            except ValueError:
+                logger.warning(
+                    "Invalid cost ceiling '%s' for provider %d; ignoring",
+                    ceiling_str, idx,
+                )
+
+    if not clients:
+        return LLMProviderChain([LLMClient()])
+    return LLMProviderChain(clients, cost_ceilings=cost_ceilings or None)
 
 def _anthropic_msg(m: dict[str, str]) -> dict[str, str]:
     """Anthropic only accepts user/assistant roles, not system."""

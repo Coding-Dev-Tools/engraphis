@@ -5280,6 +5280,90 @@ class Store:
             "by_token_counter": [finished(value) for _, value in sorted(buckets.items())],
         }
 
+    def context_savings_grouped(
+        self, *, workspace_id: str, repo_id: Optional[str] = None,
+        group_by: str = "workspace",
+    ) -> list[dict]:
+        """Aggregate context savings grouped by a dimension.
+
+        Supported dimensions: ``workspace`` (single bucket), ``repo``,
+        ``agent`` (actor digest), ``day`` (UTC date from receipt ts).
+        Returns a list of dicts each containing the group key and the same
+        token counters as :meth:`context_savings`.  Receipts are privacy-safe:
+        actor is a one-way digest, no query or memory content is exposed.
+        """
+        valid_dims = {"workspace", "repo", "agent", "day"}
+        if group_by not in valid_dims:
+            raise ValueError(f"group_by must be one of: {', '.join(sorted(valid_dims))}")
+        where = "workspace_id=?"
+        params: list = [workspace_id]
+        if repo_id is not None:
+            where += " AND repo_id=?"
+            params.append(repo_id)
+        rows = self.conn.execute(
+            "SELECT id, ts, repo_id, actor, payload FROM operation_receipts WHERE " + where,
+            params,
+        ).fetchall()
+        import time as _time
+        groups: dict[str, dict] = {}
+
+        def _bucket() -> dict:
+            return {
+                "receipt_count": 0, "source_tokens": 0, "context_tokens": 0,
+                "saved_tokens": 0, "budget_tokens": 0, "packed_count": 0,
+                "omitted_count": 0,
+            }
+
+        def _add(target: dict, usage: dict) -> None:
+            target["receipt_count"] += 1
+            for key in (
+                "source_tokens", "context_tokens", "saved_tokens",
+                "budget_tokens", "packed_count", "omitted_count",
+            ):
+                value = usage.get(key)
+                if type(value) in (int, float) and value >= 0:
+                    target[key] += value
+
+        for raw_row in rows:
+            receipt = _public_receipt_row(dict(raw_row))
+            if receipt.get("invalid_payload"):
+                continue
+            metadata = receipt.get("metadata")
+            usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+            if not isinstance(usage, dict):
+                continue
+            required = ("source_tokens", "context_tokens", "saved_tokens")
+            if not all(
+                type(usage.get(k)) in (int, float) and usage[k] >= 0
+                for k in required
+            ):
+                continue
+            if group_by == "workspace":
+                key = workspace_id
+            elif group_by == "repo":
+                key = str(raw_row["repo_id"] or "(none)")
+            elif group_by == "agent":
+                key = str(raw_row["actor"] or "system")
+            elif group_by == "day":
+                try:
+                    day = _time.strftime("%Y-%m-%d", _time.gmtime(float(raw_row["ts"])))
+                except (TypeError, ValueError, OverflowError, OSError):
+                    day = "unknown"
+                key = day
+            else:
+                key = workspace_id
+            grp = groups.setdefault(key, _bucket())
+            _add(grp, usage)
+        result = []
+        for key in sorted(groups):
+            entry = {"group_key": key, **groups[key]}
+            entry["savings_ratio"] = (
+                entry["saved_tokens"] / entry["source_tokens"]
+                if entry["source_tokens"] else 0.0
+            )
+            result.append(entry)
+        return result
+
     def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
                         expected_count: Optional[int] = None) -> dict:
         chain = self._receipt_chain_state(workspace_id)
@@ -5498,6 +5582,48 @@ class Store:
             did = ids.new_id("device")
             self.set_sync_state("device_id", did, commit=owns_transaction)
         return did
+    # ── sync stats (per-device byte transfer counters) ─────────────────────────
+    def add_sync_bytes(self, device_id: str, *, sent: int = 0,
+                       received: int = 0, commit: bool = True) -> None:
+        """Accumulate byte transfer counters for one device.
+
+        Counters are monotonic and local-only — they never leave the device in a
+        sync bundle. ``device_id`` is the origin device of the bytes (the local
+        device for ``sent``, the remote device for ``received``)."""
+        if sent < 0 or received < 0:
+            raise ValueError("byte counters must be non-negative")
+        if sent == 0 and received == 0:
+            return
+        now = now_ts()
+        self.conn.execute(
+            "INSERT INTO sync_stats(device_id, bytes_sent, bytes_received, updated_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET "
+            "bytes_sent=sync_stats.bytes_sent+excluded.bytes_sent, "
+            "bytes_received=sync_stats.bytes_received+excluded.bytes_received, "
+            "updated_at=excluded.updated_at",
+            (device_id, sent, received, now),
+        )
+        if commit:
+            self.conn.commit()
+
+    def get_sync_stats(self) -> list[dict]:
+        """Return per-device byte transfer counters (content-free telemetry).
+
+        Returns only device_id and counters — no memory content, no PII."""
+        rows = self.conn.execute(
+            "SELECT device_id, bytes_sent, bytes_received, updated_at "
+            "FROM sync_stats ORDER BY updated_at DESC"
+        ).fetchall()
+        return [
+            {
+                "device_id": str(row["device_id"]),
+                "bytes_sent": int(row["bytes_sent"]),
+                "bytes_received": int(row["bytes_received"]),
+                "updated_at": float(row["updated_at"]),
+            }
+            for row in rows
+        ]
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _where(self, flt: Optional[SearchFilter], include_invalid: bool,

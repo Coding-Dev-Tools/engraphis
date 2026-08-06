@@ -1708,6 +1708,18 @@ def analytics_export(workspace: Optional[str] = None):
     })
 
 
+@router.get("/analytics/health")
+def analytics_health(workspace: Optional[str] = None):
+    """Local memory health: decay distribution, orphan count, conflict frequency.
+
+    Unlike the hosted ``/analytics`` endpoint, this runs entirely on the local
+    database and is available on every plan. The dashboard's Memory Health
+    panel renders these metrics as a histogram and trend indicators.
+    """
+    ws = workspace or _require_ws()
+    return _run(service().memory_health, workspace=ws)
+
+
 @router.get("/ready")
 def ready():
     """Readiness (vs. /health liveness): the service builds — initializing the embedder

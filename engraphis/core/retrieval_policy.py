@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 
-RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "lexical", "graph", "code"})
+RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "lexical", "graph", "code", "conflict_aware"})
 CANDIDATE_DEPTH_MODES = frozenset({"fixed", "adaptive"})
 
 _CODE_RE = re.compile(
@@ -57,6 +57,14 @@ _CONFIGS = {
     "code": ProfileConfig(
         "code", True, True, True, True,
         code_scale=3.0, code_presence_bonus=1.5,
+    ),
+    # Conflict-aware profile: identical to balanced but signals the recall
+    # engine to inject same-subject_key candidates from the top vector/lexical
+    # results before fusion. This ensures that superseded or conflicting
+    # versions of a durable claim surface alongside the current winner,
+    # giving downstream consumers the full temporal chain.
+    "conflict_aware": ProfileConfig(
+        "conflict_aware", True, True, True, False,
     ),
 }
 

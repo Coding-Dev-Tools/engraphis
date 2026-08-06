@@ -1290,6 +1290,77 @@ class MemoryService:
             _local_cli_operator=True,
         )
 
+    @_rollback_service_transaction
+    def remember_batch(self, memories: list[dict], *, workspace: str) -> dict:
+        """Store multiple memories in a single atomic transaction.
+
+        Each item in *memories* accepts the same keyword arguments as
+        :meth:`remember` (``content`` is the only required key).  The entire
+        batch runs inside one ``BEGIN IMMEDIATE`` transaction via the
+        ``@_rollback_service_transaction`` decorator; unexpected engine errors
+        roll back every write, while per-item *validation* failures are caught
+        and reported without aborting the rest of the batch.
+
+        Returns a dict with ``total``, ``succeeded``, ``failed``, and a
+        ``results`` list carrying per-item resolution (``op``: add / noop /
+        invalidate / relate / quarantined) or an ``error`` string.
+        """
+        if not isinstance(memories, list):
+            raise ValidationError("memories must be a list")
+        if not memories:
+            raise ValidationError("memories list must not be empty")
+        if len(memories) > 50:
+            raise ValidationError("memories list must not exceed 50 items")
+
+        ws = self._clean_ws(workspace)
+        results: list[dict] = []
+        failed_indices: list[int] = []
+
+        for idx, mem in enumerate(memories):
+            if not isinstance(mem, dict):
+                results.append({"index": idx, "status": "error",
+                                "error": "each memory must be a dict"})
+                failed_indices.append(idx)
+                continue
+            content = mem.get("content")
+            if not content or not isinstance(content, str) or not content.strip():
+                results.append({"index": idx, "status": "error",
+                                "error": "content is required and must be a non-empty string"})
+                failed_indices.append(idx)
+                continue
+            try:
+                result = self.remember(
+                    content,
+                    workspace=ws,
+                    repo=mem.get("repo"),
+                    session_id=mem.get("session_id"),
+                    mtype=mem.get("mtype", "semantic"),
+                    scope=mem.get("scope"),
+                    title=mem.get("title", ""),
+                    importance=mem.get("importance", 0.0),
+                    keywords=mem.get("keywords"),
+                    source=mem.get("source", "agent"),
+                    trusted=mem.get("trusted", True),
+                    kind=mem.get("kind"),
+                    resolve_conflicts=mem.get("dedupe", True),
+                    valid_from=mem.get("valid_from"),
+                    subject_key=mem.get("subject_key", ""),
+                    claim_kind=mem.get("claim_kind", ""),
+                )
+                results.append({"index": idx, "status": "ok", **result})
+            except (ValidationError, ValueError) as exc:
+                results.append({"index": idx, "status": "error",
+                                "error": str(exc)})
+                failed_indices.append(idx)
+
+        return {
+            "workspace": ws,
+            "total": len(memories),
+            "succeeded": len(memories) - len(failed_indices),
+            "failed": len(failed_indices),
+            "results": results,
+        }
+
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",
                scope: Optional[str] = None, metadata: Optional[dict] = None,
@@ -2937,6 +3008,56 @@ class MemoryService:
         )
         return out
 
+    def index_repo_incremental(self, *, workspace: str, repo: str, root_path: str,
+                               paths: list[str],
+                               languages: Optional[list] = None) -> dict:
+        """Incrementally re-index only the listed *paths* (absolute or repo-relative).
+
+        Designed for filesystem-watcher callers: performs the same validated workspace
+        / repo resolution and receipt recording as :meth:`index_repo`, but restricts
+        the engine to the supplied paths instead of a full tree walk.  Files that no
+        longer exist on disk are treated as deletions.
+        """
+        if not repo:
+            raise ValidationError("repo is required to index code")
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo")
+        root_path = _clean_text(root_path, field="root_path", max_chars=MAX_CONTENT_CHARS)
+        if not isinstance(paths, (list, tuple)):
+            raise ValidationError("paths must be a list of file paths")
+        cleaned_paths = [
+            _clean_text(p, field="paths[]", max_chars=MAX_CONTENT_CHARS) for p in paths
+        ]
+        wid = self._get_or_create_workspace(ws)
+        rid = self.store.get_or_create_repo(wid, rp)
+        langs = None
+        if languages:
+            from engraphis.backends.codegraph import normalize_language, supported_languages
+            requested = _clean_string_list(languages, field="languages", max_items=10,
+                                           max_chars=40)
+            supported = supported_languages()
+            langs = {normalize_language(x) for x in requested}
+            unknown = sorted(x for x in langs if x not in supported)
+            if unknown:
+                raise ValidationError(
+                    f"unsupported language(s): {', '.join(unknown)}. "
+                    f"Supported: {', '.join(sorted(supported))}. "
+                    "Omit 'languages' to index every supported language found."
+                )
+        out = self.engine.index_repo_incremental(rid, root_path, cleaned_paths, languages=langs)
+        out["workspace"] = ws
+        out["repo"] = rp
+        out["receipt"] = self.store.record_receipt(
+            "index_repo", workspace_id=wid, repo_id=rid, actor="agent",
+            target_count=out["files_indexed"], status="ok",
+            metadata={"files_scanned": out["files_scanned"],
+                      "files_indexed": out["files_indexed"],
+                      "files_removed": out["files_removed"],
+                      "symbols": out["symbols"], "edges": out["edges"],
+                      "incremental": True},
+        )
+        return out
+
     def search_code(self, query: str, *, workspace: str, repo: str, limit: int = 20,
                     as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
@@ -3036,6 +3157,38 @@ class MemoryService:
             "known_at": known_at,
             "historical": flt.historical,
         }
+
+    def link_symbol(self, symbol_id: str, memory_id: str, *, workspace: str, repo: str,
+                    relation: str = "mentions", confidence: float = 1.0) -> dict:
+        """Create or reinforce a manual link between a code symbol and a memory.
+
+        Validates that both the symbol and the memory exist within the given
+        workspace/repo scope before writing. Idempotent: linking the same pair
+        with the same relation returns the existing link id without duplicating.
+        """
+        if not repo:
+            raise ValidationError("repo is required to link a symbol")
+        symbol_id = _clean_text(symbol_id, field="symbol_id", max_chars=500)
+        memory_id = _clean_text(memory_id, field="memory_id", max_chars=500)
+        relation = _clean_name(relation, field="relation") or "mentions"
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            raise ValidationError("confidence must be a number between 0 and 1")
+        wid, rid = self._require_scope(workspace, repo)
+        # Validate symbol exists in this repo.
+        symbols = self.store.list_symbols(rid, identifiers=[symbol_id])
+        if not symbols:
+            raise ValidationError(f"no symbol '{symbol_id}' in repo '{repo}'")
+        # Validate memory exists and belongs to this workspace/repo.
+        self._check_owns(memory_id, wid, rid)
+        link_id = self.store.link_memory_symbol(
+            repo_id=rid, symbol_id=symbols[0]["id"], memory_id=memory_id,
+            relation=relation, confidence=confidence,
+        )
+        return {"link_id": link_id, "symbol_id": symbols[0]["id"],
+                "memory_id": memory_id, "relation": relation,
+                "workspace": workspace, "repo": repo}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
@@ -4456,16 +4609,55 @@ class MemoryService:
             "entries": entries,
         }
 
-    def context_savings(self, *, workspace: str, repo: Optional[str] = None) -> dict:
-        """Return cumulative packed-context savings from content-free operation receipts."""
+    def context_savings(self, *, workspace: str, repo: Optional[str] = None,
+                        group_by: Optional[str] = None,
+                        format: str = "json") -> dict:
+        """Return cumulative packed-context savings from content-free operation receipts.
+
+        When *group_by* is set (``repo``, ``agent``, ``day``), returns a
+        ``by_group`` list instead of the flat aggregate.  When *format* is
+        ``csv``, the ``csv`` field contains a properly escaped CSV string
+        suitable for spreadsheet import.
+        """
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         wid, rid = self._require_scope(ws, rp)
-        return {
+        fmt = str(format or "json").strip().casefold()
+        if fmt not in ("json", "csv"):
+            raise ValidationError("format must be 'json' or 'csv'")
+        gb = str(group_by or "").strip().casefold() if group_by else ""
+        base = {
             "format": "engraphis-context-savings/1",
             "scope": {"workspace": ws, **({"repo": rp} if rp else {})},
-            **self.store.context_savings(workspace_id=wid, repo_id=rid),
         }
+        if gb:
+            valid_dims = {"workspace", "repo", "agent", "day"}
+            if gb not in valid_dims:
+                raise ValidationError(
+                    f"group_by must be one of: {', '.join(sorted(valid_dims))}"
+                )
+            rows = self.store.context_savings_grouped(
+                workspace_id=wid, repo_id=rid, group_by=gb,
+            )
+            base["group_by"] = gb
+            base["by_group"] = rows
+            if fmt == "csv":
+                import csv as _csv
+                import io as _io
+                buf = _io.StringIO()
+                fields = [
+                    "group_key", "receipt_count", "source_tokens",
+                    "context_tokens", "saved_tokens", "budget_tokens",
+                    "packed_count", "omitted_count", "savings_ratio",
+                ]
+                writer = _csv.DictWriter(buf, fieldnames=fields)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({k: row.get(k, "") for k in fields})
+                base["csv"] = buf.getvalue()
+        else:
+            base.update(self.store.context_savings(workspace_id=wid, repo_id=rid))
+        return base
 
     def verify_receipts(self, *, workspace: str, expected_head: str = "",
                         expected_count: Optional[int] = None) -> dict:
@@ -7891,6 +8083,102 @@ class MemoryService:
             "total_rows": int(total_rows),   # live + superseded history (never deleted)
             "workspaces": int(workspaces), "sessions": int(sessions),
             "schema_version": self.store.schema_version,
+        }
+
+    def memory_health(self, *, workspace: str) -> dict:
+        """Local memory health metrics: decay distribution, orphan count, conflict frequency.
+
+        All queries are bounded and indexed. No sensitive content is exposed — only
+        aggregate counts and distributions derived from stability, entity linkage,
+        and audit action columns.
+        """
+        import time as _time
+        wid = self._lookup_workspace(self._clean_ws(workspace))
+        if wid is None:
+            return {"workspace": workspace, "decay_distribution": [],
+                    "orphan_count": 0, "conflict_frequency": {"total": 0, "last_7d": 0}}
+        conn = self.store.conn
+        now = _time.time()
+        live = ("(valid_from IS NULL OR valid_from<=?) AND (valid_to IS NULL OR ?<valid_to) "
+                "AND expired_at IS NULL")
+        base_where = " WHERE workspace_id=? AND COALESCE(scope,'workspace')!='session'"
+        live_where = f"{base_where} AND {live}"
+        live_params: list[Any] = [now, now, wid]
+        # ── Decay distribution (retention buckets) ──────────────────────────────
+        # R(t) = exp(-Δt_days / S). Bucket into 5 bands: critical (<0.2), low
+        # (0.2–0.4), medium (0.4–0.6), high (0.6–0.8), strong (>0.8).
+        # Computed in SQL via CASE on the retention formula so this is one indexed
+        # scan, not a Python loop over every memory.
+        decay_sql = f"""
+            SELECT
+                SUM(CASE WHEN ret < 0.2 THEN 1 ELSE 0 END) AS critical,
+                SUM(CASE WHEN ret >= 0.2 AND ret < 0.4 THEN 1 ELSE 0 END) AS low,
+                SUM(CASE WHEN ret >= 0.4 AND ret < 0.6 THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN ret >= 0.6 AND ret < 0.8 THEN 1 ELSE 0 END) AS high,
+                SUM(CASE WHEN ret >= 0.8 THEN 1 ELSE 0 END) AS strong
+            FROM (
+                SELECT EXP(
+                    -MAX(0, (? - COALESCE(last_access, ingested_at, ?)) / 86400.0)
+                    / MAX(stability, 0.01)
+                ) AS ret
+                FROM memories{live_where}
+            )
+        """
+        decay_row = conn.execute(decay_sql, [now, now, *live_params]).fetchone()
+        decay_distribution = [
+            {"bucket": "critical", "label": "< 20%", "count": int(decay_row["critical"] or 0)},
+            {"bucket": "low",      "label": "20–40%", "count": int(decay_row["low"] or 0)},
+            {"bucket": "medium",   "label": "40–60%", "count": int(decay_row["medium"] or 0)},
+            {"bucket": "high",     "label": "60–80%", "count": int(decay_row["high"] or 0)},
+            {"bucket": "strong",   "label": "> 80%",  "count": int(decay_row["strong"] or 0)},
+        ]
+        # ── Orphan count (memories with no entity links) ────────────────────────
+        # A memory is an orphan when it has zero live rows in memory_entities.
+        # The LEFT JOIN + WHERE me.id IS NULL pattern uses the existing
+        # idx_memory_entity_memory index on (memory_id, valid_to, expired_at).
+        orphan_sql = f"""
+            SELECT COUNT(*) AS n FROM memories m
+            {live_where.replace('WHERE', 'WHERE m.', 1).replace('workspace_id=', 'm.workspace_id=').replace('scope,', 'm.scope,')}
+              AND NOT EXISTS (
+                  SELECT 1 FROM memory_entities me
+                  WHERE me.memory_id = m.id
+                    AND me.valid_to IS NULL AND me.expired_at IS NULL
+              )
+        """
+        # Rewrite live_where to be table-qualified for the subquery form
+        orphan_params: list[Any] = [now, now, wid]
+        orphan_sql_clean = (
+            f"SELECT COUNT(*) AS n FROM memories m "
+            f"WHERE m.workspace_id=? AND COALESCE(m.scope,'workspace')!='session' "
+            f"AND (m.valid_from IS NULL OR m.valid_from<=?) "
+            f"AND (m.valid_to IS NULL OR ?<m.valid_to) "
+            f"AND m.expired_at IS NULL "
+            f"AND NOT EXISTS ("
+            f"  SELECT 1 FROM memory_entities me "
+            f"  WHERE me.memory_id=m.id AND me.valid_to IS NULL AND me.expired_at IS NULL"
+            f")"
+        )
+        orphan_count = int(conn.execute(orphan_sql_clean, orphan_params).fetchone()["n"])
+        # ── Conflict frequency (audit actions in last 7 days + total) ───────────
+        # Conflicts are recorded as audit entries with action containing 'conflict'.
+        # idx_audit_target covers (target, ts); we filter by ts range only.
+        seven_days_ago = now - 7 * 86400
+        conflict_total = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM audit WHERE action LIKE '%conflict%'"
+        ).fetchone()["n"])
+        conflict_7d = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM audit WHERE action LIKE '%conflict%' AND ts>=?",
+            (seven_days_ago,)
+        ).fetchone()["n"])
+        return {
+            "workspace": workspace,
+            "decay_distribution": decay_distribution,
+            "orphan_count": orphan_count,
+            "conflict_frequency": {
+                "total": conflict_total,
+                "last_7d": conflict_7d,
+            },
+            "computed_at": now,
         }
 
 

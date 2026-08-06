@@ -90,8 +90,9 @@ For the full memory trust model and existing-store migration procedure, see the
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |
 | Code | `engraphis_export_code_graph` | Exports graph JSON, Markdown, and HTML. |
+| Code | `engraphis_link_symbol` | Manually links a code symbol to a memory (idempotent). |
 | Audit | `engraphis_receipts` | Lists content-free hashed operation receipts. |
-| Audit | `engraphis_context_savings` | Summarizes packed-context usage by workspace, repository, and token-counter identity. |
+| Audit | `engraphis_context_savings` | Summarizes packed-context usage by workspace, repository, and token-counter identity. Supports `group_by` (repo/agent/day) and `format=csv` for breakdown exports. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
 | Audit | `engraphis_export_receipts` | Exports a shareable receipt-only audit bundle. |
 | Governance | `engraphis_retire` | Retires a memory by closing its validity window. It does not delete history. |
