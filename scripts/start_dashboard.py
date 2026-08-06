@@ -191,6 +191,10 @@ def main(argv=None) -> None:
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
 
     try:
+        from engraphis import __version__ as _engraphis_version
+    except Exception:
+        _engraphis_version = "unknown"
+    try:
         # Imported AFTER the env writes above: this snapshot and uvicorn's in-process
         # import of the app see the same values, so the banner reports the RESOLVED DB
         # path (installed builds use a per-user data dir, not "./engraphis.db").
@@ -208,10 +212,11 @@ def main(argv=None) -> None:
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - convert startup failures to UX
         ap.exit(1, "Error: %s\n" % _startup_error(exc, db))
 
-    print(f"Engraphis WebUI - {url}")
+    print(f"Engraphis WebUI v{_engraphis_version} - {url}")
     print(f"  Dashboard :  {url}/")
     print(f"  REST API  :  {url}/api")
     print(f"  Database  :  {db}")
+    print(f"  Version   :  {_engraphis_version}")
     print("  Press Ctrl+C to stop.")
     sys.stdout.flush()
 
