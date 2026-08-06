@@ -27,7 +27,7 @@ discovery and the validated executors.
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 33 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 34 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.

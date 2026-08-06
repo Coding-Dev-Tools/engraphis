@@ -322,7 +322,7 @@ the indicated read or action executor; no profile selection is required. The gat
 the discovered capability again before it runs it, and clients remain responsible for their
 normal destructive-action approval boundary.
 
-Existing clients that pin the historical 33 named tools can use
+Existing clients that pin the historical 34 named tools can use
 `engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
 including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOLS.md).
 
@@ -493,7 +493,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + Smart MCP (Classic 33-tool compatibility) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 34-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -511,7 +511,7 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes a zero-configuration Smart MCP gateway plus a 33-tool Classic compatibility
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 34-tool Classic compatibility
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
 The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
@@ -641,7 +641,7 @@ engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # Smart MCP gateway + 33-tool Classic compatibility server
+│   ├── mcp_server.py        # Smart MCP gateway + 34-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup

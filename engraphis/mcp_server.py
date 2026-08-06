@@ -573,6 +573,11 @@ def engraphis_recall_grounded(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context and citation bodies from the end; source references "
+                    "are preserved. None means no cap.",
+        ge=1, le=1_000_000)] = None,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -603,7 +608,7 @@ def engraphis_recall_grounded(
                 llm = LLMClient()
             except Exception:
                 llm = None
-        return _ok(service().grounded_recall(
+        payload = service().grounded_recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
@@ -611,7 +616,9 @@ def engraphis_recall_grounded(
             response_mode=response_mode,
             diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
             min_support=min_support, llm=llm,
-        ))
+        )
+        payload = _apply_response_budget(payload, max_response_tokens)
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
     finally:
@@ -659,6 +666,9 @@ def engraphis_answer(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens.",
+        ge=1, le=1_000_000)] = None,
 ) -> str:
     """Backward-compatible alias for ``engraphis_recall_grounded``.
 
@@ -673,6 +683,7 @@ def engraphis_answer(
         response_mode=response_mode, diagnostics=diagnostics,
         planning=planning, mtype_limits=mtype_limits,
         min_support=min_support, synthesize=synthesize,
+        max_response_tokens=max_response_tokens,
     )
 
 

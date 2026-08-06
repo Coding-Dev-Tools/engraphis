@@ -30,6 +30,12 @@ class Scope(str, Enum):
     SESSION = "session"
     REPO = "repo"
     WORKSPACE = "workspace"
+    # TEAM scope: forward-compatibility marker only. Read-side wiring
+    # (SearchFilter predicates in store.list_memories / edges_in_scope,
+    # RBAC checks against team_members, promotion semantics) belongs in
+    # a dedicated PR. Do not expand wiring inside CodeQL/security fix
+    # branches — dead scope surface is a liability until the full
+    # feature ships together.
     TEAM = "team"
     USER = "user"
 
@@ -94,7 +100,9 @@ class MemoryRecord:
     pinned_at: Optional[float] = None     # system-time when a pin last became effective
     unpinned_at: Optional[float] = None   # system-time when an unpin became effective
     confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
-    team_id: Optional[str] = None        # team scope ownership (team-scoped memories)
+    # team_id: forward-compat only. Stored and round-tripped but not yet
+    # used by read-side filters; see Scope.TEAM note above.
+    team_id: Optional[str] = None
 
 
 
@@ -121,8 +129,9 @@ class SearchFilter:
     known_at: Optional[float] = None
     # Team scope: when set, team-scoped memories visible to this team are included.
     # The caller's team membership and role are resolved at the service/store layer.
+    # team_id / caller_id: forward-compat only. Neither is yet consumed
+    # by store predicates or RBAC checks; see Scope.TEAM note above.
     team_id: Optional[str] = None
-    # Caller's user identity for team RBAC checks (email or user id).
     caller_id: Optional[str] = None
 
     def __post_init__(self) -> None:

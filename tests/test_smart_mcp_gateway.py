@@ -42,7 +42,7 @@ CLASSIC_TOOL_NAMES = {
     "engraphis_proactive_context", "engraphis_recall_grounded", "engraphis_answer",
     "engraphis_ingest", "engraphis_consolidate", "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
-    "engraphis_export_receipts", "engraphis_check_update",
+    "engraphis_export_receipts", "engraphis_check_update", "engraphis_link_symbol",
 }
 
 
@@ -94,12 +94,12 @@ def test_normal_mcp_exposes_only_the_smart_gateway_tools(monkeypatch):
     assert len(server.mcp.instructions) <= 512
 
 
-def test_classic_mcp_retains_the_33_named_tool_compatibility_surface(monkeypatch):
+def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch):
     server = _memory_server(monkeypatch)
 
     classic = _tools(server, "classic_mcp")
     assert set(classic) == CLASSIC_TOOL_NAMES
-    assert len(classic) == 33
+    assert len(classic) == 34
     # These aliases carry distinct historical defaults and must not disappear.
     assert {"engraphis_answer", "engraphis_forget"} <= set(classic)
 

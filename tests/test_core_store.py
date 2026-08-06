@@ -23,7 +23,25 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 9
+    assert store.schema_version == 10
+
+
+# Forward-compat test: TEAM scope wiring is incomplete (see Scope.TEAM note
+# in interfaces.py). This pins the storage surface so the column round-trips
+# correctly when the full RBAC/read-side feature lands.
+def test_team_id_persists_and_is_queryable(store):
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="Team-scoped fact.", workspace_id=wid,
+        team_id="team_xyz",
+    ))
+    rec = store.get_memory(mid)
+    assert rec is not None
+    assert rec.team_id == "team_xyz"
+    rows = store.conn.execute(
+        "SELECT id FROM memories WHERE team_id=?", ("team_xyz",)
+    ).fetchall()
+    assert [row["id"] for row in rows] == [mid]
 
 
 def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
@@ -431,7 +449,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 9
+    assert migrated.schema_version == 10
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"

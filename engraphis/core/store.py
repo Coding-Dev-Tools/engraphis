@@ -1147,6 +1147,7 @@ class Store:
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
             "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
+            "ALTER TABLE memories ADD COLUMN team_id TEXT",
         ):
             try:
                 self.conn.execute(stmt)
@@ -2216,8 +2217,8 @@ class Store:
                 keywords, metadata, importance, surprise, stability, access_count, last_access,
                 valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
                 subject_key, claim_kind,
-                pinned, sensitivity, provenance, confidence, pinned_at, unpinned_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                pinned, sensitivity, provenance, confidence, pinned_at, unpinned_at, team_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                 workspace_id=excluded.workspace_id, repo_id=excluded.repo_id,
                 session_id=excluded.session_id, scope=excluded.scope, mtype=excluded.mtype,
@@ -2233,7 +2234,8 @@ class Store:
                 claim_kind=excluded.claim_kind, pinned=excluded.pinned,
                 sensitivity=excluded.sensitivity, provenance=excluded.provenance,
                 confidence=excluded.confidence,
-                pinned_at=excluded.pinned_at, unpinned_at=excluded.unpinned_at""",
+                pinned_at=excluded.pinned_at, unpinned_at=excluded.unpinned_at,
+                team_id=excluded.team_id""",
             (rec.id, rec.workspace_id, rec.repo_id, rec.session_id,
              _enum(rec.scope), _enum(rec.mtype), rec.title, rec.content, rec.summary,
              _dumps(rec.keywords), _dumps(rec.metadata), rec.importance, rec.surprise,
@@ -2242,7 +2244,7 @@ class Store:
              rec.subject_key, rec.claim_kind,
              int(rec.pinned), rec.sensitivity,
              _dumps(rec.provenance), rec.confidence,
-             rec.pinned_at, rec.unpinned_at),
+             rec.pinned_at, rec.unpinned_at, rec.team_id),
         )
         try:
             # Keep the row, FTS mirror, and vector mirror atomic for the normal
@@ -5721,6 +5723,7 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         provenance=_loads(row["provenance"], {}),
         pinned_at=row["pinned_at"] if "pinned_at" in row.keys() else None,
         unpinned_at=row["unpinned_at"] if "unpinned_at" in row.keys() else None,
+        team_id=row["team_id"] if "team_id" in row.keys() else None,
     )
 
 

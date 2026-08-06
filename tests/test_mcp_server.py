@@ -69,7 +69,7 @@ _ALL_TOOLS = {
     "engraphis_answer", "engraphis_ingest", "engraphis_consolidate",
     "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
-    "engraphis_export_receipts",
+    "engraphis_export_receipts", "engraphis_link_symbol",
     "engraphis_check_update",
 }
 
@@ -101,11 +101,11 @@ def test_server_identity_and_tools_registered():
 
     classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
     assert srv.classic_mcp.name == "engraphis_mcp"
-    assert len(_ALL_TOOLS) == 33
+    assert len(_ALL_TOOLS) == 34
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("### Classic 33-tool inventory", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 34-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = classic["engraphis_remember"].inputSchema.get("properties", {})

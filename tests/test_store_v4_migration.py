@@ -57,10 +57,16 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     _prepare_v3(db)
 
     migrated = Store(str(db))
-    assert migrated.schema_version == 9
+    assert migrated.schema_version == 10
     assert migrated.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
+    # Forward-compat: team_id column exists after migration (read-side wiring
+    # is incomplete; see Scope.TEAM note in interfaces.py).
+    mem_columns = {row["name"] for row in migrated.conn.execute(
+        "PRAGMA table_info(memories)"
+    ).fetchall()}
+    assert "team_id" in mem_columns
     migrated.close()
 
     backup = Path(f"{db}.pre-migration-v4.bak")
@@ -147,7 +153,7 @@ def test_v4_upgrade_rebuilds_code_history_and_backfills_claim_identity(tmp_path)
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == 10
         assert Path(f"{db}.pre-migration-v5.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= columns
@@ -248,8 +254,8 @@ def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_pa
             "SELECT valid_from, ingested_at, valid_to, expired_at "
             "FROM mem_links WHERE a='mem_a'"
         ).fetchone()
-        assert upgraded.schema_version == 9
-        assert Path(f"{db}.pre-migration-v9.bak").is_file()
+        assert upgraded.schema_version == 10
+        assert Path(f"{db}.pre-migration-v10.bak").is_file()
         assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
         assert row["valid_from"] == row["ingested_at"] == 123
         assert row["valid_to"] is None and row["expired_at"] is None
@@ -298,7 +304,7 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
         history = upgraded.conn.execute(
             "SELECT file, content_hash, valid_from, ingested_at FROM code_file_history"
         ).fetchone()
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == 10
         assert Path(f"{db}.pre-migration-v6.bak").is_file()
         assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert history["file"] == "api.py"
@@ -343,7 +349,7 @@ def test_v6_upgrade_adds_confidence_and_preserves_rows(tmp_path):
         ).fetchone()
         record = upgraded.get_memory(memory_id)
 
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == 10
         # A v6 source backs up as v7 (min(SCHEMA_VERSION, previous_version + 1)).
         assert Path(f"{db}.pre-migration-v7.bak").is_file()
         assert "confidence" in columns
@@ -391,7 +397,7 @@ def test_v7_reopen_canonicalizes_legacy_entity_aliases_idempotently(
             "SELECT id, canonical_id, canonical_method FROM entities "
             "ORDER BY id"
         ).fetchall()
-        assert reopened.schema_version == 9
+        assert reopened.schema_version == 10
         assert [(row["canonical_id"], row["canonical_method"]) for row in rows] == [
             ("ent_open_ai", "token_overlap"),
             ("ent_open_ai", "token_overlap"),
@@ -457,7 +463,7 @@ def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_pa
         row = upgraded.conn.execute(
             "SELECT memory_id, repo_id FROM memory_tombstones WHERE memory_id='legacy-erased'"
         ).fetchone()
-        assert upgraded.schema_version == 9
+        assert upgraded.schema_version == 10
         assert "repo_id" in columns
         assert index_columns == ["workspace_id", "repo_id", "memory_id"]
         assert row["memory_id"] == "legacy-erased"
@@ -490,7 +496,7 @@ def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypa
     monkeypatch.setattr(Store, "_migrate_code_file_history_v6", unexpected)
     reopened = Store(str(db))
     try:
-        assert reopened.schema_version == 9
+        assert reopened.schema_version == 10
     finally:
         reopened.close()
 
@@ -522,7 +528,7 @@ def test_migration_transform_failure_rolls_back_and_restart_completes(
 
     monkeypatch.setattr(Store, "_backfill_edge_supports", original)
     restarted = Store(str(db))
-    assert restarted.schema_version == 9
+    assert restarted.schema_version == 10
     assert restarted.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -653,4 +659,4 @@ def test_backup_directory_is_durable_before_schema_transform(monkeypatch, tmp_pa
     monkeypatch.setattr(Store, "_apply_schema", require_flush_before_schema)
 
     Store(str(db)).close()
-    assert _version(db) == 9
+    assert _version(db) == 10

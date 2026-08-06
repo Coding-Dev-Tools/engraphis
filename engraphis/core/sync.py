@@ -1426,6 +1426,7 @@ class SyncEngine:
                 logger.warning("sync bundle rejected (%s)", type(exc).__name__)
                 applied.append({"bundle": name, "error": "bundle rejected",
                                 "error_type": type(exc).__name__})
+                continue
             rep["from_device"] = remote.get("device_id", "?")
             # Inbound byte accounting: attribute received bytes to the origin device
             # from the bundle header (falls back to a stable synthetic key so the
