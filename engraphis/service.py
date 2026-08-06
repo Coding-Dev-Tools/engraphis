@@ -8134,29 +8134,19 @@ class MemoryService:
         ]
         # ── Orphan count (memories with no entity links) ────────────────────────
         # A memory is an orphan when it has zero live rows in memory_entities.
-        # The LEFT JOIN + WHERE me.id IS NULL pattern uses the existing
-        # idx_memory_entity_memory index on (memory_id, valid_to, expired_at).
-        orphan_sql = f"""
-            SELECT COUNT(*) AS n FROM memories m
-            {live_where.replace('WHERE', 'WHERE m.', 1).replace('workspace_id=', 'm.workspace_id=').replace('scope,', 'm.scope,')}
-              AND NOT EXISTS (
-                  SELECT 1 FROM memory_entities me
-                  WHERE me.memory_id = m.id
-                    AND me.valid_to IS NULL AND me.expired_at IS NULL
-              )
-        """
-        # Rewrite live_where to be table-qualified for the subquery form
+        # The NOT EXISTS subquery uses the existing idx_memory_entity_memory
+        # index on (memory_id, valid_to, expired_at).
         orphan_params: list[Any] = [now, now, wid]
         orphan_sql_clean = (
-            f"SELECT COUNT(*) AS n FROM memories m "
-            f"WHERE m.workspace_id=? AND COALESCE(m.scope,'workspace')!='session' "
-            f"AND (m.valid_from IS NULL OR m.valid_from<=?) "
-            f"AND (m.valid_to IS NULL OR ?<m.valid_to) "
-            f"AND m.expired_at IS NULL "
-            f"AND NOT EXISTS ("
-            f"  SELECT 1 FROM memory_entities me "
-            f"  WHERE me.memory_id=m.id AND me.valid_to IS NULL AND me.expired_at IS NULL"
-            f")"
+            "SELECT COUNT(*) AS n FROM memories m "
+            "WHERE m.workspace_id=? AND COALESCE(m.scope,'workspace')!='session' "
+            "AND (m.valid_from IS NULL OR m.valid_from<=?) "
+            "AND (m.valid_to IS NULL OR ?<m.valid_to) "
+            "AND m.expired_at IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM memory_entities me "
+            "  WHERE me.memory_id=m.id AND me.valid_to IS NULL AND me.expired_at IS NULL"
+            ")"
         )
         orphan_count = int(conn.execute(orphan_sql_clean, orphan_params).fetchone()["n"])
         # ── Conflict frequency (audit actions in last 7 days + total) ───────────

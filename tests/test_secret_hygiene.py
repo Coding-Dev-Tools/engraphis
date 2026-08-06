@@ -195,6 +195,12 @@ def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     historical_at = engine.store.conn.execute(
         "SELECT MAX(valid_from) FROM edge_supports WHERE edge_id=?", (edge_id,)
     ).fetchone()[0]
+    # Ensure temporal separation so the historical_at anchor is strictly before
+    # the valid_to stamped by retire() → invalidate_edges_for_memory().
+    # Without this, both can land on the same microsecond and the strict < 
+    # predicate in _temporal_visibility_sql excludes the support.
+    import time
+    time.sleep(0.05)  # 50ms for CI/load robustness (was 10ms)
     engine.retire(historical_id, reason="historical evidence")
 
     engine.secure_erase(erased_id)

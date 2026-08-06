@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
