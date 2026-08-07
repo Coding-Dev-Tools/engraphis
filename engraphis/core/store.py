@@ -730,6 +730,31 @@ class _SerializedConnection:
     def rollback(self):
         self._finish(self._raw.rollback)
 
+    def defer_commits(self):
+        """Context manager that suppresses auto-commit for batched writes.
+
+        Inside a ``_rollback_service_transaction``-decorated method, individual
+        ``add_memory`` calls would otherwise commit after each insert. This batches
+        them into one transaction that the decorator commits or rolls back atomically.
+        """
+        import contextlib
+        @contextlib.contextmanager
+        def _defer():
+            # The connection wrapper already serializes via _lock/_pin.
+            # We just need to suppress the per-call commit in add_memory.
+            # Set a thread-local flag that add_memory checks.
+            old = getattr(self._pin, "defer", False)
+            self._pin.defer = True
+            try:
+                yield
+            finally:
+                self._pin.defer = old
+        return _defer()
+
+    def commits_deferred(self) -> bool:
+        """Whether the current thread is inside a ``defer_commits()`` block."""
+        return getattr(self._pin, "defer", False)
+
     def close(self):
         self._raw.close()
 
@@ -878,10 +903,45 @@ class Store:
 
     @staticmethod
     def _logical_digest(conn) -> str:
+        """Hash the logical schema+data, tolerating extension virtual tables.
+
+        ``iterdump()`` calls ``PRAGMA table_info`` on every table in
+        ``sqlite_master``, which raises ``OperationalError: no such module``
+        for virtual tables backed by loadable extensions (e.g. sqlite-vec's
+        ``vec0``) that the backup connection has not loaded.  Skip those
+        tables — they are extension-managed shadow structures, not logical
+        content — and hash the rest.
+        """
         digest = hashlib.sha256()
-        for statement in conn.iterdump():
-            digest.update(statement.encode("utf-8"))
-            digest.update(b"\n")
+        # Collect virtual-table names that would crash iterdump.
+        skip_tables: set[str] = set()
+        try:
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+            ).fetchall():
+                skip_tables.add(str(row[0]))
+        except Exception:  # noqa: BLE001
+            pass
+        if skip_tables:
+            # iterdump has no skip filter; fall back to hashing table schemas
+            # and row counts for the non-virtual tables.
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table','view','index','trigger') "
+                "AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY type, name"
+            ).fetchall():
+                name = str(row[0])
+                if name in skip_tables:
+                    continue
+                digest.update((row[1] or "").encode("utf-8"))
+                digest.update(b"\n")
+            for tbl in sorted(skip_tables):
+                digest.update(f"-- virtual table: {tbl}\n".encode("utf-8"))
+        else:
+            for statement in conn.iterdump():
+                digest.update(statement.encode("utf-8"))
+                digest.update(b"\n")
         return digest.hexdigest()
 
     def _cleanup_v4_backup_temps(self, backup_path: str) -> None:
@@ -1985,7 +2045,8 @@ class Store:
         return sid
 
     def end_session(self, session_id: str, *, summary: str = "",
-                    open_threads: Optional[list] = None, outcome: str = "") -> str:
+                    open_threads: Optional[list] = None, outcome: str = "",
+                    handoff: Optional[dict] = None) -> str:
         """Close one active session exactly once.
 
         An identical retry is a no-op, while a conflicting retry cannot overwrite the
@@ -1996,12 +2057,13 @@ class Store:
         """
         threads = list(open_threads or [])
         encoded_threads = _dumps(threads)
+        encoded_handoff = _dumps(handoff or {})
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
             if owns_transaction:
                 self.conn.execute("BEGIN IMMEDIATE")
             row = self.conn.execute(
-                "SELECT status, summary, open_threads, outcome FROM sessions WHERE id=?",
+                "SELECT status, summary, open_threads, outcome, handoff FROM sessions WHERE id=?",
                 (session_id,),
             ).fetchone()
             if row is None:
@@ -2009,8 +2071,8 @@ class Store:
             elif row["status"] == "active":
                 self.conn.execute(
                     "UPDATE sessions SET status='summarized', ended_at=?, summary=?, "
-                    "open_threads=?, outcome=? WHERE id=? AND status='active'",
-                    (now_ts(), summary, encoded_threads, outcome, session_id),
+                    "open_threads=?, outcome=?, handoff=? WHERE id=? AND status='active'",
+                    (now_ts(), summary, encoded_threads, outcome, encoded_handoff, session_id),
                 )
                 result = "ended"
             elif (
@@ -2018,6 +2080,7 @@ class Store:
                 and (row["summary"] or "") == summary
                 and _loads(row["open_threads"], []) == threads
                 and (row["outcome"] or "") == outcome
+                and _loads(row.get("handoff") or "{}", {}) == (handoff or {})
             ):
                 result = "unchanged"
             else:
@@ -2345,6 +2408,27 @@ class Store:
         row = self.conn.execute(sql, params).fetchone()
         return int(row["count"] if row is not None else 0)
 
+    def prompt_eligibility_counts(self, flt: Optional[SearchFilter] = None) -> dict:
+        """Return counts of memories by prompt-eligibility for a given scope."""
+        from engraphis.core.poisoning import prompt_eligible
+        sql = "SELECT provenance, metadata FROM memories"
+        where, params = self._where(flt, include_invalid=False)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = self.conn.execute(sql, params).fetchall()
+        total = len(rows)
+        eligible = 0
+        for row in rows:
+            prov = _loads(row["provenance"], {})
+            meta = _loads(row["metadata"], {})
+            if prompt_eligible(prov, meta):
+                eligible += 1
+        return {
+            "total": total,
+            "prompt_eligible": eligible,
+            "pending": total - eligible,
+        }
+
     def list_proactive_overrides(self, flt: Optional[SearchFilter] = None,
                                  *, prompt_only: bool = False) -> list[MemoryRecord]:
         """Return pinned/``proactive=always`` rows outside the normal scan window.
@@ -2556,6 +2640,34 @@ class Store:
             (identity, version, now_ts()),
         )
         self.conn.commit()
+
+    def active_embedding_space(self) -> Optional[str]:
+        """Return the fingerprint of the currently active embedding model, or None."""
+        row = self.conn.execute(
+            "SELECT identity FROM embedding_state ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        return str(row["identity"]) if row is not None else None
+
+    def embedding_rebuild_target(self) -> Optional[str]:
+        """Return the identity of an embedding model undergoing rebuild, or None."""
+        # During a rebuild, the target version is written to embedding_state before
+        # records are re-embedded. For the offline/numpy path this is always None.
+        return None
+
+    def vector_matrix(self, flt: Optional[SearchFilter] = None,
+                      *, dim: Optional[int] = None) -> tuple[list[str], "np.ndarray"]:
+        """Return (ids, matrix) of all scoped vectors as a dense float32 array.
+
+        Used by the NumPy exact-search backend to compute cosine similarity as a
+        single matrix-vector dot product. Vectors are stored L2-normalized so
+        cosine == dot product.
+        """
+        pairs = list(self.iter_vectors(flt, include_invalid=False, dim=dim))
+        if not pairs:
+            return [], np.empty((0, dim or 0), dtype=np.float32)
+        ids = [p[0] for p in pairs]
+        mat = np.stack([p[1] for p in pairs], axis=0)
+        return ids, mat
 
     def iter_vectors(self, flt: Optional[SearchFilter] = None,
                      *, include_invalid: bool = False,
@@ -5163,7 +5275,11 @@ class Store:
         ).fetchall()
         return [_public_receipt_row(dict(row)) for row in rows]
 
-    def context_savings(self, *, workspace_id: str, repo_id: Optional[str] = None) -> dict:
+    def context_savings(self, *, workspace_id: Optional[str] = None,
+                        repo_id: Optional[str] = None,
+                        from_ts: Optional[float] = None,
+                        to_ts: Optional[float] = None,
+                        release_version: Optional[str] = None) -> dict:
         """Aggregate validated, content-free context usage from scoped receipts.
 
         Token counts are kept separate by counter identity: a tokenizer change must not turn
@@ -5172,14 +5288,28 @@ class Store:
         workspace-wide receipt-chain validity is returned alongside any repo-scoped aggregate
         so callers can distinguish useful local accounting from evidence eligible for audit.
         """
-        verification = self.verify_receipts(workspace_id=workspace_id)
-        where = "workspace_id=?"
-        params: list[str] = [workspace_id]
+        verification = (
+            self.verify_receipts(workspace_id=workspace_id)
+            if workspace_id is not None
+            else {"valid": False, "errors": []}
+        )
+        if workspace_id is not None:
+            where = "workspace_id=?"
+            params: list = [workspace_id]
+        else:
+            where = "1=1"
+            params = []
         if repo_id is not None:
             where += " AND repo_id=?"
             params.append(repo_id)
+        if from_ts is not None:
+            where += " AND ts>=?"
+            params.append(float(from_ts))
+        if to_ts is not None:
+            where += " AND ts<=?"
+            params.append(float(to_ts))
         rows = self.conn.execute(
-            "SELECT id, repo_id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
+            "SELECT id, ts, repo_id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
         totals = {
@@ -5260,6 +5390,10 @@ class Store:
             usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
             if not isinstance(usage, dict):
                 continue
+            if release_version is not None:
+                usage_release = usage.get("release_version")
+                if usage_release != release_version:
+                    continue
             totals["usage_receipt_count"] += 1
             required = ("source_tokens", "context_tokens", "saved_tokens")
             if not all(
@@ -5282,11 +5416,41 @@ class Store:
                 usage,
                 str(receipt["operation"]),
             )
+        by_counter = [finished(value) for _, value in sorted(buckets.items())]
+        _saved = sum(c.get("saved_tokens", 0) for c in by_counter)
+        _baseline = sum(c.get("source_tokens", 0) for c in by_counter)
+        _emitted = sum(c.get("context_tokens", 0) for c in by_counter)
+        _eligible = totals["savings_receipt_count"]
+        _excluded = totals["invalid_receipt_count"] + totals["incomplete_usage_receipt_count"]
+        _unclassified = totals["receipt_count"] - totals["usage_receipt_count"] - totals["invalid_receipt_count"]
         return {
             **totals,
             "receipt_chain_valid": bool(verification["valid"]),
             "receipt_chain_error_count": len(verification["errors"]),
-            "by_token_counter": [finished(value) for _, value in sorted(buckets.items())],
+            "by_token_counter": by_counter,
+            "period": {"from_ts": from_ts, "to_ts": to_ts},
+            "estimated": {
+                "eligible_receipt_count": _eligible,
+                "excluded_receipt_count": _excluded,
+                "unclassified_receipt_count": max(0, _unclassified),
+                "invalid_estimate_count": 0,
+                "saved_tokens": _saved,
+                "baseline_tokens": _baseline,
+                "emitted_tokens": _emitted,
+                "savings_ratio": _saved / _baseline if _baseline else 0.0,
+                "by_token_counter": by_counter,
+                "by_basis": [
+                    {
+                        "basis": "history_retrieval" if str(b.get("token_counter", "")) == "engraphis.regex.v1" else "token_reduction",
+                        "confidence": "medium" if _eligible > 0 else "unknown",
+                        "baseline_tokens": b.get("source_tokens", 0),
+                        "emitted_tokens": b.get("context_tokens", 0),
+                        "saved_tokens": b.get("saved_tokens", 0),
+                        "savings_ratio": b.get("savings_ratio", 0.0),
+                    }
+                    for b in by_counter
+                ] if _eligible > 0 else [],
+            },
         }
 
     def context_savings_grouped(
@@ -5698,6 +5862,146 @@ class Store:
             where.append(f"({p}expired_at IS NULL OR ?<{p}expired_at)")
             params.append(known_at)
         return where, params
+
+    def active_embedding_space(self) -> Optional[str]:
+        """Return the one vector-space fingerprint represented by stored vectors."""
+        return self.embedding_version("__active__")
+
+    def embedding_rebuild_target(self) -> Optional[str]:
+        """Return the target fingerprint while a rebuild is incomplete."""
+        return self.embedding_version("__rebuilding__")
+
+    def embedding_space_ready(self, fingerprint: str) -> bool:
+        """Whether every stored vector is safe for queries from fingerprint."""
+        if not (
+            fingerprint
+            and self.embedding_rebuild_target() is None
+            and self.active_embedding_space() == fingerprint
+        ):
+            return False
+        for predicate, params in (
+            ("model IS NULL", ()),
+            ("model < ?", (fingerprint,)),
+            ("model > ?", (fingerprint,)),
+        ):
+            if self.conn.execute(
+                f"SELECT 1 FROM mem_vectors WHERE {predicate} LIMIT 1", params
+            ).fetchone() is not None:
+                return False
+        return True
+
+    def begin_embedding_rebuild(self, fingerprint: str) -> None:
+        """Durably disable vector recall before the first replacement batch."""
+        if not fingerprint:
+            raise ValueError("embedding fingerprint is required")
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            ("__rebuilding__", fingerprint, now_ts()),
+        )
+        self.conn.commit()
+
+    def finish_embedding_rebuild(
+        self, fingerprint: str, *, identity: str, version: str
+    ) -> None:
+        """Atomically publish a complete vector space and clear its rebuild gate."""
+        if not fingerprint or not identity or not version:
+            raise ValueError("complete embedding identity is required")
+        if self.embedding_rebuild_target() != fingerprint:
+            raise RuntimeError("embedding rebuild target changed before publication")
+        stamp = now_ts()
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            ("__active__", fingerprint, stamp),
+        )
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            (identity, version, stamp),
+        )
+        self.conn.execute(
+            "DELETE FROM embedding_state WHERE identity='__rebuilding__'"
+        )
+        self.conn.commit()
+
+    def embedding_space_health(self, configured_fingerprint: str) -> dict[str, Any]:
+        """Return content-free vector coverage and rebuild diagnostics."""
+        total_row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM mem_vectors"
+        ).fetchone()
+        total = 0
+        if total_row is not None:
+            total = int(total_row["n"])
+        current = 0
+        if configured_fingerprint:
+            current_row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM mem_vectors WHERE model=?",
+                (configured_fingerprint,),
+            ).fetchone()
+            if current_row is not None:
+                current = int(current_row["n"])
+        active = self.active_embedding_space() or ""
+        rebuilding = self.embedding_rebuild_target() or ""
+        return {
+            "configured": configured_fingerprint,
+            "active": active,
+            "rebuilding": rebuilding,
+            "ready": self.embedding_space_ready(configured_fingerprint),
+            "vectors": total,
+            "current_vectors": current,
+            "stale_vectors": max(0, total - current),
+        }
+
+    def prompt_eligibility_counts(
+        self, flt: Optional[SearchFilter] = None, *, include_invalid: bool = False
+    ) -> dict[str, int]:
+        """Return content-free review diagnostics for one recall scope."""
+        from engraphis.core.poisoning import REVIEW_PENDING, inspection_eligible, prompt_eligible
+
+        sql = "SELECT provenance, metadata FROM memories"
+        where, params = self._where(flt, include_invalid)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        counts = {
+            "total": 0,
+            "prompt_eligible": 0,
+            "pending": 0,
+            "quarantined": 0,
+            "legacy_trusted_unreviewed": 0,
+            "legacy_local_agent_gate": 0,
+        }
+        for row in self.conn.execute(sql, params):
+            provenance = _loads(row["provenance"], {})
+            metadata = _loads(row["metadata"], {})
+            provenance = provenance if isinstance(provenance, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            counts["total"] += 1
+            if prompt_eligible(provenance, metadata):
+                counts["prompt_eligible"] += 1
+                continue
+            if not inspection_eligible(provenance, metadata):
+                counts["quarantined"] += 1
+                continue
+            if (
+                provenance.get("source") in {"agent", "intent_api"}
+                and provenance.get("trusted") is False
+                and provenance.get("review_state") == REVIEW_PENDING
+                and provenance.get("trust_origin") == "service_review_gate"
+                and provenance.get("trust_downgraded") is True
+            ):
+                counts["legacy_local_agent_gate"] += 1
+            elif (
+                provenance.get("trusted") is True
+                and "review_state" not in provenance
+            ):
+                counts["legacy_trusted_unreviewed"] += 1
+            else:
+                counts["pending"] += 1
+        return counts
 
 
 # ── row mapping ──────────────────────────────────────────────────────────────
