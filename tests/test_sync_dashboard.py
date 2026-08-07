@@ -144,7 +144,18 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         assert "my-personal" not in synced        # ...personal folders never do
 
 
-def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("stored_settings", "expected_error"),
+    [
+        ('{"visibility":"corrupt-value"}', "visibility is invalid"),
+        ('{"visibility":""}', "visibility is invalid"),
+        ("[]", "settings are unreadable"),
+        ("{broken", "settings are unreadable"),
+    ],
+)
+def test_sync_fails_closed_on_invalid_workspace_visibility(
+    monkeypatch, tmp_path, stored_settings, expected_error
+):
     synced = []
 
     def fake_get_transport(kind="folder", **kw):
@@ -157,7 +168,7 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
         svc = v2_api.service()
         svc.store.conn.execute(
             "UPDATE workspaces SET settings=? WHERE name='demo'",
-            ('{"visibility":"corrupt-value"}',),
+            (stored_settings,),
         )
         svc.store.conn.commit()
 
@@ -168,7 +179,7 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
         assert summary["succeeded"] == 0
         assert "demo" not in synced
         assert any(
-            error["workspace"] == "demo" and "visibility is invalid" in error["error"]
+            error["workspace"] == "demo" and expected_error in error["error"]
             for error in summary["errors"]
         )
 
