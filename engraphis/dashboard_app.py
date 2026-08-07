@@ -274,10 +274,40 @@ def create_app() -> FastAPI:
         return JSONResponse({**body, "detail": body}, status_code=402)
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
         embed_dim=settings.embed_dim or 384,
         vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
         allowed_workspaces=settings.allowed_workspaces)
     app.state.service = svc
+    # Startup self-check: verify critical Store methods exist and stats() works.
+    # Catches merge-conflict regressions where methods escape the Store class body
+    # (e.g. orphaned at module level after a bad rebase). Fails fast with a clear
+    # error instead of silently serving 500s on /api/bootstrap.
+    _required_store_methods = (
+        "prompt_eligibility_counts",
+        "embedding_space_health",
+        "active_embedding_space",
+        "begin_embedding_rebuild",
+        "finish_embedding_rebuild",
+    )
+    _store_cls = type(svc.store)
+    _missing = [m for m in _required_store_methods if not hasattr(_store_cls, m)]
+    if _missing:
+        raise RuntimeError(
+            f"Engraphis Store class is missing required methods: {', '.join(_missing)}. "
+            f"This usually means methods were accidentally moved outside the Store class "
+            f"body during a merge conflict. Check engraphis/core/store.py."
+        )
+    try:
+        svc.stats()
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"Engraphis service startup self-check failed: {exc}. "
+            f"Store method is likely orphaned outside the class body."
+        ) from exc
     # The review token is intentionally process-local and is never a general API
     # credential. It is minted alongside a short-lived browser session and exists only
     # to authorize the narrowly scoped human-approval dashboard action below.
