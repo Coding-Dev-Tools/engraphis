@@ -32,7 +32,7 @@ class FakePinnedReaderCounter:
 
 def test_harness_runs_and_scores():
     report = run(load_dataset(str(DATASET)), k=3)
-    assert report["questions"] == 4
+    assert report["questions"] == 9
     # The deterministic embedder should retrieve supporting facts for these
     # lexically-grounded questions; demand non-trivial recall so a regression trips CI.
     assert report["hit_at_k"] >= 0.75
@@ -105,7 +105,7 @@ def test_v2_harness_envelope_records_usage_latency_and_rank_metrics():
             "confidence_intervals", "paired_bootstrap"} <= set(metrics)
     assert metrics["confidence_intervals"]["recall_at_5"]["iterations"] == 8
     assert metrics["paired_bootstrap"]["available"] is False
-    assert report["legacy_summary"]["questions"] == 4
+    assert report["legacy_summary"]["questions"] == 9
 
 
 def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeypatch):
