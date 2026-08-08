@@ -41,9 +41,6 @@ class _Service:
         self.calls.append(("remember", content, kwargs))
         return {"id": "mem_2", "stored": True}
 
-    def secure_erase(self, memory_id, **kwargs):
-        self.calls.append(("secure_erase", memory_id, kwargs))
-        return {"id": memory_id, "status": "erased"}
 
 
 def test_hermes_provider_imports_without_hermes_or_model_dependencies(monkeypatch):
@@ -53,11 +50,12 @@ def test_hermes_provider_imports_without_hermes_or_model_dependencies(monkeypatc
     assert provider.name == "engraphis"
     assert module._local_embed_model("sentence-transformers/all-MiniLM-L6-v2").startswith("local:")
     assert {tool["name"] for tool in provider.get_tool_schemas()} == {
-        "engraphis_search", "engraphis_store", "engraphis_erase",
+        "engraphis_search", "engraphis_store",
     }
+    assert "engraphis_erase" not in provider.system_prompt_block()
 
 
-def test_hermes_provider_uses_scoped_service_and_explicit_secure_erase(monkeypatch):
+def test_hermes_provider_uses_scoped_service_without_model_visible_erase(monkeypatch):
     module = _provider_module(monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_HERMES_WORKSPACE", "personal")
     monkeypatch.setenv("ENGRAPHIS_HERMES_REPO", "project")
@@ -72,14 +70,14 @@ def test_hermes_provider_uses_scoped_service_and_explicit_secure_erase(monkeypat
     stored = json.loads(provider.handle_tool_call(
         "engraphis_store", {"text": "The theme is blue.", "keywords": ["theme"]},
     ))
-    erased = json.loads(provider.handle_tool_call("engraphis_erase", {"memory_id": "mem_2"}))
+    refused = json.loads(provider.handle_tool_call(
+        "engraphis_erase", {"memory_id": "mem_2"},
+    ))
 
     assert stored["id"] == "mem_2"
-    assert erased == {"id": "mem_2", "status": "erased"}
+    assert refused == {"error": "unknown_tool"}
     turn_call = next(call for call in service.calls if call[0] == "remember")
     assert turn_call[2]["workspace"] == "personal"
     assert turn_call[2]["repo"] == "project"
     assert turn_call[2]["scope"] == "repo"
     assert turn_call[2]["source"] == "agent"
-    erase_call = next(call for call in service.calls if call[0] == "secure_erase")
-    assert erase_call[2]["actor"] == "hermes"

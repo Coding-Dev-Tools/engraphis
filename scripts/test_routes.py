@@ -46,8 +46,13 @@ def run() -> None:
     print()
     workspace = f"smoke-{int(time.time())}"
     memory_id = ""
+    headers = (
+        {"Authorization": f"Bearer {settings.api_token}"}
+        if settings.api_token
+        else {}
+    )
 
-    with httpx.Client(base_url=BASE, timeout=30) as client:
+    with httpx.Client(base_url=BASE, timeout=30, headers=headers) as client:
         try:
             health = _expect(client.get("/api/health"))
             assert health["engine"] == "v2"

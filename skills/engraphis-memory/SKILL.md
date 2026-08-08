@@ -79,9 +79,10 @@ Every memory carries a **scope** (visibility) and a **type** (kind). Getting the
 - **repo**: the repository (`backend`). Omit only for genuinely workspace-wide facts.
 - **session**: one unit of work; pass its `session_id` so its memories group and resume.
 
-Pick the **narrowest scope that is still reusable**: a fix specific to one repo is `scope="repo"`;
-a preference that follows the human everywhere is `scope="user"`. Full rules, scope-vs-type, and
-promotion: [SCOPING.md](references/SCOPING.md).
+Pick the **narrowest supported scope that is still reusable**: usually `scope="repo"`, or
+`scope="workspace"` for deliberately shared cross-repo facts. `scope="user"` is reserved and
+rejected until memories carry an owner identity; it is not a private personal scope. Full rules,
+scope-vs-type, and promotion: [SCOPING.md](references/SCOPING.md).
 
 ## Classic direct-tool guide
 

@@ -59,15 +59,26 @@ const context = await browser.newContext({
   deviceScaleFactor: 1,
 });
 const page = await context.newPage();
-await page.goto(`http://127.0.0.1:${port}/${html}?autoplay=1`, { waitUntil: "networkidle" });
-// Keep the capture clock independent from requestAnimationFrame throttling in
-// headless environments and leave a small tail after the page's 56-second animation.
-await page.waitForTimeout(durationMs);
-await context.close();
-await browser.close();
-server.close();
-
-const recorded = await page.video().path();
+let recorded;
+try {
+  await page.goto(`http://127.0.0.1:${port}/${html}?autoplay=1`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => window.demoPayloadReady === true, null, { timeout: 10_000 });
+  const payloadSource = await page.evaluate(() => window.demoPayloadSource);
+  if (payloadSource !== "generated") {
+    throw new Error(`Refusing to record demo from ${payloadSource || "unknown"} payload`);
+  }
+  // Keep the capture clock independent from requestAnimationFrame throttling in
+  // headless environments and leave a small tail after the page's 56-second animation.
+  await page.waitForTimeout(durationMs);
+  await context.close();
+  recorded = await page.video().path();
+} catch (error) {
+  await context.close().catch(() => {});
+  throw error;
+} finally {
+  await browser.close();
+  server.close();
+}
 const ffmpeg = process.env.FFMPEG || "ffmpeg";
 const encoded = spawnSync(ffmpeg, [
   "-y", "-i", recorded,

@@ -1,7 +1,9 @@
 # Engraphis MCP tools: reference
 
-All 40 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
-Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
+The Classic server registers 34 direct tools and the Smart gateway registers nine; two names
+overlap, for 41 distinct public tool names. Parameters are `name (type, default)`: no default
+means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
+instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
@@ -17,13 +19,14 @@ Group index: [Write](#write) · [Recall and read](#recall-and-read) · [History]
 Store a memory so it can be recalled later, across turns, sessions, and repos.
 
 - `content (str)`: the fact/decision/convention/procedure.
-- `workspace (str)`: top-level scope (org/product), e.g. `"acme"`.
+- `workspace (str, "default")`: top-level scope (org/product), e.g. `"acme"`.
 - `repo (str, None)`: repository scope; omit for workspace-wide facts.
 - `session_id (str, None)`: from `engraphis_start_session`, if this belongs to a session.
 - `mtype (str, "semantic")`: `semantic` | `episodic` | `procedural` | `working`. See CONVENTIONS.
-- `scope (str, None)`: `session` | `repo` | `workspace` | `user`; omitted preserves the
-  compatible default (`repo` when `repo` or a repo-backed `session_id` is present, otherwise
-  `workspace`). Session visibility must be explicit. See SCOPING.
+- `scope (str, None)`: `session` | `repo` | `workspace`; `user` is reserved and rejected until
+  memories carry an immutable owner identity. Omitted preserves the compatible default (`repo`
+  when `repo` or a repo-backed `session_id` is present, otherwise `workspace`). Session
+  visibility must be explicit. See SCOPING.
 - `title (str, "")`: optional short title.
 - `importance (float, 0.0)`: `0..1`; higher resists decay.
 - `keywords (list[str], None)`: optional, aids lexical recall.
@@ -32,6 +35,10 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
   **supersedes** the old one (`op:"invalidate"`, old closed not deleted); an uncertain neighbor
   returns `op:"relate"` and keeps both. Set `False` only for intentionally repeated episodic
   log entries.
+- `source (str, "agent")`: content origin. Web, import, sync, and other external origins remain
+  untrusted even if `trusted=true`.
+- `trusted (bool, true)`: local-agent confidence label; it cannot elevate an external origin.
+- `kind (str, None)`: optional artifact kind such as `plan`, `diff`, `review`, or `task_summary`.
 - `retention_class (str, None)`: optional host classification: `ephemeral` | `normal` |
   `critical`; advisory and bounded, never a silent discard.
 - `retention_reason (str, "")`: short content-free rationale for that classification.
@@ -42,20 +49,22 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
   subject and compatible kind make supersession deterministic; uncertain neighbors remain live.
 
 Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
-`invalidate` (with `superseded:[old_id,…]`) | `relate` (with `related_to`; both claims remain).
+`invalidate` (with `superseded:[old_id,…]`) | `relate` (with `related_to`; both claims remain) |
+`quarantined` (retained for governance review but excluded from normal recall, with content-free
+`policy` and `reasons` codes).
 
 > Prefer `dedupe=True` (default). It is what keeps the store contradiction-free without an LLM.
 
 ### `engraphis_record_event`
-Append a lightweight episodic log entry with less ceremony than `remember`, for raw events you may
-later consolidate into a durable fact.
+Append one raw occurrence to the append-only event ledger. Event rows are not memories: they are
+not recalled, deduplicated, reinforced, or consolidated as memories.
 
-- `kind (str)`: e.g. `decision`, `bug`, `fix`, `tried_and_failed`, `review_comment`.
+- `kind (str)`: stable event category, e.g. `decision`, `bug`, `fix`, `tried_and_failed`.
 - `content (str)`: what happened.
-- `workspace (str)`, `repo (str, None)`, `session_id (str, None)`.
+- `workspace (str, "default")`, `repo (str, None)`, `session_id (str, None)`.
 
-Returns `{id, kind}`. Three similar events about the same thing is a signal to promote it into a
-`semantic`/`procedural` memory with `remember`.
+Returns `{id, kind}`. Choose this when each occurrence matters; use `remember` when the outcome
+must itself be recalled, and promote a recurring pattern through `engraphis_consolidate`.
 
 ---
 
@@ -79,6 +88,12 @@ bodies already represented in `context`.
   Engraphis had learned in system time; `as_of (float, None)` is the `valid_at` compatibility
   alias and must match when both are supplied.
 - `diagnostics (bool, false)`: include the per-arm retrieval trace.
+- `planning (str, "off")`: `off` preserves the single-query path; `auto` materializes the
+  original query plus at most two planner routes, with strict per-route and cumulative bounds.
+- `mtype_limits (dict[str,int], None)`: optional post-rerank maxima by memory type. Limits drop
+  lower-ranked results; they never boost relevance.
+- `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`; truncation
+  removes packed context from the end while preserving source references.
 
 Returns `{query, count, context, sources, packed_sources, usage, valid_at, known_at, historical,
 retrieval_profile, response_mode, receipt}`. `usage` always names `budget_tokens`,
@@ -107,6 +122,10 @@ It is the full-response compatibility surface; prefer `engraphis_recall_context`
 - `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
   `valid_at` alias and conflicts unless it matches `valid_at` exactly.
 - `diagnostics (bool, false)`: include `retrieval_trace` with raw/normalized/fusion/rerank data.
+- `planning (str, "off")`: `off` preserves single-query recall; `auto` enables bounded planning.
+- `mtype_limits (dict[str,int], None)`: optional post-rerank maxima by memory type.
+- `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`; truncation
+  removes packed context and memory bodies from the end while preserving source references.
 
 Returns `{query, count, context, memories:[{id, title, content, scope, mtype, repo_id, score,
 arm, retention, provenance}], packed_sources, usage, valid_at, known_at, historical,
@@ -128,8 +147,9 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
 - `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` remains the
   compatibility `valid_at` alias and must match if both are supplied.
 - `token_budget (int, None)`; `retrieval_profile (str, "balanced")`; `candidate_depth (str,
-  "fixed" | "adaptive")`; `response_mode (str, "full" | "compact")`; `diagnostics (bool,
-  false)`.
+  "fixed")`; `response_mode (str, "full" | "compact")`; `diagnostics (bool, false)`.
+- `planning (str, "off")`; `mtype_limits (dict[str,int], None)`;
+  `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`.
 - `min_support (float, None)`: absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)`: ask a configured LLM for cited prose; falls back safely.
@@ -143,7 +163,15 @@ reinforced. This surface is stateful and non-idempotent.
 ### `engraphis_answer`
 Backward-compatible grounded-answer alias with the same state effects. Prefer
 `engraphis_recall_grounded` for new configs; keep using this only if an existing agent already
-references it. It accepts the same temporal, profile, response-mode, and diagnostics fields.
+references it.
+
+- `query (str)`; `workspace (str, "default")`; `repo (str, None)`; `k (int, 8)`;
+  `min_support (float, 0.25)`; `synthesize (bool, false)`.
+- `as_of (float, None)`; `valid_at (float, None)`; `known_at (float, None)`;
+  `token_budget (int, None)`; `retrieval_profile (str, "balanced")`;
+  `candidate_depth (str, "fixed")`; `response_mode (str, "full")`;
+  `diagnostics (bool, false)`; `planning (str, "off")`;
+  `mtype_limits (dict[str,int], None)`; `max_response_tokens (int, None)`.
 
 ### `engraphis_recall_proactive`
 Conscious recall with **no query**: high-importance, recent, well-reinforced memories. Use at the
@@ -161,7 +189,8 @@ last-session handoff. Use at task start when an agent needs ready-to-use, cited 
 than the raw queryless memory list.
 
 - `workspace (str)`, `repo (str, None)`, `task (str, "")`, `agent_state (str, "")`,
-  `k (int, 10)`, `synthesize (bool, false)`.
+  `k (int, 10)`, `synthesize (bool, false)`, `token_budget (int, None)`,
+  `response_mode (str, "full")`: use `compact` for one packed context packet.
 
 Returns `{context_summary, suggested_memories, citations, suggested_queries, last_session,
 grounded, synthesized, reason}`.
@@ -225,6 +254,8 @@ external vector backend can be considered remediated.
 ### `engraphis_forget` *(deprecated)*
 Compatibility alias for `engraphis_retire`. It retains the old `status:"forgotten"` result for
 existing clients, but new integrations must use `engraphis_retire`.
+
+- `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
 
 ### `engraphis_promote`
 Widen a live memory's visibility without editing it in place. The wider record is stored first;
@@ -396,9 +427,7 @@ With `profiles=true` it also rolls every live memory mentioning an entity into o
 semantic *profile* digest, a per-subject knowledge profile linked via `profiles` that grows with use.
 
 - `workspace (str, required)`; `repo (str, None)`; `dry_run (bool, true)`;
-  `profiles (bool, false)`; `structured (bool, false)`; `supersede_sources (bool, false)`.
-  `supersede_sources=true` requires `structured=true` and bi-temporally closes only the source
-  episodes cited by validated structured facts.
+  `profiles (bool, false)`; `structured (bool, false)`.
 
 Returns `{clusters_found, digests_created, archived, skipped_already_consolidated, compaction, dry_run}`.
 The `compaction` field is the context tokens the sweep saved (before → after). With `profiles=true` a
@@ -410,6 +439,12 @@ These nine tools are the default Smart MCP surface. The seven tools below expose
 discovery, execution, inspection, update, and review operations that are not part of the classic
 direct-tool inventory above. Discovery returns the exact capability schema; executors reject stale
 or mismatched schemas and enforce the declared side-effect boundary.
+
+The two overlapping names deliberately have smaller Smart schemas than their Classic sections
+above. Smart `engraphis_remember` accepts only `content`, `workspace`, `repo`, `session_id`,
+`mtype`, and `importance`; safe provenance and deduplication are fixed internally. Smart
+`engraphis_recall_context` accepts only `query`, `workspace`, `repo`, `session_id`, `k`, and
+`token_budget`; advanced planning/profile controls are discoverable rather than routine.
 
 ### `engraphis_session`
 Start or resume a session, or end it with a next-session handoff.
@@ -488,7 +523,10 @@ Aggregate the content-free token-usage fields already stored in operation receip
 scoped to a workspace and optional repo, and are kept separate by token-counter identity so
 unlike tokenizers are never added together. No prompt, answer, or memory content is returned.
 
-- `workspace (str)`; `repo (str, None)`.
+- `workspace (str)`; `repo (str, None)`; `from_ts (float, None)` inclusive;
+  `to_ts (float, None)` exclusive; `release_version (str, None)`;
+  `format (str, None)`: `json` or `csv`; `group_by (str, None)`: `workspace`, `repo`, `agent`,
+  or `day`.
 
 Returns receipt coverage counts plus `by_token_counter` totals for source, context, saved, budget,
 packed, and omitted tokens, with savings ratios, per-operation breakdowns, and receipt-chain
@@ -499,23 +537,31 @@ Recompute hashes and validate chain order plus the independently stored local he
 Optionally pass a previously exported `expected_head` / `expected_count` for verification against
 an anchor kept outside the database. Returns `{valid, count, head, anchored, errors}`.
 
+- `workspace (str)`; `expected_head (str, None)`; `expected_count (int, None)`.
+
 ### `engraphis_export_receipts`
 Return the receipt-only export bundle plus verification result; raw memory/query contents and
 actor/workspace names are excluded.
+
+- `workspace (str)`.
 
 ### `engraphis_stats`
 Memory counts (overall or for one workspace): handy for onboarding/health checks.
 
 - `workspace (str, None)`.
 
-Returns `{memories, by_type, workspaces, sessions, schema_version}`.
+Returns `{workspace, memories, total_rows, by_type, workspaces, sessions, schema_version,
+prompt_eligibility, embedding}`. `memories` counts live rows; `total_rows` also includes
+superseded history.
 
 ### `engraphis_check_update`
 Report whether a newer Engraphis release is available, so an agent can proactively remind the
-user to upgrade. Cached ~24h and fail-silent; honors `ENGRAPHIS_UPDATE_CHECK=0` (then `enabled`
-is false). The default GitHub source is overridable via `ENGRAPHIS_UPDATE_URL`.
+user to upgrade. Cached for 24 hours by default and fail-silent; `ENGRAPHIS_UPDATE_CACHE`
+accepts a TTL in seconds and falls back to 24 hours for invalid values. `ENGRAPHIS_UPDATE_CHECK=0`
+disables the check (`enabled` is false). The default GitHub source is overridable via
+`ENGRAPHIS_UPDATE_URL`; the outbound client accepts HTTPS and rejects private/reserved destinations.
 
-- `force (bool, false)`: bypass the ~24h cache and re-check the release source now.
+- `force (bool, false)`: bypass the 24-hour cache and re-check the release source now.
 
 Returns `{enabled, current, latest, update_available, url, notice}`.
 

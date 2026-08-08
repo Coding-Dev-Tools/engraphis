@@ -11,6 +11,7 @@ from eval.productivity import (
     AgentTurn,
     DeterministicTaskAgent,
     TOKEN_COUNTER_IDENTITY,
+    _completed,
     _public_report,
     _turn,
     main,
@@ -39,6 +40,49 @@ def _small_dataset() -> list[dict]:
             "supporting": ["owner"],
         }],
     }]
+
+
+def test_offline_completion_oracle_rejects_partial_and_unanswerable_guesses():
+    question = {
+        "answer": "release manager",
+        "acceptable_answers": ["deployment owner"],
+    }
+
+    assert _completed("release manager", question, ("The release manager approves.",))
+    assert _completed("deployment owner", question, ())
+    assert not _completed("senior release manager", question, ())
+    assert _completed("", {"answerable": False}, ())
+    assert not _completed("probably the release manager", {"answerable": False}, ())
+
+
+def test_unanswerable_run_accepts_abstention_without_correction():
+    dataset = [{
+        "id": "unanswerable",
+        "memories": [],
+        "questions": [{
+            "id": "unknown",
+            "q": "What is the unavailable fact?",
+            "answerable": False,
+            "supporting": [],
+            "answer": "",
+        }],
+    }]
+
+    abstaining = run(
+        dataset,
+        agent=lambda question, context: "",
+    )["detail"]["retrieval"][0]
+    guessing = run(
+        dataset,
+        agent=lambda question, context: "invented",
+    )["detail"]["retrieval"][0]
+
+    assert abstaining["completed"] is True
+    assert abstaining["abstained"] is True
+    assert abstaining["correction_attempted"] is False
+    assert abstaining["agent_turns"] == 1
+    assert guessing["completed"] is False
+    assert guessing["abstained"] is False
 
 
 def test_productivity_report_measures_outcomes_corrections_turns_and_all_tokens() -> None:

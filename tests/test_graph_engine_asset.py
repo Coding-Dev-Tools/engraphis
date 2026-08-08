@@ -38,6 +38,8 @@ CLASSIC_DASHBOARD = ROOT / "engraphis" / "classic_assets" / "dashboard.js"
 VENDOR = STATIC / "vendor" / "force-graph.min.js"
 PRIMARY_LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 PRIMARY_INDEX = ROOT / "engraphis" / "dashboard_assets" / "index.html"
+PRIMARY_CSS = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
+PRIMARY_VENDOR = ROOT / "engraphis" / "dashboard_assets" / "vendor" / "force-graph.min.js"
 
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -1492,6 +1494,29 @@ def test_freeze_is_the_physics_gate_even_with_reduced_motion() -> None:
     assert report["frozen"]["alpha"] == 1
     assert report["resumed"]["alpha"] == 0.035
     assert report["resumed"]["reheats"] == 2
+
+
+def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
+    """The primary Ledger must not pay for graph assets before Graph opens."""
+
+    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    vendor = PRIMARY_VENDOR.read_text(encoding="utf-8")
+    styles = PRIMARY_CSS.read_text(encoding="utf-8")
+    for asset in ("d3.min.js", "force-graph.min.js", "engraphis-graph.js"):
+        assert asset not in markup
+
+    loader = source[source.index("function ensureGraphAssets()"):
+                    source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
+    d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
+    force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260730-drag-stability'")
+    assert d3 < force_graph < renderer
+    assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
+    assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
+    assert ".force-graph-container canvas {" in styles
+    assert ".force-graph-container .grabbable:active {" in styles
+    assert ".float-tooltip-kap {" in styles
 
 
 def test_primary_graph_starts_unfrozen_so_the_force_controls_take_effect() -> None:

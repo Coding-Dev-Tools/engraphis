@@ -69,14 +69,20 @@ def test_main_refuses_tokenless_non_loopback_bind(host, monkeypatch):
     assert exc.value.code == 2  # argparse .error()
 
 def test_main_blank_graph_token_falls_back_to_api_token(monkeypatch):
-    captured = []
+    captured_tokens = []
+    run_calls = []
     uvicorn = types.ModuleType("uvicorn")
-    uvicorn.run = lambda *_args, **_kwargs: None
+
+    def run(app, **options):
+        run_calls.append((app, options))
+
+    uvicorn.run = run
     read_only_api = types.ModuleType("engraphis.read_only_api")
+    app = object()
 
     def create_read_only_app(*, token):
-        captured.append(token)
-        return object()
+        captured_tokens.append(token)
+        return app
 
     read_only_api.create_read_only_app = create_read_only_app
     monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
@@ -85,4 +91,11 @@ def test_main_blank_graph_token_falls_back_to_api_token(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "api-token")
 
     assert main(["--host", "0.0.0.0", "--port", "8720"]) == 0
-    assert captured == ["api-token"]
+    assert captured_tokens == ["api-token"]
+    assert len(run_calls) == 1
+    launched_app, options = run_calls[0]
+    assert launched_app is app
+    assert options["host"] == "0.0.0.0"
+    assert options["port"] == 8720
+    assert options["proxy_headers"] is False
+    assert options["access_log"] is False

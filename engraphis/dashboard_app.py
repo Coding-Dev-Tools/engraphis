@@ -34,7 +34,11 @@ from engraphis.local_auth import (
     token_ok,
 )
 from engraphis.routes import v2_api
-from engraphis.service import MemoryService
+from engraphis.service import (
+    MAX_IMPORT_FILES,
+    MAX_IMPORT_TOTAL_BYTES,
+    MemoryService,
+)
 
 logger = logging.getLogger("engraphis")
 
@@ -42,6 +46,90 @@ _STATIC = Path(__file__).resolve().parent / "static"
 _CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _V2_ASSETS / "index.html"
+
+_DASHBOARD_JSON_REQUEST_BYTES = 8 * 1024 * 1024
+_DASHBOARD_UPLOAD_REQUEST_BYTES = (
+    MAX_IMPORT_TOTAL_BYTES + MAX_IMPORT_FILES * 4096
+)
+_DASHBOARD_REQUEST_BODY_LIMITS = {
+    "/api/auth/session": 8 * 1024,
+    "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+}
+
+
+class _RequestBodyTooLarge(Exception):
+    """Internal signal raised once the streaming request ceiling is crossed."""
+
+
+class _RequestBodyLimitMiddleware:
+    """Reject oversized request streams before FastAPI parses or buffers the body."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] != "http"
+            or scope.get("method") not in {"POST", "PUT", "PATCH", "DELETE"}
+        ):
+            await self.app(scope, receive, send)
+            return
+        max_bytes = _DASHBOARD_REQUEST_BODY_LIMITS.get(
+            scope.get("path", ""), _DASHBOARD_JSON_REQUEST_BYTES
+        )
+        raw_lengths = [
+            value for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if len(raw_lengths) > 1:
+            await JSONResponse(
+                {"error": "invalid content-length"}, status_code=400
+            )(scope, receive, send)
+            return
+        if raw_lengths:
+            try:
+                declared_length = int(raw_lengths[0])
+            except (TypeError, ValueError):
+                declared_length = -1
+            if declared_length < 0:
+                await JSONResponse(
+                    {"error": "invalid content-length"}, status_code=400
+                )(scope, receive, send)
+                return
+            if declared_length > max_bytes:
+                await self._too_large(scope, receive, send, max_bytes)
+                return
+
+        received = 0
+        limit_exceeded = False
+
+        async def limited_receive():
+            nonlocal limit_exceeded, received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > max_bytes:
+                    limit_exceeded = True
+                    raise _RequestBodyTooLarge
+            return message
+
+        async def guarded_send(message):
+            if not limit_exceeded:
+                await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _RequestBodyTooLarge:
+            pass
+        if limit_exceeded:
+            await self._too_large(scope, receive, send, max_bytes)
+
+    @staticmethod
+    async def _too_large(scope, receive, send, max_bytes):
+        await JSONResponse(
+            {"error": "request body too large", "max_bytes": max_bytes},
+            status_code=413,
+        )(scope, receive, send)
 
 
 async def _dashboard_consolidation_loop(service: MemoryService) -> None:
@@ -231,12 +319,15 @@ def create_app() -> FastAPI:
             else:
                 yield
         finally:
-            if background_task is not None:
-                background_task.cancel()
-                try:
-                    await background_task
-                except asyncio.CancelledError:
-                    pass
+            try:
+                if background_task is not None:
+                    background_task.cancel()
+                    try:
+                        await background_task
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                await asyncio.to_thread(v2_api.release_service, svc)
 
     # FastAPI's interactive docs execute CDN-hosted JavaScript with same-origin
     # authority. Do not expose that supply-chain surface on an authenticated memory
@@ -244,6 +335,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Engraphis Dashboard", docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
     app.state.mcp_over_http = _mcp_asgi is not None
+    app.add_middleware(_RequestBodyLimitMiddleware)
 
     # Honour the advertised allow-list on the actual GA dashboard entrypoint.  A
     # wildcard can never carry browser credentials.
@@ -276,11 +368,18 @@ def create_app() -> FastAPI:
         settings.db_path, embed_model=settings.embed_model,
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-        embed_dim=settings.embed_dim or 384,
+        embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
         allowed_workspaces=settings.allowed_workspaces)
+
+    def _discard_unbound_service() -> None:
+        try:
+            svc.close()
+        except Exception as exc:  # noqa: BLE001 - preserve the startup root cause
+            logger.error("failed to close rejected dashboard service (%s)", type(exc).__name__)
+
     app.state.service = svc
     # Startup self-check: verify critical Store methods exist and stats() works.
     # Catches merge-conflict regressions where methods escape the Store class body
@@ -296,6 +395,7 @@ def create_app() -> FastAPI:
     _store_cls = type(svc.store)
     _missing = [m for m in _required_store_methods if not hasattr(_store_cls, m)]
     if _missing:
+        _discard_unbound_service()
         raise RuntimeError(
             f"Engraphis Store class is missing required methods: {', '.join(_missing)}. "
             f"This usually means methods were accidentally moved outside the Store class "
@@ -309,10 +409,14 @@ def create_app() -> FastAPI:
         else:
             svc.stats()
     except AttributeError as exc:
+        _discard_unbound_service()
         raise RuntimeError(
             f"Engraphis service startup self-check failed: {exc}. "
             f"Store method is likely orphaned outside the class body."
         ) from exc
+    except BaseException:
+        _discard_unbound_service()
+        raise
     # The review token is intentionally process-local and is never a general API
     # credential. It is minted alongside a short-lived browser session and exists only
     # to authorize the narrowly scoped human-approval dashboard action below.
@@ -325,7 +429,11 @@ def create_app() -> FastAPI:
             _embedder_status(_ed, settings.embed_model)), file=_sys.stderr)
     except Exception:
         pass
-    v2_api.set_service(svc)
+    try:
+        v2_api.set_service(svc)
+    except BaseException:
+        _discard_unbound_service()
+        raise
     app.include_router(v2_api.router)
 
     app.state.auth_store = None

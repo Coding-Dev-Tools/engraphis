@@ -1,6 +1,6 @@
 {
   "name": "@engraphis/pi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "First-party Pi extension for Engraphis durable memory",
   "type": "module",
   "license": "Apache-2.0",

@@ -103,7 +103,7 @@ def service() -> MemoryService:
             embed_model=settings.embed_model or None,
             embed_revision=getattr(settings, "embed_revision", "") or None,
             require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-            embed_dim=settings.embed_dim or 384,
+            embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
             allowed_workspaces=settings.allowed_workspaces,
             vector_backend=settings.vector_backend,
             rerank_model=getattr(settings, "rerank_model", "") or None,
@@ -1627,9 +1627,9 @@ def engraphis_ingest_postgres_schema(
     )] = None,
 ) -> str:
     """Convert tables, columns, constraints, and foreign keys into a schema memory and
-    entity graph. Requires the optional psycopg backend. Each invocation stores a new
-    point-in-time schema snapshot and appends audit/receipt records, so it is not
-    idempotent."""
+    entity graph. Requires the optional psycopg backend. An exact retry reuses its live
+    point-in-time schema snapshot, but every invocation appends audit/receipt records,
+    so the tool as a whole is not idempotent."""
     try:
         return _ok(service().import_postgres_schema(
             dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
@@ -1657,9 +1657,6 @@ def engraphis_consolidate(
     structured: Annotated[bool, Field(description="If true, use configured LLM for "
                           "schema-validated consolidation facts/entities/relations; "
                           "falls back to deterministic digest on any failure.")] = False,
-    supersede_sources: Annotated[bool, Field(description="Only with structured=True: "
-                                "bi-temporally close source episodes after validated "
-                                "facts are written. Defaults false for safety.")] = False,
 ) -> str:
     """Run one sleep-time consolidation sweep: recurring episodic memories on the same
     subject are distilled into one durable semantic digest (linked to its sources), and
@@ -1679,9 +1676,10 @@ def engraphis_consolidate(
         added (``entities_considered``, ``profiles_created``, ``compaction``).
     """
     try:
-        return _ok(service().consolidate(workspace=workspace, repo=repo, dry_run=dry_run,
-                                         profiles=profiles, structured=structured,
-                                         supersede_sources=supersede_sources))
+        return _ok(service().consolidate(
+            workspace=workspace, repo=repo, dry_run=dry_run,
+            profiles=profiles, structured=structured,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -2584,7 +2582,7 @@ def engraphis_get_memory(
 @smart_mcp.tool(
     name="engraphis_update_memory",
     annotations={"title": "Edit a memory's metadata fields", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     structured_output=False,
 )
 def engraphis_update_memory(
@@ -2602,9 +2600,10 @@ def engraphis_update_memory(
                                                  le=1.0)] = None,
     actor: Annotated[str, Field(description="Optional actor label.", max_length=200)] = "user",
 ) -> str:
-    """Edit a memory's metadata fields (title/type/importance). Content edits must go
-    through the governed correction path so bi-temporal history is preserved. Secret
-    capture is rejected; provenance/trust/sensitivity are never editable here."""
+    """Edit a memory's metadata fields (title/type/importance). An identical retry is an
+    atomic no-op. Content edits must go through the governed correction path so bi-temporal
+    history is preserved. Secret capture is rejected; provenance/trust/sensitivity are never
+    editable here."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:

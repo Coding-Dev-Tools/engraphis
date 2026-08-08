@@ -18,7 +18,10 @@ Third-party browser assets distributed with this product:
   engraphis/static/vendor/d3.LICENSE.
 - Marked 12.0.2, Copyright MarkedJS, Christopher Jeffrey, and Markdown's
   contributors, MIT and BSD-style licenses. See engraphis/static/vendor/marked.LICENSE.
-- force-graph 1.51.4, Copyright 2018 Vasco Asturiano, MIT license. See
-  engraphis/static/vendor/force-graph.LICENSE.
+- force-graph 1.51.4 and its bundled runtime dependency closure, MIT/ISC/BSD-3-Clause
+  licenses. See engraphis/static/vendor/force-graph.LICENSE and the complete
+  machine-verifiable notices in deploy/force-graph-1.51.4.licenses.json, derived from
+  deploy/force-graph-1.51.4.yarn.lock at upstream commit
+  baa20a92bbe5628034d771abaf33a2dbb65d22eb.
 - DOMPurify 3.4.11, Copyright Cure53 and contributors, distributed under the
   Apache License 2.0 option stated in its embedded license header; see LICENSE.

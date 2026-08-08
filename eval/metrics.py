@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from typing import Sequence, Union
 
 
 def _unique(values: list[str], name: str) -> list[str]:
@@ -143,17 +144,32 @@ def abstention_precision_recall_f1(
     return binary_precision_recall_f1(abstained, [not item for item in answerable])
 
 
-def answer_token_recall(retrieved_texts: list[str], answer: str) -> float:
-    """Fraction of the gold answer's content tokens present in retrieved text."""
-    gold = _tokens(answer)
-    # Missing/empty answers are not evidence of a correct retrieval.  Returning
-    # zero avoids a vacuous perfect score for malformed or partial records.
-    if not gold:
-        return 0.0
+def answer_token_recall(
+    retrieved_texts: list[str], answer: Union[str, Sequence[str]]
+) -> float:
+    """Return the best content-token recall across every accepted answer variant."""
+    if not isinstance(retrieved_texts, list) or any(
+        not isinstance(text, str) for text in retrieved_texts
+    ):
+        raise ValueError("retrieved_texts must be a list of strings")
+    if isinstance(answer, str):
+        answers = [answer]
+    elif isinstance(answer, Sequence) and all(isinstance(value, str) for value in answer):
+        answers = list(answer)
+    else:
+        raise ValueError("answer must be a string or a sequence of strings")
+
     pool = set()
     for text in retrieved_texts:
         pool |= _tokens(text)
-    return sum(1 for token in gold if token in pool) / len(gold)
+
+    def recall(candidate: str) -> float:
+        gold = _tokens(candidate)
+        if not gold:
+            return 0.0
+        return sum(1 for token in gold if token in pool) / len(gold)
+
+    return max((recall(candidate) for candidate in answers), default=0.0)
 
 
 _STOP = {"the", "a", "an", "to", "of", "in", "on", "for", "and", "or", "is", "are",

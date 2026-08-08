@@ -10,7 +10,6 @@ Usage:
     engraphis-cli ingest-file notes.md --namespace vault
     engraphis-cli recall "What does the user prefer?" --namespace preferences
     engraphis-cli chat "What do you know about Alice?"
-    engraphis-cli thoughts --namespace vault
     engraphis-cli list --namespace vault
     engraphis-cli delete-namespace vault
 """
@@ -25,6 +24,7 @@ from pathlib import Path
 from engraphis.config import settings
 from engraphis.core.interfaces import SearchFilter
 from engraphis.core.poisoning import REVIEW_APPROVED, REVIEW_PENDING, inspection_eligible
+from engraphis.core.store import now_ts
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -117,13 +117,6 @@ def cmd_chat(args: argparse.Namespace) -> None:
         print(f"  [{i}] {c.get('title') or c.get('content', '')[:80]}")
 
 
-def cmd_thoughts(args: argparse.Namespace) -> None:
-    # v2 equivalent of thought synthesis: the sleep-time consolidation sweep
-    # (episodic→semantic distillation + decayed-transient archival).
-    out = _service().consolidate(workspace=args.namespace or "default",
-                                 min_cluster=max(2, min(20, args.num_chunks // 2 or 3)))
-    print(json.dumps(out, indent=2, default=str))
-
 
 def cmd_list(args: argparse.Namespace) -> None:
     out = _service().recall_proactive(workspace=args.namespace, k=args.limit)
@@ -139,18 +132,48 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_delete_ns(args: argparse.Namespace) -> None:
     if not args.force:
-        print(f"This will delete ALL memories in namespace '{args.namespace}'. "
-              f"Use --force to confirm.")
+        print(
+            f"This will retire ALL memories in namespace '{args.namespace}'. "
+            "Use --force to confirm."
+        )
         sys.exit(1)
     svc = _service()
-    wid, _ = svc._require_scope(args.namespace, None)
-    rows = svc.store.conn.execute(
-        "SELECT id FROM memories WHERE workspace_id=? AND expired_at IS NULL", (wid,)
-    ).fetchall()
-    for r in rows:
-        svc.forget(r["id"], workspace=args.namespace,
-                   reason="cli delete-namespace", actor="cli")
-    print(f"Deleted {len(rows)} memories from '{args.namespace}' (audited soft-delete)")
+    connection = svc.store.conn
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            wid, _ = svc._require_scope(args.namespace, None)
+            retired_at = now_ts()
+            rows = connection.execute(
+                "SELECT id FROM memories "
+                "WHERE workspace_id=? AND expired_at IS NULL "
+                "AND (valid_to IS NULL OR valid_to>?) ORDER BY id",
+                (wid, retired_at),
+            ).fetchall()
+            # Authorize the complete snapshot before the first mutation. Session-private
+            # rows still require their owner, and any failure must leave the batch intact.
+            for row in rows:
+                svc._check_owns(row["id"], wid, None)
+            for row in rows:
+                svc.store.close_validity(
+                    row["id"], at=retired_at, actor="cli",
+                    reason="cli delete-namespace", commit=False,
+                )
+            svc.store.record_receipt(
+                "retire", workspace_id=wid, actor="cli",
+                target_count=len(rows), status="ok",
+                metadata={"mode": "namespace_batch", "result_count": len(rows)},
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        print(
+            f"Retired {len(rows)} memories from '{args.namespace}' "
+            "(audited soft-retirement)"
+        )
+    finally:
+        svc.store.close()
 
 
 def _pending_review_candidates(args: argparse.Namespace, service: MemoryService) -> list:
@@ -317,19 +340,14 @@ def main() -> None:
     p.add_argument("--namespace", "-n", default=None, help="Namespace")
     p.set_defaults(func=cmd_chat)
 
-    p = sub.add_parser("thoughts", help="Generate consolidated thoughts")
-    p.add_argument("--namespace", "-n", default=None)
-    p.add_argument("--num-chunks", "-c", type=int, default=10)
-    p.set_defaults(func=cmd_thoughts)
-
     p = sub.add_parser("list", help="List documents in a namespace")
     p.add_argument("--namespace", "-n", default="default")
     p.add_argument("--limit", "-l", type=int, default=20)
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("delete-namespace", help="Delete an entire namespace")
-    p.add_argument("namespace", help="Namespace to delete")
-    p.add_argument("--force", action="store_true", help="Confirm deletion")
+    p = sub.add_parser("delete-namespace", help="Retire every memory in a namespace")
+    p.add_argument("namespace", help="Namespace whose memories will be retired")
+    p.add_argument("--force", action="store_true", help="Confirm retirement")
     p.set_defaults(func=cmd_delete_ns)
 
     review = sub.add_parser(

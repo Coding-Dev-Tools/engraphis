@@ -43,6 +43,8 @@ function license() {
 async function mockApi(page, options = {}) {
   const requests = [];
   requests.automationPolicies = [];
+  requests.automationBootstraps = [];
+  requests.syncRuns = [];
   requests.details = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
@@ -159,18 +161,21 @@ async function mockApi(page, options = {}) {
         ],
       });
     }
-    if (path === '/graph/entities/engraphis/memories') return ok({
-      canonical_id: 'engraphis',
-      evidence: [{
-        memory_id: memories[0].id,
-        title: memories[0].title,
-        excerpt: memories[0].content,
-        memory_type: memories[0].memory_type,
-        valid_from: 100,
-      }],
-      totals: { evidence: 1 },
-      truncation: { evidence: false },
-    });
+    if (path.startsWith('/graph/entities/') && path.endsWith('/memories')) {
+      const canonicalId = path.split('/')[3];
+      return ok({
+        canonical_id: canonicalId,
+        evidence: [{
+          memory_id: memories[0].id,
+          title: memories[0].title,
+          excerpt: memories[0].content,
+          memory_type: memories[0].memory_type,
+          valid_from: 100,
+        }],
+        totals: { evidence: 1 },
+        truncation: { evidence: false },
+      });
+    }
     if (path === '/health') return ok({ status: 'ok' });
     if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
@@ -198,9 +203,25 @@ async function mockApi(page, options = {}) {
       llmStatus.extractor = llmStatus.extractor_enabled ? 'llm_structured' : 'none';
       return ok({ ok: true, extractor_enabled: llmStatus.extractor_enabled, persisted: true });
     }
-    if (path === '/sync/status') return ok({ available: false, last: null });
+    if (path === '/sync/status') return ok(options.syncStatus || { available: false, last: null });
+    if (path === '/sync/run') {
+      requests.syncRuns.push(JSON.parse(request.postData() || '{}'));
+      const summary = options.syncRun || {
+        complete: true, attempted: 1, succeeded: 1, exported: 1,
+        added: 0, updated: 0, errors: [],
+      };
+      return ok({ ok: options.syncRunOk ?? summary.complete !== false, summary });
+    }
     if (path === '/analytics') {
       return ok({ totals: {}, entities: [], series: [] });
+    }
+    if (path === '/automation/bootstrap') {
+      requests.automationBootstraps.push(requestUrl.searchParams.get('workspace'));
+      automationPolicy = {
+        ...(options.automationBootstrap || automationPolicy || {}),
+        bootstrap_required: false,
+      };
+      return ok(automationPolicy);
     }
     if (path === '/automation') {
       if (automationPolicy) {
@@ -237,6 +258,22 @@ function browserErrors(page) {
 
 test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) => {
   const errors = browserErrors(page);
+  const assetRequests = [];
+  await page.addInitScript(() => {
+    window.__ledgerCspViolations = [];
+    document.addEventListener('securitypolicyviolation', event => {
+      window.__ledgerCspViolations.push({
+        directive: event.violatedDirective,
+        blocked: event.blockedURI,
+      });
+    });
+  });
+  page.on('request', request => {
+    const pathname = new URL(request.url()).pathname;
+    if (/\/v2-assets\/(?:vendor\/(?:d3|force-graph)\.min\.js|engraphis-graph\.js)$/.test(pathname)) {
+      assetRequests.push(pathname);
+    }
+  });
   const requests = await mockApi(page);
   const response = await page.goto('/');
 
@@ -247,10 +284,16 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   await expect(page.locator('#proactive-list').getByText(/<img src=x onerror=/)).toBeVisible();
   expect(await page.evaluate(() => window.__ledgerXss)).toBeUndefined();
   expect(requests).not.toContain('/graph');
+  expect(assetRequests).toEqual([]);
 
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
   expect(requests).toContain('/graph');
+  expect(assetRequests).toEqual([
+    '/v2-assets/vendor/d3.min.js',
+    '/v2-assets/vendor/force-graph.min.js',
+    '/v2-assets/engraphis-graph.js',
+  ]);
 
   await page.getByRole('button', { name: /^Ask/ }).click();
   await page.getByRole('textbox', { name: 'Question' }).fill('Which database?');
@@ -270,15 +313,169 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
-  // force-graph attempts a handful of inline <style> elements when it is mounted. The
-  // strict production CSP blocks them; the companion graph-engine suite records the
-  // SecurityPolicyViolationEvent objects and proves every one is style-src-elem (never
-  // an attribute/script escape hatch). External CSS supplies the rendered canvas layout.
-  const unexpectedErrors = errors.filter(message => !(
-    message.includes('Applying inline style violates')
-    && message.includes("style-src 'self'")
-  ));
-  expect(unexpectedErrors).toEqual([]);
+  expect(await page.evaluate(() => window.__ledgerCspViolations)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('Ledger retries a failed lazy graph load and opens search evidence by keyboard', async ({ page }) => {
+  await mockApi(page);
+  let d3Attempts = 0;
+  await page.route('**/v2-assets/vendor/d3.min.js*', async route => {
+    d3Attempts += 1;
+    if (d3Attempts === 1) return route.abort('failed');
+    return route.fallback();
+  });
+  await page.goto('/');
+
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
+  expect(d3Attempts).toBe(2);
+
+  await page.locator('#graph-search').fill('Engraphis');
+  const result = page.locator('#graph-search-results button').filter({ hasText: 'Engraphis' });
+  await result.focus();
+  await page.keyboard.press('Enter');
+  const dialog = page.locator('#graph-connections-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('#graph-connections-list')).toContainText('Postgres');
+  const connection = dialog.locator('.graph-connection-row').filter({ hasText: 'Postgres' })
+    .getByRole('button', { name: 'Memories' });
+  await connection.focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
+});
+
+test('Ledger requests a remote token in a masked retryable dialog', async ({ page }) => {
+  let authenticated = false;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', async route => {
+    if (authenticated) return route.fallback();
+    return route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Authentication required' }),
+    });
+  });
+  await page.route('**/auth/session', async route => {
+    const token = JSON.parse(route.request().postData() || '{}').token;
+    if (token !== 'correct-token') {
+      return route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Invalid deployment token' }),
+      });
+    }
+    authenticated = true;
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true }),
+    });
+  });
+  await page.goto('/');
+
+  const dialog = page.locator('#browser-auth-dialog');
+  const token = page.locator('#browser-auth-token');
+  await expect(dialog).toBeVisible();
+  await expect(token).toHaveAttribute('type', 'password');
+  await expect(token).toHaveAttribute('autocomplete', 'off');
+
+  await token.fill('wrong-token');
+  await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.locator('#browser-auth-error')).toContainText('Invalid deployment token');
+  await expect(token).toHaveValue('');
+
+  await token.fill('correct-token');
+  await Promise.all([
+    page.waitForNavigation(),
+    dialog.getByRole('button', { name: 'Connect', exact: true }).click(),
+  ]);
+  await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  expect(page.url()).not.toContain('token');
+});
+
+test('Ledger exposes Cloud Sync status and reports partial runs as incomplete', async ({ page }) => {
+  const requests = await mockApi(page, {
+    syncStatus: {
+      available: true,
+      last: {
+        summary: {
+          complete: true, attempted: 2, succeeded: 2, exported: 1,
+          added: 1, updated: 0, errors: [],
+        },
+      },
+    },
+    syncRun: {
+      complete: false, attempted: 2, succeeded: 1, exported: 1,
+      added: 0, updated: 0, errors: ['relay unavailable'],
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Cloud Sync' }).click();
+
+  const result = page.locator('#sync-result');
+  await expect(result).toContainText('Last sync complete');
+  await page.getByRole('button', { name: 'Sync now' }).click();
+  await expect(result).toContainText('Last sync incomplete');
+  await expect(result).toContainText('1 error');
+  expect(requests.syncRuns).toEqual([{}]);
+});
+
+test('Ledger treats a Cloud Sync ok:false response as incomplete', async ({ page }) => {
+  await mockApi(page, {
+    syncStatus: { available: true, last: null },
+    syncRunOk: false,
+    syncRun: {
+      complete: true, attempted: 1, succeeded: 1, exported: 1,
+      added: 0, updated: 0, errors: [],
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Cloud Sync' }).click();
+  await page.getByRole('button', { name: 'Sync now' }).click();
+
+  await expect(page.locator('#sync-result')).toContainText('Last sync incomplete');
+  await expect(page.locator('#notice-text')).toContainText('Cloud Sync is incomplete');
+});
+
+test('Ledger initializes hosted automation only after an explicit upload action', async ({ page }) => {
+  page.on('dialog', dialog => dialog.accept());
+  const requests = await mockApi(page, {
+    automationPolicy: {
+      enabled: false,
+      cadence_hours: 24,
+      dream_enabled: true,
+      dream_min_new: 25,
+      dream_idle_minutes: 15,
+      infer: false,
+      version: 0,
+      bootstrap_required: true,
+    },
+    automationBootstrap: {
+      enabled: true,
+      cadence_hours: 24,
+      dream_enabled: true,
+      dream_min_new: 25,
+      dream_idle_minutes: 15,
+      infer: false,
+      version: 1,
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+
+  const result = page.locator('#automation-result');
+  await expect(result).toContainText('No upload occurs until you choose this action.');
+  await expect(page.locator('#automation-enabled')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Initialize hosted automation' }).click();
+  await expect(page.locator('#automation-enabled')).toBeChecked();
+  expect(requests.automationBootstraps).toEqual([workspace]);
+  expect(requests.automationPolicies).toEqual([]);
 });
 
 test('provenance merges audit seconds and receipt milliseconds chronologically', async ({ page }) => {
@@ -354,6 +551,318 @@ test('switching workspaces clears a stale memory editor before it can write else
   await expect(page.locator('#memory-detail')).toBeHidden();
   await expect(page.locator('#library-list')).toContainText('Other workspace memory');
   await expect(page.locator('#library-list')).not.toContainText('Database choice');
+});
+
+test('late Ask, audit, and automation responses cannot cross workspace boundaries', async ({ page }) => {
+  const otherWorkspace = 'ledger-other';
+  let releaseAsk;
+  let resolveAskStarted;
+  let askCompleted = 0;
+  const askGate = new Promise(resolve => { releaseAsk = resolve; });
+  const askStarted = new Promise(resolve => { resolveAskStarted = resolve; });
+  let delayAudit = false;
+  let releaseAudit;
+  let resolveAuditStarted;
+  let auditCompleted = 0;
+  const auditGate = new Promise(resolve => { releaseAudit = resolve; });
+  const auditStarted = new Promise(resolve => { resolveAuditStarted = resolve; });
+  let delayAutomation = false;
+  let releaseAutomation;
+  let resolveAutomationStarted;
+  let automationCompleted = 0;
+  let savedAutomation = null;
+  const automationGate = new Promise(resolve => { releaseAutomation = resolve; });
+  const automationStarted = new Promise(resolve => { resolveAutomationStarted = resolve; });
+
+  await mockApi(page, {
+    workspaces: [
+      { name: workspace, memories: memories.length },
+      { name: otherWorkspace, memories: 1 },
+    ],
+    memoriesByWorkspace: {
+      [workspace]: memories,
+      [otherWorkspace]: [{
+        id: 'mem_other', title: 'Other workspace memory', content: 'Separate evidence.',
+        memory_type: 'semantic', ingested_at: Date.now() / 1000,
+      }],
+    },
+  });
+  await page.route('**/api/answer*', async route => {
+    const request = route.request();
+    const requestUrl = new URL(request.url());
+    const selected = requestUrl.searchParams.get('workspace')
+      || JSON.parse(request.postData() || '{}').workspace;
+    if (selected === workspace) {
+      resolveAskStarted();
+      await askGate;
+      askCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'workspace boundary',
+        grounded: true,
+        abstained: false,
+        answer: `${selected} grounded answer [1]`,
+        support: 0.9,
+        citations: [{
+          n: 1, id: `mem_${selected}`, title: `${selected} citation`,
+          content: `${selected} evidence`, support: 0.9,
+        }],
+      }),
+    });
+  });
+  await page.route('**/api/recall*', async route => {
+    const requestUrl = new URL(route.request().url());
+    const selected = requestUrl.searchParams.get('workspace');
+    if (selected === workspace) {
+      resolveAskStarted();
+      await askGate;
+      askCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        workspace: selected,
+        memories: [{
+          id: `raw_${selected}`, title: `${selected} raw result`,
+          content: `${selected} raw evidence`, memory_type: 'semantic',
+          ingested_at: Date.now() / 1000,
+        }],
+      }),
+    });
+  });
+  for (const endpoint of ['audit', 'receipts', 'context-savings']) {
+    await page.route(`**/api/${endpoint}*`, async route => {
+      const requestUrl = new URL(route.request().url());
+      const selected = requestUrl.searchParams.get('workspace');
+      if (delayAudit && selected === workspace) {
+        resolveAuditStarted();
+        await auditGate;
+        auditCompleted += 1;
+      }
+      const body = endpoint === 'audit'
+        ? { audit: [{
+          id: `aud_${selected}`, actor: 'tester', action: `${selected} audit`,
+          timestamp: Date.now() / 1000,
+        }] }
+        : endpoint === 'receipts'
+          ? { receipts: [{
+            id: `receipt_${selected}`, operation: `${selected} receipt`,
+            created_at: Date.now() / 1000, verified: true,
+          }] }
+          : { estimate: { excluded_or_unclassified_delivery: 0 } };
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+  }
+  await page.route('**/api/automation*', async route => {
+    const request = route.request();
+    const requestUrl = new URL(request.url());
+    const selected = requestUrl.searchParams.get('workspace');
+    if (request.method() === 'POST') {
+      savedAutomation = {
+        workspace: selected,
+        body: JSON.parse(request.postData() || '{}'),
+      };
+    } else if (delayAutomation && selected === workspace) {
+      resolveAutomationStarted();
+      await automationGate;
+      automationCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        enabled: false,
+        cadence_hours: selected === workspace ? 24 : 72,
+        dream_enabled: false,
+        dream_min_new: 25,
+        dream_idle_minutes: 30,
+        infer: false,
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Ask grounded answers' }).click();
+  await page.getByRole('textbox', { name: 'Question' }).fill('Workspace boundary?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+  await askStarted;
+  await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+  await expect(page.locator('#today-title')).toHaveText(`What changed in ${otherWorkspace}`);
+  await page.getByRole('textbox', { name: 'Question' }).fill('Workspace boundary?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+  await expect(page.locator('#answer-panel')).toContainText(`${otherWorkspace} grounded answer`);
+  releaseAsk();
+  await expect.poll(() => askCompleted).toBe(2);
+  await expect(page.locator('#answer-panel')).toContainText(`${otherWorkspace} grounded answer`);
+  await expect(page.locator('#answer-panel')).not.toContainText(`${workspace} grounded answer`);
+
+  await page.getByLabel('Active workspace').selectOption(workspace);
+  await expect(page.locator('#today-title')).toHaveText(`What changed in ${workspace}`);
+  delayAudit = true;
+  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+  await auditStarted;
+  await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+  await expect(page.locator('#audit-list')).toContainText(`${otherWorkspace} audit`);
+  releaseAudit();
+  await expect.poll(() => auditCompleted).toBe(3);
+  await expect(page.locator('#audit-list')).toContainText(`${otherWorkspace} audit`);
+  await expect(page.locator('#audit-list')).not.toContainText(`${workspace} audit`);
+
+  await page.getByLabel('Active workspace').selectOption(workspace);
+  delayAutomation = true;
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await automationStarted;
+  await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  const form = page.locator('#automation-result form');
+  await expect(form).toHaveAttribute('data-workspace', otherWorkspace);
+  await expect(page.locator('#automation-cadence')).toHaveValue('72');
+  releaseAutomation();
+  await expect.poll(() => automationCompleted).toBe(1);
+  await expect(form).toHaveAttribute('data-workspace', otherWorkspace);
+  await expect(page.locator('#automation-cadence')).toHaveValue('72');
+
+  await page.locator('#automation-cadence').fill('96');
+  await form.getByRole('button', { name: 'Save hosted policy' }).click();
+  await expect.poll(() => savedAutomation && savedAutomation.workspace).toBe(otherWorkspace);
+  expect(savedAutomation.body.cadence_hours).toBe(96);
+});
+
+test('late provenance and plan responses cannot cross workspace boundaries', async ({ page }) => {
+  const workspace = 'ledger-e2e';
+  const otherWorkspace = 'ledger-other';
+  await mockApi(page, {
+    workspaces: [
+      { name: workspace, description: 'Primary' },
+      { name: otherWorkspace, description: 'Other' },
+    ],
+  });
+
+  const whyGate = {};
+  whyGate.promise = new Promise(resolve => { whyGate.release = resolve; });
+  const whyStarted = new Promise(resolve => { whyGate.started = resolve; });
+  const timelineGate = {};
+  timelineGate.promise = new Promise(resolve => { timelineGate.release = resolve; });
+  const timelineStarted = new Promise(resolve => { timelineGate.started = resolve; });
+  const plansGate = {};
+  plansGate.promise = new Promise(resolve => { plansGate.release = resolve; });
+  const plansStarted = new Promise(resolve => { plansGate.started = resolve; });
+  let delayWhy = false;
+  let delayTimeline = false;
+  let delayPlans = false;
+
+  let whyCompleted = 0;
+  let timelineCompleted = 0;
+  let plansCompleted = 0;
+  const scopedMemory = (selected, suffix) => ({
+    id: `mem_${suffix}_${selected}`,
+    title: `${selected} ${suffix}`,
+    content: `${selected} ${suffix} evidence`,
+    memory_type: 'semantic',
+    ingested_at: Date.now() / 1000,
+  });
+  await page.route('**/api/why*', async route => {
+    const selected = new URL(route.request().url()).searchParams.get('workspace');
+    if (delayWhy && selected === workspace) {
+      whyGate.started();
+      await whyGate.promise;
+      whyCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ answer: [scopedMemory(selected, 'belief')], supersedes: [] }),
+    });
+  });
+  await page.route('**/api/timeline*', async route => {
+    const selected = new URL(route.request().url()).searchParams.get('workspace');
+    if (delayTimeline && selected === workspace) {
+      timelineGate.started();
+      await timelineGate.promise;
+      timelineCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ history: [scopedMemory(selected, 'timeline')] }),
+    });
+  });
+  await page.route('**/api/license*', async route => {
+    const selected = new URL(route.request().url()).searchParams.get('workspace');
+    if (delayPlans && selected === workspace) {
+      plansGate.started();
+      await plansGate.promise;
+      plansCompleted += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        plan: selected === otherWorkspace ? 'team' : selected === workspace ? 'pro' : 'free',
+        plan_source: 'session',
+        cloud_access_active: true,
+        trial: { available: false },
+      }),
+    });
+  });
+
+  try {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+    delayWhy = true;
+    await page.getByLabel('Claim or topic').fill('Workspace boundary');
+    await page.getByRole('button', { name: 'Trace belief' }).click();
+    await whyStarted;
+    await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+    await page.getByLabel('Claim or topic').fill('Workspace boundary');
+    await page.getByRole('button', { name: 'Trace belief' }).click();
+    await expect(page.locator('#why-result')).toContainText(`${otherWorkspace} belief`);
+    whyGate.release();
+    await expect.poll(() => whyCompleted).toBe(1);
+    await expect(page.locator('#why-result')).not.toContainText(`${workspace} belief`);
+
+    await page.getByLabel('Active workspace').selectOption(workspace);
+    await page.getByRole('tab', { name: 'Timeline' }).click();
+    delayTimeline = true;
+    await page.locator('#timeline-input').fill('Workspace boundary');
+    await page.getByRole('button', { name: 'Show history' }).click();
+    await timelineStarted;
+    await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+    await page.locator('#timeline-input').fill('Workspace boundary');
+    await page.getByRole('button', { name: 'Show history' }).click();
+    await expect(page.locator('#timeline-result')).toContainText(`${otherWorkspace} timeline`);
+    timelineGate.release();
+    await expect.poll(() => timelineCompleted).toBe(1);
+    await expect(page.locator('#timeline-result')).not.toContainText(`${workspace} timeline`);
+
+    await page.getByLabel('Active workspace').selectOption(workspace);
+    await page.getByRole('button', { name: 'Manage' }).click();
+    delayPlans = true;
+    await page.getByRole('tab', { name: 'Plans & billing' }).click();
+    await plansStarted;
+    await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+    const teamCard = page.locator('#plan-cards .plan-card')
+      .filter({ has: page.locator('h2', { hasText: 'Team' }) });
+    await expect(teamCard.locator('.eyebrow')).toHaveText('Current plan');
+    plansGate.release();
+    await expect.poll(() => plansCompleted).toBe(1);
+    await expect(teamCard.locator('.eyebrow')).toHaveText('Current plan');
+  } finally {
+    whyGate.release();
+    timelineGate.release();
+    plansGate.release();
+  }
 });
 
 test('Ask keeps the raw retrieval preview alongside its single grounded answer', async ({ page }) => {

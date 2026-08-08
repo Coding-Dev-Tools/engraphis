@@ -5,6 +5,47 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+
+- Fail closed on new `user`-scope memory writes until records carry an immutable owner identity;
+  preserve historical reads and the existing promotion rejection instead of presenting
+  workspace-bound rows as private personal memory.
+- Load optional dotenv configuration only from the owner-private
+  `~/.engraphis/config.env` or an absolute owner-private file selected by
+  `ENGRAPHIS_ENV_FILE`; arbitrary working-directory `.env` files are not a trust boundary.
+- Clarify Cloud Sync credential-origin binding, secret-manager-only unattended credentials,
+  version-3 rollback evidence, and the deliberately incomplete first-contact state without
+  claiming an untrusted relay can prove a complete device set.
+- Advance through schema 13: schema 12 classifies content-free erasure markers so local-only
+  `never_export` markers remain private and only validated `remote_erasure` markers may cross
+  sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
+  descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary.
+
+### Fixed
+
+- Synchronize the portable memory skill with the live Smart nine-tool and Classic 34-tool
+  surfaces, including the two intentionally narrower Smart overlap schemas, trust/origin fields,
+  planner and response bounds, context-savings filters, receipt anchors, and expanded health
+  output.
+- Separate append-only event rows from episodic memories in every agent guide: event rows are not
+  recalled, deduplicated, reinforced, or consolidated, while recallable recurring outcomes use
+  governed episodic memories.
+- Make every documentation and image target in the PyPI long description an absolute canonical
+  repository URL, and add offline contracts that reject future relative-link regressions.
+- Replace unregistered external and consolidation numbers in the context-efficiency image with a
+  checksum-bound public fixture artifact; publish exact commands plus suite/config digests and
+  retain only deterministic aggregates reproduced by the checked-in offline fixtures.
+- Align the canonical offline gate, protocol-only `core/` boundary and outer
+  `engraphis/factory.py` composition root, deterministic versus entrypoint vector-backend
+  selection, persistent embedding identity, v1 migration repair reporting, trusted configuration,
+  and hosted/local boundaries across public docs.
+- Remove the obsolete consolidation source-supersession option across public docs; consolidation
+  now exposes only the explicit clustering, archival, profile, inference, structured, LLM, time,
+  and level controls implemented by the engine.
+- Document the official LongMemEval-V2 six-variant, five-budget execution matrix end to end,
+  including clean-checkout completion receipts, exact source-question coverage, privacy-safe
+  export binding, matched `context_k=2` comparators, and memory-type count evidence.
+
 ## [1.5] - 2026-08-04
 
 Minor release advancing the v2 engine to schema 11 with governed recall recovery,

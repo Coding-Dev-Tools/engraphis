@@ -2,18 +2,19 @@
 
 Scoping is the highest-leverage decision in Engraphis. Every write sets a scope; every read is
 filtered by one. Get it right and memories surface exactly when useful; get it wrong and they
-either leak everywhere or never come back.
+either appear in unrelated work or never come back. Scope is a work-context boundary, not a
+human identity boundary.
 
 ## Two orthogonal axes: don't conflate them
 
 | Axis | Question it answers | Values | Set by |
 |---|---|---|---|
-| **scope** | *Who/where can see this?* | `session` · `repo` · `workspace` · `user` | `scope=` on `remember` |
+| **scope** | *Where does this apply?* | `session` · `repo` · `workspace` | `scope=` on `remember` |
 | **type** (`mtype`) | *What kind of thing is this?* | `working` · `episodic` · `semantic` · `procedural` | `mtype=` on `remember` |
 
-A convention is `mtype="semantic"` and probably `scope="repo"`. A user's editor preference is
-`mtype="semantic"` but `scope="user"`. Same type, different visibility. Type is covered in
-[CONVENTIONS.md](CONVENTIONS.md); this file is about scope.
+A convention is `mtype="semantic"` and probably `scope="repo"`. A personal preference has no
+safe memory scope yet: `user` is reserved until memories carry an immutable owner identity. Type
+is covered in [CONVENTIONS.md](CONVENTIONS.md); this file is about scope.
 
 ## The hierarchy
 
@@ -36,8 +37,9 @@ time: recall filters match on them literally. Pick the repository's canonical na
   conventions, decisions, bug fixes. Requires a `repo`.
 - **`workspace`**: true across every repo in the org/product: shared standards, cross-repo
   architecture, team norms. Set `repo=None`.
-- **`user`**: follows the human across everything: their preferences and working style, regardless
-  of workspace or repo.
+- **`user`**: reserved and rejected for new writes. Memories do not yet persist an owner identity,
+  so `user` cannot provide per-human isolation or follow one person across workspaces. Historical
+  `user` rows remain workspace-bound for compatibility and must not be treated as private.
 
 ## Choose the narrowest scope that stays reusable
 
@@ -45,7 +47,7 @@ Ask: *where would I want this to resurface?* Then scope there, no wider.
 
 - A fix for a quirk in `backend` only → `scope="repo"`.
 - "The whole org uses trunk-based dev" → `scope="workspace"`.
-- "This developer prefers tabs, hates mocks" → `scope="user"`.
+- Personal preferences → do not persist until owner-bound user scope exists.
 - "I'm mid-way through step 3 of this task" → `scope="session"` (or just an `open_thread`).
 
 Over-scoping (everything `workspace`) pollutes recall in unrelated repos. Under-scoping (everything
@@ -93,13 +95,15 @@ bi-temporally closes the narrow source and links them with `promotes`; pinning, 
 provenance, and learned stability are inherited. Automatic promotion is not assumed: promote
 deliberately when evidence shows the learning applies more broadly.
 
-Promotion to `user` is not yet supported: current records remain workspace-bound, so calling it
-"wider" would be misleading until user-principal ownership exists in the schema.
+Promotion to `user` and new `user`-scope writes are not supported: current records have no
+immutable owner identity and remain workspace-bound. Use `repo`, `workspace`, or `session`;
+never label shared workspace storage as a private personal scope.
 
 ## Reads are scoped too
 
-`engraphis_recall` is hierarchy-aware. A repo context sees that repo plus its workspace/user
-ancestors; a session context sees that exact session plus its repo/workspace/user ancestors.
-Other sessions never leak into repo/workspace recall. A `repo` or `session_id` filter requires a
+`engraphis_recall` is hierarchy-aware. A repo context sees that repo plus its workspace ancestors;
+a session context sees that exact session plus its repo/workspace ancestors. Other sessions never
+leak into repo/workspace recall. Historical `user` rows can still appear as workspace ancestors
+for compatibility; they are not owner-isolated. A `repo` or `session_id` filter requires a
 `workspace`. If recall returns no results and a `note` says the workspace/repo/session is unknown,
 you simply have not written there yet.

@@ -1,17 +1,29 @@
 """Small read-only HTTP surface for shared recall and repository-graph queries."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
+from contextlib import asynccontextmanager
 import json
+import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
 from engraphis.netutil import is_local_request
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import (
+    DEFAULT_CODE_QUERY_CAPACITY,
+    MAX_CODE_QUERY_CAPACITY,
+    MemoryService,
+    ValidationError,
+)
+
+
+logger = logging.getLogger("engraphis.read_only")
 
 
 class IntentRecallRequest(BaseModel):
@@ -39,6 +51,9 @@ class CodePathRequest(BaseModel):
     source: str
     target: str
     max_depth: int = 8
+    capacity: int = Field(
+        default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
+    )
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
@@ -48,6 +63,9 @@ class CodeImpactRequest(BaseModel):
     workspace: str
     repo: str
     changed_files: list[str]
+    capacity: int = Field(
+        default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
+    )
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
@@ -55,23 +73,36 @@ class CodeImpactRequest(BaseModel):
 
 def create_read_only_app(service: Optional[MemoryService] = None, *,
                          token: str = "") -> FastAPI:
+    owns_service = service is None
     svc = service or MemoryService.create(
         settings.db_path,
         embed_model=settings.embed_model or None,
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-        embed_dim=settings.embed_dim or 384,
+        embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
         allowed_workspaces=settings.allowed_workspaces,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
         extractor=settings.extractor,
+        read_only=True,
     )
+
+    @asynccontextmanager
+    async def _owned_service_lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            if owns_service:
+                await asyncio.to_thread(svc.close)
+
     expected = str(token or "")
     app = FastAPI(
         title="Engraphis Read-Only Graph API", version="1",
-        docs_url=None, redoc_url=None,
+        docs_url=None, redoc_url=None, lifespan=_owned_service_lifespan,
     )
+    app.state.service = svc
+    app.state.owns_service = owns_service
 
     @app.middleware("http")
     async def authorize(request, call_next):
@@ -90,6 +121,23 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                 {"detail": "remote access requires a bearer token"}, status_code=403
             )
         return await call_next(request)
+
+    @app.middleware("http")
+    async def redact_unhandled_errors(request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as exc:  # noqa: BLE001 - public HTTP error boundary
+            path_ref = hashlib.sha256(
+                request.url.path.encode("utf-8", "replace")
+            ).hexdigest()[:12]
+            logger.error(
+                "read-only request failed path=%s (%s)",
+                path_ref,
+                type(exc).__name__,
+            )
+            return JSONResponse(
+                {"error": "internal server error"}, status_code=500
+            )
 
     def run(fn, *args, **kwargs):
         try:
@@ -173,25 +221,30 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     def code_path(req: CodePathRequest):
         return run(
             svc.code_path, req.source, req.target, workspace=req.workspace,
-            repo=req.repo, max_depth=req.max_depth, as_of=req.as_of,
-            valid_at=req.valid_at, known_at=req.known_at,
+            repo=req.repo, max_depth=req.max_depth, capacity=req.capacity,
+            as_of=req.as_of, valid_at=req.valid_at, known_at=req.known_at,
         )
 
     @app.post("/code/impact")
     def code_impact(req: CodeImpactRequest):
         return run(
             svc.code_impact, req.changed_files,
-            workspace=req.workspace, repo=req.repo, as_of=req.as_of,
-            valid_at=req.valid_at, known_at=req.known_at,
+            workspace=req.workspace, repo=req.repo, capacity=req.capacity,
+            as_of=req.as_of, valid_at=req.valid_at, known_at=req.known_at,
         )
 
     @app.get("/code/export")
     def code_export(workspace: str, repo: str,
+                    capacity: int = Query(
+                        default=DEFAULT_CODE_QUERY_CAPACITY,
+                        ge=1,
+                        le=MAX_CODE_QUERY_CAPACITY,
+                    ),
                     as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None):
         return run(
-            svc.export_code_graph, workspace=workspace, repo=repo,
+            svc.export_code_graph, workspace=workspace, repo=repo, capacity=capacity,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
 

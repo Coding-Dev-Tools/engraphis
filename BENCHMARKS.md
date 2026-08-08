@@ -6,6 +6,31 @@ those results. When this document and the code disagree, the code is the source 
 For the locked operator sequence for a public canonical run, see
 [`docs/PUBLIC_BENCHMARK_RUNBOOK.md`](docs/PUBLIC_BENCHMARK_RUNBOOK.md).
 
+### Public numeric evidence registry
+
+Every exact public aggregate retained below comes from the checked-in, public-safe
+[`offline-fixtures-v1.json`](docs/benchmark-evidence/offline-fixtures-v1.json) artifact. Its
+SHA-256 is
+`c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2`, also recorded in the
+adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
+or per-record content fingerprints.
+
+The fixture-suite digest is
+`4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537`. The artifact defines
+the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
+also binds its exact command through `sha256(UTF-8 exact command)`:
+
+| Evidence ID | Exact command | Config digest |
+|---|---|---|
+| `offline-chunking` | `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5` | `c1c8196aa7e1568ef3844a9fb2d76b87f342c39108e32d6ad144b885a76143b8` |
+| `offline-performance` | `python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json` | `bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7` |
+| `offline-grounded` | `python -m eval.grounded` | `590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f` |
+
+External, model-dependent, latency, consolidation, and productivity numbers are not published
+until a redacted immutable artifact with the same three bindings exists. Use the
+[public benchmark runbook](docs/PUBLIC_BENCHMARK_RUNBOOK.md) to produce that evidence; absence
+from this registry means no public number is claimed.
+
 ## What we measure today (all offline, no API key)
 
 Most Engraphis evals score **retrieval**, not end-to-end QA. The separate productivity benchmark
@@ -26,33 +51,34 @@ frontier-model QA score.
   retrieval-only aggregates rather than silently dropping them. `eval.longmemeval_v2` is a local,
   text-only adapter for the official LongMemEval-V2 `insert(trajectory)` / `query(query,
   query_image=None)` memory interface; it does not download data or call a model.
-- **Grounded**: `eval/grounded.py`: answerable → cite, off-topic → abstain.
+- **Grounded**: `eval/grounded.py`: answerable → cite, off-topic → abstain. Exact fixture
+  outcomes are evidence ID `offline-grounded` in the registry above.
 - **Chunking (quality per token)**: `eval/chunking_eval.py` over `eval/datasets/longdoc.jsonl`
   ingests a multi-topic corpus twice: once as one memory per document (`whole`) and once with
   sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline.
   The checked-in corpus is explicitly marked trusted eval data so the measurement isolates
   chunking from the production trust gate, which excludes arbitrary raw imports from normal
   agent context. On the deterministic embedder, **recall@5 is 1.000 for both modes; mean
-  retrieved top-5 content falls from 740.3 to 214.1 tokens (526.2 fewer, 71.1% lower, about
+  retrieved top-5 content falls from 740.3 to 214.3 tokens (526.0 fewer, 71.1% lower, about
   3.5× smaller), while the smallest returned evidence-holding memory falls from 162.2 to 42.4
-  tokens (119.8 fewer, 73.9% lower, about 3.8× smaller).** Pass `--embed-model
-  sentence-transformers/all-MiniLM-L6-v2` for a real retrieval number (recall should then favour
-  chunked on larger corpora, not just tie).
+  tokens (119.8 fewer, 73.9% lower, about 3.8× smaller).** These aggregates are evidence ID
+  `offline-chunking` in the registry above. Pass `--embed-model
+  sentence-transformers/all-MiniLM-L6-v2` to run a model-dependent experiment; do not publish
+  that result without a new immutable artifact and pinned model revision.
 - **Full-pipeline latency + quality**: `eval/performance.py` times the shipped semantic +
   lexical + graph + fusion + scoring + rerank + packing path after warmup, with reinforcement
   disabled so repeated measurements do not mutate their corpus. It reports p50/p95/p99 latency,
   retrieval quality, packed context tokens, and full/compact JSON-shape payload proxies in one
   JSON-safe schema. Payload proxies are sampled once per question, independently of the number
   of timed iterations; they are not serialized MCP envelopes or transport responses. In the
-  documented CodeMem run (`--iterations 10`), 26 payload samples total **23,810** full-proxy
+  registered CodeMem run, 26 payload samples total **23,810** full-proxy
   `engraphis.regex.v1` tokens versus **10,202** compact-proxy tokens, avoiding **13,608** proxy
   tokens (**57.15% lower**), while 260 recalls are timed. Packed context across the same 26
   samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
-  hit@5, and answer-token recall remain 1.000. `--filler-memories` provides deterministic corpus
-  scaling, and every report records the runtime, architecture, embedder, vector backend, corpus
-  size, warmups, and iteration count. `--candidate-k` and `--retrieval-profile` make
-  adaptive-depth/routing experiments executable instead of changing production defaults from an
-  unmeasured hunch.
+  hit@5, and answer-token recall remain 1.000. These aggregates are evidence ID
+  `offline-performance` in the registry above. `--filler-memories`, `--candidate-k`, and
+  `--retrieval-profile` make scaling and routing experiments executable, but their results need
+  separate evidence before publication.
 - **Exact vector scale envelope**: `eval/vector_scale.py` measures the production
   `NumpyVectorIndex` directly at requested corpus sizes with deterministic normalized vectors and
   queries. It records a corpus fingerprint, result hashes, environment, and observed
@@ -81,40 +107,11 @@ frontier-model QA score.
   results. Optional provider telemetry is reported separately from the deterministic token
   counter and is not a provider billing estimate.
 
-The workload benchmark is also allowed to say “this workload is too small for a memory layer.”
-On the 44-memory / 26-question CodeMem regression fixture, every case already fits inside a
-64-token recency window. Full-history and recency therefore use the same 1,180 cumulative reader
-tokens at perfect evidence/answer-token quality, while Engraphis uses 1,064–1,066 reader tokens
-plus a conservative 631-token indexing pass. The indexing-inclusive total still costs more over a
-single pass, with break-even at 142–144 queries. This is an intentionally small, reusable-workload
-boundary, not a general cost claim.
-
-On the same 26 CodeMem tasks, every history fit the 512-token prompt allowance, so adaptive
-routing bypassed all 26 memory calls. It used **1,942** total agent-facing tokens versus
-**1,883** for always-on retrieval while both strategies completed **24/26** tasks with the bundled
-deterministic agent. This demonstrates bypass behavior and token accounting; this small fixture
-does not establish a token-saving claim for adaptive routing or general LLM intelligence.
-
-The complementary real-model LoCoMo workload diagnostic covers 10 conversations and 1,986
-questions with `all-MiniLM-L6-v2`, `k=10`, a 512-token reader budget, and conflict resolution
-disabled. **This is an unpinned, noncanonical workload diagnostic of reader-context use only, not
-answer quality or leaderboard accuracy.** Engraphis used **891,857** cumulative reader-context
-tokens versus **49,915,394** for uncapped full history, **98.2133% lower**. Charging one complete
-246,539-token corpus pass to indexing produces a conservative Engraphis total of **1,138,396**,
-still **97.7193% lower**, with a calculated break-even at query 10. The quality tradeoff is
-explicit:
-
-| LoCoMo workload method (unpinned, noncanonical context-use diagnostic; not answer quality or leaderboard accuracy) | Retrieval recall | Hit rate | Answer-token recall | Mean reader context |
-|---|---:|---:|---:|---:|
-| Engraphis hybrid recall | **0.600457** | **0.657417** | **0.679614** | **449.07** tokens |
-| Same-budget recency window | 0.011289 | 0.012614 | 0.339941 | 487.87 tokens |
-| Uncapped full history | 0.996997 | 0.997477 | 0.917247 | 25,133.63 tokens |
-
-This diagnostic supports a precise statement: Engraphis recovered much more useful evidence than
-a same-budget recency window while using a small fraction of full-history context. It does not
-support “same quality as full history,” provider-billing, or end-to-end answer-accuracy claims.
-The embedding model revision was not pinned in that run, so rerun it with an immutable revision
-before treating the numbers as canonical release evidence.
+The context-economy and productivity tools intentionally report when a small workload does not
+benefit from memory, and the external loaders expose retrieval-quality tradeoffs rather than
+hiding them. Their prior local results are not retained as public numbers because no matching
+redacted immutable artifact is checked in. Run the registered protocol and publish the resulting
+artifact before making a quantitative claim.
 
 ### Reproduce
 
@@ -168,17 +165,12 @@ names every remaining replacement/removal, must be fully consumed, and is record
 report with its own hash. Any source update, unused repair, or unresolved ID fails the run. This
 repairs retrieval references only; it does not claim to correct LoCoMo's semantic answer labels.
 
-The pinned full-dataset private retrieval diagnostic run on 2026-08-04 used official-source
-SHA-256 `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`, repair-manifest
-SHA-256 `7bb74979b98778aafbbe72d44a93593743ff5ba166c9c95cd4702ab7376d7c2b`, and
-`sentence-transformers/all-MiniLM-L6-v2` revision
-`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`. With `k=10` and conflict resolution disabled,
-all 10 conversations, 5,882 memories, and 1,986 questions were processed; 1,982 questions had
-gold evidence and were scored. The result was recall@10 **0.6045**, hit@10 **0.6625**,
-MRR@10 **0.4138**, NDCG@10 **0.4424**, and answer-token recall **0.4607**. Six questions used
-mechanical ID normalization, three source-audited manifest repairs were applied, and four
-questions were explicitly excluded as `no_gold_evidence`. These values measure evidence
-retrieval only; they are not end-to-end QA accuracy or an official LoCoMo leaderboard score.
+A private pinned retrieval diagnostic was inspected during development, but its result artifact is
+not checked into the public evidence registry. This document therefore publishes none of that
+run's workload counts or scores. Reproduce it from the hash-bound source and repair manifest,
+export a public-safe immutable artifact, and validate its checksum before adding quantitative
+claims. Any future values remain evidence-retrieval metrics, not end-to-end QA accuracy or an
+official LoCoMo leaderboard score.
 
 ## What we do NOT yet claim
 
@@ -226,10 +218,14 @@ cases. Retrieval-only abstention/no-evidence records remain visible in the artif
 `exclusions`; they are not counted as evidence-retrieval scores.
 
 Official LongMemEval-V2 output can be converted into a public-safe QA artifact with
-`python -m eval.longmemeval_v2_evidence`. The exporter keeps the official QA score, fixed-reader
-context token count, latency, model revisions, source digests, repository state, and artifact
-checksum. It removes raw questions, answers, prompts, reader output, and retrieved context before
-the artifact can be written. See [`eval/EVIDENCE.md`](eval/EVIDENCE.md) for the exact command.
+`python -m eval.longmemeval_v2_evidence`. The exporter requires the completion manifest written by
+the pinned runner after a successful, complete official run. It binds the exact per-question
+output, questions, haystack, trajectories, memory configuration, matrix manifest, seed, clean
+official checkout, and recorded environment. The public artifact keeps the official QA score,
+fixed-reader context token count, aggregate source-file digests, repository state, and artifact
+checksum. It removes raw questions, answers, prompts, reader output, and retrieved context, and
+does not publish per-record content fingerprints. See the
+[`public benchmark runbook`](docs/PUBLIC_BENCHMARK_RUNBOOK.md) for the end-to-end operator sequence.
 
 ### LongMemEval-V2 memory-module adapter
 
@@ -241,31 +237,42 @@ the artifact can be written. See [`eval/EVIDENCE.md`](eval/EVIDENCE.md) for the 
 with the official harness. The config pins `Qwen/Qwen3-Embedding-8B` to revision
 `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af`; mutable embedding revisions are rejected, and a
 canonical adapter run fails instead of relabeling the deterministic offline fallback as Qwen.
-Run `python -m eval.run_longmemeval_v2` with the official harness arguments and the pinned
-checkout on `PYTHONPATH`. This wrapper performs the upstream registry import in the required order
-before delegating to `evaluation.harness`; a direct upstream invocation must otherwise import
-`eval.longmemeval_v2` before calling `build_memory`.
+First materialize the six declared variants at all five token budgets:
+
+```bash
+python -m eval.longmemeval_v2_matrix \
+  --output "$ENGRAPHIS_EVIDENCE_RUN_DIR/configs"
+```
+
+This writes a 30-run manifest: balanced, planner, episodic-cap, planner-plus-episodic-cap, and
+matched `context_k=2` comparators for both capped variants, each at 256, 512, 1,024, 2,048, and
+4,096 evidence tokens. Run each manifest cell through `python -m eval.run_longmemeval_v2` with all
+eight `--engraphis-*` completion-receipt arguments. The wrapper imports the adapter before the
+official registry builds the memory module, forces the pinned reader processor revision, and
+delegates the remaining official harness arguments unchanged. Only after a successful return does
+it verify that the output question IDs exactly cover the source question IDs and write the
+immutable execution manifest.
 
 The checked-in configuration is canonical only when the adapter resolves the pinned Qwen reader
-processor at `c202236235762e1c871ad0ccb60c8ee5ba337b9a`. The wrapper also forces the audited
-official harness's otherwise-unpinned `AutoProcessor` call to that same revision. It refuses to
-start if the optional processor dependency or immutable revision is unavailable; the local regex
-counter is never silently relabeled as a reader budget. The recorded budget counts each returned
-context item's content with that reader tokenizer (without prompt framing or inter-item
-separators), so it is a hard **evidence-item content** budget, not a claim about total chat-prompt
-tokens. Packed sources are returned as separate context items, preserving the largest fitting
-evidence prefix instead of dropping one oversized monolithic item. The adapter does not download
-benchmark data or call the reader/evaluator; the official harness owns those steps.
+processor at `c202236235762e1c871ad0ccb60c8ee5ba337b9a`. The wrapper refuses a dirty or non-pinned
+official checkout and refuses to start if the optional processor dependency or immutable revision
+is unavailable; the local regex counter is never silently relabeled as a reader budget. The
+recorded budget counts each returned context item's content with that reader tokenizer (without
+prompt framing or inter-item separators), so it is a hard **evidence-item content** budget, not a
+claim about total chat-prompt tokens. Packed sources are returned as separate context items,
+preserving the largest fitting evidence prefix instead of dropping one oversized monolithic item.
+Every official per-question row reports inserted and retrieved counts by memory type. A
+memory-type-cap claim additionally requires at least two populated inserted types, so a nominal cap
+over a single-type workload cannot qualify as evidence. The adapter does not download benchmark
+data or call the reader/evaluator; the official harness owns those steps.
 
 ## External evidence status and remaining executions
 
 1. **Run the official LongMemEval-V2 reader and evaluator.** The adapter, pinned runner, and
    redacted evidence exporter are implemented. The exact upstream commit boots in an isolated
-   Python 3.11 environment and the wrapper reaches the official harness CLI. Dataset revision
-   `f152293e235517d504809563c833d7190b8c713b` publishes 7,120,369,667 bytes before the pinned
-   Qwen reader and embedding model assets. A full official run therefore still requires those
-   resources, sufficient compute, and evaluator configuration; no canonical QA score is claimed
-   until that run completes.
+   Python 3.11 environment and the wrapper reaches the official harness CLI. The dataset, pinned
+   Qwen reader, and embedding assets require substantial storage and compute; no canonical QA
+   score is claimed until that run completes.
 2. **Publish production-backend latency.** Run `eval/performance.py` with the real embedder and
    sqlite-vec/backend configuration on a fixed machine class and corpus scale.
 3. **Run the fixed-budget curve on the complete official datasets.** The v2 harness now measures
@@ -299,20 +306,15 @@ Use `--artifact` on any of these commands to write a redacted, immutable evidenc
 an adjacent SHA256 file. The ordinary console/`--json` report is private run material and may
 contain source questions for debugging.
 
-### Upstream-data diagnostic baseline (2026-07-30)
+### Upstream-data diagnostics awaiting public artifacts
 
-These runs use the dependency-free deterministic embedder on upstream data. They validate the
-adapters and expose product gaps; they are noncanonical diagnostics, not leaderboard or marketing
-claims. The artifact validator accepted every completed envelope.
-
-| Upstream source | Executed scope | Result and boundary |
-|---|---|---|
-| LoCoMo-Plus commit `059f4e3d38f7f1f96765e8e2cb7de3097551bffb` | All 401 Cognitive cases, 40,270 source memories | Recall@10 **0.1259**, hit@10 **0.1272**, MRR@10 **0.0744**, answer-token context coverage **0.5095**. This is cue-evidence retrieval, not answer-judge accuracy. The low retrieval score is useful negative evidence: implicit-constraint recall remains a real product gap. |
-| MemoryAgentBench commit `455306dcabc3842526eb83cd4e225e5d486c5c5d`, official Hugging Face `Accurate_Retrieval` first row | 100 questions | Recall@10 **0.5100**, hit@10 **0.8600**, answer-token context coverage **0.8500**. Gold evidence was derived only where an accepted answer occurred in a source chunk. |
-| The same source, `Conflict_Resolution` first row | 100 questions | Recall@10 **0.4600**, hit@10 **0.6400**, answer-token context coverage **0.6800**. This plain-context export measures retrieval, not structured temporal invalidation. |
-| The same source, `Long_Range_Understanding` first row | 1 question | Answer-token context coverage **0.2658**. The export supplied no evidence IDs and no accepted answer occurred verbatim in a source chunk, so retrieval was deliberately left unscored rather than reported as a false perfect score. |
-| The same source, `Test_Time_Learning` first row | One 5.88 MB context | The no-resolution ingest did not complete within a five-minute local smoke ceiling. This is a measured large-ingest throughput gap, not a failed quality score; batch embedding and transaction work should precede a complete split run. |
-| Mem2ActBench upstream smoke | 2 public rows | Recall@10, hit@10, MRR@10, and NDCG@10 **1.0000**; expected tool-call JSON token coverage **0.5714**. This is retrieval/context coverage, not generated action success. |
+The LoCoMo-Plus, MemoryAgentBench, and Mem2ActBench adapters have been exercised against upstream
+data and exposed useful product gaps. Their earlier local envelopes are not present in the
+checked-in evidence registry, so this document withholds their case counts, retrieval scores,
+token coverage, and throughput measurements. Rerun each adapter with `--artifact`, publish the
+redacted immutable envelope and checksum, and add its suite/config binding before quoting a
+number. Until then these lanes demonstrate executable plumbing only, not leaderboard,
+answer-quality, or marketing results.
 
 The MemoryAgentBench loader accepts both its aligned public JSON export and the Hugging Face
 dataset-server `rows[].row` envelope. Rows without gold evidence remain useful for answer-token
@@ -338,13 +340,11 @@ or invent a task-success oracle.
 1. **Budget-aware packing**: compare full source, safe summary, sentence-aligned safe summary
    excerpt, and raw-source excerpt at fixed budgets. Gate on support/answer retention and
    qualifier preservation, not token count alone.
-2. **Adaptive retrieval work**: `--candidate-depth adaptive` is now an opt-in performance
-   experiment. It keeps wider graph/code pools and reduces routine lexical/balanced pools while
-   reporting the requested and actual depth. Sample and CodeMem kept every offline quality metric
-   at 1.0 with balanced depth reduced from 50 to 15; CodeMem plus 1,000 fillers reduced local
-   median recall latency from 20.666 ms to 18.991 ms in a 260-recall comparison, an 8.1%
-   reduction. These are machine-specific regression results, not production latency claims. Keep
-   the default fixed until complete external categories meet predeclared quality margins.
+2. **Adaptive retrieval work**: `--candidate-depth adaptive` is an opt-in performance experiment.
+   It keeps wider graph/code pools and reduces routine lexical/balanced pools while reporting the
+   requested and actual depth. A local experiment motivated this option, but no public number is
+   retained because its machine-specific artifact is not in the evidence registry. Keep the
+   default fixed until complete external categories meet predeclared quality margins.
 3. **Packing-pressure consolidation**: prioritize memory families that are frequently recalled,
    repeatedly omitted, or costly per useful token. Count write/index/storage cost as well as later
    reader-context savings.
@@ -354,7 +354,7 @@ or invent a task-success oracle.
    measuring tokens-to-evidence, recall, and storage/index growth together before recommending a
    model-specific default.
 5. **Bulk ingestion**: add batch embedding plus a transaction-aware vector upsert path, then rerun
-   the 5.88 MB MemoryAgentBench Test-Time Learning row. Gate this on identical stored-memory,
+   the complete MemoryAgentBench Test-Time Learning input. Gate this on identical stored-memory,
    provenance, graph-link, and temporal-resolution outcomes, not throughput alone.
 6. **Scoped caches**: benchmark query embeddings and repeat-recall results keyed by workspace,
    repo, time anchors, profile, and corpus version. Test invalidation correctness before claiming

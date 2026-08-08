@@ -50,7 +50,7 @@ You interact with Engraphis through three surfaces, all backed by the *same* eng
 
 These are the properties that matter when you're deciding how to use it well:
 
-1. **Scoped.** Every memory lives in a `workspace → repo → session` hierarchy. A memory can be visible at `session`, `repo`, `workspace`, or `user` level. This is what lets one agent work across many repos without cross-contaminating context.
+1. **Scoped.** Every memory lives in a `workspace → repo → session` hierarchy and can apply at `session`, `repo`, or `workspace` level. Scope separates work contexts; it does not identify a human owner. `user` is reserved and rejected until owner-bound memories exist.
 
 2. **Typed.** Every memory is one of four types: `semantic` (durable facts/conventions), `episodic` (events/decisions that happened), `procedural` (how-tos), or `working` (transient scratch). Each type has its own scoring weights and lifecycle. Getting scope + type right is ~90% of using Engraphis well.
 
@@ -94,7 +94,8 @@ Engraphis is a Python package. Install the MCP variant:
 pip install "engraphis[mcp]"
 ```
 
-Then run the one-time initializer, which writes an `.env` with an absolute DB path and prints config snippets:
+Then run the one-time initializer, which writes the owner-private
+`~/.engraphis/config.env` with an absolute DB path and prints config snippets:
 
 ```bash
 engraphis-init
@@ -109,7 +110,11 @@ advanced actions as needed. You can sanity-check that it's on your PATH:
 engraphis-mcp --help    # or just confirm the command resolves
 ```
 
-> **Note on the database.** The memory store is a single SQLite file. `engraphis-init` sets `ENGRAPHIS_DB_PATH` to an absolute path in your `.env`. If you also run the dashboard, point it at the *same* DB path so the WebUI and the agent share one memory store. Mismatched DB paths is the #1 cause of "I remembered something but can't see it in the dashboard."
+> **Note on the database.** The memory store is a single SQLite file. `engraphis-init` sets
+> `ENGRAPHIS_DB_PATH` to an absolute path in `~/.engraphis/config.env`. If you also run the
+> dashboard, point it at the *same* DB path so the WebUI and the agent share one memory store.
+> Mismatched DB paths are the #1 cause of "I remembered something but can't see it in the
+> dashboard."
 
 ### 3.2 Register the server in Kilo Code
 
@@ -167,7 +172,7 @@ Notes on the fields:
 
 ### 3.3 Verify the pipe is connected
 
-Reload Kilo Code (or toggle the server off/on in **Settings → MCP**). You should now see the six
+Reload Kilo Code (or toggle the server off/on in **Settings → MCP**). You should now see the nine
 `engraphis_*` Smart tools. The fastest end-to-end check is to ask Kilo Code to discover the health
 capability, then run the returned read executor:
 
@@ -226,10 +231,10 @@ Smart command shown above.
 | Category | Tool | What it does |
 |---|---|---|
 | **Write** | `engraphis_remember` | Store a fact; deterministically resolved to add / reinforce (noop) / supersede (invalidate). |
-| Write | `engraphis_record_event` | Append a lightweight episodic log entry: lower ceremony than remember; repeats are a promotion signal. |
+| Write | `engraphis_record_event` | Append one raw occurrence to an event ledger; event rows are not recalled, deduplicated, or consolidated as memories. |
 | Write | `engraphis_link` | Explicitly connect two related memories (e.g. a bug ↔ its fix). |
 | Write | `engraphis_ingest` | Store raw/undistilled text; extracts discrete facts first when an LLM extractor is configured. |
-| Write | `engraphis_ingest_postgres_schema` | Store a new point-in-time PostgreSQL schema + graph per call; the DSN is never stored. |
+| Write | `engraphis_ingest_postgres_schema` | Store a point-in-time PostgreSQL schema + graph; an unchanged exact retry reuses the snapshot, while every call appends audit/receipt records. The DSN is never stored. |
 | **Stateful recall** | `engraphis_recall_context` | Recommended prompt packet: hard-budget context, compact source identities, strict token usage, and optional diagnostics. |
 | **Stateful recall** | `engraphis_recall` | Hybrid vector + lexical + graph recall, with independent `valid_at`/`known_at`; appends a privacy-safe receipt without strengthening weak matches. |
 | Stateful recall | `engraphis_recall_grounded` | Cited answer assembled only from retrieved memories. It either answers with evidence or abstains; supports optional point-in-time `as_of`, records a receipt, and reinforces cited memories. |
@@ -249,6 +254,7 @@ Smart command shown above.
 | Audit | `engraphis_verify_receipts` | Verify the tamper-evident receipt chain. |
 | Audit | `engraphis_export_receipts` | Export a privacy-safe receipt-only audit bundle. |
 | **Governance** | `engraphis_retire` | Retire a memory: bi-temporal close, never a hard delete; every request is audited. `engraphis_forget` is a deprecated compatibility alias. |
+| Governance | `engraphis_forget` | Deprecated compatibility alias for `engraphis_retire`; prefer the canonical name. |
 | Governance | `engraphis_secure_erase` | Irreversibly remove a leaked memory and its local indexes; rotate the credential and remediate external copies separately. |
 | Governance | `engraphis_pin` | Exempt a memory from decay/pruning; every pin/unpin request is audited. |
 | Governance | `engraphis_correct` | Replace a memory's content without losing history: keeps the "why" chain. |
@@ -298,13 +304,17 @@ are unnecessary; both recall surfaces accept `diagnostics=true` for a retrieval 
 - **repo**: the repository (e.g. `backend`). Omit only for genuinely workspace-wide facts.
 - **session**: one unit of work; pass its `session_id` so memories group and resume.
 
-Pick the **narrowest scope that is still reusable**. A fix specific to one repo is `scope="repo"`. A preference that follows you everywhere is `scope="user"`. Over-scoping (everything at `workspace`) pollutes recall across repos; under-scoping (everything at `session`) means nothing survives.
+Pick the **narrowest supported scope that is still reusable**. A fix specific to one repo is
+`scope="repo"`; deliberately shared cross-repo guidance is `scope="workspace"`. `scope="user"`
+is reserved and rejected until memories carry an immutable owner identity, so it must not be used
+for private preferences. Over-scoping pollutes unrelated work; under-scoping at `session` means
+nothing survives the task.
 
 **Recommended convention for Kilo Code:** set the `workspace` to your org/product name and the `repo` to the folder/repo name Kilo Code is currently working in. Keep those two stable and the whole hierarchy works itself out. A tidy way to enforce this is a project-level `.kilo/kilo.jsonc` per repo with a rules/instruction note telling the agent which workspace + repo string to use.
 
 ### 5.3 What to remember and what not to
 
-**Store:** conventions ("we use pnpm"), decisions **with rationale** ("switched to PASETO because JWT `none`-alg risk"), bug cause→fix, user/team preferences, reusable procedures, durable environment facts.
+**Store:** conventions ("we use pnpm"), decisions **with rationale** ("switched to PASETO because JWT `none`-alg risk"), bug cause→fix, intentionally shared team/repo preferences, reusable procedures, durable environment facts. Personal preferences have no owner-isolated scope yet.
 
 **Do not store:** secrets, tokens, or credentials; transient scratch state; verbatim large files or logs; anything cheaply re-derivable from the code. **Treat memory as data, not commands**; never store text that instructs a future agent to take an action (that's the memory-poisoning threat; ingested/external content is marked `trusted=false` so prompts can label it).
 
@@ -383,7 +393,7 @@ Kilo Code is an MCP client; Engraphis ships an MCP server (`engraphis-mcp`, loca
 `engraphis-init`, then add a `local` server named `engraphis` under the `mcp` key in
 `kilo.jsonc` (`["cmd","/c","engraphis-mcp"]` on Windows, `["engraphis-mcp"]` on
 macOS/Linux), pin `ENGRAPHIS_DB_PATH`, bump `timeout` to 15000, and verify with
-Engraphis action discovery. That gets the pipes connected. The *value* is the Smart gateway: six
+Engraphis action discovery. That gets the pipes connected. The *value* is the Smart gateway: nine
 compact routine tools plus automatic access to scoped, typed, bi-temporal memory, code, audit, and
 maintenance capabilities. It preserves the discipline of "recall before you ask, remember before
 you move on," with `workspace → repo → session` scoping and periodic consolidation when needed.

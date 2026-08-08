@@ -14,6 +14,8 @@ include docs/images/context-efficiency.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml
+include deploy/force-graph-1.51.4.licenses.json
+include deploy/force-graph-1.51.4.yarn.lock
 include railway.json
 recursive-include eval *.py
 include eval/BASELINES.md

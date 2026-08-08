@@ -49,6 +49,25 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
         assert removed not in template["variables"]
 
 
+def test_dependency_automation_covers_every_root_ecosystem():
+    dependabot = _text(".github/dependabot.yml")
+    ecosystems = re.findall(r'package-ecosystem:\s*"([^"]+)"', dependabot)
+
+    assert sorted(ecosystems) == ["docker", "github-actions", "npm", "pip"]
+    assert len(ecosystems) == len(set(ecosystems))
+    assert "npm audit --audit-level=high" in _text(".github/workflows/ci.yml")
+    assert "npm audit --audit-level=high" in _text(".github/workflows/release.yml")
+    assert "npm ci --ignore-scripts --omit=optional" in _text(".github/workflows/ci.yml")
+    assert "npm ci --ignore-scripts --omit=optional" in _text(
+        ".github/workflows/release.yml"
+    )
+    package = json.loads(_text("package.json"))
+    lock = json.loads(_text("package-lock.json"))
+    assert package["devDependencies"]["impeccable"] == "3.5.0"
+    assert lock["packages"][""]["devDependencies"]["impeccable"] == "3.5.0"
+    assert lock["packages"]["node_modules/impeccable"]["version"] == "3.5.0"
+
+
 def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
@@ -62,7 +81,11 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
     assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in docker_docs
     assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
-    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert (
+        "[Docker deployment guide]"
+        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md)"
+        in readme
+    )
     assert "The Docker image includes the streamable HTTP MCP endpoint" in docker_docs
     assert "ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in docker_docs
     assert "docker-compose.lan.yml" in docker_docs
@@ -88,7 +111,12 @@ def test_advanced_query_planning_stays_in_architecture_docs():
     architecture = _text("docs/ARCHITECTURE_V3.md")
     guidance = "`planning=\"auto\"` keeps the original query"
 
-    assert "[architecture guide](docs/ARCHITECTURE_V3.md#query-planning)" in readme
+    assert (
+        "[architecture guide]"
+        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
+        "docs/ARCHITECTURE_V3.md#query-planning)"
+        in readme
+    )
     assert guidance not in readme
     assert guidance in architecture
     assert "LLMQueryPlanner(my_llm)" in architecture
@@ -99,7 +127,12 @@ def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     pi_guide = _text("integrations/pi/README.md")
     review_guide = _text("docs/WRITE_REVIEW.md")
 
-    assert "[Pi extension guide](integrations/pi/README.md)" in readme
+    assert (
+        "[Pi extension guide]"
+        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
+        "integrations/pi/README.md)"
+        in readme
+    )
     assert "pi install npm:@engraphis/pi" not in readme
     assert "Every advanced state-changing action requires an explicit Pi confirmation dialog" in pi_guide
 
@@ -127,7 +160,11 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
     assert "ports: !override" in lan_compose
     assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
     assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
-    assert "[Docker deployment guide](docs/DOCKER.md)" in readme
+    assert (
+        "[Docker deployment guide]"
+        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md)"
+        in readme
+    )
     assert "ENGRAPHIS_COMPOSE_PORT=8787" in docker_docs
 
 
@@ -150,6 +187,11 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert 'python -m pip_audit --path "$audit_dir"' in ci
     assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in ci
     assert "tesseract-ocr" in _text("Dockerfile")
+    assert (
+        _text("Dockerfile").splitlines()[1]
+        == "FROM python:3.11-slim@sha256:"
+        "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff AS base"
+    )
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
     assert "docker-entrypoint\\.sh" in ci
@@ -161,21 +203,27 @@ def test_ci_and_release_audit_production_image_dependencies():
         assert "env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet" in workflow
         assert "ENGRAPHIS_API_TOKEN: ci-lan-overlay-token" in workflow
         assert "Validate token-protected LAN Compose overlay" in workflow
-    assert 'pip setuptools wheel build twine pip-audit ".[all,test]"' in release_build
+    assert 'pip setuptools wheel build twine pip-audit cyclonedx-bom ".[all,test]"' in release_build
     assert "python -m pip_audit --local --skip-editable" in release_build
     assert "python scripts/normalize_sdist.py dist/*.tar.gz" in release_build
-    assert "python scripts/normalize_sdist.py dist-repeat/*.tar.gz" in release_build
+    assert "pip list --format=freeze" in release_build
+    assert "name: build-environment-evidence" in release_build
     assert "engine.store.close()" in release_build
     assert "engine.close()" not in release_build
-    assert "docker build -t engraphis:release ." in release_docker
+    assert "docker buildx build --pull --load" in release_docker
+    assert "--metadata-file container-evidence/build-metadata.json" in release_docker
+    assert '"containerimage.digest"' in release_docker
     assert "Validate Compose configuration" in release_docker
     assert "docker compose config --quiet" in release_docker
     assert "Audit production image dependencies" in release_docker
-    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in release_docker
+    assert "pip-audit==2.10.1" in release_docker
     assert 'docker create --name "$container" engraphis:release' in release_docker
     assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in release_docker
     assert 'python -m pip_audit --path "$audit_dir"' in release_docker
-    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release_evidence
+    assert "reproducibility-check" in release_evidence.split("needs:", 1)[1].splitlines()[0]
+    assert "installed-artifact-platform-smoke" in (
+        release_evidence.split("needs:", 1)[1].splitlines()[0]
+    )
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
@@ -216,7 +264,11 @@ def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
         assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
 
     release = _text(".github/workflows/release.yml")
-    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release
+    release_evidence = release.split("  release-evidence:\n", 1)[1].split(
+        "  publish:\n", 1,
+    )[0]
+    assert "reproducibility-check" in release_evidence
+    assert "encryption" in release_evidence.split("needs:", 1)[1].splitlines()[0]
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -236,13 +288,13 @@ def test_release_builds_one_portable_open_core_wheel():
     assert "cython" not in pyproject.lower()
     assert "cibuildwheel" not in release
     assert release.count("python -m build") == 2
-    assert "python -m build --outdir dist-repeat" in release
-    assert "<(cd dist && sha256sum * | sort)" in release
-    assert "<(cd dist-repeat && sha256sum * | sort)" in release
+    assert "python -m build --outdir dist-repeat" not in release
+    assert 'builder: ["a", "b"]' in release
+    assert "python:3.11-slim@sha256:90744cff" in release
+    assert "Compare independent distribution builders" in release
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
-    assert "needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]" in release
     assert "  release-evidence:\n" in release
     assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release
@@ -262,6 +314,24 @@ def test_all_workflow_actions_are_pinned_to_full_commit_shas():
             assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision), (
                 f"{path.name}:{line_number} action is not pinned to a full commit SHA"
             )
+
+
+def test_workflows_and_shell_scripts_are_lf_normalized():
+    paths = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    paths += sorted((ROOT / ".github" / "workflows").glob("*.yaml"))
+    paths += sorted(ROOT.rglob("*.sh"))
+
+    assert paths
+    for path in paths:
+        assert b"\r\n" not in path.read_bytes(), (
+            f"{path.relative_to(ROOT)} contains CRLF line endings"
+        )
+    attributes = _text(".gitattributes")
+    assert ".github/workflows/*.yml text eol=lf" in attributes
+    assert ".github/workflows/*.yaml text eol=lf" in attributes
+    assert "*.sh text eol=lf" in attributes
+    assert "deploy/*.lock text eol=lf" in attributes
+    assert "deploy/*.licenses.json text eol=lf" in attributes
 
 
 def test_ci_and_release_default_to_read_only_repository_permissions():
@@ -307,6 +377,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
         "build==1.5.0",
         "twine==6.2.0",
         "pip-audit==2.10.1",
+        "cyclonedx-bom==7.3.0",
     ):
         assert pin in constraints
     assert 'language: ["python", "javascript-typescript"]' in codeql
@@ -333,6 +404,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
     assert "--verified-check reproducible-distributions" in evidence
     assert "--verified-check installed-artifact-smoke" in evidence
     assert "--verified-check installed-artifact-smoke-py39" in evidence
+    assert "--verified-check installed-artifact-platform-smoke" in evidence
     ci_build = ci.split("  build:\n", 1)[1]
     assert "Install pinned build and audit tooling" in ci_build
     assert '"build==1.5.0" "pip-audit==2.10.1"' in ci_build
@@ -387,17 +459,15 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
     assert '"repos/${GH_REPO}/git/tags/${tag_sha}"' in repair
     assert 'test "$object_type" = "commit"' in repair
     assert "--json databaseId,headBranch,headSha,event,createdAt" in repair
-    assert ".headBranch == $tag" in repair
-    assert ".headSha == $sha" in repair
-    assert '.event == "push"' in repair
-    assert "sort_by(.createdAt)" in repair
+    assert "repair_run_candidates" in repair
+    assert "while IFS= read -r candidate" in repair
     assert '.name == "Build distributions"' in repair
     assert '.name == "Publish to PyPI"' in repair
     assert '.name == "Generate public release evidence"' in repair
     assert '.name == "Assemble distributions"' not in repair
     assert repair.count('.conclusion == "success"') >= 2
-    assert 'gh run download "$run_id"' in repair
-    assert 'open("release-evidence/release-evidence.json", encoding="utf-8")' in repair
+    assert 'gh run download "$candidate"' in repair
+    assert 'evidence_root / "release-evidence.json"' in repair
     assert 'assert evidence.get("tag") == tag' in repair
     assert 'assert evidence.get("commit") == commit' in repair
     assert 'assert evidence.get("package", {}).get("version") == tag.removeprefix("v")' in repair
@@ -514,7 +584,21 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "Pro and Team are GA in v1.0.0" not in readme
     assert "Pro and Team are services" in readme
     assert "img.shields.io/badge/version-1.0.0" not in readme
-    assert "img.shields.io/pypi/v/engraphis.svg" in readme
+    assert (
+        "[![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)]"
+        "(https://pypi.org/project/engraphis/)"
+        in readme
+    )
+    assert (
+        "https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/"
+        "docs/images/knowledge-graph.png"
+        in readme
+    )
+    assert (
+        "https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/"
+        "docs/images/context-efficiency.svg"
+        in readme
+    )
     assert "official hosted service" in readme
     assert "are generally available" not in readme
     assert "private repository" in normalized_readme

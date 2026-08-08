@@ -2,15 +2,15 @@
 
 Closes the biggest first-run gap: with no configuration, an installed build puts its
 database in the platform user-data directory, where most people never think to look.
-This command instead writes a project-local `.env` with an explicit absolute DB path
-(and optional API token), then prints exact MCP snippets to paste into Claude Code /
-Cursor / Cline / Zed.
+This command writes the process-selected trusted config file with an explicit absolute
+DB path (and optional API token), then prints exact MCP snippets to paste into Claude
+Code / Cursor / Cline / Zed.
 
-    engraphis-init                 # write ./.env (kept if it exists), print next steps
+    engraphis-init                 # write ~/.engraphis/config.env
     engraphis-init --db ~/mem.db   # choose the database location
     engraphis-init --token         # also generate a bearer token for the HTTP APIs
     engraphis-init --encrypted     # require SQLCipher and provision a private DB key file
-    engraphis-init --force         # overwrite an existing .env
+    engraphis-init --force         # overwrite the trusted config file
     engraphis-init --check         # doctor: verify install, extras, DB writability
 
 Non-interactive by design (no prompts): safe in scripts, CI, and agent shells.
@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from engraphis.private_state import read_private_text
 from engraphis.backends.encrypted_db import connector_from_env
+from engraphis.private_state import (
+    atomic_private_text,
+    ensure_owner_private_dir,
+    read_private_text,
+)
 
 
 _HEX64 = set("0123456789abcdef")
@@ -80,7 +82,7 @@ def cmd_check() -> int:
     try:
         db.parent.mkdir(parents=True, exist_ok=True)
         connector = connector_from_env()
-        conn = (
+        conn: Any = (
             connector(str(db))
             if connector is not None
             else sqlite3.connect(str(db))
@@ -123,38 +125,23 @@ def _env_content(db_path: Path, token: str, key_path: Optional[Path] = None) -> 
         ]
     lines += [
         "# Pro and Team are hosted. Connect through the Engraphis Cloud account portal;",
-        "# never paste access or refresh credentials into a repository .env file.",
+        "# never paste access or refresh credentials into this configuration file.",
         "# ENGRAPHIS_CLOUD_CONTROL_URL=https://control.example.com",
         "# ENGRAPHIS_CLOUD_COMPUTE_URL=https://compute.example.com",
     ]
     return "\n".join(lines) + "\n"
 
 
-def _write_env(path: Path, content: str) -> None:
-    """Atomically replace *path* through a private temporary file.
-
-    The file can contain an API bearer token, so it must not spend even a short window
-    with the process umask's default group/world-readable permissions.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".%s." % path.name, suffix=".tmp",
-                                     dir=str(path.parent))
-    try:
-        os.chmod(temporary, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            fd = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            Path(temporary).unlink()
-        except FileNotFoundError:
-            pass
-        raise
+def _write_env(
+    path: Path,
+    content: str,
+    *,
+    owner_private_parent: bool = False,
+) -> None:
+    """Atomically replace one private configuration or key file."""
+    if owner_private_parent:
+        ensure_owner_private_dir(path.parent)
+    atomic_private_text(path, content)
 
 
 def _key_path_for(db_path: Path) -> Path:
@@ -176,7 +163,7 @@ def _private_file_content(path: Path) -> str:
 
 
 def _provision_db_key(db_path: Path) -> Path:
-    """Create or validate a sidecar SQLCipher key without ever putting it in ``.env``.
+    """Create or validate a sidecar SQLCipher key outside the trusted config.
 
     An existing database without this key is intentionally rejected.  Silently attaching a
     fresh key would make an existing plaintext database inaccessible and could tempt a user
@@ -195,27 +182,42 @@ def _provision_db_key(db_path: Path) -> Path:
     return key_path
 
 
-def _existing_env_value(env_file: Path, name: str) -> str:
-    """Read one simple assignment from the private file emitted by this command."""
-    try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return ""
-    for line in lines:
+def _read_existing_env(env_file: Path) -> str:
+    """Read one bounded, owner-only trusted config snapshot."""
+    return read_private_text(
+        env_file,
+        max_bytes=1024 * 1024,
+        owner_only=True,
+    ) or ""
+
+
+def _existing_env_value(content: str, name: str) -> str:
+    """Read one simple assignment from trusted config content."""
+    for line in content.splitlines():
         key, separator, value = line.partition("=")
         if separator and key.strip() == name:
             return value.strip().strip("\"'")
     return ""
 
 
-def _existing_db_path(env_file: Path, fallback: Path) -> Path:
+def _existing_db_path(env_file: Path, content: str, fallback: Path) -> Path:
     """Read the simple ENGRAPHIS_DB_PATH assignment emitted by this command."""
-    raw = _existing_env_value(env_file, "ENGRAPHIS_DB_PATH")
+    raw = _existing_env_value(content, "ENGRAPHIS_DB_PATH")
     if raw:
         configured = Path(raw).expanduser()
-        return (configured if configured.is_absolute()
-                else (env_file.parent / configured).resolve())
+        return (
+            configured
+            if configured.is_absolute()
+            else (env_file.parent / configured).resolve()
+        )
     return fallback
+
+
+def _trusted_env_file() -> Path:
+    """Return the process-fixed private configuration path."""
+    from engraphis.config import trusted_env_path
+
+    return trusted_env_path()
 
 
 def main(argv=None) -> int:
@@ -234,16 +236,24 @@ def main(argv=None) -> int:
         "--no-encryption", action="store_true",
         help="do not enable SQLCipher even when its driver is installed",
     )
-    ap.add_argument("--force", action="store_true", help="overwrite an existing .env")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite the existing trusted config file",
+    )
     ap.add_argument("--check", action="store_true",
-                    help="doctor mode: verify the installation instead of writing .env")
+                    help="doctor mode: verify the installation without writing config")
     args = ap.parse_args(argv)
 
     if args.check:
         return cmd_check()
 
     db_path = Path(args.db).expanduser().resolve()
-    env_file = Path.cwd() / ".env"
+    try:
+        env_file = _trusted_env_file()
+    except (OSError, RuntimeError, ValueError) as exc:
+        _fail("trusted configuration", str(exc))
+        return 1
     token = secrets.token_urlsafe(24) if args.token else ""
     sqlcipher_available = _try_import("sqlcipher3") is not None
     if args.encrypted and not sqlcipher_available:
@@ -253,9 +263,17 @@ def main(argv=None) -> int:
     key_path: Optional[Path] = None
 
     if env_file.exists() and not args.force:
-        print(f".env already exists at {env_file} - kept (use --force to overwrite).")
-        db_path = _existing_db_path(env_file, db_path)
-        existing_key = _existing_env_value(env_file, "ENGRAPHIS_DB_KEY_FILE")
+        try:
+            existing_env = _read_existing_env(env_file)
+        except OSError as exc:
+            _fail("trusted configuration", str(exc))
+            return 1
+        print(
+            f"trusted config already exists at {env_file} - kept "
+            "(use --force to overwrite)."
+        )
+        db_path = _existing_db_path(env_file, existing_env, db_path)
+        existing_key = _existing_env_value(existing_env, "ENGRAPHIS_DB_KEY_FILE")
         if existing_key:
             key_path = Path(existing_key).expanduser()
     else:
@@ -265,7 +283,15 @@ def main(argv=None) -> int:
             except RuntimeError as exc:
                 _fail("SQLCipher encryption", str(exc))
                 return 1
-        _write_env(env_file, _env_content(db_path, token, key_path))
+        try:
+            _write_env(
+                env_file,
+                _env_content(db_path, token, key_path),
+                owner_private_parent=True,
+            )
+        except OSError as exc:
+            _fail("trusted configuration", str(exc))
+            return 1
         print(f"wrote {env_file}")
         print(f"  database -> {db_path}")
         if key_path is not None:
@@ -273,7 +299,7 @@ def main(argv=None) -> int:
         elif not args.no_encryption:
             _miss("SQLCipher encryption", 'not installed; use --encrypted after pip install "engraphis[encryption]"')
         if token:
-            print("  api token -> generated (in .env; send as 'Authorization: Bearer ...')")
+            print("  api token -> generated (in trusted config; send as 'Authorization: Bearer ...')")
 
     mcp_env = {"ENGRAPHIS_DB_PATH": str(db_path)}
     if key_path is not None:

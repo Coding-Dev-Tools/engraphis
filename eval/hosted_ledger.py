@@ -17,9 +17,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Union
 
+from engraphis.private_state import (
+    UnsafeStateFile,
+    append_private_text,
+    open_private_binary,
+    read_private_text,
+)
+
 
 SCHEMA_VERSION = "engraphis-hosted-ledger/1"
 MAX_NORMALIZED_ANSWER_CHARS = 4_096
+MAX_PRIVATE_LEDGER_BYTES = 64 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LABEL = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _ERROR_CLASS = re.compile(r"[a-z][a-z0-9_-]{0,63}")
@@ -209,11 +217,16 @@ def resolve_private_ledger_path(
             raise HostedLedgerError("outside-repo private records require an absolute path")
         if _inside(resolved, root):
             raise HostedLedgerError("external private record path resolves into the repository")
-    return resolved
+    return lexical
 
 
 class PrivateHostedLedger:
-    """Append-only local ledger with duplicate protection and a persisted call budget."""
+    """Append-only local ledger with duplicate protection and a persisted call budget.
+
+    POSIX parents/leaves are hardened to ``0700``/``0600``. Windows mode bits cannot
+    prove an owner-only ACL, so external paths must live in an ACL-protected user
+    directory; link, reparse-point, hardlink, and replacement checks still apply.
+    """
 
     def __init__(
         self,
@@ -230,20 +243,27 @@ class PrivateHostedLedger:
         self._lock_handle = None
         self._acquire_lock()
         try:
-            if self.path.exists():
-                self._load()
+            self._load()
         except Exception:
             self.close()
             raise
 
     def _acquire_lock(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(self.path.name + ".lock")
-        handle = lock_path.open("a+b")
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
+        handle = None
+        try:
+            handle = open_private_binary(lock_path, append=True)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+        except (OSError, UnsafeStateFile) as exc:
+            if handle is not None:
+                handle.close()
+            raise HostedLedgerError(
+                "the private ledger lock is unsafe or unavailable"
+            ) from exc
         try:
             if sys.platform == "win32":
                 import msvcrt
@@ -297,7 +317,17 @@ class PrivateHostedLedger:
         }
 
     def _load(self) -> None:
-        for number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            payload = read_private_text(
+                self.path, max_bytes=MAX_PRIVATE_LEDGER_BYTES, allow_missing=True
+            )
+        except (OSError, UnsafeStateFile) as exc:
+            raise HostedLedgerError(
+                "the private ledger is unsafe or unreadable"
+            ) from exc
+        if payload is None:
+            return
+        for number, line in enumerate(payload.splitlines(), 1):
             if not line.strip():
                 continue
             try:
@@ -365,12 +395,15 @@ class PrivateHostedLedger:
             raise HostedLedgerError(f"private ledger line {number} has an invalid call count")
 
     def _append(self, record: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            append_private_text(
+                self.path, payload, max_bytes=MAX_PRIVATE_LEDGER_BYTES
+            )
+        except (OSError, UnsafeStateFile) as exc:
+            raise HostedLedgerError(
+                "the private ledger is unsafe or unwritable"
+            ) from exc
 
     def reserve_call(self, identity: AttemptIdentity, *, max_calls: int) -> int:
         """Durably reserve one provider call before it starts, across restarts."""

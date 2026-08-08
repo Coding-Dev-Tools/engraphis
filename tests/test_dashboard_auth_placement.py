@@ -76,6 +76,24 @@ def test_ledger_receipt_export_uses_authenticated_fetch_not_navigation():
     assert "URL.createObjectURL(blob)" in body
     assert "byId('export-receipts').addEventListener('click', exportReceipts)" in script
 
+def test_ledger_remote_token_entry_is_masked_and_cleared_between_attempts():
+    html = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+            / "index.html").read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+              / "ledger.js").read_text(encoding="utf-8")
+
+    assert 'id="browser-auth-dialog"' in html
+    assert 'id="browser-auth-token" type="password"' in html
+    assert 'autocomplete="off"' in html
+    prompt = script[script.index("function promptBrowserToken("):
+                    script.index("async function authenticateBrowser")]
+    authenticate = script[script.index("async function authenticateBrowser"):
+                          script.index("async function reviewCsrfToken")]
+    assert "window.prompt(" not in prompt + authenticate
+    assert "input.value = ''" in prompt
+    assert "dialog.showModal()" in prompt
+    assert "form.addEventListener('submit'" in prompt
+
 
 def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     script = SCRIPT.read_text(encoding="utf-8")

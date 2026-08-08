@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 
 import pytest
+from engraphis import private_state as private_state_module
 
 from eval.hosted_ledger import (
     MAX_NORMALIZED_ANSWER_CHARS,
+    MAX_PRIVATE_LEDGER_BYTES,
     AttemptIdentity,
     CheckpointTurn,
     HostedLedgerError,
@@ -192,3 +196,157 @@ def test_private_ledger_has_an_exclusive_process_lock(tmp_path):
     first.close()
     second = PrivateHostedLedger(path, _binding(), repo_root=repo)
     second.close()
+
+
+def _external_ledger_path(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    private = tmp_path / "external-private"
+    private.mkdir()
+    return repo, private / "run.jsonl"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission contract")
+def test_private_ledger_enforces_owner_only_directory_and_file_modes(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = repo / ".private-eval" / "run.jsonl"
+    previous_umask = os.umask(0o022)
+    try:
+        ledger = PrivateHostedLedger(path, _binding(), repo_root=repo)
+        ledger.reserve_call(_identity(), max_calls=1)
+        ledger.close()
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.with_name(path.name + ".lock").stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("leaf_kind", ["ledger", "lock"])
+def test_private_ledger_rejects_symlink_leaves_without_touching_target(
+    tmp_path, leaf_kind
+):
+    repo, path = _external_ledger_path(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not touch", encoding="utf-8")
+    if os.name != "nt":
+        victim.chmod(0o600)
+    leaf = path if leaf_kind == "ledger" else path.with_name(path.name + ".lock")
+    try:
+        leaf.symlink_to(victim)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation unavailable")
+
+    with pytest.raises(HostedLedgerError, match="unsafe"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)
+
+    assert victim.read_text(encoding="utf-8") == "do not touch"
+
+
+@pytest.mark.parametrize("leaf_kind", ["ledger", "lock"])
+def test_private_ledger_rejects_hardlinked_leaves_without_touching_target(
+    tmp_path, leaf_kind
+):
+    repo, path = _external_ledger_path(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not touch", encoding="utf-8")
+    if os.name != "nt":
+        victim.chmod(0o600)
+    leaf = path if leaf_kind == "ledger" else path.with_name(path.name + ".lock")
+    try:
+        os.link(victim, leaf)
+    except (NotImplementedError, OSError):
+        pytest.skip("hardlink creation unavailable")
+
+    with pytest.raises(HostedLedgerError, match="unsafe"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)
+
+    assert victim.read_text(encoding="utf-8") == "do not touch"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission contract")
+@pytest.mark.parametrize("leaf_kind", ["ledger", "lock"])
+def test_private_ledger_rejects_public_existing_leaves(tmp_path, leaf_kind):
+    repo, path = _external_ledger_path(tmp_path)
+    leaf = path if leaf_kind == "ledger" else path.with_name(path.name + ".lock")
+    leaf.write_bytes(b"" if leaf_kind == "ledger" else b"\0")
+    leaf.chmod(0o644)
+
+    with pytest.raises(HostedLedgerError, match="unsafe"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)
+
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o644
+
+
+def test_private_ledger_rejects_oversized_existing_file_before_reading(tmp_path):
+    repo, path = _external_ledger_path(tmp_path)
+    path.touch(mode=0o600)
+    if os.name != "nt":
+        path.chmod(0o600)
+    with path.open("r+b") as handle:
+        handle.truncate(MAX_PRIVATE_LEDGER_BYTES + 1)
+
+    with pytest.raises(HostedLedgerError, match="unsafe|unreadable"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)
+
+
+@pytest.mark.parametrize("leaf_kind", ["ledger", "lock"])
+def test_private_ledger_rejects_leaf_replacement_during_open(
+    monkeypatch, tmp_path, leaf_kind
+):
+    repo, path = _external_ledger_path(tmp_path)
+    leaf = path if leaf_kind == "ledger" else path.with_name(path.name + ".lock")
+    leaf.write_bytes(b"" if leaf_kind == "ledger" else b"\0")
+    if os.name != "nt":
+        leaf.chmod(0o600)
+    original_open = private_state_module.os.open
+    swapped = False
+
+    def swap_on_open(raw_path, flags, mode=0o777):
+        nonlocal swapped
+        if not swapped and os.path.abspath(raw_path) == os.path.abspath(leaf):
+            leaf.unlink()
+            leaf.write_bytes(b"" if leaf_kind == "ledger" else b"\0")
+            if os.name != "nt":
+                leaf.chmod(0o600)
+            swapped = True
+        return original_open(raw_path, flags, mode)
+
+    monkeypatch.setattr(private_state_module.os, "open", swap_on_open)
+    with pytest.raises(HostedLedgerError, match="unsafe"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)
+    assert swapped is True
+
+
+@pytest.mark.parametrize("leaf_kind", ["ledger", "lock"])
+def test_private_ledger_rejects_reparse_point_attributes(
+    monkeypatch, tmp_path, leaf_kind
+):
+    repo, path = _external_ledger_path(tmp_path)
+    leaf = path if leaf_kind == "ledger" else path.with_name(path.name + ".lock")
+    leaf.write_bytes(b"" if leaf_kind == "ledger" else b"\0")
+    if os.name != "nt":
+        leaf.chmod(0o600)
+    original_lstat = private_state_module.os.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    class ReparseStat:
+        st_file_attributes = reparse_flag
+
+        def __init__(self, original):
+            self._original = original
+
+        def __getattr__(self, name):
+            return getattr(self._original, name)
+
+    def reparse_lstat(raw_path):
+        result = original_lstat(raw_path)
+        if os.path.abspath(raw_path) == os.path.abspath(leaf):
+            return ReparseStat(result)
+        return result
+
+    monkeypatch.setattr(private_state_module.os, "lstat", reparse_lstat)
+    with pytest.raises(HostedLedgerError, match="unsafe"):
+        PrivateHostedLedger(path, _binding(), repo_root=repo)

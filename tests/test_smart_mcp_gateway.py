@@ -92,6 +92,7 @@ def test_normal_mcp_exposes_only_the_smart_gateway_tools(monkeypatch):
     assert set(tools) == SMART_TOOL_NAMES
     assert len(tools) == 9
     assert len(server.mcp.instructions) <= 512
+    assert "scope" not in tools["engraphis_remember"].inputSchema.get("properties", {})
 
 
 def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch):
@@ -112,7 +113,7 @@ def test_smart_gateway_initial_payload_fits_context_budget(monkeypatch):
         {"tools": tools}, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")
     assert len(initial_payload) <= 12 * 1024
-    # Stable project-local approximation: the six-tool surface must stay well under
+    # Stable project-local approximation: the nine-tool surface must stay well under
     # the release gate and at least 80% below the previous 64.6 KB direct catalog.
     assert len(initial_payload) <= int(64_600 * 0.20)
     assert len(re.findall(rb"\w+|[^\s\w]", initial_payload)) <= 4_500
@@ -278,6 +279,29 @@ def test_discovery_omits_an_unavailable_action(monkeypatch):
     ))
 
     assert discovered["actions"] == []
+
+
+
+def test_smart_gateway_rejects_ownerless_user_scope_before_writing(monkeypatch):
+    server = _memory_server(monkeypatch)
+    action = server._action_payload(server.ACTION_SPECS["ingest"])
+    response = server.engraphis_execute_action(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={
+            "content": "Ownerless user ingest must not be created.",
+            "workspace": "acme",
+            "scope": "user",
+        },
+    )
+
+    code, message, retryable = _error_envelope(response)
+    assert code == "E_INTERNAL"
+    assert message == "Error: operation failed. Check the Engraphis server logs for details."
+    assert retryable is False
+    assert server._service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM memories"
+    ).fetchone()["n"] == 0
 
 
 def test_stateful_executor_records_only_content_free_gateway_telemetry(monkeypatch):
@@ -633,6 +657,16 @@ def test_update_memory_edits_metadata_and_rejects_secrets(monkeypatch):
     assert updated["updated"] == ["title", "importance"]
     got = _payload(server.engraphis_get_memory(memory_id=created["id"], workspace="acme"))
     assert got["title"] == "rate-limit"
+    after_first = tuple(server._service.store.conn.iterdump())
+    retried = _payload(server.engraphis_update_memory(
+        memory_id=created["id"], workspace="acme", title="rate-limit",
+        importance=0.8,
+    ))
+    assert retried["updated"] == []
+    assert tuple(server._service.store.conn.iterdump()) == after_first
+    annotations = _tools(server, "mcp")["engraphis_update_memory"].annotations
+    assert annotations.idempotentHint is True
+
 
     # A secret in the new title is rejected via the governed path.
     code, _message, retryable = _error_envelope(server.engraphis_update_memory(

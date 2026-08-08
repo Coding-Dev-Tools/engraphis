@@ -809,8 +809,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--processes",
         type=int,
-        default=1,
-        help="number of independent benchmark processes (default: 1)",
+        default=None,
+        help=(
+            "independent benchmark processes "
+            "(default: 5 for --acceptance-matrix, otherwise 1)"
+        ),
     )
     parser.add_argument(
         "--minimum-queries",
@@ -830,6 +833,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="print the full JSON report")
     args = parser.parse_args(argv)
+    processes = args.processes if args.processes is not None else (
+        5 if args.acceptance_matrix else 1
+    )
     dataset = load_dataset(args.dataset)
     if args.acceptance_matrix:
         report = run_acceptance_matrix(
@@ -843,7 +849,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             filler_memories=args.filler_memories,
             token_budget=args.token_budget,
             retrieval_profile=args.retrieval_profile,
-            processes=args.processes,
+            processes=processes,
             minimum_queries=args.minimum_queries,
         )
     else:
@@ -859,7 +865,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             token_budget=args.token_budget,
             retrieval_profile=args.retrieval_profile,
             concurrency=args.concurrency,
-            processes=args.processes,
+            processes=processes,
             minimum_queries=args.minimum_queries,
             canonical=args.canonical,
         )

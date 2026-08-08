@@ -4,7 +4,7 @@ const TITLES={overview:'Overview',recall:'Recall',memories:'Memories','mem-edito
 const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',health:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Operate',team:'Engine',settings:'Engine'};
 /* Per-view subtitle rendered in the topbar next to the view name. The body no longer
    repeats the view title/description — the topbar is the single source for both. */
-const DESCS={overview:'',recall:'Hybrid semantic + retention search over this workspace.',memories:'Browse and curate the memories in this workspace.','mem-editor':'',proactive:'What matters right now: importance × recency × retention, plus the last session handoff.',why:'The current answer to a question, with the facts it superseded.',timeline:'Bi-temporal history: what was believed, when it was valid, and when it was recorded.',audit:'Local governance history or content-free, tamper-evident receipts for sharing.',graph:'Explore entities and their sourced relationships from this workspace's memories.',analytics:'Hosted growth, retention, decay, and entity insights for this workspace.',health:'Memory lifecycle metrics: age distribution, decay rates, and staleness.',consolidate:'Run the free local consolidation tool manually; dry-run first to preview changes.',automation:'Hosted maintenance policy: consolidate, dream, and review on a schedule.',workspaces:'Switch between workspaces or create a new one.',team:'Hosted organizations, roles, and seats for Engraphis Cloud.',settings:'Theme, update, and connection settings.'};
+const DESCS={overview:'',recall:'Hybrid semantic + retention search over this workspace.',memories:'Browse and curate the memories in this workspace.','mem-editor':'',proactive:'What matters right now: importance × recency × retention, plus the last session handoff.',why:'The current answer to a question, with the facts it superseded.',timeline:'Bi-temporal history: what was believed, when it was valid, and when it was recorded.',audit:'Local governance history or content-free, tamper-evident receipts for sharing.',graph:"Explore entities and their sourced relationships from this workspace's memories.",analytics:'Hosted growth, retention, decay, and entity insights for this workspace.',health:'Memory lifecycle metrics: age distribution, decay rates, and staleness.',consolidate:'Run the free local consolidation tool manually; dry-run first to preview changes.',automation:'Hosted maintenance policy: consolidate, dream, and review on a schedule.',workspaces:'Switch between workspaces or create a new one.',team:'Hosted organizations, roles, and seats for Engraphis Cloud.',settings:'Theme, update, and connection settings.'};
 let CURRENT_VIEW='overview';
 /* Loaders that compute a live subtitle (e.g. Overview's counts) call this instead of
    writing to a body element, so the topbar stays authoritative. */
@@ -1652,11 +1652,11 @@ h20:function(event){loadAudit()},
 h21:function(event){loadReceipts()},
 h22:function(event){downloadReceipts()},
 h23:function(event){graphKeyboard(event)},
-h24:function(event){loadGraph()},
+h24:function(event){loadGraphWorkspaceView()},
 h25:function(event){if(event.key==='Enter')graphSearch()},
 h26:function(event){graphFit()},
 h27:function(event){graphReheat()},
-h28:function(event){loadGraph()},
+h28:function(event){loadGraphWorkspaceView()},
 h29:function(event){graphApplyPreset('compact');graphSyncPresetCards()},
 h30:function(event){graphApplyPreset('original');graphSyncPresetCards()},
 h31:function(event){graphApplyPreset('communities');graphSyncPresetCards()},
@@ -1680,7 +1680,7 @@ h48:function(event){graphToggleLabels(this)},
 h49:function(event){graphRender()},
 h50:function(event){graphToggleFlow(this)},
 h51:function(event){graphToggleFreeze(this)},
-h52:function(event){if(event.key==='Enter')loadGraph()},
+h52:function(event){if(event.key==='Enter')loadGraphWorkspaceView()},
 h53:function(event){graphApplyPreset(this.value)},
 h54:function(event){graphSetStyle(this.value)},
 h55:function(event){graphSetColorBy(this.value)},

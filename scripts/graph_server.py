@@ -56,7 +56,7 @@ def main(argv=None) -> int:
             " (needs Python 3.10+)"
         ) from exc
     uvicorn.run(create_read_only_app(token=token), host=args.host, port=args.port,
-                proxy_headers=False)
+                proxy_headers=False, access_log=False)
     return 0
 
 if __name__ == "__main__":

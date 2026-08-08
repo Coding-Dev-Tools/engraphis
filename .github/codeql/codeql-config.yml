@@ -6,10 +6,7 @@
 # checks, or any cryptographic purpose. The code sets usedforsecurity=False.
 #
 # Changing to SHA-256 would invalidate all existing local vectors and break
-# the documented compatibility invariant in regression tests.
+# the documented compatibility invariant in regression tests. The release SARIF
+# gate waives only the two exact call sites; the CodeQL query remains enabled.
 
 name: "Engraphis CodeQL config"
-
-query-filters:
-  - exclude:
-      id: py/weak-sensitive-data-hashing

@@ -21,8 +21,8 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 11`) | `engraphis_v1.db` |
-| Entry | `MemoryEngine.create()` → `core/engine.py` | Internal reference only; never a public launcher |
+| Data | new v2 schema (`SCHEMA_VERSION = 13`) | `engraphis_v1.db` |
+| Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
 Only touch the v1 server for compatibility fixes or to keep the reference running. When a
@@ -34,18 +34,22 @@ task is ambiguous, decide which side it belongs to *before* editing.
 
 ```bash
 # ── Install ──────────────────────────────────────────────────────────────────
-pip install numpy pytest            # v2 core + tests, fully OFFLINE (this is what CI does)
-pip install -e ".[all,dev]"         # full stack: FastAPI server, ST embeddings, ruff
-cp .env.example .env                # optional; configure server, LLM, encryption, or hosted client settings
+pip install numpy pytest            # v2 core + tests, fully offline (Python 3.9 floor job)
+pip install -e ".[test]"            # full offline CI test/lint/typecheck dependencies
+pip install -e ".[all,dev]"         # complete local stack: dashboard, MCP, embeddings, dev tools
+# Config: process environment or owner-private ~/.engraphis/config.env; never a searched CWD .env
 
-# ── Quality gate (offline, no API key — KEEP THIS GREEN; mirrors .github/workflows/ci.yml) ──
-python -m pytest tests/ -q                                          # unit tests (offline)
+# ── Primary offline gate (no API key — KEEP THIS GREEN; mirrors CI's full-stack job) ──
+ruff check .                                                        # pinned lint rules
+python scripts/check_commercial_manifest.py                         # source/service boundary
+python scripts/externalize_dashboard_assets.py                      # strict-CSP asset drift
+python -m pytest tests/ -q                                          # full offline unit suite
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5   # retrieval eval gate
-python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # larger eval; covers conflict resolution
-python -m eval.ablation                                             # vector-only vs 1-hop vs PPR
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # coding/conflict gate
+python -m eval.ablation                                             # vector-only vs hybrid
 python -m eval.reinforcement                                        # bounded retention trajectory
-python -m eval.adversarial_memory_security                          # poisoning + prompt graph boundary
-ruff check .                                    # lint (line-length 100, py39, pinned rule set)
+python -m eval.adversarial_memory_security                          # prompt/graph boundary
+pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
 python -m eval.external --dataset locomo10.json --format locomo --k 10        # LoCoMo
@@ -56,7 +60,7 @@ python -m eval.external --dataset locomo10.json --format locomo --offline --limi
 python -m scripts.start_dashboard    # http://127.0.0.1:8700
 # Use this unified launcher; there is no separate Inspector service.
 
-# ── Onboarding (writes .env with an absolute DB path; doctor mode verifies install) ──
+# ── Onboarding (writes owner-private ~/.engraphis/config.env; doctor verifies install) ──
 engraphis-init                   # or: python -m scripts.init
 engraphis-init --check
 
@@ -83,7 +87,9 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 
 ```
 
-`requires-python >= 3.9` (ruff targets `py39`); CI and the recommended dev environment use **3.11**.
+`requires-python >= 3.9` (ruff targets `py39`). CI tests the NumPy-only core on 3.9, the full
+offline stack on 3.10–3.14, and Pyright on 3.11; dedicated jobs also exercise encryption and built
+artifacts. `.github/workflows/ci.yml` is authoritative when the matrix changes.
 
 ---
 
@@ -142,11 +148,15 @@ is distilled into discrete facts first; the offline default is passthrough.
 
 ## 3. Non-negotiable conventions (load-bearing)
 
-1. **Interfaces before implementations.** `core/` and `engines/` depend only on the
-   Protocols in `core/interfaces.py` (`Embedder`, `VectorIndex`, `LexicalIndex`,
-   `GraphStore`, `Reranker`, `LLM`). **Never import a concrete backend inside `core/`** —
-   inject it. Swapping `sqlite-vec`→Qdrant, or a local embedder for an API, must be a
-   *config change, not a refactor*.
+1. **Interfaces before implementations.** Every module in `core/`, including `core/engine.py`,
+   depends only on the Protocols in `core/interfaces.py` (`Embedder`, `VectorIndex`,
+   `LexicalIndex`, `GraphStore`, `Reranker`, `LLM`) and injected collaborators. The sole outer
+   composition root is `engraphis/factory.py`, which may import concrete backends and selects the
+   dependency-light `IdentityReranker` default. `engraphis/__init__.py` registers that provider so
+   the compatibility `MemoryEngine.create()` entry point delegates outward; new callers may use
+   `engraphis.create_memory_engine()` directly. **Never import a concrete backend anywhere inside
+   `core/`.** Swapping `sqlite-vec`→Qdrant, or a local embedder for an API, must be a *config
+   change, not a refactor*.
 2. **Forgetting lowers retrieval priority; it never hard-deletes.** Decay adjusts
    `stability`. Hard deletion is explicit, governed, and audited (`Store.audit`).
 3. **Truth is temporal.** Resolve contradictions by **invalidation, not overwrite**:
@@ -155,7 +165,9 @@ is distilled into discrete facts first; the offline default is passthrough.
 4. **Everything is scoped.** Every memory carries a `Scope` + `workspace/repo/session`.
    Every read takes a `SearchFilter`. Scope promotion is an explicit operation.
 5. **Memory is typed** (`working` / `episodic` / `semantic` / `procedural`), each with its
-   own weight profile (`scoring.DEFAULT_WEIGHTS`) and lifecycle. Treat them differently.
+   own weight profile (`scoring.DEFAULT_WEIGHTS`) and lifecycle. The append-only event ledger is
+   outside that type system: use `record_event` for raw occurrences and an episodic memory when
+   the outcome must be recalled or consolidated.
 6. **Provenance always.** Set `provenance` on memories and edges so "why is this known?"
    is answerable.
 7. **Prove "better" with a number.** No retrieval/quality claim ships without an eval.
@@ -186,7 +198,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 11`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 13`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -199,16 +211,18 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
   `operation_receipts`, `events`, `audit`, `memory_tombstones`, `schema_migrations`.
+- **Erasure markers contain no memory content.** `memory_tombstones.export_class` is strictly
+  `never_export|remote_erasure`; only `remote_erasure` may cross a sync boundary.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
 
 ---
 
 ## 6. Gotchas
 
-- **Offline by default in core:** `MemoryEngine.create()` uses a deterministic hashing
-  embedder + NumPy index, so tests need no model download or network. Pass `embed_model=...`
-  to load a real embedding model; choose `vector_backend="sqlite-vec"` separately when you
-  need native exact-KNN acceleration.
+- **Offline by default at the public factory:** `engraphis.MemoryEngine.create()` and
+  `engraphis.create_memory_engine()` select a deterministic hashing embedder + NumPy index, so
+  tests need no model download or network. Pass `embed_model=...` to load a real embedding model;
+  choose `vector_backend="sqlite-vec"` separately when you need native exact-KNN acceleration.
 - **First full-stack run downloads `all-MiniLM-L6-v2` (~80 MB)** for the ST embedder.
 - **FTS5 may be missing** on some SQLite builds → `Store` auto-falls back to `LIKE`
   (`self.has_fts5`). Don't assume BM25 is available.

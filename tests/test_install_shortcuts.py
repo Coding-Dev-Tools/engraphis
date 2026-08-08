@@ -56,18 +56,26 @@ def test_windows_icon_is_passed_as_data_not_interpolated_into_powershell(
     monkeypatch, tmp_path
 ):
     icon = 'C:\\icons\\quoted"$value.ico'
+    desktop = tmp_path / "Desktop"
+    start_menu = tmp_path / "Start Menu"
     captured = {}
 
     def run(command, **kwargs):
         captured["command"] = command
         captured["kwargs"] = kwargs
+        for path in (
+            desktop / "Engraphis Dashboard.lnk",
+            start_menu / "Engraphis" / "Engraphis Dashboard.lnk",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"shortcut")
         return object()
 
     monkeypatch.setattr(install_shortcuts.subprocess, "run", run)
 
     install_shortcuts._windows(
-        tmp_path / "Desktop",
-        tmp_path / "Start Menu",
+        desktop,
+        start_menu,
         argparse.Namespace(icon=icon),
     )
 
@@ -75,7 +83,13 @@ def test_windows_icon_is_passed_as_data_not_interpolated_into_powershell(
     assert icon not in powershell
     assert powershell.count("$env:ENGRAPHIS_SHORTCUT_ICON") == 2
     assert captured["kwargs"]["env"]["ENGRAPHIS_SHORTCUT_ICON"] == icon
+    assert captured["kwargs"]["env"]["ENGRAPHIS_SHORTCUT_DESKTOP"] == str(desktop)
     assert captured["kwargs"]["check"] is True
+    for path in (
+        desktop / "Engraphis Dashboard.lnk",
+        start_menu / "Engraphis" / "Engraphis Dashboard.lnk",
+    ):
+        assert install_shortcuts._windows_marker(path).is_file()
 
 
 @pytest.mark.parametrize(
@@ -109,6 +123,7 @@ def test_windows_uses_a_redacted_bat_fallback_for_powershell_failures(
 
     launcher = desktop / "Engraphis Dashboard.bat"
     assert launcher.read_text() == (
+        install_shortcuts._BAT_OWNER_LINE + "\n"
         "@echo off\nengraphis-dashboard\n"
         "echo.\necho Dashboard stopped. Press any key.\npause >nul\n"
     )
@@ -127,20 +142,52 @@ def test_icon_validation_rejects_empty_or_control_bearing_values(value):
 
 
 @pytest.mark.parametrize("system", ["Windows", "Darwin", "Linux"])
-def test_remove_shortcuts_removes_only_known_artifacts_and_is_idempotent(tmp_path, system):
+def test_remove_shortcuts_removes_only_verified_artifacts_and_is_idempotent(
+    tmp_path, system
+):
     desktop = tmp_path / "Desktop"
     start_menu = tmp_path / "Start Menu" / "Programs"
     home = tmp_path / "Home"
     desktop.mkdir(parents=True)
-
     expected = _shortcut_paths(system, desktop, start_menu, home=home)
-    for path in expected:
-        if path.suffix == ".app":
-            (path / "Contents").mkdir(parents=True)
-            (path / "Contents" / "Info.plist").write_text("owned artifact")
-        else:
+
+    if system == "Windows":
+        for path in expected:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("owned artifact")
+            if path.suffix == ".lnk":
+                path.write_bytes(f"owned:{path}".encode())
+                install_shortcuts._write_windows_marker(path)
+            else:
+                path.write_text(
+                    install_shortcuts._BAT_OWNER_LINE + "\n@echo off\n",
+                    encoding="utf-8",
+                )
+    elif system == "Darwin":
+        app_dir = home / "Applications" / "Engraphis Dashboard.app"
+        contents = app_dir / "Contents"
+        resources = contents / "Resources"
+        macos = contents / "MacOS"
+        resources.mkdir(parents=True)
+        macos.mkdir(parents=True)
+        (contents / "Info.plist").write_text("owned", encoding="utf-8")
+        (macos / "engraphis-dashboard").write_text("owned", encoding="utf-8")
+        (resources / ".engraphis-owner").write_text(
+            install_shortcuts._OWNER_ID + "\n",
+            encoding="utf-8",
+        )
+        try:
+            expected[0].symlink_to(app_dir)
+        except OSError:
+            install_shortcuts.shutil.copytree(app_dir, expected[0])
+    else:
+        entry = (
+            "[Desktop Entry]\nType=Application\nExec=engraphis-dashboard\n"
+            + install_shortcuts._LINUX_OWNER_LINE
+            + "\n"
+        )
+        for path in expected:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(entry, encoding="utf-8")
 
     untouched = home / "Applications" / "Unrelated.app"
     untouched.mkdir(parents=True)
@@ -152,7 +199,6 @@ def test_remove_shortcuts_removes_only_known_artifacts_and_is_idempotent(tmp_pat
     assert all(not path.exists() and not path.is_symlink() for path in expected)
     assert untouched.is_dir()
     assert nearby.read_text() == "keep"
-
     assert _remove_shortcuts(system, desktop, start_menu, home=home) == []
 
 
@@ -210,6 +256,7 @@ def test_linux_shortcuts_keep_desktop_launcher_executable_and_menu_entry_data(mo
         "Categories=Development;Utility;\n"
         "Keywords=AI;memory;agent;dashboard;\n"
         "StartupWMClass=engraphis-dashboard\n"
+        f"{install_shortcuts._LINUX_OWNER_LINE}\n"
     )
     assert desktop_entry.read_text() == expected
     assert menu_entry.read_text() == expected
@@ -233,3 +280,64 @@ def test_linux_shortcuts_reject_icon_newline_before_mutating_files(monkeypatch, 
 
     assert not (desktop / "engraphis-dashboard.desktop").exists()
     assert not (home / ".local").exists()
+
+
+@pytest.mark.parametrize("system", ["Windows", "Darwin", "Linux"])
+def test_shortcut_collision_is_preserved_and_refused_before_install(tmp_path, system):
+    home = tmp_path / "Home"
+    desktop = home / "Desktop"
+    start_menu = home / "Start Menu"
+    collision = _shortcut_paths(system, desktop, start_menu, home=home)[0]
+    collision.parent.mkdir(parents=True)
+    if system == "Darwin":
+        collision.mkdir()
+        (collision / "keep.txt").write_text("unrelated")
+    else:
+        collision.write_text("unrelated")
+
+    with pytest.raises(FileExistsError, match="unrecognized launcher collision"):
+        install_shortcuts._prepare_install_paths(system, [collision], home=home)
+
+    assert collision.exists()
+    if collision.is_dir():
+        assert (collision / "keep.txt").read_text() == "unrelated"
+    else:
+        assert collision.read_text() == "unrelated"
+
+
+
+def test_windows_marker_collision_is_refused_before_install(tmp_path):
+    home = tmp_path / "Home"
+    desktop = home / "Desktop"
+    start_menu = home / "Start Menu"
+    launcher = _shortcut_paths("Windows", desktop, start_menu, home=home)[0]
+    marker = install_shortcuts._windows_marker(launcher)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("unrelated", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="unrecognized launcher collision"):
+        install_shortcuts._prepare_install_paths(
+            "Windows",
+            [launcher],
+            home=home,
+        )
+
+    assert not launcher.exists()
+    assert marker.read_text(encoding="utf-8") == "unrelated"
+
+
+def test_windows_uninstall_preserves_a_launcher_replaced_after_install(tmp_path):
+    home = tmp_path / "Home"
+    desktop = home / "Desktop"
+    start_menu = home / "Start Menu"
+    launcher = desktop / "Engraphis Dashboard.lnk"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(b"installer-owned shortcut")
+    install_shortcuts._write_windows_marker(launcher)
+    marker = install_shortcuts._windows_marker(launcher)
+
+    launcher.write_bytes(b"user replacement")
+
+    assert _remove_shortcuts("Windows", desktop, start_menu, home=home) == []
+    assert launcher.read_bytes() == b"user replacement"
+    assert marker.is_file()

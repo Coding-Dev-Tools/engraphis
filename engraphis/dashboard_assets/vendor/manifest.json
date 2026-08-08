@@ -1,0 +1,27 @@
+{
+  "schema": "engraphis-vendored-assets/v1",
+  "assets": [
+    {
+      "path": "d3.min.js",
+      "package": "d3",
+      "version": "7.9.0",
+      "source": "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js",
+      "license": "ISC",
+      "license_file": "d3.LICENSE",
+      "sha256": "f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539",
+      "local_modifications": []
+    },
+    {
+      "path": "force-graph.min.js",
+      "package": "force-graph",
+      "version": "1.51.4",
+      "source": "https://cdn.jsdelivr.net/npm/force-graph@1.51.4/dist/force-graph.min.js",
+      "license": "MIT",
+      "license_file": "force-graph.LICENSE",
+      "sha256": "5b71387a1ebbe99a2e8c845cd6ac40f776e363dbcb6a4dd200001b70e7b7271e",
+      "local_modifications": [
+        "Neutralized two runtime stylesheet-node insertions; equivalent static rules live in ../ledger.css for the production CSP."
+      ]
+    }
+  ]
+}

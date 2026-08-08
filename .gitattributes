@@ -1,6 +1,12 @@
+* whitespace=cr-at-eol
 *.pyd binary
 *.so binary
 *.dll binary
+.github/workflows/*.yml text eol=lf
+.github/workflows/*.yaml text eol=lf
+*.sh text eol=lf
+deploy/*.lock text eol=lf
+deploy/*.licenses.json text eol=lf
 .claude-plugin/*.json text eol=lf
 .claude-plugin/skill-assets.sha256 text eol=lf
 skills/engraphis-memory/*.md text eol=lf

@@ -1,6 +1,6 @@
 name: engraphis
 version: 1.5.0
-description: "Engraphis local memory provider with scoped recall, history, and explicit secure erase."
+description: "Engraphis local memory provider with scoped recall and bounded turn history."
 pip_dependencies: []
 requires_env: []
 hooks:

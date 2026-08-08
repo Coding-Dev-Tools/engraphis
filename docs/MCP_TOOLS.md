@@ -78,7 +78,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |
-| Write | `engraphis_record_event` | Appends a lightweight episodic event. |
+| Write | `engraphis_record_event` | Appends one raw occurrence to the event ledger; event rows are not recalled, deduplicated, reinforced, or consolidated as memories. |
 | Write | `engraphis_link` | Connects two related memories. |
 | Write | `engraphis_ingest` | Applies the configured extractor (`chunk`, `llm`, or `llm_structured`). With `none`, it stores one verbatim memory. |
 | Write | `engraphis_ingest_postgres_schema` | Stores a PostgreSQL schema snapshot and typed graph. The DSN is never stored. |
@@ -112,13 +112,16 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. |
 
 All four recall tools (`engraphis_recall`, `engraphis_recall_context`,
-`engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`
-and optional `mtype_limits`, for example `{"working": 1, "semantic": 3}`. Planning is off by
-default. Type limits are post-rerank maxima and can intentionally return fewer than `k`; they do not
-raise a memory type's relevance. Responses include a stable `context_revision`. Planner details,
-per-query rankings, type-limit drops, and fallback reasons are returned only when
-`diagnostics=true`. Every planned query remains inside the caller's scope, temporal, trust, and
-prompt-eligibility filters, and grounded recall still measures support against the original query.
+`engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
+optional `mtype_limits` such as `{"working": 1, "semantic": 3}`, and optional
+`max_response_tokens` from `1` through `1000000`. `response_mode="full"` returns the classic
+response; `"compact"` removes packed context and citation/memory bodies from the end while
+preserving source/citation references. Responses include a stable `context_revision`. Planner
+details, per-query rankings, type-limit drops, and fallback reasons are returned only when
+`diagnostics=true`. Type limits are post-rank maxima and can intentionally return fewer than `k`;
+they do not raise a memory type's relevance. Every planned query remains inside the caller's scope,
+temporal, trust, and prompt-eligibility filters, and grounded recall still measures support against
+the original query.
 
 For parameter details and return shapes, see the tool descriptions exposed by the MCP server. The
 [agent connection guide](AGENT_CONNECT.md) explains local and hosted connections, and the

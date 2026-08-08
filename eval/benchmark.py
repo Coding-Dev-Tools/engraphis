@@ -150,9 +150,11 @@ def environment_provenance() -> dict[str, Any]:
 
 _PUBLIC_RECORD_FIELDS = frozenset({
     "question_id", "category", "retrieved_ids", "supporting_ids", "context_tokens",
-    "latency_ms", "abstained", "excluded", "answerable", "grounded",
+    "latency_ms", "abstained", "excluded", "answerable", "answer_scored", "grounded",
     "grounded_support", "answer_token_recall", "context_token_method",
-    "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded", "usage",
+    "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded",
+    "retrieval_scored", "inserted_memory_type_counts", "retrieved_memory_type_counts",
+    "usage",
 })
 _PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
 _PUBLIC_USAGE_FIELDS = frozenset({
@@ -161,14 +163,10 @@ _PUBLIC_USAGE_FIELDS = frozenset({
     "memory_context_tokens", "memory_context_original_tokens", "reader_prompt_tokens",
     "reader_completion_tokens", "adapter_reported_context_tokens",
 })
-_RAW_QUERY_FIELDS = ("q", "query", "question", "question_text")
-_RAW_ANSWER_FIELDS = (
-    "answer", "answer_gold", "answer_variants", "response", "response_raw",
-    "response_parsed_boxed", "output", "completion", "model_output", "assistant_response",
-)
-_RAW_CONTEXT_FIELDS = (
-    "context", "memory_context", "messages", "prompt_messages", "retrieved_context",
-)
+_CONTENT_FINGERPRINT_FIELDS = frozenset({
+    "query_sha256", "answer_or_response_sha256", "context_or_prompt_sha256",
+    "question_sha256", "detail_sha256",
+})
 _SECRET_NAME_RE = re.compile(
     r"(?:^|[-_])(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
     r"password|passwd|secret|token|signature|sig|private[-_]?key)$",
@@ -190,20 +188,14 @@ def _is_secret_name(value: str) -> bool:
 
 
 def _public_exclusion(value: Any) -> Optional[dict[str, Any]]:
-    """Keep an exclusion's reason but never allow a free-form detail to leak content."""
+    """Keep only the stable exclusion identity and audited reason."""
     if not isinstance(value, dict):
         return None
-    public = {
+    return {
         key: deepcopy(value[key])
         for key in ("question_id", "reason")
         if key in value
     }
-    detail = value.get("detail")
-    if detail == "":
-        public["detail"] = ""
-    elif detail is not None:
-        public["detail_sha256"] = sha256_text(canonical_json(detail))
-    return public
 
 
 def _public_usage(value: Any) -> Optional[dict[str, Any]]:
@@ -221,22 +213,10 @@ def redact_public_record(record: dict[str, Any]) -> dict[str, Any]:
 
     Public artifacts are evidence, not a lossless export. An allowlist prevents a new
     adapter field from accidentally publishing prompts, contexts, model output, tool calls,
-    or other raw payloads before this boundary is reviewed.
+    content-derived fingerprints, or other raw payloads before this boundary is reviewed.
+    Whole-input source digests remain in the report envelope for provenance.
     """
     public: dict[str, Any] = {}
-    groups = (
-        (_RAW_QUERY_FIELDS, "query_sha256"),
-        (_RAW_ANSWER_FIELDS, "answer_or_response_sha256"),
-        (_RAW_CONTEXT_FIELDS, "context_or_prompt_sha256"),
-    )
-    for fields, digest_field in groups:
-        values = [
-            {"field": field, "value": record[field]}
-            for field in fields
-            if field in record
-        ]
-        if values:
-            public[digest_field] = sha256_text(canonical_json(values))
     for key, value in record.items():
         if key == "excluded":
             redacted = _public_exclusion(value)
@@ -540,6 +520,12 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("each record question_id must be non-empty")
             continue
         record_ids.append(question_id)
+        fingerprints = sorted(set(record) & _CONTENT_FINGERPRINT_FIELDS)
+        if fingerprints:
+            errors.append(
+                "public records must not contain content-derived fingerprints: "
+                + ", ".join(fingerprints)
+            )
         embedded = record.get("excluded")
         if embedded is not None:
             if not isinstance(embedded, dict) or embedded.get("question_id") != question_id:
@@ -590,8 +576,16 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
         if not isinstance(protocol.get("token_accounting"), dict):
             errors.append("canonical reports require protocol.token_accounting")
         privacy = report.get("privacy")
-        if not isinstance(privacy, dict) or privacy.get("raw_query_policy") != "redacted_sha256":
-            errors.append("canonical reports require raw-query redaction metadata")
+        required_privacy = {
+            "raw_query_policy": "omitted",
+            "raw_answer_policy": "omitted",
+            "raw_context_policy": "omitted",
+            "content_fingerprint_policy": "omitted",
+        }
+        if not isinstance(privacy, dict) or any(
+            privacy.get(key) != value for key, value in required_privacy.items()
+        ):
+            errors.append("canonical reports require omitted raw content and content fingerprints")
         if protocol.get("complete_dataset") is not True:
             errors.append("canonical protocol.complete_dataset must be true")
         source_questions = protocol.get("source_questions")
@@ -787,7 +781,7 @@ def _validate_confidence_intervals(
     records: Sequence[dict],
     errors: list[str],
 ) -> None:
-    """Require complete, bounded confidence intervals tied to reported point estimates."""
+    """Recompute every canonical interval from its public question evidence."""
     if not isinstance(confidence, dict) or set(confidence) != set(_RANK_METRICS):
         errors.append(
             "canonical metrics.confidence_intervals must exactly cover every rank metric"
@@ -796,10 +790,11 @@ def _validate_confidence_intervals(
     expected_keys = {
         "point", "low", "high", "n", "seed", "iterations", "strata_key",
     }
-    n_scored = sum(
-        1 for record in records
+    scored_records = [
+        record for record in records
         if isinstance(record, dict) and not record.get("excluded")
-    )
+    ]
+    n_scored = len(scored_records)
     for field in _RANK_METRICS:
         interval = confidence[field]
         prefix = f"canonical metrics.confidence_intervals.{field}"
@@ -817,34 +812,56 @@ def _validate_confidence_intervals(
         elif not float(low) <= float(point) <= float(high):
             errors.append(f"{prefix} must satisfy low <= point <= high")
         aggregate = metrics.get(field)
-        if (
-            not _is_finite_number(aggregate)
-            or not _metric_matches(point, float(aggregate))
-        ):
+        if not _is_finite_number(aggregate) or not _metric_matches(point, float(aggregate)):
             errors.append(f"{prefix}.point must match metrics.{field}")
         if not _is_nonnegative_integer(interval.get("n")) or interval["n"] != n_scored:
             errors.append(f"{prefix}.n must equal the non-excluded record count")
-        if not _is_nonnegative_integer(interval.get("seed")):
+        seed = interval.get("seed")
+        seed_valid = _is_nonnegative_integer(seed)
+        if not seed_valid:
             errors.append(f"{prefix}.seed must be a non-negative integer")
         iterations = interval.get("iterations")
-        if not _is_nonnegative_integer(iterations) or iterations == 0:
+        iterations_valid = _is_nonnegative_integer(iterations) and iterations > 0
+        if not iterations_valid:
             errors.append(f"{prefix}.iterations must be a positive integer")
         if interval.get("strata_key") != "category":
             errors.append(f"{prefix}.strata_key must equal category")
+
+        evidence: list[dict[str, Any]] = []
+        for record in scored_records:
+            recomputed = _rank_metrics_from_record(record)
+            if recomputed is None:
+                evidence = []
+                break
+            evidence.append({
+                "category": record.get("category", "unknown"),
+                "value": recomputed[field],
+            })
+        if seed_valid and iterations_valid and len(evidence) == n_scored:
+            expected = stratified_bootstrap_ci(
+                evidence,
+                lambda rows: (
+                    sum(float(row["value"]) for row in rows) / len(rows)
+                    if rows else 0.0
+                ),
+                iterations=iterations,
+                seed=seed,
+            )
+            if any(interval.get(key) != expected.get(key) for key in expected_keys):
+                errors.append(
+                    f"{prefix} must exactly match deterministic recomputation from records"
+                )
 
 
 def _validate_paired_bootstrap(
     paired: Any, records: Sequence[dict], errors: list[str]
 ) -> None:
-    """Validate exact available/unavailable paired-bootstrap payload shapes."""
+    """Reject unbound paired claims; canonical artifacts carry no baseline rows."""
+    del records
     prefix = "canonical metrics.paired_bootstrap"
     if not isinstance(paired, dict) or not isinstance(paired.get("available"), bool):
         errors.append(f"{prefix} must explicitly state availability")
         return
-    n_scored = sum(
-        1 for record in records
-        if isinstance(record, dict) and not record.get("excluded")
-    )
     if paired["available"] is False:
         expected_keys = {
             "available", "reason", "n", "delta", "low", "high", "iterations",
@@ -862,36 +879,10 @@ def _validate_paired_bootstrap(
         if not _is_nonnegative_integer(iterations) or iterations == 0:
             errors.append(f"{prefix}.iterations must be a positive integer")
         return
-
-    expected_keys = {
-        "available", "metric", "delta", "low", "high", "n", "seed", "iterations",
-    }
-    if set(paired) != expected_keys:
-        errors.append(f"{prefix} available payload must match the canonical schema")
-        return
-    if paired.get("metric") not in _RANK_METRICS:
-        errors.append(f"{prefix}.metric must name a canonical rank metric")
-    delta = paired.get("delta")
-    low = paired.get("low")
-    high = paired.get("high")
-    if not all(
-        _is_finite_number(value) and -1.0 <= float(value) <= 1.0
-        for value in (delta, low, high)
-    ):
-        errors.append(f"{prefix} delta/low/high must be finite numbers in [-1, 1]")
-    elif not float(low) <= float(delta) <= float(high):
-        errors.append(f"{prefix} must satisfy low <= delta <= high")
-    if (
-        not _is_nonnegative_integer(paired.get("n"))
-        or paired["n"] == 0
-        or paired["n"] != n_scored
-    ):
-        errors.append(f"{prefix}.n must equal the positive non-excluded record count")
-    if not _is_nonnegative_integer(paired.get("seed")):
-        errors.append(f"{prefix}.seed must be a non-negative integer")
-    iterations = paired.get("iterations")
-    if not _is_nonnegative_integer(iterations) or iterations == 0:
-        errors.append(f"{prefix}.iterations must be a positive integer")
+    errors.append(
+        f"{prefix} must be unavailable until an immutable baseline artifact and "
+        "aligned per-question evidence are bound"
+    )
 
 
 def _validate_grounded_metric_availability(
@@ -1347,10 +1338,10 @@ def report_envelope(
             "n_scored": len(public_records) - len(unique_exclusions),
         },
         "privacy": {
-            "raw_query_policy": "redacted_sha256",
-            "raw_answer_policy": "redacted_sha256",
-            "raw_context_policy": "redacted_sha256",
-            "digest_algorithm": "sha256",
+            "raw_query_policy": "omitted",
+            "raw_answer_policy": "omitted",
+            "raw_context_policy": "omitted",
+            "content_fingerprint_policy": "omitted",
         },
         "models": dict(models or {}),
         "metrics": metrics or {}, "exclusions": unique_exclusions,

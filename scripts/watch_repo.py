@@ -18,11 +18,11 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import signal
 import sys
-import time
 from pathlib import Path
 
 logger = logging.getLogger("engraphis.watch_repo")
@@ -37,21 +37,23 @@ _WATCHED_EXTENSIONS = frozenset({
 
 
 class _PollingWatcher:
-    """Poll-based file change detector using os.stat mtime comparison.
+    """Poll-based detector using content-backed file signatures.
 
-    No external dependencies.  Scans the repo root for files matching
-    ``_WATCHED_EXTENSIONS`` and compares mtimes against the last known state.
+    No external dependencies. Scans the repo root for files matching
+    ``_WATCHED_EXTENSIONS`` and compares nanosecond mtime, size, and a bounded
+    digest. The digest catches same-size rewrites whose mtime was preserved or
+    restored by build and sync tools.
     """
 
     def __init__(self, root: Path, interval: float = 5.0) -> None:
         self.root = root
         self.interval = max(1.0, interval)
-        self._mtimes: dict[str, float] = {}
+        self._signatures: dict[str, tuple[int, int, bytes]] = {}
         self._initial_scan_done = False
 
-    def _scan(self) -> dict[str, float]:
-        """Walk the tree and collect mtimes for watched extensions."""
-        mtimes: dict[str, float] = {}
+    def _scan(self) -> dict[str, tuple[int, int, bytes]]:
+        """Walk the tree and collect content-backed signatures."""
+        signatures: dict[str, tuple[int, int, bytes]] = {}
         for dirpath, _dirnames, filenames in os.walk(self.root):
             for fname in filenames:
                 ext = os.path.splitext(fname)[1].lower()
@@ -59,10 +61,22 @@ class _PollingWatcher:
                     continue
                 full = os.path.join(dirpath, fname)
                 try:
-                    mtimes[full] = os.stat(full).st_mtime
+                    digest = hashlib.blake2b(digest_size=16)
+                    with open(full, "rb") as handle:
+                        info = os.fstat(handle.fileno())
+                        while True:
+                            chunk = handle.read(64 * 1024)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                    signatures[full] = (
+                        int(getattr(info, "st_mtime_ns", info.st_mtime * 1_000_000_000)),
+                        int(info.st_size),
+                        digest.digest(),
+                    )
                 except OSError:
                     pass
-        return mtimes
+        return signatures
 
     def poll(self) -> list[str]:
         """Return list of changed file paths since last poll.
@@ -71,30 +85,29 @@ class _PollingWatcher:
         """
         current = self._scan()
         if not self._initial_scan_done:
-            self._mtimes = current
+            self._signatures = current
             self._initial_scan_done = True
             return []
 
         changed: list[str] = []
-        # Detect modified or new files.
-        for path, mtime in current.items():
-            old = self._mtimes.get(path)
-            if old is None or mtime > old:
+        # Detect modified or new files, including backdated/same-mtime rewrites.
+        for path, signature in current.items():
+            if self._signatures.get(path) != signature:
                 changed.append(path)
         # Detect deleted files (trigger reindex to clean stale symbols).
-        for path in self._mtimes:
+        for path in self._signatures:
             if path not in current:
                 changed.append(path)
 
-        self._mtimes = current
+        self._signatures = current
         return changed
 
 
 def _try_watchdog_watcher(root: Path, callback, stop_event):
     """Attempt watchdog-based watching.  Returns True if started, False if unavailable."""
     try:
-        from watchdog.observers import Observer
-        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer  # type: ignore[import-not-found]
+        from watchdog.events import FileSystemEventHandler  # type: ignore[import-not-found]
     except ImportError:
         return False
 
@@ -111,6 +124,17 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
         def on_deleted(self, event):
             self.on_modified(event)
 
+        def on_moved(self, event):
+            if event.is_directory:
+                return
+            paths = [
+                path
+                for path in (event.src_path, event.dest_path)
+                if os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
+            ]
+            if paths:
+                callback(paths)
+
     observer = Observer()
     observer.schedule(_Handler(), str(root), recursive=True)
     observer.start()
@@ -124,22 +148,7 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
     return True
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(
-        description="Watch a repository and trigger incremental reindex on changes."
-    )
-    ap.add_argument("--db", required=True, help="Path to the v2 database file.")
-    ap.add_argument("--workspace", required=True, help="Workspace name.")
-    ap.add_argument("--repo", required=True, help="Repo name (must already be indexed).")
-    ap.add_argument("--interval", type=float, default=5.0,
-                    help="Poll interval in seconds (default 5).")
-    ap.add_argument("--no-watch", action="store_true",
-                    help="One-shot scan: detect and reindex changes, then exit.")
-    args = ap.parse_args(argv)
-
-    from engraphis.core.engine import MemoryEngine
-
-    engine = MemoryEngine.create(args.db)
+def _run(args, engine) -> int:
     wid_row = engine.store.conn.execute(
         "SELECT id FROM workspaces WHERE name=?", (args.workspace,)
     ).fetchone()
@@ -163,31 +172,44 @@ def main(argv=None) -> int:
 
     root = Path(root_path)
 
-    def reindex(paths: list[str]) -> None:
-        if not paths:
-            return
-        logger.info("reindexing %d changed file(s)", len(paths))
+    def reindex(paths: list[str], *, fail_full: bool = False) -> bool:
+        if not paths and not fail_full:
+            return True
         try:
-            result = engine.index_repo_incremental(rid, root, paths)
-            scanned = result.get("files_scanned", 0)
-            symbols = result.get("symbols_indexed", 0)
-            logger.info("reindex complete: %d files, %d symbols", scanned, symbols)
+            if fail_full:
+                result = engine.index_repo(rid, root)
+            else:
+                result = engine.index_repo_incremental(rid, root, paths)
         except Exception as exc:
-            logger.error("reindex failed: %s", exc)
+            logger.error("%s reindex failed: %s",
+                         "startup" if fail_full else "incremental", exc)
+            return False
+        failed = int(result.get("files_failed", 0))
+        if failed:
+            logger.error(
+                "%s reindex incomplete: %d file(s) failed",
+                "startup" if fail_full else "incremental",
+                failed,
+            )
+            return False
+        logger.info(
+            "%s reindex complete: %d changed, %d unchanged, %d removed",
+            "startup" if fail_full else "incremental",
+            result.get("files_indexed", 0),
+            result.get("files_unchanged", 0),
+            result.get("files_removed", 0),
+        )
+        return True
 
+    # Reconcile persisted code state before establishing any in-process watcher
+    # baseline. This catches edits, renames, and deletions made while the watcher
+    # was stopped and works for both one-shot and continuous modes.
+    if not reindex([], fail_full=True):
+        return 1
     if args.no_watch:
-        watcher = _PollingWatcher(root, interval=args.interval)
-        watcher.poll()  # baseline
-        time.sleep(0.1)
-        changed = watcher.poll()
-        if changed:
-            reindex(changed)
-            print(f"Reindexed {len(changed)} changed file(s).")
-        else:
-            print("No changes detected.")
+        print("Reindex complete.")
         return 0
 
-    # Graceful shutdown on SIGINT/SIGTERM.
     import threading
     stop_event = threading.Event()
 
@@ -198,13 +220,12 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Try watchdog first; fall back to polling.
     if _try_watchdog_watcher(root, reindex, stop_event):
         return 0
 
     logger.info("watchdog not available; using polling (interval=%.1fs)", args.interval)
     watcher = _PollingWatcher(root, interval=args.interval)
-    watcher.poll()  # baseline
+    watcher.poll()
     print(f"Watching {root} (poll every {args.interval}s, Ctrl+C to stop)...")
 
     while not stop_event.is_set():
@@ -217,6 +238,33 @@ def main(argv=None) -> int:
 
     print("Stopped.")
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Watch a repository and trigger incremental reindex on changes."
+    )
+    ap.add_argument("--db", required=True, help="Path to the v2 database file.")
+    ap.add_argument("--workspace", required=True, help="Workspace name.")
+    ap.add_argument("--repo", required=True, help="Repo name (must already be indexed).")
+    ap.add_argument("--interval", type=float, default=5.0,
+                    help="Poll interval in seconds (default 5).")
+    ap.add_argument("--no-watch", action="store_true",
+                    help="One-shot full reconciliation, then exit.")
+    args = ap.parse_args(argv)
+
+    from engraphis.core.engine import MemoryEngine
+
+    engine = MemoryEngine.create(args.db)
+    try:
+        return _run(args, engine)
+    finally:
+        close_index = getattr(engine.index, "close", None)
+        try:
+            if callable(close_index):
+                close_index()
+        finally:
+            engine.store.close()
 
 
 if __name__ == "__main__":
