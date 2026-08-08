@@ -1448,6 +1448,8 @@ def context_savings(
     from_ts: Optional[float] = None,
     to_ts: Optional[float] = None,
     release_version: Optional[str] = None,
+    format: Optional[str] = None,
+    group_by: Optional[str] = None,
 ):
     ws = workspace or _require_ws()
     return _run(
@@ -1457,6 +1459,8 @@ def context_savings(
         from_ts=from_ts,
         to_ts=to_ts,
         release_version=release_version,
+        format=format,
+        group_by=group_by,
     )
 
 
@@ -1746,6 +1750,18 @@ def analytics_export(workspace: Optional[str] = None):
         "implemented": False,
         "alternative": "/analytics",
     })
+
+
+@router.get("/analytics/health")
+def analytics_health(workspace: Optional[str] = None):
+    """Local memory health: decay distribution, orphan count, conflict frequency.
+
+    Unlike the hosted ``/analytics`` endpoint, this runs entirely on the local
+    database and is available on every plan. The dashboard's Memory Health
+    panel renders these metrics as a histogram and trend indicators.
+    """
+    ws = workspace or _require_ws()
+    return _run(service().memory_health, workspace=ws)
 
 
 @router.get("/ready")

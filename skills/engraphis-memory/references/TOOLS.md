@@ -316,6 +316,21 @@ Return portable `graph.json` data plus a human-readable Markdown report and self
 Returns `{graph, report_markdown, graph_html, valid_at, known_at, historical}`. Historical code
 reads are pure reads and never reinforce memories.
 
+### `engraphis_link_symbol`
+Manually create a link between a code symbol and a memory. Use when automatic indexing misses a
+relationship you know about -- for example, linking a deployment function to the incident memory it
+resolved, or connecting a config constant to the decision that set its value. Idempotent: repeating
+the same call returns the existing link without duplication.
+
+- `symbol_id (str)`: symbol ID, short name, or fully-qualified name from an indexed repo.
+- `memory_id (str)`: memory ID to link to the symbol.
+- `workspace (str)`: workspace the repo belongs to.
+- `repo (str)`: indexed repo containing the symbol.
+- `relation (str, "mentions")`: relationship type (e.g. `mentions`, `implements`, `fixes`).
+- `confidence (float, 1.0)`: link confidence `0..1`.
+
+Returns `{link_id, symbol_id, memory_id, relation, workspace, repo}`.
+
 ---
 
 ## Sessions

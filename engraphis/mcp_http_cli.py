@@ -83,7 +83,7 @@ def main(argv=None) -> None:
         "--classic",
         action="store_true",
         help=(
-            "serve the legacy 33 direct-tool surface; normal use defaults to the compact "
+            "serve the legacy 34 direct-tool surface; normal use defaults to the compact "
             "Smart gateway"
         ),
     )

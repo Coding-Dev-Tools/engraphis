@@ -206,6 +206,8 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
         release_version: Optional[str] = None,
+        format: Optional[str] = None,
+        group_by: Optional[str] = None,
     ):
         return run(
             svc.context_savings,
@@ -214,6 +216,8 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             from_ts=from_ts,
             to_ts=to_ts,
             release_version=release_version,
+            format=format,
+            group_by=group_by,
         )
 
     @app.get("/receipts/verify")

@@ -218,10 +218,10 @@ class, and the appropriate executor revalidates all of it before running.
 | `engraphis_conflict_review` | List pending/quarantined/conflicted records for review (read-only inbox). |
 
 `engraphis-mcp-classic` is only for an existing configuration that pins direct tool names. It
-preserves the former 33-tool surface below; new Kilo Code installations should keep the zero-config
+preserves the former 34-tool surface below; new Kilo Code installations should keep the zero-config
 Smart command shown above.
 
-### Classic 33-tool inventory
+### Classic 34-tool inventory
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -242,6 +242,7 @@ Smart command shown above.
 | Code | `engraphis_search_code` | Find symbols, callers, docstrings, and linked decisions/incidents/procedures. |
 | Code | `engraphis_code_path` | Explain a path across files, definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Rank commit/PR impact by dependents, communities, memories, and hotspots. |
+| Code | `engraphis_link_symbol` | Manually link a code symbol to a memory (idempotent; reinforces existing links). |
 | Code | `engraphis_export_code_graph` | Portable graph JSON + Markdown + self-contained HTML. |
 | **Audit** | `engraphis_receipts` | List content-free hashed operation receipts. |
 | Audit | `engraphis_context_savings` | Cumulative packed-context savings from receipts, separated by token-counter identity. |

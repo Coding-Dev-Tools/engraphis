@@ -27,7 +27,7 @@ discovery and the validated executors.
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 33 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 34 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
@@ -96,6 +96,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |
 | Code | `engraphis_export_code_graph` | Exports graph JSON, Markdown, and HTML. |
+| Code | `engraphis_link_symbol` | Manually links a code symbol to a memory (idempotent). |
 | Audit | `engraphis_receipts` | Lists content-free hashed operation receipts. |
 | Audit | `engraphis_context_savings` | Reports receipt-backed estimated context tokens saved, eligible/excluded deliveries, basis, confidence, and token-counter identity; optional `from_ts`, `to_ts`, and `release_version` filters are supported. This is estimated prompt-context reduction, not provider billing. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
