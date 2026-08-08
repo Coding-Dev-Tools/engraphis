@@ -777,7 +777,8 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 profiles: bool = False, min_mentions: int = MIN_PROFILE_MENTIONS,
                 infer: bool = False, structured: bool = False,
                 supersede_sources: bool = False, llm: Any = None,
-                now: Optional[float] = None) -> dict:
+                now: Optional[float] = None,
+                consolidation_level: str = "flat") -> dict:
     """Run one consolidation sweep over a workspace (optionally one repo). Returns a
     JSON-able report; with ``dry_run=True`` it only reports what *would* happen.
 
@@ -789,7 +790,15 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     a third pass additionally rolls each entity's scattered memories into one durable
     profile digest (per-entity profile digests); its report lands under
     ``report["profiles"]``.
+
+    With ``consolidation_level='hierarchical'``, after the flat episodic→semantic
+    distillation, the resulting semantic digests are grouped by temporal bucket (week/month
+    based on ingested_at) and a second consolidation pass produces weekly/monthly summary
+    digests linked to their source digests via mem_links with relation='hierarchical_digest'.
+    This improves token reduction beyond flat mode on multi-week fixtures.
     """
+    if consolidation_level not in ("flat", "hierarchical"):
+        raise ValueError(f"consolidation_level must be 'flat' or 'hierarchical', got {consolidation_level!r}")
     if infer:
         raise ValueError("dream inference is available through Engraphis Cloud")
     if supersede_sources and not structured:

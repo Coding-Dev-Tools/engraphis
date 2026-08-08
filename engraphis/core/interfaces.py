@@ -97,6 +97,8 @@ class MemoryRecord:
     confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
 
 
+
+
 @dataclass
 class SearchFilter:
     """Scope + temporal filter applied to every read (§7.1)."""

@@ -1457,9 +1457,14 @@ class SyncEngine:
 
         own_name = "bundle-%s.json" % self.device_id
         pushed = False
+        pushed_bytes = 0
         if not dry_run and push:
-            transport.push(own_name, json.dumps(bundle).encode("utf-8"))
+            payload = json.dumps(bundle).encode("utf-8")
+            transport.push(own_name, payload)
             pushed = True
+            pushed_bytes = len(payload)
+            # Record outbound byte count under this device (local-only telemetry).
+            self.store.add_sync_bytes(self.device_id, sent=pushed_bytes, commit=False)
 
         applied: list[dict] = []
         totals = {
@@ -1512,15 +1517,30 @@ class SyncEngine:
                                 "error_type": type(exc).__name__})
                 continue
             rep["from_device"] = remote.get("device_id", "?")
+            # Inbound byte accounting: attribute received bytes to the origin device
+            # from the bundle header (falls back to a stable synthetic key so the
+            # counter row still increments when a peer omits its device_id).
+            inbound_device = (
+                remote.get("device_id") if isinstance(remote.get("device_id"), str)
+                and remote.get("device_id") else f"unknown:{name}"
+            )
+            self.store.add_sync_bytes(inbound_device, received=len(data), commit=False)
             applied.append(rep)
             for k in totals:
                 totals[k] += rep.get(k, 0)
 
+        # Flush accumulated byte counters alongside the final sync-state commit.
+        if not dry_run:
+            try:
+                self.store.conn.commit()
+            except Exception:  # noqa: BLE001 — best-effort; counters are telemetry
+                pass
         errors = [a for a in applied if "error" in a]
         return {"pushed": own_name if pushed else None, "workspace": ws_name,
                 "device_id": self.device_id, "exported_memories": len(bundle["memories"]),
                 "read_only": bool(not push and not dry_run),
                 "peers_applied": len(applied) - len(errors),
+                "bytes_sent": pushed_bytes,
                 # Explicit: the round must NOT read as a success when bundles were dropped
                 # (refused for signature/authorization, unreadable, or never delivered).
                 "complete": not errors, "errors": errors,
