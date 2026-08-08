@@ -42,6 +42,7 @@
 <div class="nav-section">Relations</div>
 <button type="button" class="nav-item" data-view="graph"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="13" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="13" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4.5L7 11M11.5 4.5L9 11M5 3h6" stroke="currentColor" stroke-width="1.1"/></svg>Graph</button>
 <button type="button" class="nav-item" data-view="analytics"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 14V2M2 14h12M5 11V7M8.5 11V4M12 11V9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Analytics<span class="nav-badge" id="nav-analytics-lock"></span></button>
+<button type="button" class="nav-item" data-view="health"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 8h3l2-5 2 10 2-5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>Memory Health</button>
 <div class="nav-section">Engine</div>
 <button type="button" class="nav-item" data-view="consolidate"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 5h12M4 8h8M6 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Consolidate</button>
 <button type="button" class="nav-item" data-view="automation"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Automation<span class="nav-badge" id="nav-automation-lock"></span></button>
@@ -220,6 +221,17 @@
 <button class="btn btn-ghost btn-sm" data-onclick="h58">Refresh</button>
 </div>
 <div id="analytics-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Connecting to hosted Analytics…</div></div>
+</div>
+
+<div class="view" id="view-health">
+<div id="health-actions" class="workbench-command">
+<button class="btn btn-ghost btn-sm" data-onclick="h153">Refresh</button>
+</div>
+<div class="stat-grid" id="health-stat-grid"></div>
+<div class="cols-2">
+<div class="card"><div class="card-head">Decay distribution</div><div id="health-decay-chart" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading…</div></div></div>
+<div class="card"><div class="card-head">Trends</div><div id="health-trends" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading…</div></div></div>
+</div>
 </div>
 
 <div class="view" id="view-consolidate">

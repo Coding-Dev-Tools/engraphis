@@ -1,10 +1,10 @@
 const API=location.origin+'/api',TRIAL_DAYS=3;
 let WS=null, WORKSPACES=[], LIC=null;
-const TITLES={overview:'Overview',recall:'Recall',memories:'Memories','mem-editor':'Memory',proactive:'Proactive recall',why:'Why',timeline:'Timeline',audit:'Audit trail',graph:'Knowledge Graph',analytics:'Hosted Analytics',consolidate:'Consolidate',automation:'Hosted Automation',workspaces:'Workspaces',team:'Team Cloud',settings:'Settings'};
-const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Operate',team:'Engine',settings:'Engine'};
+const TITLES={overview:'Overview',recall:'Recall',memories:'Memories','mem-editor':'Memory',proactive:'Proactive recall',why:'Why',timeline:'Timeline',audit:'Audit trail',graph:'Knowledge Graph',analytics:'Hosted Analytics',health:'Memory Health',consolidate:'Consolidate',automation:'Hosted Automation',workspaces:'Workspaces',team:'Team Cloud',settings:'Settings'};
+const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',health:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Operate',team:'Engine',settings:'Engine'};
 /* Per-view subtitle rendered in the topbar next to the view name. The body no longer
    repeats the view title/description — the topbar is the single source for both. */
-const DESCS={overview:'',recall:'Hybrid semantic + retention search over this workspace.',memories:'Browse and curate the memories in this workspace.','mem-editor':'',proactive:'What matters right now: importance × recency × retention, plus the last session handoff.',why:'The current answer to a question, with the facts it superseded.',timeline:'Bi-temporal history: what was believed, when it was valid, and when it was recorded.',audit:'Local governance history or content-free, tamper-evident receipts for sharing.',graph:'Explore entities and their sourced relationships from this workspace’s memories.',analytics:'Hosted growth, retention, decay, and entity insights for this workspace.',consolidate:'Run the free local consolidation tool manually; dry-run is the safe default.',automation:'Configure hosted Auto Consolidation and Auto Dreaming policies and review managed proposals.',workspaces:'Hard isolation boundaries. The active workspace receives new memories, imports, searches, and graph operations.',team:'Open the hosted organization dashboard for members, roles, named seats, and audit.',settings:'Local engine settings plus hosted-plan, sync, and managed-compute status.'};
+const DESCS={overview:'',recall:'Hybrid semantic + retention search over this workspace.',memories:'Browse and curate the memories in this workspace.','mem-editor':'',proactive:'What matters right now: importance × recency × retention, plus the last session handoff.',why:'The current answer to a question, with the facts it superseded.',timeline:'Bi-temporal history: what was believed, when it was valid, and when it was recorded.',audit:'Local governance history or content-free, tamper-evident receipts for sharing.',graph:'Explore entities and their sourced relationships from this workspace's memories.',analytics:'Hosted growth, retention, decay, and entity insights for this workspace.',health:'Memory lifecycle metrics: age distribution, decay rates, and staleness.',consolidate:'Run the free local consolidation tool manually; dry-run first to preview changes.',automation:'Hosted maintenance policy: consolidate, dream, and review on a schedule.',workspaces:'Switch between workspaces or create a new one.',team:'Hosted organizations, roles, and seats for Engraphis Cloud.',settings:'Theme, update, and connection settings.'};
 let CURRENT_VIEW='overview';
 /* Loaders that compute a live subtitle (e.g. Overview's counts) call this instead of
    writing to a body element, so the topbar stays authoritative. */
@@ -1553,6 +1553,22 @@ function loadConsolidateView(){
  if(!WS)return workspaceRequired('consolidate-body','preview or commit consolidation');
  clearWorkspaceRequired('consolidate-body','Run a dry preview before committing consolidation.');
 }
+async function loadHealthView(){
+ const grid=document.getElementById('health-stat-grid'),decay=document.getElementById('health-decay-chart'),trends=document.getElementById('health-trends');
+ if(grid)grid.innerHTML='<div class="spinner" data-csp-style="s86"></div>';
+ try{
+  const h=await api('/memory/health/overview?namespace='+encodeURIComponent(WS||''));
+  const cards=[['Total memories',h.total||0],['Avg age (days)',h.avg_age_days||0],['Decay rate',h.decay_rate||0],['Stale',h.stale_count||0]];
+  if(grid)grid.innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');
+  if(decay)decay.innerHTML='<div class="empty" data-csp-style="s12">Decay distribution chart not yet implemented.</div>';
+  if(trends)trends.innerHTML='<div class="empty" data-csp-style="s12">Trend analysis not yet implemented.</div>';
+ }catch(e){
+  if(grid)grid.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>';
+  if(decay)decay.innerHTML='';
+  if(trends)trends.innerHTML='';
+ }
+}
+
 const LOADERS={
  overview:loadOverview,
  recall:function(){loadWorkspaceInputView('view-recall','recall-results','recall memories','Enter a query to recall memories.')},
@@ -1567,6 +1583,7 @@ const LOADERS={
  automation:loadAutomationView,
  workspaces:loadWorkspaces,
  team:loadTeam,
+ health:loadHealthView,
  settings:loadSettings
 };
 
@@ -1715,6 +1732,7 @@ h131:function(event){testLlm()},
 h150:function(event){setLlmExtractor(true)},
 h151:function(event){setLlmExtractor(false)},
 h152:function(event){graphToggleAllNodes()},
+h153:function(event){loadHealthView()},
 h136:function(event){syncNow()},
 h138:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,false)},
 h139:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,true)},
