@@ -1006,6 +1006,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                     help="deterministic stratified-bootstrap iterations for v2 output")
     ap.add_argument("--grounded", action="store_true",
                     help="run deterministic grounded recall for rows declaring answerable")
+    ap.add_argument("--output-dir", default=None,
+                    help="save the JSON report to this directory (filename derived from dataset + timestamp)")
     args = ap.parse_args(argv)
 
     if args.artifact and not (args.v2 or args.canonical):
@@ -1031,6 +1033,16 @@ def main(argv: Optional[list[str]] = None) -> None:
             write_canonical_artifact(report, args.artifact, canonical=args.canonical)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
+    if args.output_dir:
+        import datetime
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dataset_stem = Path(args.dataset).stem
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_file = out_dir / f"{dataset_stem}_{ts}.json"
+        out_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        latest = out_dir / f"{dataset_stem}_latest.json"
+        latest.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if args.json or args.v2 or args.canonical:
         print(json.dumps(report, indent=2))
     else:
