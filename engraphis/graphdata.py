@@ -91,17 +91,26 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
         }
         for i in ids_
     ]
+    nodes.sort(key=lambda item: (-item["degree"], str(item["id"])))
+    edges.sort(key=lambda item: tuple(
+        str(item.get(key, ""))
+        for key in (
+            "id", "from", "to", "label", "layer", "valid_from", "valid_to", "reason",
+        )
+    ))
 
     types: dict = {}
     for n in nodes:
         types[n["etype"]] = types.get(n["etype"], 0) + 1
-    top = sorted(({"id": i, "name": label_of.get(i, i), "degree": d} for i, d in deg.items()),
-                 key=lambda r: -r["degree"])[:12]
+    top = [
+        {"id": node["id"], "name": node["label"], "degree": node["degree"]}
+        for node in nodes if node["degree"] > 0
+    ][:12]
     connected = sum(1 for n in nodes if n["degree"] > 0)
     return {
         "workspace": workspace, "nodes": nodes, "edges": edges,
         "types": [{"etype": k, "count": v}
-                  for k, v in sorted(types.items(), key=lambda kv: -kv[1])],
+                  for k, v in sorted(types.items(), key=lambda kv: (-kv[1], kv[0]))],
         "layers": [{"layer": k, "count": v}
                    for k, v in sorted(layers.items(), key=lambda kv: (-kv[1], kv[0]))],
         "top": top,

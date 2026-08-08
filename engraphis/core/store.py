@@ -37,6 +37,10 @@ from engraphis.core.interfaces import (
     Node,
     Scope,
     SearchFilter,
+    _finite_number,
+    _finite_timestamp,
+    advance_modified_hlc,
+    normalize_modified_hlc,
 )
 from engraphis.core.secrets import reject_secrets
 from engraphis.core.poisoning import (
@@ -44,6 +48,7 @@ from engraphis.core.poisoning import (
     REVIEW_PENDING,
     llm_consolidation_kind,
     pending_llm_consolidation_envelope,
+    pending_llm_extraction_envelope,
 )
 from engraphis.core.retention_policy import (
     DEFAULT_STABILITY_DAYS,
@@ -75,6 +80,20 @@ ENTITY_BLOCK_TOKEN_CHUNK = 200
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
 _LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
 _LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
+_LLM_EXTRACTION_REPAIR_STATE_KEY = "__schema_v12_llm_extraction_trust_repair"
+_LLM_EXTRACTION_REPAIR_STATE_VALUE = "complete"
+TOMBSTONE_NEVER_EXPORT = "never_export"
+TOMBSTONE_REMOTE_ERASURE = "remote_erasure"
+TOMBSTONE_EXPORT_CLASSES = frozenset({
+    TOMBSTONE_NEVER_EXPORT,
+    TOMBSTONE_REMOTE_ERASURE,
+})
+USER_SCOPE_UNSUPPORTED = (
+    "user scope is not supported until owner-aware memories are implemented; "
+    "use workspace, repo, or session"
+)
+
+
 
 
 def now_ts() -> float:
@@ -603,11 +622,15 @@ def _temporal_anchors(flt: Optional[SearchFilter], *, valid_at: Optional[float] 
     otherwise the filter's normalized ``valid_at``/legacy ``as_of`` value applies.
     System-time defaults to the present, which preserves ordinary current reads.
     """
-    world = valid_at
+    world = _finite_timestamp(valid_at, "valid_at")
     if world is None and flt is not None:
-        world = flt.valid_at
-    known = flt.known_at if flt is not None else None
-    present = now_ts()
+        world = _finite_timestamp(flt.valid_at, "valid_at")
+    known = _finite_timestamp(
+        flt.known_at if flt is not None else None, "known_at"
+    )
+    present = _finite_timestamp(now_ts(), "current timestamp")
+    if present is None:
+        raise AssertionError("current timestamp unexpectedly became null")
     return (present if world is None else world,
             present if known is None else known)
 
@@ -1031,6 +1054,7 @@ class Store:
                 # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
                 # creating a temporary table here: a dry-run must not write anything.
                 self.conn.execute("PRAGMA query_only=ON")
+                self._validate_read_only_ready()
                 row = self.conn.execute(
                     "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
                 ).fetchone()
@@ -1071,6 +1095,94 @@ class Store:
             conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _validate_read_only_ready(self) -> None:
+        """Fail closed unless the immutable snapshot can serve the current schema."""
+        required = {
+            "workspaces",
+            "repos",
+            "sessions",
+            "memories",
+            "mem_vectors",
+            "entities",
+            "edges",
+            "mem_links",
+            "memory_tombstones",
+            "memory_sync_exports",
+            "operation_receipts",
+            "schema_migrations",
+        }
+        rows = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        present = {str(row["name"]) for row in rows}
+        missing = sorted(required - present)
+        if missing:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                + ", ".join(missing)
+            )
+        session_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(sessions)"
+            ).fetchall()
+        }
+        if "handoff" not in session_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                "sessions.handoff"
+            )
+        memory_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(memories)"
+            ).fetchall()
+        }
+        if "modified_hlc" not in memory_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                "memories.modified_hlc"
+            )
+        sync_export_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(memory_sync_exports)"
+            ).fetchall()
+        }
+        required_sync_export_columns = {
+            "memory_id", "workspace_id", "repo_id",
+            "first_exported_at", "last_exported_at",
+        }
+        missing_sync_export_columns = sorted(
+            required_sync_export_columns - sync_export_columns
+        )
+        if missing_sync_export_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                + ", ".join(
+                    f"memory_sync_exports.{name}"
+                    for name in missing_sync_export_columns
+                )
+            )
+        tombstone_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(memory_tombstones)"
+            ).fetchall()
+        }
+        if "export_class" not in tombstone_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                "memory_tombstones.export_class"
+            )
+        row = self.conn.execute(
+            "SELECT MAX(version) AS version FROM schema_migrations"
+        ).fetchone()
+        version = int(row["version"]) if row and row["version"] is not None else 0
+        if version != SCHEMA_VERSION:
+            raise RuntimeError(
+                f"read-only Store schema {version} is not current "
+                f"(expected {SCHEMA_VERSION}); open it once with a writable Store"
+            )
+        if not self._quick_check(self.conn):
+            raise sqlite3.DatabaseError("read-only Store integrity check failed")
 
     @staticmethod
     def _raw_connection(conn):
@@ -1311,13 +1423,53 @@ class Store:
             "valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at",
         }.issubset(mem_link_columns)
         self._mem_links_need_temporal_backfill = mem_links_need_temporal_backfill
+        memory_columns: set[str] = set()
+        if "memories" in object_names:
+            memory_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+        memories_need_modified_hlc = (
+            "memories" in object_names and "modified_hlc" not in memory_columns
+        )
+        self._memories_need_modified_hlc = memories_need_modified_hlc
+        session_columns: set[str] = set()
+        if "sessions" in object_names:
+            session_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+        sessions_need_handoff = "handoff" not in session_columns
+        self._sessions_need_handoff = sessions_need_handoff
+        tombstone_columns: set[str] = set()
+        if "memory_tombstones" in object_names:
+            tombstone_columns = {
+                str(row["name"])
+                for row in self.conn.execute(
+                    "PRAGMA table_info(memory_tombstones)"
+                ).fetchall()
+            }
+        tombstones_need_export_class = (
+            "memory_tombstones" in object_names
+            and "export_class" not in tombstone_columns
+        )
+        self._tombstones_need_export_class = tombstones_need_export_class
+        sync_exports_need_table = (
+            bool(object_names) and "memory_sync_exports" not in object_names
+        )
+        self._sync_exports_need_table = sync_exports_need_table
         if previous_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {previous_version} is newer than supported "
                 f"schema {SCHEMA_VERSION}"
             )
         needs_backup = bool(object_names) and (
-            previous_version < SCHEMA_VERSION or mem_links_need_temporal_backfill
+            previous_version < SCHEMA_VERSION
+            or mem_links_need_temporal_backfill
+            or memories_need_modified_hlc
+            or sessions_need_handoff
+            or tombstones_need_export_class
+            or sync_exports_need_table
         )
         try:
             # Reserve the writer before the snapshot. This is read/locking state only;
@@ -1356,6 +1508,7 @@ class Store:
             "ALTER TABLE memories ADD COLUMN subject_key TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN claim_kind TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE memories ADD COLUMN modified_hlc TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE edges ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE entities ADD COLUMN normalized_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE entities ADD COLUMN canonical_method TEXT NOT NULL DEFAULT 'exact'",
@@ -1388,11 +1541,74 @@ class Store:
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
             "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
+            "ALTER TABLE memory_tombstones ADD COLUMN export_class TEXT NOT NULL "
+            "DEFAULT 'never_export' CHECK("
+            "export_class IN ('never_export','remote_erasure'))",
+            "ALTER TABLE sessions ADD COLUMN handoff TEXT DEFAULT '{}'",
         ):
             try:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        session_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "handoff" not in session_columns:
+            # Unlike the legacy additive loop above, do not swallow an arbitrary
+            # OperationalError: this current-version shape repair is load-bearing.
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN handoff TEXT DEFAULT '{}'"
+            )
+        memory_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "modified_hlc" not in memory_columns:
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN modified_hlc TEXT NOT NULL DEFAULT ''"
+            )
+        sync_export_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='memory_sync_exports'"
+        ).fetchone()
+        if sync_export_table is None:
+            raise RuntimeError("memory_sync_exports table is missing after schema repair")
+        sync_export_columns = {
+            str(row["name"])
+            for row in self.conn.execute(
+                "PRAGMA table_info(memory_sync_exports)"
+            ).fetchall()
+        }
+        if not {
+            "memory_id", "workspace_id", "repo_id",
+            "first_exported_at", "last_exported_at",
+        }.issubset(sync_export_columns):
+            raise RuntimeError("memory_sync_exports table has an incomplete schema")
+        tombstone_columns = {
+            str(row["name"])
+            for row in self.conn.execute(
+                "PRAGMA table_info(memory_tombstones)"
+            ).fetchall()
+        }
+        if "export_class" not in tombstone_columns:
+            self.conn.execute(
+                "ALTER TABLE memory_tombstones ADD COLUMN export_class TEXT NOT NULL "
+                "DEFAULT 'never_export' CHECK("
+                "export_class IN ('never_export','remote_erasure'))"
+            )
+        if previous_version < 12:
+            self.conn.execute(
+                "UPDATE memory_tombstones SET export_class=?",
+                (TOMBSTONE_NEVER_EXPORT,),
+            )
+        invalid_export_class = self.conn.execute(
+            "SELECT export_class FROM memory_tombstones "
+            "WHERE export_class NOT IN (?,?) LIMIT 1",
+            (TOMBSTONE_NEVER_EXPORT, TOMBSTONE_REMOTE_ERASURE),
+        ).fetchone()
+        if invalid_export_class is not None:
+            raise RuntimeError("memory tombstone export_class is invalid")
         tombstone_index_columns = [
             str(row["name"])
             for row in self.conn.execute(
@@ -1524,6 +1740,9 @@ class Store:
         self._ensure_llm_consolidation_trust_repair_v11(
             scan_legacy=previous_version >= 11,
         )
+        # Earlier v11/v12 builds let model-extracted facts inherit ingress approval.
+        # Repair both version transitions and already-opened same-schema databases once.
+        self._ensure_llm_extraction_trust_repair_v12()
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -1628,14 +1847,6 @@ class Store:
                         receipt_scope["updated_at"],
                     ),
                 )
-        # v11: add handoff column to sessions for structured session handoff data
-        if previous_version < 11:
-            try:
-                self.conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN handoff TEXT DEFAULT '{}'"
-                )
-            except sqlite3.OperationalError:
-                pass  # column may already exist
 
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
@@ -1753,6 +1964,7 @@ class Store:
             provenance["review_basis"] = basis
             provenance["review_policy_version"] = 11
             metadata["provenance"] = dict(provenance)
+            self.advance_memory_modified_hlc(row["id"], commit=False)
             self.conn.execute(
                 "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
                 (_dumps(provenance), _dumps(metadata), row["id"]),
@@ -1824,6 +2036,7 @@ class Store:
                 provenance["review_basis"] = "legacy_llm_consolidation"
                 provenance["review_policy_version"] = 11
                 metadata["provenance"] = dict(provenance)
+                self.advance_memory_modified_hlc(row["id"], commit=False)
                 self.conn.execute(
                     "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
                     (_dumps(provenance), _dumps(metadata), row["id"]),
@@ -1842,6 +2055,69 @@ class Store:
         self.set_sync_state(
             _LLM_CONSOLIDATION_REPAIR_STATE_KEY,
             _LLM_CONSOLIDATION_REPAIR_STATE_VALUE,
+            commit=False,
+        )
+
+    def _ensure_llm_extraction_trust_repair_v12(self) -> None:
+        """Demote legacy model-extracted facts and retire their derived graph state."""
+        marker = self.conn.execute(
+            "SELECT value FROM sync_state WHERE key=?",
+            (_LLM_EXTRACTION_REPAIR_STATE_KEY,),
+        ).fetchone()
+        if (
+            marker is not None
+            and marker["value"] == _LLM_EXTRACTION_REPAIR_STATE_VALUE
+        ):
+            return
+
+        rows = self.conn.execute(
+            "SELECT id, metadata, provenance FROM memories ORDER BY id"
+        ).fetchall()
+        repaired = 0
+        for row in rows:
+            metadata = _loads(row["metadata"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            if not isinstance(metadata.get("llm_extraction"), dict):
+                continue
+            dedicated = _loads(row["provenance"], {})
+            dedicated = dedicated if isinstance(dedicated, dict) else {}
+            nested = metadata.get("provenance")
+            nested = dict(nested) if isinstance(nested, dict) else {}
+            provenance = _merge_provenance_envelopes(dedicated, nested)
+            provenance, metadata, detected = pending_llm_extraction_envelope(
+                provenance, metadata,
+            )
+            if not detected:
+                continue
+            self.retire_memory_graph_state(row["id"], commit=False)
+            provenance["review_basis"] = "legacy_llm_extraction"
+            provenance["review_policy_version"] = 12
+            metadata["provenance"] = dict(provenance)
+            self.advance_memory_modified_hlc(row["id"], commit=False)
+            self.conn.execute(
+                "UPDATE memories SET provenance=?, metadata=? WHERE id=?",
+                (_dumps(provenance), _dumps(metadata), row["id"]),
+            )
+            self.audit(
+                "schema_migration",
+                "llm_extraction_trust_repair",
+                row["id"],
+                f"schema=12; state={REVIEW_PENDING}",
+                commit=False,
+            )
+            repaired += 1
+
+        if repaired:
+            self.audit(
+                "schema_migration",
+                "llm_extraction_trust_repair_summary",
+                "schema_v12",
+                f"pending={repaired}",
+                commit=False,
+            )
+        self.set_sync_state(
+            _LLM_EXTRACTION_REPAIR_STATE_KEY,
+            _LLM_EXTRACTION_REPAIR_STATE_VALUE,
             commit=False,
         )
 
@@ -1949,6 +2225,7 @@ class Store:
             subject_key = str(row["subject_key"] or metadata.get("subject_key") or "").strip()
             claim_kind = str(row["claim_kind"] or metadata.get("claim_kind") or "").strip()
             if subject_key != (row["subject_key"] or "") or claim_kind != (row["claim_kind"] or ""):
+                self.advance_memory_modified_hlc(row["id"], commit=False)
                 self.conn.execute(
                     "UPDATE memories SET subject_key=?, claim_kind=? WHERE id=?",
                     (subject_key, claim_kind, row["id"]),
@@ -2431,6 +2708,33 @@ class Store:
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
 
+    @contextmanager
+    def _write_operation(self, name: str, *, commit: bool):
+        """Isolate one compound write without settling a caller-owned transaction."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        savepoint = ""
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            else:
+                savepoint = (
+                    f"engraphis_{name}_{threading.get_ident()}_{time.monotonic_ns()}"
+                )
+                self.conn.execute(f"SAVEPOINT {savepoint}")
+            yield
+            if savepoint:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif commit:
+                self.conn.commit()
+        except BaseException:
+            if owns_transaction:
+                if self.conn.transaction_owned_by_current_thread():
+                    self.conn.rollback()
+            elif savepoint and self.conn.transaction_owned_by_current_thread():
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+
     # ── tenancy ───────────────────────────────────────────────────────────────
     def _authorize_workspace(self, name: str) -> str:
         """When this Store is bound to a workspace allow-list, refuse to create or
@@ -2452,16 +2756,38 @@ class Store:
         self.conn.commit()
         return wid
 
-    def get_or_create_workspace(self, name: str) -> str:
-        # Authorize on the RETRIEVE path too, not just create — otherwise a workspace
-        # outside ENGRAPHIS_WORKSPACES that already exists in the DB (e.g. predating the
-        # allow-list, or arriving via sync) could be handed back, silently bypassing the
-        # isolation boundary _authorize_workspace is meant to enforce ("create or retrieve").
+    def get_or_create_workspace(
+        self, name: str, *, settings: Optional[dict] = None,
+    ) -> str:
+        """Atomically return/create a workspace; the winning creator's settings persist."""
         self._authorize_workspace(name)
-        row = self.conn.execute("SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
-        if row:
-            return row["id"]
-        return self.create_workspace(name)
+        row = self.conn.execute(
+            "SELECT id FROM workspaces WHERE name=?", (name,)
+        ).fetchone()
+        if row is not None:
+            return str(row["id"])
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            candidate = ids.new_id("workspace")
+            self.conn.execute(
+                "INSERT INTO workspaces(id, name, created_at, settings) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO NOTHING",
+                (candidate, name, now_ts(), _dumps(settings or {})),
+            )
+            row = self.conn.execute(
+                "SELECT id FROM workspaces WHERE name=?", (name,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("workspace creation did not produce a durable row")
+            if owns_transaction:
+                self.conn.commit()
+            return str(row["id"])
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
 
     def create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
         rid = ids.new_id("repo")
@@ -2475,10 +2801,45 @@ class Store:
         return rid
 
     def get_or_create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
+        """Return one scoped repository id, creating it atomically when absent."""
         row = self.conn.execute(
             "SELECT id FROM repos WHERE workspace_id=? AND name=?", (workspace_id, name)
         ).fetchone()
-        return row["id"] if row else self.create_repo(workspace_id, name, **kw)
+        if row is not None:
+            return str(row["id"])
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            candidate = ids.new_id("repo")
+            self.conn.execute(
+                "INSERT INTO repos(id, workspace_id, name, root_path, vcs_remote, "
+                "primary_lang, created_at, settings) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(workspace_id, name) DO NOTHING",
+                (
+                    candidate,
+                    workspace_id,
+                    name,
+                    kw.get("root_path"),
+                    kw.get("vcs_remote"),
+                    kw.get("primary_lang"),
+                    now_ts(),
+                    _dumps(kw.get("settings") or {}),
+                ),
+            )
+            row = self.conn.execute(
+                "SELECT id FROM repos WHERE workspace_id=? AND name=?",
+                (workspace_id, name),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("repository creation did not produce a durable row")
+            if owns_transaction:
+                self.conn.commit()
+            return str(row["id"])
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
 
     # ── sessions ──────────────────────────────────────────────────────────────
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None,
@@ -2669,7 +3030,99 @@ class Store:
 
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
-                   commit: bool = True) -> str:
+                   commit: bool = True,
+                   _allow_legacy_user_scope: bool = False,
+                   _preserve_legacy_modified_hlc: bool = False) -> str:
+        """Persist a memory and every derived mirror as one failure boundary.
+
+        New USER-scoped rows are unsafe until records carry an owner identity. Sync and
+        migration code preserving already-existing USER history may opt into that
+        internal compatibility path. Sync may separately preserve the empty pre-v13
+        descriptive clock; ordinary local writes always mint a real HLC.
+        """
+        if (
+            _enum(rec.scope) == Scope.USER.value
+            and not _allow_legacy_user_scope
+        ):
+            raise ValueError(USER_SCOPE_UNSUPPORTED)
+        with self._write_operation("add_memory", commit=commit):
+            return self._add_memory_impl(
+                rec,
+                audit=audit,
+                preserve_legacy_modified_hlc=_preserve_legacy_modified_hlc,
+            )
+
+    def advance_memory_modified_hlc(
+        self,
+        memory_id: str,
+        *,
+        observed_hlc: str = "",
+        commit: bool = True,
+    ) -> str:
+        """Atomically advance one memory's descriptive-state hybrid logical clock.
+
+        ``commit=False`` deliberately leaves a newly opened transaction to the caller,
+        allowing the clock update and a following direct descriptive update to share one
+        commit/rollback boundary.  Inside an existing transaction this method uses a
+        savepoint and never settles the caller's transaction, regardless of ``commit``.
+        """
+        if not isinstance(memory_id, str) or not memory_id:
+            raise ValueError("memory_id must be a non-empty string")
+        observed_hlc = normalize_modified_hlc(observed_hlc, allow_empty=True)
+        with self._write_operation("advance_memory_modified_hlc", commit=commit):
+            row = self.conn.execute(
+                "SELECT modified_hlc FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            current = normalize_modified_hlc(
+                str(row["modified_hlc"] or ""), allow_empty=True
+            )
+            advanced = advance_modified_hlc(
+                current,
+                observed=observed_hlc,
+                node_id=self.device_id(),
+                now_ms=int(now_ts() * 1000),
+            )
+            updated = self.conn.execute(
+                "UPDATE memories SET modified_hlc=? WHERE id=?",
+                (advanced, memory_id),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("memory descriptive clock update lost its target")
+            return advanced
+
+    def _add_memory_impl(
+        self,
+        rec: MemoryRecord,
+        *,
+        audit: bool = True,
+        preserve_legacy_modified_hlc: bool = False,
+    ) -> str:
+        # Callers can mutate a dataclass after construction; validate again at the
+        # persistence boundary so SQLite never receives NaN or infinity.
+        for name in (
+            "last_access",
+            "valid_from",
+            "valid_to",
+            "ingested_at",
+            "expired_at",
+            "valid_to_recorded_at",
+            "pinned_at",
+            "unpinned_at",
+        ):
+            setattr(rec, name, _finite_timestamp(getattr(rec, name), name))
+        rec.modified_hlc = normalize_modified_hlc(
+            rec.modified_hlc, allow_empty=True
+        )
+        if (
+            rec.valid_from is not None
+            and rec.valid_to is not None
+            and rec.valid_to < rec.valid_from
+        ):
+            raise ValueError(
+                "valid_to cannot predate valid_from; the validity interval would be empty"
+            )
         # This is the last common write boundary.  Check every persisted text-bearing
         # field *before* the main row, FTS mirror, or vector are written, including
         # direct Store callers that do not go through MemoryEngine/MemoryService.
@@ -2714,8 +3167,10 @@ class Store:
         rec.access_count = effective_access_count(rec.access_count)
         if not rec.id:
             rec.id = ids.new_id("memory")
+        existing_record: Optional[MemoryRecord] = None
         existing = self.conn.execute(
-            "SELECT provenance, workspace_id FROM memories WHERE id=?", (rec.id,)
+            "SELECT * FROM memories WHERE id=?",
+            (rec.id,),
         ).fetchone()
         if existing is not None:
             if existing["workspace_id"] != rec.workspace_id:
@@ -2723,13 +3178,21 @@ class Store:
                            f"existing workspace={existing['workspace_id']}, "
                            f"incoming workspace={rec.workspace_id}", commit=False)
                 rec.id = ids.new_id("memory")
-            elif audit:
-                # Generic provenance-change record for direct writes. The sync path
-                # passes audit=False and logs its own semantic 'sync_overwrite' instead,
-                # so a synced update yields exactly one audit row rather than a duplicate.
-                self.audit("system", "overwrite", rec.id,
-                           f"existing provenance={existing['provenance']}, "
-                           f"incoming provenance={_dumps(rec.provenance)}", commit=False)
+                existing = None
+            else:
+                existing_record = _row_to_record(existing)
+                if audit:
+                    # Generic provenance-change record for direct writes. The sync path
+                    # passes audit=False and logs its own semantic 'sync_overwrite'
+                    # instead, so a synced update yields exactly one audit row.
+                    self.audit(
+                        "system",
+                        "overwrite",
+                        rec.id,
+                        f"existing provenance={existing['provenance']}, "
+                        f"incoming provenance={_dumps(rec.provenance)}",
+                        commit=False,
+                    )
         ts = now_ts()
         # A "closed history" record may legitimately carry only a past ``valid_to`` with
         # ``valid_from`` defaulting to ingest time (the fixture/backfill convention). The
@@ -2740,6 +3203,28 @@ class Store:
         rec.ingested_at = rec.ingested_at if rec.ingested_at is not None else ts
         rec.valid_from = rec.valid_from if rec.valid_from is not None else ts
         rec.last_access = rec.last_access if rec.last_access is not None else ts
+        if not preserve_legacy_modified_hlc:
+            previous_hlc = (
+                existing_record.modified_hlc if existing_record is not None else ""
+            )
+            descriptive_changed = (
+                existing_record is None
+                or _memory_descriptive_state(rec)
+                != _memory_descriptive_state(existing_record)
+            )
+            if descriptive_changed and (
+                not rec.modified_hlc or rec.modified_hlc <= previous_hlc
+            ):
+                rec.modified_hlc = advance_modified_hlc(
+                    previous_hlc,
+                    observed=rec.modified_hlc,
+                    node_id=self.device_id(),
+                    now_ms=int(ts * 1000),
+                )
+            elif not descriptive_changed and rec.modified_hlc < previous_hlc:
+                # An idempotent local upsert must not roll back the durable clock merely
+                # because the caller reconstructed an otherwise-identical record.
+                rec.modified_hlc = previous_hlc
         if (valid_from_was_explicit and rec.valid_to is not None
                 and rec.valid_to < rec.valid_from):
             raise ValueError(
@@ -2749,10 +3234,10 @@ class Store:
             """INSERT INTO memories
                (id, workspace_id, repo_id, session_id, scope, mtype, title, content, summary,
                 keywords, metadata, importance, surprise, stability, access_count, last_access,
-                valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
-                subject_key, claim_kind,
+                valid_from, valid_to, valid_to_recorded_at, ingested_at, modified_hlc,
+                expired_at, subject_key, claim_kind,
                 pinned, sensitivity, provenance, confidence, pinned_at, unpinned_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                 workspace_id=excluded.workspace_id, repo_id=excluded.repo_id,
                 session_id=excluded.session_id, scope=excluded.scope, mtype=excluded.mtype,
@@ -2764,6 +3249,7 @@ class Store:
                 valid_to=excluded.valid_to,
                 valid_to_recorded_at=excluded.valid_to_recorded_at,
                 ingested_at=excluded.ingested_at,
+                modified_hlc=excluded.modified_hlc,
                 expired_at=excluded.expired_at, subject_key=excluded.subject_key,
                 claim_kind=excluded.claim_kind, pinned=excluded.pinned,
                 sensitivity=excluded.sensitivity, provenance=excluded.provenance,
@@ -2773,34 +3259,21 @@ class Store:
              _enum(rec.scope), _enum(rec.mtype), rec.title, rec.content, rec.summary,
              _dumps(rec.keywords), _dumps(rec.metadata), rec.importance, rec.surprise,
              rec.stability, rec.access_count, rec.last_access, rec.valid_from, rec.valid_to,
-             rec.valid_to_recorded_at, rec.ingested_at, rec.expired_at,
+             rec.valid_to_recorded_at, rec.ingested_at, rec.modified_hlc, rec.expired_at,
              rec.subject_key, rec.claim_kind,
              int(rec.pinned), rec.sensitivity,
              _dumps(rec.provenance), rec.confidence,
              rec.pinned_at, rec.unpinned_at),
         )
-        try:
-            # Keep the row, FTS mirror, and vector mirror atomic for the normal
-            # single-write path.  Once the main INSERT succeeds, a mirror failure
-            # otherwise leaves this connection pinned in a partial transaction and
-            # lets a later commit publish an unindexed memory.
-            self._fts_upsert(rec.id, rec.title, rec.content, " ".join(rec.keywords))
-            # vector mirror (L2-normalized for cosine-as-dot)
-            if rec.embedding is not None:
-                self.put_vector(
-                    rec.id,
-                    rec.embedding,
-                    model=str(rec.metadata.get("embed_model", "")),
-                )
-        except BaseException:
-            if commit:
-                self.conn.rollback()
-            raise
-        # ``commit=False`` lets a bulk writer (sync's bundle apply) amortize one commit over
-        # a batch of rows instead of paying a durability fsync per memory. The caller then
-        # owns the transaction and MUST commit or roll back — see SyncEngine.apply_bundle.
-        if commit:
-            self.conn.commit()
+        # The method-level transaction/savepoint keeps the row, FTS mirror, and
+        # vector mirror atomic without settling a caller-owned transaction.
+        self._fts_upsert(rec.id, rec.title, rec.content, " ".join(rec.keywords))
+        if rec.embedding is not None:
+            self.put_vector(
+                rec.id,
+                rec.embedding,
+                model=str(rec.metadata.get("embed_model", "")),
+            )
         return rec.id
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
@@ -2829,6 +3302,54 @@ class Store:
             for row in rows:
                 out[row["id"]] = _row_to_record(row)
         return out
+
+    def visible_memory_ids(self, memory_ids: list[str],
+                           flt: Optional[SearchFilter], *,
+                           include_invalid: bool = False) -> set[str]:
+        """Return the bounded subset visible under :func:`memory_matches_filter`.
+
+        This is the lightweight visibility oracle for native indexes: it reads
+        identity/scope/temporal columns only and never hydrates content or vectors.
+        """
+        if not isinstance(memory_ids, list):
+            raise TypeError("memory_ids must be a list")
+        if len(memory_ids) > IN_CLAUSE_CHUNK:
+            raise ValueError(
+                f"memory_ids may contain at most {IN_CLAUSE_CHUNK} entries"
+            )
+        unique = list(dict.fromkeys(memory_ids))
+        if any(not isinstance(memory_id, str) or not memory_id for memory_id in unique):
+            raise ValueError("memory_ids must contain non-empty strings")
+        if not unique:
+            return set()
+        marks = ",".join("?" for _ in unique)
+        rows = self.conn.execute(
+            "SELECT id, workspace_id, repo_id, session_id, scope, mtype, "
+            "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
+            f"FROM memories WHERE id IN ({marks})",
+            unique,
+        ).fetchall()
+        visible: set[str] = set()
+        for row in rows:
+            record = MemoryRecord(
+                id=row["id"],
+                content="",
+                workspace_id=row["workspace_id"],
+                repo_id=row["repo_id"],
+                session_id=row["session_id"],
+                scope=Scope(row["scope"]),
+                mtype=MemoryType(row["mtype"]),
+                valid_from=row["valid_from"],
+                valid_to=row["valid_to"],
+                valid_to_recorded_at=row["valid_to_recorded_at"],
+                ingested_at=row["ingested_at"],
+                expired_at=row["expired_at"],
+            )
+            if memory_matches_filter(
+                record, flt, include_invalid=include_invalid
+            ):
+                visible.add(record.id)
+        return visible
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
@@ -3023,32 +3544,30 @@ class Store:
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted",
                        commit: bool = True) -> None:
-        """Bi-temporal invalidation (§8.3): shorten a fact's validity without deleting."""
-        recorded_at = now_ts()
-        at = at if at is not None else recorded_at
-        row = self.conn.execute(
-            "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
-        ).fetchone()
-        if (
-            row is not None
-            and row["valid_from"] is not None
-            and at < row["valid_from"]
-        ):
-            raise ValueError("valid_to cannot predate valid_from")
-        updated = self.conn.execute(
-            "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
-            "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
-            (at, recorded_at, memory_id, at),
-        ).rowcount
-        if updated:
-            self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
-        # Governance attempts are audit-worthy even when the interval was already
-        # closed.  MCP callers deliberately expose forget as non-idempotent so a
-        # repeated request keeps its own audit evidence while avoiding a second edge
-        # invalidation or widening a closed interval.
-        self.audit(actor, "invalidate", memory_id, reason, commit=False)
-        if commit:
-            self.conn.commit()
+        """Close one fact and its graph evidence as one atomic governance write."""
+        recorded_at = _finite_timestamp(now_ts(), "recorded_at")
+        at = _finite_timestamp(recorded_at if at is None else at, "at")
+        with self._write_operation("close_validity", commit=commit):
+            row = self.conn.execute(
+                "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if (
+                row is not None
+                and row["valid_from"] is not None
+                and at < row["valid_from"]
+            ):
+                raise ValueError("valid_to cannot predate valid_from")
+            updated = self.conn.execute(
+                "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
+                (at, recorded_at, memory_id, at),
+            ).rowcount
+            if updated:
+                self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
+            # Governance attempts are audit-worthy even when the interval was already
+            # closed. MCP callers expose forget as non-idempotent so every request
+            # retains evidence without widening the closed interval.
+            self.audit(actor, "invalidate", memory_id, reason, commit=False)
 
     def set_pinned(self, memory_id: str, pinned: bool) -> None:
         """Pinned memories are exempt from automatic decay/pruning (AGENTS.md §3.2);
@@ -3081,20 +3600,20 @@ class Store:
         self.conn.commit()
 
     def reinforce(self, memory_id: str, *, alpha: float = 0.3, boost: float = 0.0) -> None:
-        """Spacing-effect reinforcement (§13.2): stability grows sub-linearly with use."""
-        row = self.conn.execute(
-            "SELECT stability, access_count FROM memories WHERE id=?", (memory_id,)
-        ).fetchone()
-        if not row:
-            return
-        new_stab, new_count = reinforced_stability(
-            row["stability"], row["access_count"], alpha=alpha, boost=boost,
-        )
-        self.conn.execute(
-            "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
-            (new_stab, new_count, now_ts(), memory_id),
-        )
-        self.conn.commit()
+        """Apply one spacing-effect transition atomically across Store instances."""
+        with self._write_operation("reinforce", commit=True):
+            row = self.conn.execute(
+                "SELECT stability, access_count FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return
+            new_stab, new_count = reinforced_stability(
+                row["stability"], row["access_count"], alpha=alpha, boost=boost,
+            )
+            self.conn.execute(
+                "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
+                (new_stab, new_count, now_ts(), memory_id),
+            )
 
     # ── vectors ───────────────────────────────────────────────────────────────
     def put_vector(self, memory_id: str, vec: np.ndarray, *, model: str = "") -> None:
@@ -3347,10 +3866,14 @@ class Store:
         memory_columns = {
             item["name"] for item in conn.execute("PRAGMA table_info(memories)").fetchall()
         }
+        identity_columns = [
+            name for name in (
+                "id", "workspace_id", "repo_id", "scope", "sensitivity",
+            )
+            if name in memory_columns
+        ]
         row = conn.execute(
-            ("SELECT id, workspace_id, repo_id FROM memories WHERE id=?"
-             if "workspace_id" in memory_columns
-             else "SELECT id FROM memories WHERE id=?"),
+            f"SELECT {', '.join(identity_columns)} FROM memories WHERE id=?",
             (memory_id,),
         ).fetchone()
         if row is None:
@@ -3485,6 +4008,10 @@ class Store:
             "removed": True,
             "workspace_id": row["workspace_id"] if "workspace_id" in row.keys() else None,
             "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
+            "scope": row["scope"] if "scope" in row.keys() else None,
+            "sensitivity": (
+                row["sensitivity"] if "sensitivity" in row.keys() else None
+            ),
             "graph_edges_considered": len(supported_edges),
             "entities_considered": len(incident_entities),
         }
@@ -3562,18 +4089,27 @@ class Store:
             current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
             if not current["present"]:
                 raise KeyError(f"no memory with id '{memory_id}'")
-            # Durable sync tombstone: the local row is hard-deleted, but the *deletion*
-            # must survive in sync state so a peer that still holds the row is told this
-            # id is dead instead of re-adding it on the next round. No content travels —
-            # only the id, the erasure time, and this device's id. Scope is captured from
-            # the erased row so an export restricted to a repo still tells that repo's
-            # peers the id is gone (a tombstone scoped to the workspace is never
-            # exported, mirroring how an erased row can no longer be scoped).
+            export_marker = self.get_memory_sync_export(memory_id)
+            if (
+                export_marker is not None
+                and export_marker["workspace_id"] == current.get("workspace_id")
+            ):
+                export_class = TOMBSTONE_REMOTE_ERASURE
+                tombstone_workspace_id = export_marker["workspace_id"]
+                tombstone_repo_id = export_marker["repo_id"]
+            else:
+                export_class = TOMBSTONE_NEVER_EXPORT
+                tombstone_workspace_id = current.get("workspace_id")
+                tombstone_repo_id = current.get("repo_id")
+            # Current scope/sensitivity cannot prove that an id ever crossed a sync
+            # boundary. Only the durable content-free marker can authorize a remote
+            # erasure; absent or scope-conflicting evidence fails closed to local-only.
             self.add_memory_tombstone(
                 memory_id, deleted_at=now_ts(),
                 device_id=device_id,
-                workspace_id=current.get("workspace_id"),
-                repo_id=current.get("repo_id"),
+                workspace_id=tombstone_workspace_id,
+                repo_id=tombstone_repo_id,
+                export_class=export_class,
             )
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.commit()
@@ -3606,6 +4142,7 @@ class Store:
         return {
             "id": memory_id,
             "status": "securely_erased",
+            "export_class": export_class,
             "maintenance": maintenance,
             "recognised_backups_erased": backup_processed,
             "recognised_backups_failed": backup_failed,
@@ -3681,15 +4218,10 @@ class Store:
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
         """Persist an entity and its derived incidence atomically."""
-        owns_transaction = not self.conn.transaction_owned_by_current_thread()
-        try:
-            return self._upsert_entity_impl(node, commit=commit)
-        except BaseException:
-            if owns_transaction and self.conn.transaction_owned_by_current_thread():
-                self.conn.rollback()
-            raise
+        with self._write_operation("upsert_entity", commit=commit):
+            return self._upsert_entity_impl(node)
 
-    def _upsert_entity_impl(self, node: Node, *, commit: bool = True) -> str:
+    def _upsert_entity_impl(self, node: Node) -> str:
         normalized = normalize_entity_name(node.name)
         existing = self.conn.execute(
             "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? "
@@ -3726,8 +4258,6 @@ class Store:
         self._live_canonicalize_entity(
             nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
         )
-        if commit:
-            self.conn.commit()
         return nid
 
     def _live_canonicalize_entity(self, entity_id: str, *, name: str,
@@ -3808,11 +4338,14 @@ class Store:
                 ingested_at=row["ingested_at"], expired_at=row["expired_at"],
                 provenance={"source": "exact_text_backfill"}, commit=False,
             )
-    def list_entities(self, flt: Optional[SearchFilter] = None,
-                      *, limit: Optional[int] = None) -> list[Node]:
-        """Entities in scope, newest first — the seed set the profile-consolidation
-        pass rolls up (``core.consolidate.consolidate_profiles``). Scoped to the
-        filter's workspace/repo so it can't cross the isolation boundary."""
+    def list_entities(self, flt: Optional[SearchFilter] = None, *,
+                      after_id: Optional[str] = None,
+                      limit: Optional[int] = None) -> list[Node]:
+        """Return scoped entities, with optional deterministic keyset paging.
+
+        Passing ``after_id`` (including ``""`` for the first page) selects
+        ascending ULID order. Omitting it preserves the legacy newest-first view.
+        """
         sql = "SELECT * FROM entities"
         where: list[str] = []
         params: list[Any] = []
@@ -3825,11 +4358,17 @@ class Store:
             else:
                 where.append("repo_id=?")
             params.append(flt.repo_id)
+        if after_id:
+            where.append("id>?")
+            params.append(after_id)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY created_at DESC"
-        if limit:
-            sql += f" LIMIT {int(limit)}"
+        sql += " ORDER BY " + (
+            "id" if after_id is not None else "created_at DESC, id DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
         rows = self.conn.execute(sql, params).fetchall()
         return [Node(id=r["id"], name=r["name"], ntype=r["etype"] or "",
                      workspace_id=r["workspace_id"], repo_id=r["repo_id"],
@@ -3846,6 +4385,13 @@ class Store:
                            provenance: Optional[dict] = None,
                            commit: bool = True) -> str:
         """Create one idempotent, bi-temporal memory↔entity incidence record."""
+        valid_from = _finite_timestamp(valid_from, "valid_from")
+        valid_to = _finite_timestamp(valid_to, "valid_to")
+        valid_to_recorded_at = _finite_timestamp(
+            valid_to_recorded_at, "valid_to_recorded_at"
+        )
+        ingested_at = _finite_timestamp(ingested_at, "ingested_at")
+        expired_at = _finite_timestamp(expired_at, "expired_at")
         stamp = now_ts()
         if valid_to is None and expired_at is None:
             existing = self.conn.execute(
@@ -3875,6 +4421,8 @@ class Store:
                     valid_to_recorded_at, requested_known, expired_at,
                 ),
             ).fetchone()
+        if valid_to is not None and valid_to < requested_valid:
+            raise ValueError("memory-entity valid_to cannot predate valid_from")
         if existing is not None:
             if valid_to is None and expired_at is None:
                 desired_confidence = max(
@@ -4026,21 +4574,21 @@ class Store:
         return rows
 
     def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
-        """Atomically persist an edge and its normalized support rows.
+        """Atomically persist an edge and its normalized support rows."""
+        with self._write_operation("upsert_edge", commit=commit):
+            return self._upsert_edge_impl(edge)
 
-        The implementation performs several writes.  If a later support write fails,
-        roll back a transaction opened by this call so a partial edge cannot remain
-        pending on the shared connection.
-        """
-        owns_transaction = not self.conn.transaction_owned_by_current_thread()
-        try:
-            return self._upsert_edge_impl(edge, commit=commit)
-        except BaseException:
-            if owns_transaction and self.conn.transaction_owned_by_current_thread():
-                self.conn.rollback()
-            raise
-
-    def _upsert_edge_impl(self, edge: Edge, *, commit: bool = True) -> str:
+    def _upsert_edge_impl(self, edge: Edge) -> str:
+        # Revalidate mutable dataclass fields at the persistence boundary.
+        for name in (
+            "valid_from",
+            "valid_to",
+            "ingested_at",
+            "expired_at",
+            "valid_to_recorded_at",
+        ):
+            setattr(edge, name, _finite_timestamp(getattr(edge, name), name))
+        edge.weight = _finite_number(edge.weight, "weight")
         eid = edge.id or ids.new_id("edge")
         edge_valid_from = edge.valid_from if edge.valid_from is not None else now_ts()
         if edge.valid_to is not None and edge.valid_to < edge_valid_from:
@@ -4111,8 +4659,6 @@ class Store:
                 valid_to_recorded_at=edge.valid_to_recorded_at,
                 ingested_at=edge.ingested_at, expired_at=edge.expired_at,
             )
-            if commit:
-                self.conn.commit()
             return eid
         equivalent = None
         if edge.valid_to is None and edge.expired_at is None:
@@ -4169,8 +4715,6 @@ class Store:
                 valid_to_recorded_at=edge.valid_to_recorded_at,
                 ingested_at=edge.ingested_at, expired_at=edge.expired_at,
             )
-            if commit:
-                self.conn.commit()
             return str(equivalent["id"])
         if replacing:
             # ``upsert_edge`` replaces the supplied edge record. Close its previous
@@ -4208,37 +4752,36 @@ class Store:
             valid_to_recorded_at=edge.valid_to_recorded_at,
             ingested_at=edge.ingested_at, expired_at=edge.expired_at,
         )
-        if commit:
-            self.conn.commit()
         return eid
 
-    def invalidate_edge(self, edge_id: str, at: Optional[float] = None) -> None:
-        recorded_at = now_ts()
-        ts = recorded_at if at is None else at
-        row = self.conn.execute(
-            "SELECT valid_from FROM edges WHERE id=?", (edge_id,)
-        ).fetchone()
-        if (
-            row is not None
-            and row["valid_from"] is not None
-            and ts < row["valid_from"]
-        ):
-            # A caller may supply an old world-time anchor for an edge whose
-            # implicit start was recorded at ingestion.  Clamp the close time to
-            # the recorded start so the interval remains valid without allowing
-            # an inverted temporal row.
-            ts = row["valid_from"]
-        self.conn.execute(
-            "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
-            "WHERE id=? AND valid_to IS NULL",
-            (ts, recorded_at, edge_id),
-        )
-        self.conn.execute(
-            "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
-            "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
-            (ts, recorded_at, edge_id),
-        )
-        self.conn.commit()
+    def invalidate_edge(self, edge_id: str, at: Optional[float] = None, *,
+                        commit: bool = True) -> None:
+        """Close an edge and its supports at one finite world/system-time boundary."""
+        with self._write_operation("invalidate_edge", commit=commit):
+            recorded_at = _finite_timestamp(now_ts(), "recorded_at")
+            ts = _finite_timestamp(recorded_at if at is None else at, "at")
+            row = self.conn.execute(
+                "SELECT valid_from FROM edges WHERE id=?", (edge_id,)
+            ).fetchone()
+            if (
+                row is not None
+                and row["valid_from"] is not None
+                and ts < row["valid_from"]
+            ):
+                # A caller may supply an old world-time anchor for an edge whose
+                # implicit start was recorded at ingestion. Clamp it to preserve
+                # a non-empty interval without admitting non-finite timestamps.
+                ts = row["valid_from"]
+            self.conn.execute(
+                "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE id=? AND valid_to IS NULL",
+                (ts, recorded_at, edge_id),
+            )
+            self.conn.execute(
+                "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
+                (ts, recorded_at, edge_id),
+            )
 
     def _write_edge_supports(self, edge_id: str, relation: str, provenance: dict,
                              *, valid_from: Optional[float] = None,
@@ -4246,6 +4789,13 @@ class Store:
                              valid_to_recorded_at: Optional[float] = None,
                              ingested_at: Optional[float] = None,
                              expired_at: Optional[float] = None) -> None:
+        valid_from = _finite_timestamp(valid_from, "valid_from")
+        valid_to = _finite_timestamp(valid_to, "valid_to")
+        valid_to_recorded_at = _finite_timestamp(
+            valid_to_recorded_at, "valid_to_recorded_at"
+        )
+        ingested_at = _finite_timestamp(ingested_at, "ingested_at")
+        expired_at = _finite_timestamp(expired_at, "expired_at")
         source_kind = _edge_source_kind(provenance, relation)
         confidence = _edge_support_confidence(provenance, source_kind)
         support_provenance = _merge_edge_provenance([provenance])
@@ -4308,22 +4858,20 @@ class Store:
                          ingested_at: Optional[float] = None,
                          commit: bool = True) -> None:
         """Record support and edge provenance as one write unit."""
-        owns_transaction = not self.conn.transaction_owned_by_current_thread()
-        try:
+        with self._write_operation("add_edge_support", commit=commit):
             self._add_edge_support_impl(
-                edge_id, provenance, valid_from=valid_from,
-                ingested_at=ingested_at, commit=commit,
+                edge_id,
+                provenance,
+                valid_from=valid_from,
+                ingested_at=ingested_at,
             )
-        except BaseException:
-            if owns_transaction and self.conn.transaction_owned_by_current_thread():
-                self.conn.rollback()
-            raise
 
     def _add_edge_support_impl(self, edge_id: str, provenance: dict, *,
                                valid_from: Optional[float] = None,
-                               ingested_at: Optional[float] = None,
-                               commit: bool = True) -> None:
+                               ingested_at: Optional[float] = None) -> None:
         """Record another source memory supporting an existing graph edge."""
+        valid_from = _finite_timestamp(valid_from, "valid_from")
+        ingested_at = _finite_timestamp(ingested_at, "ingested_at")
         incoming = _provenance_memory_ids(provenance)
         if not incoming:
             return
@@ -4375,11 +4923,21 @@ class Store:
                     "UPDATE edges SET valid_from=?, ingested_at=? WHERE id=?",
                     (earlier_valid, earlier_ingested, edge_id),
                 )
-        if commit:
-            self.conn.commit()
 
-    def invalidate_edges_for_memory(self, memory_id: str, *, at: Optional[float] = None,
-                                    commit: bool = True) -> None:
+    def invalidate_edges_for_memory(
+        self, memory_id: str, *, at: Optional[float] = None,
+        commit: bool = True,
+    ) -> None:
+        """Atomically retire one memory's support from derived graph edges."""
+        with self._write_operation("invalidate_edges_for_memory", commit=commit):
+            self._invalidate_edges_for_memory_impl(
+                memory_id, at=at, commit=False
+            )
+
+    def _invalidate_edges_for_memory_impl(
+        self, memory_id: str, *, at: Optional[float] = None,
+        commit: bool = False,
+    ) -> None:
         """Remove one memory's support and close edges with no remaining sources.
 
         Called on every INVALIDATE resolution, ``forget`` and ``correct`` — routine write
@@ -4397,8 +4955,8 @@ class Store:
         directly (service.py): those edges would carry provenance but no support rows, and
         would then silently never be invalidated. Normalize the edge writes first.
         """
-        recorded_at = now_ts()
-        ts = at if at is not None else recorded_at
+        recorded_at = _finite_timestamp(now_ts(), "recorded_at")
+        ts = _finite_timestamp(recorded_at if at is None else at, "at")
         owner = self.conn.fetchall(
             "SELECT workspace_id FROM memories WHERE id=?", (memory_id,))
         workspace_id = owner[0]["workspace_id"] if owner else None
@@ -4475,6 +5033,23 @@ class Store:
         preserve_link_relations: Iterable[str] = (),
         commit: bool = True,
     ) -> None:
+        """Atomically retire every derived graph surface for one memory."""
+        with self._write_operation("retire_memory_graph_state", commit=commit):
+            self._retire_memory_graph_state_impl(
+                memory_id,
+                at=at,
+                preserve_link_relations=preserve_link_relations,
+                commit=False,
+            )
+
+    def _retire_memory_graph_state_impl(
+        self,
+        memory_id: str,
+        *,
+        at: Optional[float] = None,
+        preserve_link_relations: Iterable[str] = (),
+        commit: bool = False,
+    ) -> None:
         """Close live graph derivatives of one memory without deleting their history.
 
         A trust downgrade can leave the memory itself valid for inspection while making
@@ -4484,8 +5059,8 @@ class Store:
         ``preserve_link_relations`` keeps explicitly named audit/lineage relations live
         while retiring associative links such as automatic evolution bridges.
         """
-        recorded_at = now_ts()
-        ts = at if at is not None else recorded_at
+        recorded_at = _finite_timestamp(now_ts(), "recorded_at")
+        ts = _finite_timestamp(recorded_at if at is None else at, "at")
         self.invalidate_edges_for_memory(memory_id, at=ts, commit=False)
         self.conn.execute(
             "UPDATE memory_entities SET valid_to=?, valid_to_recorded_at=? "
@@ -4585,6 +5160,156 @@ class Store:
             statement, statement_params
         ).fetchall()]
 
+    @staticmethod
+    def _validate_memory_link_owner_rows(
+        first,
+        second,
+        relation: str,
+        *,
+        allow_scope_transition: bool,
+    ) -> None:
+        """Require shared workspace; prove cross-owner promotion/merge lineage."""
+        if first["workspace_id"] != second["workspace_id"]:
+            raise ValueError("memory link endpoints must share workspace ownership")
+        first_owner = (
+            first["repo_id"], first["session_id"], str(first["scope"] or "")
+        )
+        second_owner = (
+            second["repo_id"], second["session_id"], str(second["scope"] or "")
+        )
+        if first_owner == second_owner or relation not in {"promotes", "merges"}:
+            return
+        if not allow_scope_transition:
+            raise ValueError(
+                "governed promotion or merge requires explicit scope-transition "
+                "authorization"
+            )
+        rank = {
+            Scope.SESSION.value: 0,
+            Scope.REPO.value: 1,
+            Scope.WORKSPACE.value: 2,
+            Scope.USER.value: 3,
+        }
+        first_rank = rank.get(str(first["scope"]), -1)
+        second_rank = rank.get(str(second["scope"]), -1)
+        # Allow same-rank links within the same workspace (cross-repo is OK at workspace scope)
+        if first_rank < second_rank:
+            raise ValueError(
+                "governed memory link must point from the wider result to its source"
+            )
+        if first_rank == second_rank and first["workspace_id"] != second["workspace_id"]:
+            raise ValueError(
+                "governed memory link must point from the wider result to its source"
+            )
+        metadata = _loads(first["metadata"], {})
+        provenance = _loads(first["provenance"], {})
+        nested = metadata.get("provenance") if isinstance(metadata, dict) else {}
+        if not isinstance(nested, dict):
+            nested = {}
+        if relation == "promotes":
+            evidence = metadata.get("promoted_from", []) if isinstance(metadata, dict) else []
+        else:
+            evidence = (
+                provenance.get("merges")
+                or nested.get("merges")
+                or (metadata.get("supersedes") if isinstance(metadata, dict) else [])
+                or []
+            )
+        if not isinstance(evidence, list) or second["id"] not in evidence:
+            raise ValueError(
+                f"governed {relation} link lacks persisted source evidence"
+            )
+
+    def _validate_memory_link_endpoints(
+        self,
+        a: str,
+        b: str,
+        relation: str,
+        *,
+        allow_scope_transition: bool,
+    ) -> None:
+        """Require durable endpoint ownership or a proven governed widening."""
+        rows = self.conn.execute(
+            "SELECT id, workspace_id, repo_id, session_id, scope, metadata, provenance "
+            "FROM memories WHERE id IN (?,?)",
+            (a, b),
+        ).fetchall()
+        records = {str(row["id"]): row for row in rows}
+        if a not in records or b not in records:
+            raise ValueError("memory link endpoints must exist")
+        self._validate_memory_link_owner_rows(
+            records[a],
+            records[b],
+            relation,
+            allow_scope_transition=allow_scope_transition,
+        )
+
+    def _filter_memory_links_by_ownership(self, rows: list[dict]) -> list[dict]:
+        """Fail closed on legacy/direct-SQL links that cross an unproven boundary."""
+        if not rows:
+            return []
+        endpoint_ids = sorted({
+            endpoint for row in rows for endpoint in (row["a"], row["b"])
+        })
+        records = {}
+        for start in range(0, len(endpoint_ids), IN_CLAUSE_CHUNK):
+            chunk = endpoint_ids[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            for record in self.conn.execute(
+                "SELECT id, workspace_id, repo_id, session_id, scope, "
+                f"metadata, provenance FROM memories WHERE id IN ({marks})",
+                chunk,
+            ):
+                records[str(record["id"])] = record
+        valid = []
+        for row in rows:
+            first = records.get(row["a"])
+            second = records.get(row["b"])
+            if first is None or second is None:
+                continue
+            try:
+                self._validate_memory_link_owner_rows(
+                    first,
+                    second,
+                    str(row["relation"]),
+                    allow_scope_transition=True,
+                )
+            except ValueError:
+                continue
+            valid.append(row)
+        return valid
+
+    def _memory_link_endpoint_visibility(
+        self, flt: Optional[SearchFilter], *, include_invalid: bool,
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for alias in ("ma", "mb"):
+            where, values = self._where(
+                flt, include_invalid=include_invalid, alias=alias
+            )
+            clauses.extend(where)
+            params.extend(values)
+        ordinary = " AND ".join(clauses)
+        if include_invalid:
+            return ordinary, params
+
+        # Promotion and merge links intentionally keep retired source history
+        # queryable from the live successor. They still require both endpoints
+        # to satisfy every non-temporal scope/type predicate.
+        historical_clauses: list[str] = []
+        historical_params: list[Any] = []
+        for alias in ("ma", "mb"):
+            where, values = self._where(
+                flt, include_invalid=True, alias=alias
+            )
+            historical_clauses.extend(where)
+            historical_params.extend(values)
+        lineage = "l.relation IN ('promotes','merges')"
+        if historical_clauses:
+            lineage += " AND " + " AND ".join(historical_clauses)
+        return f"(({ordinary}) OR ({lineage}))", params + historical_params
+
     def add_link(self, a: str, b: str, relation: str = "related",
                  layer: Optional[GraphLayer] = None, reason: str = "",
                  *, valid_from: Optional[float] = None,
@@ -4592,10 +5317,18 @@ class Store:
                  valid_to_recorded_at: Optional[float] = None,
                  ingested_at: Optional[float] = None,
                  expired_at: Optional[float] = None,
-                 commit: bool = True) -> None:
+                 commit: bool = True,
+                 allow_scope_transition: bool = False) -> None:
         """Idempotent per (pair, relation): re-linking the same two memories with the
         same relation is a no-op in either direction, so auto-evolution and explicit
         ``engraphis_link`` calls can't accrete duplicate rows."""
+        valid_from = _finite_timestamp(valid_from, "valid_from")
+        valid_to = _finite_timestamp(valid_to, "valid_to")
+        valid_to_recorded_at = _finite_timestamp(
+            valid_to_recorded_at, "valid_to_recorded_at"
+        )
+        ingested_at = _finite_timestamp(ingested_at, "ingested_at")
+        expired_at = _finite_timestamp(expired_at, "expired_at")
         reject_secrets((("link reason", reason),))
         requested_layer = (
             normalize_graph_layer(layer, relation).value
@@ -4608,9 +5341,18 @@ class Store:
         if valid_to is not None and valid_to < world_start:
             raise ValueError("link valid_to cannot predate valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        savepoint = ""
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            savepoint = (
+                f"engraphis_add_link_{threading.get_ident()}_{time.monotonic_ns()}"
+            )
+            self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
+            self._validate_memory_link_endpoints(
+                a, b, relation, allow_scope_transition=allow_scope_transition
+            )
             # A sync bundle may carry a closed link interval.  It has no live row to
             # match below, so recognize an exact historical version before inserting
             # it again on every replay. ``IS`` deliberately gives NULL-safe equality.
@@ -4626,7 +5368,9 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if owns_transaction:
+                if savepoint:
+                    self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                elif owns_transaction:
                     self.conn.commit()
                 return
             existing = self.conn.execute(
@@ -4677,12 +5421,17 @@ class Store:
                             existing["valid_to_recorded_at"], stamp,
                         ),
                     )
-                    if commit:
+                    if savepoint:
+                        self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    elif commit:
                         self.conn.commit()
-                elif owns_transaction:
+                else:
                     # The pre-read reservation has no write to batch. Release it even
                     # for ``commit=False``; the old no-op path never opened a transaction.
-                    self.conn.commit()
+                    if savepoint:
+                        self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    elif owns_transaction:
+                        self.conn.commit()
                 return
             self.conn.execute(
                 "INSERT INTO mem_links("
@@ -4692,10 +5441,15 @@ class Store:
                 (a, b, relation, graph_layer, reason, stamp, world_start, valid_to,
                  valid_to_recorded_at, system_start, expired_at),
             )
-            if commit:
+            if savepoint:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif commit:
                 self.conn.commit()
         except BaseException:
-            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+            if savepoint and self.conn.transaction_owned_by_current_thread():
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -4706,7 +5460,8 @@ class Store:
                          valid_to_recorded_at: Optional[float] = None,
                          ingested_at: Optional[float] = None,
                          expired_at: Optional[float] = None,
-                         commit: bool = True) -> bool:
+                         commit: bool = True,
+                         allow_scope_transition: bool = False) -> bool:
         """Persist one exact temporal link version without collapsing live evidence.
 
         Normal :meth:`add_link` intentionally de-duplicates active relationships for
@@ -4715,6 +5470,13 @@ class Store:
         for a convergent historical graph. This method appends that exact observation and
         returns whether it was new, while replaying the same version remains a no-op.
         """
+        valid_from = _finite_timestamp(valid_from, "valid_from")
+        valid_to = _finite_timestamp(valid_to, "valid_to")
+        valid_to_recorded_at = _finite_timestamp(
+            valid_to_recorded_at, "valid_to_recorded_at"
+        )
+        ingested_at = _finite_timestamp(ingested_at, "ingested_at")
+        expired_at = _finite_timestamp(expired_at, "expired_at")
         reject_secrets((("link reason", reason),))
         graph_layer = normalize_graph_layer(layer, relation).value
         stamp = now_ts()
@@ -4723,9 +5485,19 @@ class Store:
         if valid_to is not None and valid_to < world_start:
             raise ValueError("link valid_to cannot predate valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        savepoint = ""
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            savepoint = (
+                f"engraphis_add_link_version_{threading.get_ident()}_"
+                f"{time.monotonic_ns()}"
+            )
+            self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
+            self._validate_memory_link_endpoints(
+                a, b, relation, allow_scope_transition=allow_scope_transition
+            )
             exact = self.conn.execute(
                 "SELECT 1 FROM mem_links "
                 "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
@@ -4738,7 +5510,9 @@ class Store:
                 ),
             ).fetchone()
             if exact is not None:
-                if owns_transaction:
+                if savepoint:
+                    self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                elif owns_transaction:
                     self.conn.commit()
                 return False
             self.conn.execute(
@@ -4749,11 +5523,16 @@ class Store:
                 (a, b, relation, graph_layer, reason, stamp, world_start, valid_to,
                  valid_to_recorded_at, system_start, expired_at),
             )
-            if commit:
+            if savepoint:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif commit:
                 self.conn.commit()
             return True
         except BaseException:
-            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+            if savepoint and self.conn.transaction_owned_by_current_thread():
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
 
@@ -4764,26 +5543,39 @@ class Store:
         Historical visibility remains available through ``get_links``/``links_among``.
         """
         sql = (
-            "SELECT 1 FROM mem_links WHERE ((a=? AND b=?) OR (a=? AND b=?)) "
+            "SELECT a, b, relation FROM mem_links "
+            "WHERE ((a=? AND b=?) OR (a=? AND b=?)) "
             "AND valid_to IS NULL AND expired_at IS NULL"
         )
         params: list[Any] = [a, b, b, a]
         if relation is not None:
             sql += " AND relation=?"
             params.append(relation)
-        return self.conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+        rows = [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        return bool(self._filter_memory_links_by_ownership(rows))
 
     def get_links(self, memory_id: str, *,
                   flt: Optional[SearchFilter] = None) -> list[dict]:
-        """Return direct links visible at the filter's bi-temporal anchors."""
-        visible_sql, params = _temporal_visibility_sql("", flt)
-        rows = self.conn.execute(
-            "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
-            "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
-            f"WHERE (a=? OR b=?) AND {visible_sql} ORDER BY a, b, relation",
-            (memory_id, memory_id, *params),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        """Return direct links only when both endpoints are visible to ``flt``."""
+        link_sql, link_params = _temporal_visibility_sql("l", flt)
+        endpoint_sql, endpoint_params = self._memory_link_endpoint_visibility(
+            flt, include_invalid=False
+        )
+        sql = (
+            "SELECT l.a, l.b, l.relation, l.layer, l.reason, l.created_at, "
+            "l.valid_from, l.valid_to, l.valid_to_recorded_at, l.ingested_at, "
+            "l.expired_at FROM mem_links AS l "
+            "JOIN memories AS ma ON ma.id=l.a "
+            "JOIN memories AS mb ON mb.id=l.b "
+            f"WHERE (l.a=? OR l.b=?) AND {link_sql}"
+        )
+        params: list[Any] = [memory_id, memory_id, *link_params]
+        if endpoint_sql:
+            sql += " AND " + endpoint_sql
+            params.extend(endpoint_params)
+        sql += " ORDER BY l.a, l.b, l.relation"
+        rows = [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        return self._filter_memory_links_by_ownership(rows)
 
     def edges_in_scope(self, flt: Optional[SearchFilter] = None,
                        *, at: Optional[float] = None,
@@ -4840,49 +5632,50 @@ class Store:
                     flt: Optional[SearchFilter] = None,
                     include_invalid: bool = False,
                     limit: Optional[int] = None) -> list[dict]:
-        """Return memory links visible under both temporal anchors.
-
-        ``include_invalid`` is for full-state replication only: a closed interval is
-        state that must synchronize even though normal graph reads do not expose it.
-
-        Chunk only the indexed ``a`` side and filter ``b`` against an in-memory set.
-        This keeps every statement below SQLite's portable variable limit while
-        preserving exact pair semantics for graphs containing thousands of memories.
-        """
-        if not ids:
-            return []
-        if layers is not None and not layers:
+        """Return links whose two endpoints and interval are visible to ``flt``."""
+        if not ids or (layers is not None and not layers):
             return []
         row_cap = None if limit is None else max(0, int(limit))
         if row_cap == 0:
             return []
         wanted = set(ids)
         ordered_ids = sorted(wanted)
-        visibility_sql, visibility_params = _temporal_visibility_sql("", flt)
+        visibility_sql, visibility_params = _temporal_visibility_sql("l", flt)
+        endpoint_sql, endpoint_params = self._memory_link_endpoint_visibility(
+            flt, include_invalid=include_invalid
+        )
         rows: list[dict] = []
-        # Leave headroom for the time anchor and optional layer parameters.
-        chunk_size = max(1, IN_CLAUSE_CHUNK - 16)
+        # Leave headroom for temporal, endpoint-scope, and layer parameters.
+        chunk_size = max(1, IN_CLAUSE_CHUNK - 32)
         for start in range(0, len(ordered_ids), chunk_size):
             if row_cap is not None and len(rows) >= row_cap:
                 break
             chunk = ordered_ids[start:start + chunk_size]
             marks = ",".join("?" for _ in chunk)
             sql = (
-                "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
-                "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
-                f"WHERE a IN ({marks})"
+                "SELECT l.a, l.b, l.relation, l.layer, l.reason, l.created_at, "
+                "l.valid_from, l.valid_to, l.valid_to_recorded_at, l.ingested_at, "
+                "l.expired_at FROM mem_links AS l "
+                "JOIN memories AS ma ON ma.id=l.a "
+                "JOIN memories AS mb ON mb.id=l.b "
+                f"WHERE l.a IN ({marks})"
             )
             params: list[Any] = [*chunk]
             if not include_invalid:
                 sql += f" AND {visibility_sql}"
                 params.extend(visibility_params)
+            if endpoint_sql:
+                sql += " AND " + endpoint_sql
+                params.extend(endpoint_params)
             if layers is not None:
                 layer_marks = ",".join("?" for _ in layers)
-                sql += f" AND layer IN ({layer_marks})"
+                sql += f" AND l.layer IN ({layer_marks})"
                 params.extend(_enum(layer) for layer in layers)
-            sql += " ORDER BY a, b, relation, valid_from, ingested_at"
-            found = self.conn.execute(sql, params).fetchall()
-            for row in found:
+            sql += " ORDER BY l.a, l.b, l.relation, l.valid_from, l.ingested_at"
+            found = [
+                dict(row) for row in self.conn.execute(sql, params).fetchall()
+            ]
+            for row in self._filter_memory_links_by_ownership(found):
                 if row["b"] not in wanted:
                     continue
                 rows.append(dict(row))
@@ -4896,48 +5689,54 @@ class Store:
                        include_invalid: bool = False,
                        limit: Optional[int] = None,
                        prompt_only: bool = False) -> list[dict]:
-        """Return visible links with at least one endpoint in ``ids``.
-
-        This bounded frontier expansion is distinct from :meth:`links_among`: graph
-        recall uses it to retain an unmentioned endpoint linked to an entity-attached
-        memory, without first materializing every memory in a large scope.
-        """
-        if not ids:
-            return []
-        if layers is not None and not layers:
+        """Return visible links touching ``ids`` without exposing a foreign endpoint."""
+        if not ids or (layers is not None and not layers):
             return []
         row_cap = None if limit is None else max(0, int(limit))
         if row_cap == 0:
             return []
         ordered_ids = sorted(set(ids))
-        visibility_sql, visibility_params = _temporal_visibility_sql("", flt)
+        visibility_sql, visibility_params = _temporal_visibility_sql("l", flt)
+        endpoint_sql, endpoint_params = self._memory_link_endpoint_visibility(
+            flt, include_invalid=include_invalid
+        )
         rows: list[dict] = []
         seen: set[tuple] = set()
-        # Each id appears once for each endpoint predicate; reserve parameters for
-        # time/layer filters so this remains under SQLite's portable bind limit.
-        chunk_size = max(1, (IN_CLAUSE_CHUNK - 16) // 2)
+        # Each seed appears in both endpoint predicates; reserve bindings for filters.
+        chunk_size = max(1, (IN_CLAUSE_CHUNK - 32) // 2)
         for start in range(0, len(ordered_ids), chunk_size):
             if row_cap is not None and len(rows) >= row_cap:
                 break
             chunk = ordered_ids[start:start + chunk_size]
             marks = ",".join("?" for _ in chunk)
             sql = (
-                "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
-                "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
-                f"WHERE (a IN ({marks}) OR b IN ({marks}))"
+                "SELECT l.a, l.b, l.relation, l.layer, l.reason, l.created_at, "
+                "l.valid_from, l.valid_to, l.valid_to_recorded_at, l.ingested_at, "
+                "l.expired_at FROM mem_links AS l "
+                "JOIN memories AS ma ON ma.id=l.a "
+                "JOIN memories AS mb ON mb.id=l.b "
+                f"WHERE (l.a IN ({marks}) OR l.b IN ({marks}))"
             )
             params: list[Any] = [*chunk, *chunk]
             if not include_invalid:
                 sql += f" AND {visibility_sql}"
                 params.extend(visibility_params)
+            if endpoint_sql:
+                sql += " AND " + endpoint_sql
+                params.extend(endpoint_params)
             if layers is not None:
                 layer_marks = ",".join("?" for _ in layers)
-                sql += f" AND layer IN ({layer_marks})"
+                sql += f" AND l.layer IN ({layer_marks})"
                 params.extend(_enum(layer) for layer in layers)
-            sql += " ORDER BY a, b, relation, valid_from, ingested_at"
+            sql += " ORDER BY l.a, l.b, l.relation, l.valid_from, l.ingested_at"
             found = [dict(row) for row in self.conn.execute(sql, params).fetchall()]
-            endpoint_ids = {endpoint for item in found for endpoint in (item["a"], item["b"])}
-            endpoint_records = self.get_memories(sorted(endpoint_ids)) if prompt_only else {}
+            found = self._filter_memory_links_by_ownership(found)
+            endpoint_ids = {
+                endpoint for item in found for endpoint in (item["a"], item["b"])
+            }
+            endpoint_records = (
+                self.get_memories(sorted(endpoint_ids)) if prompt_only else {}
+            )
             for item in found:
                 if prompt_only and not all(
                     (record := endpoint_records.get(endpoint))
@@ -5305,17 +6104,32 @@ class Store:
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def symbols_for_files(self, repo_id: str, files: list[str], *,
-                          flt: Optional[SearchFilter] = None) -> list[dict]:
-        if not files:
+                          flt: Optional[SearchFilter] = None,
+                          limit: Optional[int] = None) -> list[dict]:
+        """Return visible symbols for files, honoring a hard result sentinel."""
+        files = sorted(set(file for file in files if file))
+        if not files or (limit is not None and int(limit) <= 0):
             return []
-        marks = ",".join("?" for _ in files)
-        temporal, params = _temporal_visibility_sql("", flt)
-        rows = self.conn.execute(
-            f"SELECT * FROM symbols WHERE repo_id=? AND file IN ({marks}) "
-            f"AND {temporal} ORDER BY file, fqname",
-            (repo_id, *files, *params),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        result: list[dict] = []
+        for start in range(0, len(files), IN_CLAUSE_CHUNK):
+            chunk = files[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            temporal, params = _temporal_visibility_sql("", flt)
+            sql = (
+                f"SELECT * FROM symbols WHERE repo_id=? AND file IN ({marks}) "
+                f"AND {temporal} ORDER BY file, fqname, id"
+            )
+            query_params: list[Any] = [repo_id, *chunk, *params]
+            if limit is not None:
+                remaining = int(limit) - len(result)
+                if remaining <= 0:
+                    break
+                sql += " LIMIT ?"
+                query_params.append(remaining)
+            result.extend(
+                dict(row) for row in self.conn.execute(sql, query_params).fetchall()
+            )
+        return result
 
     def count_code_edges(self, repo_id: str) -> int:
         row = self.conn.execute(
@@ -6285,7 +7099,11 @@ class Store:
                 "budget_tokens", "packed_count", "omitted_count",
             ):
                 value = usage.get(key)
-                if type(value) in (int, float) and value >= 0:
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
                     target[key] += value
 
         for raw_row in rows:
@@ -6466,31 +7284,188 @@ class Store:
         if commit:
             self.conn.commit()
 
-    # ── sync tombstones (durable deletion markers that propagate) ───────────────
-    def add_memory_tombstone(self, memory_id: str, *, deleted_at: Optional[float] = None,
-                             device_id: Optional[str] = None,
-                             workspace_id: Optional[str] = None,
-                             repo_id: Optional[str] = None) -> None:
-        """Record that a memory id is dead (secure-erased) so sync can propagate it.
+    # ── durable sync-export proof ──────────────────────────────────────────────
 
-        Carries no user content — only the id, the erasure time, and the origin
-        device. Earliest ``deleted_at`` wins, exactly like the ``valid_to`` closure
-        lattice, so a replayed or stale erasure can never resurrect a memory or move
-        a tombstone later in time. The caller owns the transaction/commit.
+    def mark_memories_sync_exported(
+        self,
+        memory_ids: Iterable[str],
+        *,
+        workspace_id: str,
+        exported_at: Optional[float] = None,
+        commit: bool = True,
+    ) -> int:
+        """Atomically record content-free proof that eligible live rows were exported.
+
+        The bounded batch is intended to be called by the sync transaction only after
+        those exact ids have been selected for transfer.  Markers survive secure erase.
         """
-        ts = now_ts() if deleted_at is None else deleted_at
+        if isinstance(memory_ids, (str, bytes)):
+            raise TypeError("memory_ids must be an iterable of memory ids")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise ValueError("workspace_id must be a non-empty string")
+        unique: list[str] = []
+        seen: set[str] = set()
+        for memory_id in memory_ids:
+            if not isinstance(memory_id, str) or not memory_id:
+                raise ValueError("memory_ids must contain non-empty strings")
+            if memory_id in seen:
+                continue
+            seen.add(memory_id)
+            unique.append(memory_id)
+            if len(unique) > IN_CLAUSE_CHUNK:
+                raise ValueError(
+                    f"memory_ids may contain at most {IN_CLAUSE_CHUNK} unique entries"
+                )
+        if not unique:
+            return 0
+        ts = _finite_timestamp(
+            now_ts() if exported_at is None else exported_at, "exported_at"
+        )
+        if ts is None:
+            raise AssertionError("normalized exported_at unexpectedly became null")
+        with self._write_operation("mark_memories_sync_exported", commit=commit):
+            marks = ",".join("?" for _ in unique)
+            rows = self.conn.execute(
+                "SELECT id, workspace_id, repo_id, scope, sensitivity "
+                f"FROM memories WHERE id IN ({marks})",
+                unique,
+            ).fetchall()
+            by_id = {str(row["id"]): row for row in rows}
+            missing = [memory_id for memory_id in unique if memory_id not in by_id]
+            if missing:
+                raise ValueError("sync export marker targets must exist")
+            existing_rows = self.conn.execute(
+                "SELECT memory_id, workspace_id, repo_id, first_exported_at, "
+                f"last_exported_at FROM memory_sync_exports WHERE memory_id IN ({marks})",
+                unique,
+            ).fetchall()
+            existing_by_id = {
+                str(row["memory_id"]): row for row in existing_rows
+            }
+            for memory_id in unique:
+                row = by_id[memory_id]
+                if row["workspace_id"] != workspace_id:
+                    raise ValueError(
+                        "sync export marker workspace does not own every memory"
+                    )
+                scope = str(row["scope"] or "")
+                sensitivity = str(row["sensitivity"] or "secret")
+                if (
+                    scope not in (Scope.WORKSPACE.value, Scope.REPO.value)
+                    or sensitivity not in ("normal", "sensitive")
+                ):
+                    raise ValueError(
+                        "sync export markers require a shareable workspace/repo memory"
+                    )
+                if (
+                    scope == Scope.REPO.value
+                    and (not isinstance(row["repo_id"], str) or not row["repo_id"])
+                ):
+                    raise ValueError(
+                        "sync export markers require a valid repository owner"
+                    )
+                repo_id = row["repo_id"] if scope == Scope.REPO.value else None
+                existing = existing_by_id.get(memory_id)
+                if existing is None:
+                    first_exported_at = last_exported_at = ts
+                else:
+                    if existing["workspace_id"] != workspace_id:
+                        raise ValueError(
+                            "sync export marker conflicts with its existing workspace"
+                        )
+                    existing_repo = existing["repo_id"]
+                    if (
+                        existing_repo is not None
+                        and repo_id is not None
+                        and existing_repo != repo_id
+                    ):
+                        raise ValueError(
+                            "sync export marker cannot move between repositories"
+                        )
+                    if existing_repo is None or repo_id is None:
+                        repo_id = None
+                    existing_first = _finite_timestamp(
+                        existing["first_exported_at"], "first_exported_at"
+                    )
+                    existing_last = _finite_timestamp(
+                        existing["last_exported_at"], "last_exported_at"
+                    )
+                    if existing_first is None or existing_last is None:
+                        raise RuntimeError("stored sync export marker has null time")
+                    if existing_last < existing_first:
+                        raise RuntimeError("stored sync export marker has inverted time")
+                    first_exported_at = min(existing_first, ts)
+                    last_exported_at = max(existing_last, ts)
+                self.conn.execute(
+                    "INSERT INTO memory_sync_exports("
+                    "memory_id, workspace_id, repo_id, first_exported_at, last_exported_at"
+                    ") VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(memory_id) DO UPDATE SET "
+                    "workspace_id=excluded.workspace_id, repo_id=excluded.repo_id, "
+                    "first_exported_at=excluded.first_exported_at, "
+                    "last_exported_at=excluded.last_exported_at",
+                    (
+                        memory_id, workspace_id, repo_id,
+                        first_exported_at, last_exported_at,
+                    ),
+                )
+        return len(unique)
+
+    def get_memory_sync_export(self, memory_id: str) -> Optional[dict]:
+        """Return one content-free prior-export marker, if local proof exists."""
+        if not isinstance(memory_id, str) or not memory_id:
+            raise ValueError("memory_id must be a non-empty string")
+        row = self.conn.execute(
+            "SELECT memory_id, workspace_id, repo_id, first_exported_at, "
+            "last_exported_at FROM memory_sync_exports WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    # ── sync tombstones (durable deletion markers that propagate) ───────────────
+    def add_memory_tombstone(
+        self,
+        memory_id: str,
+        *,
+        deleted_at: Optional[float] = None,
+        device_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        repo_id: Optional[str] = None,
+        export_class: str = TOMBSTONE_NEVER_EXPORT,
+    ) -> None:
+        """Record one content-free erasure marker under a closed export policy.
+
+        Earliest ``deleted_at`` wins, exactly like the ``valid_to`` closure lattice.
+        ``never_export`` is terminal because its erased source classification can no
+        longer be reconstructed. ``remote_erasure`` is likewise monotonic: a stale
+        replay cannot retract a deletion already sent to peers. The caller owns the
+        transaction/commit.
+        """
+        ts = _finite_timestamp(
+            now_ts() if deleted_at is None else deleted_at, "deleted_at"
+        )
+        if (
+            not isinstance(export_class, str)
+            or export_class not in TOMBSTONE_EXPORT_CLASSES
+        ):
+            raise ValueError(
+                "export_class must be 'never_export' or 'remote_erasure'"
+            )
         did = device_id or self.device_id()
         existing = self.conn.execute(
-            "SELECT deleted_at, device_id, workspace_id, repo_id "
+            "SELECT deleted_at, device_id, workspace_id, repo_id, export_class "
             "FROM memory_tombstones WHERE memory_id=?",
             (memory_id,),
         ).fetchone()
         if existing is None:
             self.conn.execute(
                 "INSERT INTO memory_tombstones("
-                "memory_id, deleted_at, device_id, workspace_id, repo_id, created_at"
-                ") VALUES (?,?,?,?,?,?)",
-                (memory_id, ts, did, workspace_id, repo_id, ts),
+                "memory_id, deleted_at, device_id, workspace_id, repo_id, "
+                "export_class, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    memory_id, ts, did, workspace_id, repo_id,
+                    export_class, ts,
+                ),
             )
             return
         existing_workspace = existing["workspace_id"]
@@ -6507,7 +7482,12 @@ class Store:
             and existing_repo != repo_id
         ):
             raise ValueError("tombstone repository scope conflicts with existing marker")
-        earlier = float(ts) < float(existing["deleted_at"])
+        if ts is None:
+            raise AssertionError("normalized deleted_at unexpectedly became null")
+        existing_deleted_at = existing["deleted_at"]
+        if existing_deleted_at is None:
+            raise RuntimeError("stored tombstone deleted_at is null")
+        earlier = ts < float(existing_deleted_at)
         merged_workspace = (
             None
             if existing_workspace is None or workspace_id is None
@@ -6521,14 +7501,28 @@ class Store:
             if existing_repo is None or repo_id is None
             else existing_repo
         )
+        if (
+            existing["export_class"] == TOMBSTONE_NEVER_EXPORT
+            and export_class == TOMBSTONE_REMOTE_ERASURE
+        ):
+            raise ValueError("never_export tombstones cannot become remotely exportable")
+        merged_export_class = (
+            TOMBSTONE_REMOTE_ERASURE
+            if (
+                existing["export_class"] == TOMBSTONE_REMOTE_ERASURE
+                or export_class == TOMBSTONE_REMOTE_ERASURE
+            )
+            else TOMBSTONE_NEVER_EXPORT
+        )
         self.conn.execute(
             "UPDATE memory_tombstones SET deleted_at=?, device_id=?, "
-            "workspace_id=?, repo_id=? WHERE memory_id=?",
+            "workspace_id=?, repo_id=?, export_class=? WHERE memory_id=?",
             (
                 ts if earlier else existing["deleted_at"],
                 did if earlier else existing["device_id"],
                 merged_workspace,
                 merged_repo,
+                merged_export_class,
                 memory_id,
             ),
         )
@@ -6544,20 +7538,21 @@ class Store:
             raise ValueError("repo_id requires workspace_id")
         if workspace_id is None:
             rows = self.conn.execute(
-                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
-                "FROM memory_tombstones ORDER BY memory_id"
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id, "
+                "export_class FROM memory_tombstones ORDER BY memory_id"
             ).fetchall()
         elif repo_id is None:
             rows = self.conn.execute(
-                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
-                "FROM memory_tombstones WHERE workspace_id=? "
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id, "
+                "export_class FROM memory_tombstones WHERE workspace_id=? "
                 "ORDER BY memory_id",
                 (workspace_id,),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id "
-                "FROM memory_tombstones WHERE workspace_id=? AND (repo_id=? OR repo_id IS NULL) "
+                "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id, "
+                "export_class FROM memory_tombstones "
+                "WHERE workspace_id=? AND (repo_id=? OR repo_id IS NULL) "
                 "ORDER BY memory_id",
                 (workspace_id, repo_id),
             ).fetchall()
@@ -6567,21 +7562,29 @@ class Store:
                 "device": str(row["device_id"] or ""),
                 "workspace_id": row["workspace_id"],
                 "repo_id": row["repo_id"],
+                "export_class": str(row["export_class"]),
             }
             for row in rows
         ]
 
     def device_id(self) -> str:
-        """Stable per-database device id (minted once, then persistent). Attributes
-        sync bundles to their origin device so a store never re-applies its own
-        writes; it is local metadata, never memory, and only ever leaves the machine
-        inside a bundle header."""
-        owns_transaction = not self.conn.transaction_owned_by_current_thread()
-        did = self.get_sync_state("device_id")
-        if not did:
-            did = ids.new_id("device")
-            self.set_sync_state("device_id", did, commit=owns_transaction)
-        return did
+        """Return the one durable per-database sync origin, minting it atomically."""
+        existing = self.get_sync_state("device_id")
+        if existing:
+            return str(existing)
+        with self._write_operation("device_id", commit=True):
+            candidate = ids.new_id("device")
+            self.conn.execute(
+                "INSERT INTO sync_state(key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO NOTHING",
+                ("device_id", candidate, now_ts()),
+            )
+            row = self.conn.execute(
+                "SELECT value FROM sync_state WHERE key='device_id'"
+            ).fetchone()
+            if row is None or not row["value"]:
+                raise RuntimeError("device identity initialization produced no value")
+            return str(row["value"])
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _where(self, flt: Optional[SearchFilter], include_invalid: bool,
@@ -6660,6 +7663,29 @@ def _enum(v: Any) -> str:
     return v.value if hasattr(v, "value") else str(v)
 
 
+def _memory_descriptive_state(rec: MemoryRecord) -> tuple[Any, ...]:
+    """Return the fields governed by a memory's descriptive LWW clock."""
+    return (
+        rec.title,
+        rec.content,
+        rec.summary,
+        tuple(sorted(rec.keywords)),
+        rec.metadata,
+        _enum(rec.mtype),
+        _enum(rec.scope),
+        rec.importance,
+        rec.surprise,
+        rec.confidence,
+        rec.sensitivity,
+        rec.valid_from,
+        rec.ingested_at,
+        rec.session_id,
+        rec.provenance,
+        rec.subject_key,
+        rec.claim_kind,
+    )
+
+
 def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
     return MemoryRecord(
         id=row["id"], content=row["content"],
@@ -6679,6 +7705,9 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
             if "valid_to_recorded_at" in row.keys() else None
         ),
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
+        modified_hlc=(
+            row["modified_hlc"] if "modified_hlc" in row.keys() else ""
+        ),
         subject_key=row["subject_key"] if "subject_key" in row.keys() else "",
         claim_kind=row["claim_kind"] if "claim_kind" in row.keys() else "",
         pinned=bool(row["pinned"]), sensitivity=row["sensitivity"],

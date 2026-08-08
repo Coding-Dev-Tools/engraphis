@@ -3,7 +3,7 @@
 - list_documents(offset=..) with no limit generated invalid SQL (OFFSET without LIMIT).
 - GET /memory/documents/{id} without ?namespace looked up a nonexistent '_global' ns.
 - POST /memory/prune coerced an explicit minRetention=0.0 to 0.05 and over-pruned.
-- POST /memory/conversations crashed (500) on a user message missing 'content'.
+- POST /memory/conversations validates content and forwards the complete grounded history.
 - POST /memory/interactions recorded signals that never reinforced any memory.
 """
 import threading
@@ -40,6 +40,72 @@ def test_find_document_without_namespace(monkeypatch, tmp_path):
     assert mem_store.find_document("doc1") is not None
     assert mem_store.find_document("doc1", "vault") is not None
     assert mem_store.find_document("nope") is None
+
+
+def test_valid_zero_alias_values_are_forwarded(monkeypatch):
+    from engraphis.models import (
+        BatchDocumentsRequest,
+        DocumentItem,
+        InsertDocumentRequest,
+        RecallMemoriesRequest,
+        ThoughtRequest,
+    )
+    from engraphis.routes import memory as memory_routes
+
+    observed = {}
+
+    def capture_document(**kwargs):
+        observed["document"] = kwargs
+        return {"document_id": "doc"}
+
+    def capture_batch(items):
+        observed["batch"] = items
+        return {"accepted": [], "count": 0}
+
+    def capture_thought(**kwargs):
+        observed["thought"] = kwargs
+        return {}
+
+    def capture_recall(**kwargs):
+        observed["recall"] = kwargs
+        return {}
+
+    monkeypatch.setattr(
+        memory_routes.ingest_engine, "ingest_document", capture_document
+    )
+    monkeypatch.setattr(memory_routes.ingest_engine, "ingest_batch", capture_batch)
+    monkeypatch.setattr(
+        memory_routes.thoughts_engine, "synthesize_thoughts", capture_thought
+    )
+    monkeypatch.setattr(
+        memory_routes.recall_engine, "recall_by_retention", capture_recall
+    )
+
+    memory_routes.insert_document(InsertDocumentRequest(
+        title="title",
+        content="content",
+        namespace="ns",
+        created_at=0.0,
+        updated_at=0.0,
+    ))
+    memory_routes.insert_documents_batch(BatchDocumentsRequest(items=[
+        DocumentItem(
+            title="title",
+            content="content",
+            namespace="ns",
+            created_at=0.0,
+            updated_at=0.0,
+        )
+    ]))
+    memory_routes.recall_thoughts(ThoughtRequest(randomnessSeed=0))
+    memory_routes.recall_memories(RecallMemoriesRequest(namespace="ns", asOf=0.0))
+
+    assert observed["document"]["created_at"] == 0.0
+    assert observed["document"]["updated_at"] == 0.0
+    assert observed["batch"][0]["createdAt"] == 0.0
+    assert observed["batch"][0]["updatedAt"] == 0.0
+    assert observed["thought"]["randomness_seed"] == 0
+    assert observed["recall"]["as_of"] == 0.0
 
 
 def test_recall_master_none_namespace_recalls_across_all(monkeypatch, tmp_path):
@@ -143,14 +209,58 @@ def test_prune_honors_explicit_zero_threshold(monkeypatch, tmp_path):
                    json={"namespace": "ns", "minRetention": 0.0, "dryRun": True})
         assert r.status_code == 200, r.text
         data = r.json()["data"]
-        assert data.get("candidates", data.get("wouldDelete", 0)) == 0 or \
-            data.get("count", 0) == 0
+        assert data["matched"] == 0
+        assert data["deleted"] == 0
 
 
 def test_conversations_missing_content_is_400_not_500(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/memory/conversations", json={"messages": [{"role": "user"}]})
         assert r.status_code == 400
+
+
+def test_conversations_preserve_history_and_ground_latest_user(monkeypatch, tmp_path):
+    observed = {}
+
+    class _CapturingLLM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def chat(self, messages, **kwargs):
+            observed["messages"] = messages
+            observed["kwargs"] = kwargs
+            return "grounded answer"
+
+    def _recall(**kwargs):
+        observed["recall"] = kwargs
+        return {
+            "llmContextMessage": "The deployment region is eu-west-1.",
+            "count": 1,
+            "chunks": [{"documentId": "region"}],
+        }
+
+    monkeypatch.setattr("engraphis.routes.memory.LLMClient", _CapturingLLM)
+    monkeypatch.setattr("engraphis.routes.memory.recall_engine.recall", _recall)
+    history = [
+        {"role": "user", "content": "Where is the service?"},
+        {"role": "assistant", "content": "Which environment?"},
+        {"role": "user", "content": "Production."},
+    ]
+    with _client(monkeypatch, tmp_path) as c:
+        response = c.post("/memory/conversations", json={"messages": history})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["answer"] == "grounded answer"
+    assert observed["recall"]["prompt"] == "Production."
+    assert observed["messages"][:2] == history[:2]
+    grounded_user = observed["messages"][2]
+    assert grounded_user["role"] == "user"
+    assert "The deployment region is eu-west-1." in grounded_user["content"]
+    assert grounded_user["content"].endswith("Current user message:\nProduction.")
+    assert "untrusted" in observed["kwargs"]["system"]
 
 
 def test_query_context_does_not_echo_llm_exception_text(monkeypatch, tmp_path):
@@ -486,7 +596,7 @@ def test_duplicate_candidate_query_uses_indexed_ordering_without_temp_sort(monke
     assert conn.execute(global_sql, global_params).fetchone()["document_id"] == "latest-id"
 
 
-def test_duplicate_health_bounds_candidates_results_and_uses_worker(
+def test_duplicate_health_bounds_candidates_results_and_runs_off_loop(
     monkeypatch,
     tmp_path,
 ):
@@ -512,14 +622,6 @@ def test_duplicate_health_bounds_candidates_results_and_uses_worker(
         "all_vectors",
         lambda **_kwargs: pytest.fail("route must not load every vector"),
     )
-    worker_calls = []
-    real_worker = vault_routes.asyncio.to_thread
-
-    async def tracked_worker(function, *args):
-        worker_calls.append(function)
-        return await real_worker(function, *args)
-
-    monkeypatch.setattr(vault_routes.asyncio, "to_thread", tracked_worker)
     # The records above intentionally live in the v1 reference database.  Rebind
     # through the explicit factory only after presenting a distinct v2 database path.
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "current-v2.db"))
@@ -539,4 +641,5 @@ def test_duplicate_health_bounds_candidates_results_and_uses_worker(
     assert len(data["duplicates"]) == 2
     assert data["result_limit"] == 2
     assert data["truncated"] is True
-    assert worker_calls == [vault_routes._duplicate_pairs]
+    import inspect
+    assert inspect.iscoroutinefunction(vault_routes.find_duplicates) is False

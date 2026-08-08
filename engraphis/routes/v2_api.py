@@ -24,17 +24,20 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictInt
+from starlette.concurrency import run_in_threadpool
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
 from engraphis.service import (
+    DEFAULT_CODE_QUERY_CAPACITY,
     GraphIndexRebuilding,
     GraphSceneCapacityExceeded,
     MemoryService,
+    MAX_CODE_QUERY_CAPACITY,
     ValidationError,
 )
 from engraphis.core.store import _escape_like
@@ -45,6 +48,7 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
 
 _service: Optional[MemoryService] = None
+_SERVICE_LOCK = threading.RLock()
 _AUTOMATION_BOOTSTRAP_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _AUTOMATION_BOOTSTRAP_LOCKS_GUARD = threading.Lock()
 _KEYWORD_SCORE_SEMANTICS = {
@@ -111,38 +115,49 @@ def _sanitized_http_exception(status_code: object) -> HTTPException:
 def service() -> MemoryService:
     """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
     global _service
-    if _service is None:
-        _service = MemoryService.create(
-            settings.db_path, embed_model=settings.embed_model,
-            embed_revision=getattr(settings, "embed_revision", "") or None,
-            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-            embed_dim=settings.embed_dim or 384,
-            vector_backend=settings.vector_backend,
-            rerank_model=getattr(settings, "rerank_model", "") or None,
-            rerank_revision=getattr(settings, "rerank_revision", "") or None)
-    return _service
+    with _SERVICE_LOCK:
+        if _service is None:
+            _service = MemoryService.create(
+                settings.db_path, embed_model=settings.embed_model,
+                embed_revision=getattr(settings, "embed_revision", "") or None,
+                require_immutable_models=bool(
+                    getattr(settings, "require_immutable_models", False)
+                ),
+                embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
+                vector_backend=settings.vector_backend,
+                rerank_model=getattr(settings, "rerank_model", "") or None,
+                rerank_revision=getattr(settings, "rerank_revision", "") or None,
+            )
+        return _service
 
 
 def set_service(svc: Optional[MemoryService]) -> None:
-    """Inject a service (tests / the dashboard app).
-
-    Close the previously-bound service's store connection first so its SQLite/WAL
-    handle can't leak across injections and hold a lock on the DB file — under heavy
-    test churn a deferred GC close collided with the next MemoryService.create on the
-    same path and surfaced as an intermittent ``database is locked``."""
+    """Atomically replace the process-wide service after closing the prior instance."""
     global _service
-    prev = _service
-    if prev is svc:
-        return
-    if prev is not None:
-        store = getattr(prev, "store", None)
+    with _SERVICE_LOCK:
+        prev = _service
+        if prev is svc:
+            return
+        if prev is not None:
+            try:
+                prev.close()
+            except Exception as exc:  # noqa: BLE001 - preserve the prior live binding
+                logger.error("prior memory service close failed (%s)", type(exc).__name__)
+                raise RuntimeError("the prior memory service could not be closed") from None
+        _service = svc
+
+
+def release_service(svc: MemoryService) -> None:
+    """Close one app-owned service without clearing a newer process-wide binding."""
+    global _service
+    with _SERVICE_LOCK:
         try:
-            if store is not None:
-                store.close()
-        except Exception as exc:  # noqa: BLE001 - preserve the prior live binding
-            logger.error("prior memory service close failed (%s)", type(exc).__name__)
-            raise RuntimeError("the prior memory service could not be closed") from None
-    _service = svc
+            svc.close()
+        except Exception as exc:  # noqa: BLE001 - retain a failed live binding for retry
+            logger.error("memory service close failed (%s)", type(exc).__name__)
+            raise RuntimeError("the memory service could not be closed") from None
+        if _service is svc:
+            _service = None
 
 
 def _run(fn, *a, **k):
@@ -870,9 +885,22 @@ def llm_activity(workspace: Optional[str] = None,
             detail = {"mode": "llm_structured", "legacy": True}
         else:
             continue
-        structured = metadata.get("structured_extraction") or {}
-        entities = metadata.get("entities") or structured.get("entities") or []
-        relations = metadata.get("relations") or structured.get("relations") or []
+        raw_structured = metadata.get("structured_extraction")
+        structured = raw_structured if isinstance(raw_structured, dict) else {}
+        raw_unverified = metadata.get("unverified_derived_graph")
+        unverified = raw_unverified if isinstance(raw_unverified, dict) else {}
+        entities = (
+            metadata.get("entities")
+            or structured.get("entities")
+            or unverified.get("entities")
+            or []
+        )
+        relations = (
+            metadata.get("relations")
+            or structured.get("relations")
+            or unverified.get("relations")
+            or []
+        )
         activities.append({
             "id": record["id"],
             "title": record["title"] or "",
@@ -996,43 +1024,119 @@ def workspaces_import_folder(req: _ImportFolderReq):
                 derive_facts=req.derive_facts)
 
 
-@router.post("/workspaces/import-files")
-async def workspaces_import_files(workspace: str = Form(...),
-                                  memory_type: str = Form("semantic"),
-                                  derive_facts: bool = Form(False),
-                                  files: list[UploadFile] = File(...)):
-    """Drag-and-drop / picked-file upload counterpart to import-folder (see
-    MemoryService.import_files). Each upload is read bounded by
-    ``MemoryService.MAX_IMPORT_RESOURCE_BYTES`` — a resource bound, not a
-    security boundary (see that constant's docstring); the rest of validation is
-    transport-agnostic and lives in the service layer, same as every other write."""
+_IMPORT_FILES_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["workspace", "files"],
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "memory_type": {"type": "string", "default": "semantic"},
+                        "derive_facts": {"type": "boolean", "default": False},
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def _multipart_bool(value: object, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "on", "yes"}:
+            return True
+        if normalized in {"0", "false", "off", "no", ""}:
+            return False
+    raise HTTPException(status_code=422, detail={
+        "error": f"{field} must be a boolean",
+    })
+
+
+async def _import_uploaded_files(
+    *, workspace: str, memory_type: str, derive_facts: bool, files: list,
+):
     from engraphis.service import (
         MAX_IMPORT_FILES,
         MAX_IMPORT_RESOURCE_BYTES,
         MAX_IMPORT_TOTAL_BYTES,
     )
+
     if len(files) > MAX_IMPORT_FILES:
         raise HTTPException(status_code=413, detail={
             "error": f"too many files (max {MAX_IMPORT_FILES})"
         })
     payload = []
     total = 0
-    for f in files:
+    for uploaded in files:
+        if not callable(getattr(uploaded, "read", None)):
+            raise HTTPException(status_code=422, detail={
+                "error": "files must contain uploads",
+            })
         remaining = MAX_IMPORT_TOTAL_BYTES - total
-        raw = await f.read(min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1)
+        raw = await uploaded.read(
+            min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1
+        )
         if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
             raise HTTPException(status_code=413, detail={
-                "error": f"{f.filename or 'file'} is too large"
+                "error": f"{getattr(uploaded, 'filename', '') or 'file'} is too large"
             })
         if len(raw) > remaining:
             raise HTTPException(status_code=413, detail={
                 "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
             })
         total += len(raw)
-        payload.append({"name": f.filename or "untitled",
-                        "data": raw})
-    return _run(service().import_files, workspace=workspace, files=payload,
-                memory_type=memory_type, derive_facts=derive_facts)
+        payload.append({
+            "name": getattr(uploaded, "filename", "") or "untitled",
+            "data": raw,
+        })
+    return await run_in_threadpool(
+        _run,
+        service().import_files,
+        workspace=workspace,
+        files=payload,
+        memory_type=memory_type,
+        derive_facts=derive_facts,
+    )
+
+
+@router.post("/workspaces/import-files", openapi_extra=_IMPORT_FILES_OPENAPI)
+async def workspaces_import_files(request: Request):
+    """Parse uploads under transport-level part/file ceilings before service work."""
+    from engraphis.service import MAX_IMPORT_FILES, MAX_NAME_CHARS
+
+    async with request.form(
+        max_files=MAX_IMPORT_FILES,
+        max_fields=3,
+        max_part_size=MAX_NAME_CHARS * 4,
+    ) as form:
+        workspace = form.get("workspace")
+        memory_type = form.get("memory_type", "semantic")
+        if not isinstance(workspace, str) or not workspace:
+            raise HTTPException(status_code=422, detail={
+                "error": "workspace is required",
+            })
+        if not isinstance(memory_type, str):
+            raise HTTPException(status_code=422, detail={
+                "error": "memory_type must be text",
+            })
+        return await _import_uploaded_files(
+            workspace=workspace,
+            memory_type=memory_type,
+            derive_facts=_multipart_bool(
+                form.get("derive_facts", "false"), field="derive_facts"
+            ),
+            files=list(form.getlist("files")),
+        )
 
 
 class _PostgresImportReq(BaseModel):
@@ -1546,6 +1650,7 @@ class _MergeReq(BaseModel):
     workspace: Optional[str] = None
     title: Optional[str] = None
     memory_type: Optional[str] = None
+    scope: Optional[str] = None
     reason: str = "merged in dashboard"
 
 
@@ -1556,8 +1661,10 @@ def merge(req: _MergeReq):
     supersedes them — the multi-input sibling of /correct. Validation, workspace
     authorization, and the safety inheritance rules all live in MemoryService.merge."""
     ws = req.workspace or _default_ws()
-    return _run(service().merge, req.ids, req.content, workspace=ws,
-                title=req.title, mtype=req.memory_type, reason=req.reason)
+    return _run(
+        service().merge, req.ids, req.content, workspace=ws, title=req.title,
+        mtype=req.memory_type, scope=req.scope, reason=req.reason,
+    )
 
 
 # ── agent connect (Team) ───────────────────────────────────────────────────────
@@ -1704,7 +1811,6 @@ class _ConsolidateReq(BaseModel):
     dry_run: bool = True
     infer: bool = False
     structured: bool = False
-    supersede_sources: bool = False
 
 
 @router.post("/consolidate")
@@ -1718,7 +1824,7 @@ def consolidate(req: _ConsolidateReq):
         })
     ws = req.workspace or _default_ws()
     return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer,
-                structured=req.structured, supersede_sources=req.supersede_sources)
+                structured=req.structured)
 
 
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
@@ -1825,13 +1931,8 @@ class _AutomationReq(BaseModel):
 
 @router.get("/automation")
 def automation_get(workspace: Optional[str] = None):
-    """Read or provision the cloud-authoritative managed-maintenance policy."""
-    from engraphis.cloud_features import (
-        CloudFeatureClient,
-        automation_bootstrap_phase,
-        build_managed_snapshot,
-        save_automation_bootstrap_phase,
-    )
+    """Read the cloud-authoritative managed-maintenance policy without mutating it."""
+    from engraphis.cloud_features import CloudFeatureClient
 
     ws = _require_ws(workspace)
     workspace_id = service()._lookup_workspace(ws)
@@ -1842,60 +1943,10 @@ def automation_get(workspace: Optional[str] = None):
         })
     cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
     policy = _managed_call(cloud.get_policy, workspace_id)
-    # Version zero is the Cloud's explicit "no policy has ever been saved" sentinel.  Start
-    # new Pro/Team workspaces on the recommended maintenance cadence immediately: the account
-    # connection already authorizes managed compute, and a customer should not need to discover
-    # an extra enable switch.  A persisted disabled policy has version >= 1, so an intentional
-    # pause is never overwritten.
     try:
         unconfigured = int(policy.get("version", -1)) == 0
     except (AttributeError, TypeError, ValueError, OverflowError):
         unconfigured = False
-    if unconfigured:
-        bootstrap_workspace_id = workspace_id
-        default_policy = {
-            "enabled": True,
-            "cadence_minutes": 1440,
-            "dream_enabled": True,
-            "dream_min_new": 25,
-            "dream_idle_minutes": 15,
-            "infer": False,
-        }
-        # Snapshot upload and policy persistence are separate private-service calls. Record
-        # the completed upload locally before saving the policy so a transient failure of
-        # that second call resumes at the policy step instead of uploading memory again
-        # and consuming another generation on every dashboard refresh.
-        with _automation_bootstrap_lock(cloud.organization_id, bootstrap_workspace_id):
-            phase = automation_bootstrap_phase(
-                service(), cloud.organization_id, bootstrap_workspace_id
-            )
-            if phase == "policy_saved":
-                # The initial GET observed version zero before the other tab completed its
-                # bootstrap. The durable phase is authoritative: do not upload or resave.
-                # ``version`` must not remain the Cloud's stale zero sentinel, or the follower
-                # would render an enabled schedule as unconfigured until its next refresh.
-                policy = {**default_policy, "version": 1}
-            else:
-                if phase != "snapshot_uploaded":
-                    workspace_id, snapshot = _managed_call(build_managed_snapshot, service(), ws)
-                    receipt = _managed_call(cloud.upload_snapshot, workspace_id, snapshot)
-                    generation = (
-                        receipt.get("generation", snapshot["generation"])
-                        if isinstance(receipt, dict)
-                        else snapshot["generation"]
-                    )
-                    save_automation_bootstrap_phase(
-                        service(),
-                        cloud.organization_id,
-                        bootstrap_workspace_id,
-                        "snapshot_uploaded",
-                        generation=int(generation),
-                    )
-                saved = _managed_call(cloud.save_policy, workspace_id, default_policy)
-                save_automation_bootstrap_phase(
-                    service(), cloud.organization_id, bootstrap_workspace_id, "policy_saved"
-                )
-                policy = {**default_policy, **(saved if isinstance(saved, dict) else {})}
     recent = _managed_call(cloud.list_jobs, workspace_id, limit=10)
     recent_jobs = recent.get("jobs") if isinstance(recent, dict) else []
     if not isinstance(recent_jobs, list):
@@ -1916,7 +1967,74 @@ def automation_get(workspace: Optional[str] = None):
         "recent_jobs": recent_jobs,
         "next_run_at": policy.get("next_run_at"),
         "version": policy.get("version", 0),
+        "bootstrap_required": unconfigured,
     }
+
+
+@router.post("/automation/bootstrap")
+def automation_bootstrap(workspace: Optional[str] = None):
+    """Explicitly provision a new workspace's hosted snapshot and default policy."""
+    from engraphis.cloud_features import (
+        CloudFeatureClient,
+        automation_bootstrap_phase,
+        build_managed_snapshot,
+        save_automation_bootstrap_phase,
+    )
+
+    ws = _require_ws(workspace)
+    bootstrap_workspace_id = service()._lookup_workspace(ws)
+    if not bootstrap_workspace_id:
+        raise HTTPException(status_code=404, detail={
+            "error": "The selected workspace does not exist.",
+            "managed_cloud": True,
+        })
+    cloud = _managed_call(CloudFeatureClient.from_environment, bootstrap_workspace_id)
+    default_policy = {
+        "enabled": True,
+        "cadence_minutes": 1440,
+        "dream_enabled": True,
+        "dream_min_new": 25,
+        "dream_idle_minutes": 15,
+        "infer": False,
+    }
+    with _automation_bootstrap_lock(cloud.organization_id, bootstrap_workspace_id):
+        policy = _managed_call(cloud.get_policy, bootstrap_workspace_id)
+        try:
+            unconfigured = int(policy.get("version", -1)) == 0
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            unconfigured = False
+        if unconfigured:
+            phase = automation_bootstrap_phase(
+                service(), cloud.organization_id, bootstrap_workspace_id
+            )
+            if phase != "policy_saved":
+                if phase != "snapshot_uploaded":
+                    workspace_id, snapshot = _managed_call(
+                        build_managed_snapshot, service(), ws
+                    )
+                    receipt = _managed_call(
+                        cloud.upload_snapshot, workspace_id, snapshot
+                    )
+                    generation = (
+                        receipt.get("generation", snapshot["generation"])
+                        if isinstance(receipt, dict)
+                        else snapshot["generation"]
+                    )
+                    save_automation_bootstrap_phase(
+                        service(),
+                        cloud.organization_id,
+                        bootstrap_workspace_id,
+                        "snapshot_uploaded",
+                        generation=int(generation),
+                    )
+                _managed_call(cloud.save_policy, bootstrap_workspace_id, default_policy)
+                save_automation_bootstrap_phase(
+                    service(),
+                    cloud.organization_id,
+                    bootstrap_workspace_id,
+                    "policy_saved",
+                )
+    return automation_get(workspace=ws)
 
 
 @router.post("/automation")
@@ -2269,6 +2387,9 @@ class _CodePathReq(BaseModel):
     source: str
     target: str
     max_depth: int = Field(default=8, ge=1, le=32)
+    capacity: int = Field(
+        default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
+    )
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
@@ -2278,8 +2399,8 @@ class _CodePathReq(BaseModel):
 def code_path(req: _CodePathReq):
     return _run(
         service().code_path, req.source, req.target, workspace=req.workspace,
-        repo=req.repo, max_depth=req.max_depth, as_of=req.as_of,
-        valid_at=req.valid_at, known_at=req.known_at,
+        repo=req.repo, max_depth=req.max_depth, capacity=req.capacity,
+        as_of=req.as_of, valid_at=req.valid_at, known_at=req.known_at,
     )
 
 
@@ -2287,6 +2408,9 @@ class _CodeImpactReq(BaseModel):
     workspace: str
     repo: str
     changed_files: list[str]
+    capacity: int = Field(
+        default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
+    )
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
@@ -2296,18 +2420,23 @@ class _CodeImpactReq(BaseModel):
 def code_impact(req: _CodeImpactReq):
     return _run(
         service().code_impact, req.changed_files,
-        workspace=req.workspace, repo=req.repo, as_of=req.as_of,
-        valid_at=req.valid_at, known_at=req.known_at,
+        workspace=req.workspace, repo=req.repo, capacity=req.capacity,
+        as_of=req.as_of, valid_at=req.valid_at, known_at=req.known_at,
     )
 
 
 @router.get("/code/export")
 def code_export(workspace: str, repo: str,
+                capacity: int = Query(
+                    default=DEFAULT_CODE_QUERY_CAPACITY,
+                    ge=1,
+                    le=MAX_CODE_QUERY_CAPACITY,
+                ),
                 as_of: Optional[float] = None,
                 valid_at: Optional[float] = None,
                 known_at: Optional[float] = None):
     return _run(
-        service().export_code_graph, workspace=workspace, repo=repo,
+        service().export_code_graph, workspace=workspace, repo=repo, capacity=capacity,
         as_of=as_of, valid_at=valid_at, known_at=known_at,
     )
 
@@ -2441,25 +2570,13 @@ def _entitlement_cache_path() -> Optional["Path"]:
 
 
 def _cloud_control_url() -> str:
-    """Return the configured control-plane base URL, or ``""``. Never raises.
-
-    ``cloud_session`` exposes no public accessor for the saved endpoint, so the saved
-    record is read through its loader defensively: a rename degrades to "not configured",
-    which merely skips the refresh rather than breaking the boot path.
-    """
-
-    value = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
-    if value:
-        return value.rstrip("/")
+    """Return the control URL bound to the credential family selected for this call."""
     try:
-        from engraphis import cloud_session
-        loader = getattr(cloud_session, "_load", None)
-        saved = loader() if loader is not None else None
+        from engraphis.cloud_session import credential_bound_control_url
+
+        return str(credential_bound_control_url() or "").strip().rstrip("/")
     except Exception:  # noqa: BLE001 - an unreadable session is simply "not configured"
         return ""
-    if not isinstance(saved, dict):
-        return ""
-    return str(saved.get("control_url") or "").strip().rstrip("/")
 
 
 def _configured_organization_id() -> str:
@@ -3547,12 +3664,26 @@ def _sync_all(svc) -> dict:
             logger.error("sync workspace failed (%s)", type(exc).__name__)
             errors.append({"workspace": name, "error": "sync workspace failed"})
             continue
-        succeeded += 1
         exported += int(rep.get("exported_memories", 0) or 0)
         for a in rep.get("applied") or []:
-            dev = a.get("from_device")
-            if dev and dev != "?" and "error" not in a:
+            dev = a.get("from_device") if isinstance(a, dict) else None
+            if (
+                isinstance(dev, str)
+                and dev
+                and dev != "?"
+                and "error" not in a
+            ):
                 peer_devices.add(dev)
+        if rep.get("complete") is True:
+            succeeded += 1
+        else:
+            round_errors = rep.get("errors")
+            failed_items = len(round_errors) if isinstance(round_errors, list) else 1
+            errors.append({
+                "workspace": name,
+                "error": "sync round incomplete",
+                "failed_items": max(1, min(failed_items, 10_000)),
+            })
         for k in totals:
             totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
 
@@ -3614,7 +3745,7 @@ async def sync_run():
         first = authorization_errors[0]
         raise HTTPException(status_code=first["status"], detail={
             "error": first["error"], "upgrade_url": licensing.upgrade_url()})
-    return {"ok": True, "summary": summary}
+    return {"ok": not summary["errors"], "summary": summary}
 
 
 class _SyncTokenReq(BaseModel):

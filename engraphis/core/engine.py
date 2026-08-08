@@ -21,13 +21,10 @@ import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
-from engraphis.backends.embedder_st import get_embedder
-from engraphis.backends.reranker import IdentityReranker, get_reranker
-from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
@@ -42,6 +39,7 @@ from engraphis.core.interfaces import (
     embedder_capabilities,
     embedding_space_fingerprint,
     vector_index_requires_sync,
+    vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -51,6 +49,7 @@ from engraphis.core.poisoning import (
     assess_untrusted_payload,
     inspection_eligible,
     metadata_is_quarantined,
+    pending_llm_extraction_envelope,
     prompt_eligible,
     provenance_is_approved,
 )
@@ -69,7 +68,7 @@ from engraphis.core.resolve import (
     resolve,
 )
 from engraphis.core.secrets import reject_secrets
-from engraphis.core.store import Store, _dumps, memory_matches_filter, now_ts
+from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 
@@ -89,6 +88,16 @@ def _safe_upsert(index, ids, vecs, meta=None, *, commit=True):
 
 logger = logging.getLogger("engraphis.core.engine")
 
+_ENGINE_FACTORY: Optional[Callable] = None
+
+
+def configure_engine_factory(factory: Callable) -> None:
+    """Install the outer composition provider used by ``MemoryEngine.create``."""
+    if not callable(factory):
+        raise TypeError("engine factory must be callable")
+    global _ENGINE_FACTORY
+    _ENGINE_FACTORY = factory
+
 BEST_EFFORT_FAILURE_WARNING_INTERVAL_SECONDS = 60.0
 
 # Sensitivity lattice: a merge keeps the *most restrictive* label of its sources, so
@@ -100,6 +109,11 @@ _SCOPE_RANK = {
     Scope.WORKSPACE: 2,
     Scope.USER: 3,
 }
+
+_USER_SCOPE_WRITE_ERROR = (
+    "user scope is not supported until owner-aware memories are implemented; "
+    "use workspace, repo, or session"
+)
 
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
@@ -120,10 +134,13 @@ CONFLICT_CONFIDENCE_FACTOR = 0.8
 # provenance.source="structured_extractor" label — i.e. "a configured Extractor produced
 # this". See _has_structured_graph_metadata / _trusted_graph_hints.
 GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
+_INTERNAL_DERIVED_GRAPH_KEY = "unverified_derived_graph"
 # Extractors produce these bounded metadata shapes.  Everything else in an
 # ``ExtractedFact.metadata`` mapping is untrusted extension data and must not
 # override the service-owned ingress envelope (notably provenance/quarantine).
-EXTRACTOR_METADATA_KEYS = frozenset((*GRAPH_HINT_KEYS, "chunking", "llm_extraction"))
+EXTRACTOR_METADATA_KEYS = frozenset(
+    (*GRAPH_HINT_KEYS, "chunking", "llm_extraction", "extraction_fallback")
+)
 
 # code↔memory linking (see _CodeSymbolMatcher / _link_memory_to_code)
 CODE_LINK_MAX_LINKS = 200      # per-memory fan-out cap (unchanged behaviour)
@@ -141,6 +158,20 @@ _WORD_CHAR_RE = re.compile(r"\w")
 # Default payload caps for export_code_graph — mirrors MemoryService.graph(), which caps
 # nodes and edges because the export is reachable at the lowest ('viewer') role.
 CODE_EXPORT_DEFAULT_LIMIT = 5_000
+CODE_TRAVERSAL_DEFAULT_CAPACITY = 10_000
+CODE_TRAVERSAL_MAX_CAPACITY = 50_000
+
+
+def _code_traversal_capacity(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("capacity must be an integer between 1 and 50000")
+    try:
+        capacity = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("capacity must be an integer between 1 and 50000") from exc
+    if capacity < 1 or capacity > CODE_TRAVERSAL_MAX_CAPACITY:
+        raise ValueError("capacity must be between 1 and 50000")
+    return capacity
 CODE_EXPORT_MAX_LIMIT = 20_000
 
 
@@ -218,7 +249,15 @@ def _rehome_untrusted_graph_hints(metadata: dict,
     re-homed at either layer has no hint keys left to relabel at the other.
     """
     vouched = trusted or frozenset()
-    untrusted = [k for k in GRAPH_HINT_KEYS if k in metadata and k not in vouched]
+    # The deferred review envelope is also internal. A direct caller must not be able
+    # to pre-seed it and have a genuine LLM activity marker relabel that payload as
+    # model-derived evidence. Internal producers vouch for it out of band just like
+    # executable graph hints.
+    caller_graph_keys = (*GRAPH_HINT_KEYS, _INTERNAL_DERIVED_GRAPH_KEY)
+    untrusted = [
+        key for key in caller_graph_keys
+        if key in metadata and key not in vouched
+    ]
     if not untrusted:
         return metadata
     out = {k: v for k, v in metadata.items() if k not in untrusted}
@@ -244,6 +283,21 @@ def _required_memory_workspace_id(record: MemoryRecord) -> str:
     if not isinstance(workspace_id, str) or not workspace_id:
         raise RuntimeError(f"memory {record.id!r} has no workspace id")
     return workspace_id
+
+
+def _governable_source(record: MemoryRecord, *, at: float) -> bool:
+    """Accept current truth and quarantined evidence for governed derivations."""
+    if record.expired_at is not None:
+        return False
+    if (
+        metadata_is_quarantined(record.metadata)
+        or bool((record.provenance or {}).get("quarantined"))
+    ):
+        return True
+    return (
+        (record.valid_from is None or record.valid_from <= at)
+        and (record.valid_to is None or record.valid_to > at)
+    )
 
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
     """The nearest scope ``remember()`` will actually accept for ``repo_id``.
@@ -360,36 +414,61 @@ class _CodeSymbolMatcher:
 
 
 class MemoryEngine:
-    def __init__(self, store: Store, embedder, vector_index, reranker=None,
-                 *, auto_evolve: bool = True, extractor=None,
-                 graph_extractor=None, retention_supervisor=None,
-                 allow_automatic_critical_retention: bool = False,
-                 graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
-                 query_planner: Optional[QueryPlanner] = None) -> None:
+    def __init__(
+        self,
+        store: Store,
+        embedder,
+        vector_index,
+        reranker=None,
+        *,
+        auto_evolve: bool = True,
+        extractor=None,
+        graph_extractor=None,
+        graph_feeder: Optional[Callable] = None,
+        retention_supervisor=None,
+        allow_automatic_critical_retention: bool = False,
+        graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
+        query_planner: Optional[QueryPlanner] = None,
+        code_indexer_factory: Optional[Callable] = None,
+        code_language_detector: Optional[Callable] = None,
+        code_source_iterator: Optional[Callable] = None,
+        code_source_policy: Optional[Callable] = None,
+        code_walk_limit_error=RuntimeError,
+    ) -> None:
         self.store = store
         self.embedder = embedder
         self.embedding_space = embedding_space_fingerprint(embedder)
         self.index = vector_index
-        self.reranker = reranker or IdentityReranker()
+        self.reranker = reranker
         self.recall_engine = RecallEngine(
             store,
             embedder,
             vector_index,
-            self.reranker,
+            reranker,
             graph_traversal_policy=graph_traversal_policy,
             query_planner=query_planner,
         )
         # Memory evolution (A-MEM-style): writing a new note also updates
         # how its neighbors are connected, so the network improves bidirectionally.
         self.auto_evolve = auto_evolve
-        # Optional fact extractor (core.interfaces.Extractor). None = raw passthrough.
+        # Optional implementations are injected by the outer package factory. Core owns
+        # policy and orchestration, never concrete backend selection.
         self.extractor = extractor
-        # Optional graph extractor (backends.graph_extractor). None = no graph population.
         self.graph_extractor = graph_extractor
+        self.graph_feeder = graph_feeder
+        if graph_extractor is not None and graph_feeder is None:
+            raise ValueError("graph_extractor requires an injected graph_feeder")
         self.retention_supervisor = retention_supervisor
+        self._code_indexer_factory = code_indexer_factory
+        self._code_language_detector = code_language_detector
+        self._code_source_iterator = code_source_iterator
+        self._code_source_policy = code_source_policy
+        self._code_walk_limit_error = code_walk_limit_error
         # A remote classifier is advisory. It cannot silently grant the long-lived
         # "critical" class unless the host deliberately opts into that policy.
-        self.allow_automatic_critical_retention = bool(allow_automatic_critical_retention)
+        self.allow_automatic_critical_retention = bool(
+            allow_automatic_critical_retention
+        )
         # Serializes the resolve→insert critical section of the write path (see
         # remember_with_resolution). RLock: ingest()/import paths may nest writes.
         self._write_lock = threading.RLock()
@@ -402,6 +481,43 @@ class MemoryEngine:
         # repo_id -> (symbol-set fingerprint, _CodeSymbolMatcher). Bounded; see
         # _code_matcher for the invalidation contract.
         self._code_matchers: dict = {}
+        self._resource_lock = threading.Lock()
+        self._owned_resources: tuple[Any, ...] = (store,)
+        self._closed = False
+
+    def _adopt_resources(self, resources: list[Any]) -> None:
+        """Take ownership of factory-created collaborators after composition succeeds."""
+        with self._resource_lock:
+            if self._closed:
+                raise RuntimeError("cannot transfer resources to a closed MemoryEngine")
+            self._owned_resources = tuple(resources)
+
+    def close(self) -> None:
+        """Close every owned collaborator exactly once, with the Store last."""
+        with self._resource_lock:
+            if self._closed:
+                return
+            self._closed = True
+            resources = self._owned_resources
+            self._owned_resources = ()
+
+        first_error: Optional[BaseException] = None
+        seen: set[int] = set()
+        for resource in reversed(resources):
+            identity = id(resource)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def _warn_redacted_failure(self, operation: str, exc: Exception) -> None:
         """Log bounded, payload-free warnings for non-fatal derived-work failures."""
@@ -429,50 +545,53 @@ class MemoryEngine:
             logger.warning("%s failed (%s)", operation, type(exc).__name__)
 
     @classmethod
-    def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
-               embed_revision: Optional[str] = None,
-               require_immutable_models: Optional[bool] = None,
-               embed_dim: int = 384, vector_backend: str = "numpy",
-               rerank_model: Optional[str] = None,
-               rerank_revision: Optional[str] = None, extractor: str = "none",
-               graph_extractor: str = "none",
-               retention_supervisor: str = "none",
-               allow_automatic_critical_retention: bool = False,
-               auto_evolve: bool = True, connect=None,
-               graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
-               query_planner: Optional[QueryPlanner] = None) -> "MemoryEngine":
-        from engraphis.backends.extractor import PassthroughExtractor, get_extractor
-        from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
-        from engraphis.backends.retention import get_retention_supervisor
-        store = Store(db_path, connect=connect)
-        embedder = get_embedder(
-            embed_model,
-            embed_dim,
-            revision=embed_revision,
+    def create(
+        cls,
+        db_path: str = ":memory:",
+        *,
+        embed_model: Optional[str] = None,
+        embed_revision: Optional[str] = None,
+        require_immutable_models: Optional[bool] = None,
+        embed_dim: int = 384,
+        vector_backend: str = "numpy",
+        rerank_model: Optional[str] = None,
+        rerank_revision: Optional[str] = None,
+        extractor: str = "none",
+        graph_extractor: str = "none",
+        retention_supervisor: str = "none",
+        allow_automatic_critical_retention: bool = False,
+        auto_evolve: bool = True,
+        connect=None,
+        graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
+        query_planner: Optional[QueryPlanner] = None,
+        read_only: bool = False,
+    ) -> "MemoryEngine":
+        """Compose the default engine through the package-level backend provider."""
+        if _ENGINE_FACTORY is None:
+            raise RuntimeError(
+                "no MemoryEngine factory is configured; import the engraphis package "
+                "or inject dependencies into MemoryEngine directly"
+            )
+        return _ENGINE_FACTORY(
+            engine_cls=cls,
+            db_path=db_path,
+            embed_model=embed_model,
+            embed_revision=embed_revision,
             require_immutable_models=require_immutable_models,
+            embed_dim=embed_dim,
+            vector_backend=vector_backend,
+            rerank_model=rerank_model,
+            rerank_revision=rerank_revision,
+            extractor=extractor,
+            graph_extractor=graph_extractor,
+            retention_supervisor=retention_supervisor,
+            allow_automatic_critical_retention=allow_automatic_critical_retention,
+            auto_evolve=auto_evolve,
+            connect=connect,
+            graph_traversal_policy=graph_traversal_policy,
+            query_planner=query_planner,
+            read_only=read_only,
         )
-        index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
-        reranker = get_reranker(
-            rerank_model,
-            revision=rerank_revision,
-            require_immutable_models=require_immutable_models,
-        )
-        ext = get_extractor(
-            extractor,
-            require_immutable_models=require_immutable_models,
-        )
-        if isinstance(ext, PassthroughExtractor):
-            ext = None                       # ingest() treats None as passthrough
-        ge = _get_ge(graph_extractor) if graph_extractor and graph_extractor != "none" else None
-        supervisor = get_retention_supervisor(retention_supervisor)
-        engine = cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
-                     extractor=ext, graph_extractor=ge,
-                     retention_supervisor=supervisor,
-                     allow_automatic_critical_retention=allow_automatic_critical_retention,
-                     graph_traversal_policy=graph_traversal_policy,
-                     query_planner=query_planner)
-        engine._rebuild_versioned_embeddings()
-        return engine
 
     def _rebuild_versioned_embeddings(self) -> None:
         """Re-embed records when an opt-in backend changes its vector mapping.
@@ -613,6 +732,7 @@ class MemoryEngine:
             self.store.finish_embedding_rebuild(
                 fingerprint, identity=identity, version=version
             )
+            self._mark_separate_vector_index_rebuild_complete()
         except BaseException as exc:
             if self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.rollback()
@@ -662,6 +782,15 @@ class MemoryEngine:
                 [{"model": fingerprint} for _ in ids],
                 commit=True,
             )
+        self._mark_separate_vector_index_rebuild_complete()
+
+    def _mark_separate_vector_index_rebuild_complete(self) -> None:
+        """Publish an optional ANN backend's readiness after full hydration."""
+        if getattr(self.index, "requires_rebuild", False) is not True:
+            return
+        mark_complete = getattr(self.index, "mark_rebuild_complete", None)
+        if callable(mark_complete):
+            mark_complete()
 
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -671,7 +800,8 @@ class MemoryEngine:
                  metadata: Optional[dict] = None,
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
                  candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
-                 _trusted_graph_keys: Optional[frozenset] = None) -> str:
+                 _trusted_graph_keys: Optional[frozenset] = None,
+                 _transactional_finalizer: Optional[Callable[[str], None]] = None) -> str:
         """Store one memory. Returns the resulting record id: a new id for ADD/
         INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
         NOOP (near-duplicate). See ``remember_with_resolution`` for decision detail.
@@ -683,6 +813,7 @@ class MemoryEngine:
             metadata=metadata, valid_from=valid_from, resolve_conflicts=resolve_conflicts,
             candidate_k=candidate_k, subject_key=subject_key, claim_kind=claim_kind,
             _trusted_graph_keys=_trusted_graph_keys,
+            _transactional_finalizer=_transactional_finalizer,
         )["id"]
 
     def remember_with_resolution(self, content: str, *, workspace_id: str,
@@ -694,7 +825,8 @@ class MemoryEngine:
                  resolve_conflicts: bool = True, candidate_k: int = 5,
                  subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None,
-                 _approval_override: bool = False) -> dict:
+                 _approval_override: bool = False,
+                 _transactional_finalizer: Optional[Callable[[str], None]] = None) -> dict:
         """Store one memory with deterministic conflict resolution.
 
         Returns ``{"id", "op", ...}`` where ``op`` is one of:
@@ -730,6 +862,8 @@ class MemoryEngine:
         scope = (
             Scope.REPO if (repo_id or session_id) else Scope.WORKSPACE
         ) if scope is None else Scope(scope)
+        if scope == Scope.USER:
+            raise ValueError(_USER_SCOPE_WRITE_ERROR)
         if session_id:
             session = self.store.get_session(session_id)
             if session is None:
@@ -808,27 +942,122 @@ class MemoryEngine:
         # sequence. Same single-process posture as the rest of the engine (the store is
         # one shared connection); multi-process writers are out of scope by design.
         with self._write_lock:
+            caller_owned_transaction = (
+                self.store.conn.transaction_owned_by_current_thread()
+            )
+            if (
+                caller_owned_transaction
+                and vec is not None
+                and vector_index_requires_sync(self.index, self.store)
+                and not vector_index_shares_store_transaction(self.index, self.store)
+            ):
+                # A separate backend has no hook into a caller's later commit/rollback.
+                # Publishing now can orphan a vector; waiting would silently leave a
+                # committed memory unindexed. Fail before any Store mutation and leave
+                # ownership and rollback policy entirely with the caller.
+                raise RuntimeError(
+                    "caller-owned transactions cannot write through a separate vector "
+                    "index; commit or roll back before remembering"
+                )
             owns_session_transaction = False
+            owns_lifecycle_transaction = False
             try:
+                if (_transactional_finalizer is not None
+                        and not self.store.conn.transaction_owned_by_current_thread()):
+                    self.store.conn.execute("BEGIN IMMEDIATE")
+                    owns_lifecycle_transaction = True
                 if session_id:
                     owns_session_transaction = self.store.begin_session_write(
                         session_id, workspace_id=workspace_id, repo_id=repo_id
                     )
-                return self._resolve_and_store(
-                    content, text=text, vec=vec, workspace_id=workspace_id, repo_id=repo_id,
-                    session_id=session_id, mtype=mtype, scope=scope, title=title,
-                    importance=importance, confidence=confidence, keywords=keywords,
-                    metadata=write_metadata,
-                    valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-                    candidate_k=candidate_k, subject_key=subject_key,
-                    claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
-                    poisoning=poisoning, trusted_write=trusted_write,
+                # A separate index cannot participate in the Store transaction. Delay
+                # publication until every remaining engine mutation has succeeded; an
+                # engine-owned session/lifecycle transaction is committed first.
+                # Caller-owned transactions with a separate backend were rejected above;
+                # Store-sharing indexes need no duplicate publication.
+                defer_external_index = bool(
+                    self.store.conn.transaction_owned_by_current_thread()
+                    and vector_index_requires_sync(self.index, self.store)
+                    and not vector_index_shares_store_transaction(
+                        self.index, self.store,
+                    )
                 )
+                if _transactional_finalizer is None:
+                    result = self._resolve_and_store(
+                        content, text=text, vec=vec, workspace_id=workspace_id,
+                        repo_id=repo_id, session_id=session_id, mtype=mtype, scope=scope,
+                        title=title, importance=importance, confidence=confidence,
+                        keywords=keywords, metadata=write_metadata,
+                        valid_from=valid_from, resolve_conflicts=resolve_conflicts,
+                        candidate_k=candidate_k, subject_key=subject_key,
+                        claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
+                        poisoning=poisoning, trusted_write=trusted_write,
+                        defer_external_index=defer_external_index,
+                    )
+                    if (
+                        owns_session_transaction
+                        and self.store.conn.transaction_owned_by_current_thread()
+                    ):
+                        self.store.conn.commit()
+                    if defer_external_index:
+                        self._publish_result_vector(result, vec)
+                    return result
+                with self.store.conn.defer_commits():
+                    result = self._resolve_and_store(
+                        content, text=text, vec=vec, workspace_id=workspace_id,
+                        repo_id=repo_id, session_id=session_id, mtype=mtype, scope=scope,
+                        title=title, importance=importance, confidence=confidence,
+                        keywords=keywords, metadata=write_metadata,
+                        valid_from=valid_from, resolve_conflicts=resolve_conflicts,
+                        candidate_k=candidate_k, subject_key=subject_key,
+                        claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
+                        poisoning=poisoning, trusted_write=trusted_write,
+                        transactional_finalizer=_transactional_finalizer,
+                        defer_external_index=defer_external_index,
+                    )
+                if owns_lifecycle_transaction:
+                    self.store.conn.commit()
+                if defer_external_index:
+                    self._publish_result_vector(result, vec)
+                return result
             except BaseException:
-                if (owns_session_transaction
+                if ((owns_session_transaction or owns_lifecycle_transaction)
                         and self.store.conn.transaction_owned_by_current_thread()):
                     self.store.conn.rollback()
                 raise
+
+    def _publish_result_vector(self, result: dict, vec: Optional[np.ndarray]) -> None:
+        """Publish one newly committed Store vector to a separate injected index."""
+        if vec is None or result.get("op") not in {"add", "invalidate", "relate"}:
+            return
+        memory_id = result.get("id")
+        if not isinstance(memory_id, str) or not memory_id:
+            raise RuntimeError("stored memory result is missing its id")
+        self._upsert_external_vector(memory_id, vec)
+
+    def _upsert_external_vector(self, memory_id: str, vec: np.ndarray) -> None:
+        """Best-effort synchronization for indexes outside the canonical Store."""
+        if not vector_index_requires_sync(self.index, self.store):
+            return
+        try:
+            self.index.upsert(
+                [memory_id], vec.reshape(1, -1),
+                [{"model": self.embedding_space}],
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed index write must not lose the memory
+            # The canonical Store vector is authoritative. Keep the write, but make the
+            # derived-index gap content-free and visible to operators. Never commit a
+            # caller-owned Store transaction merely to persist this diagnostic.
+            logger.warning("vector-index upsert failed for %s (%s)",
+                           memory_id, type(exc).__name__)
+            try:
+                self.store.audit(
+                    "engine", "index_upsert_failed", memory_id,
+                    "failure_type=%s" % type(exc).__name__,
+                    commit=not self.store.conn.transaction_owned_by_current_thread(),
+                )
+            except Exception as audit_exc:  # noqa: BLE001
+                self._warn_redacted_failure("vector-index failure audit", audit_exc)
 
     def _resolve_and_store(self, content: str, *, text: str, vec: Optional[np.ndarray],
                            workspace_id: str, repo_id: Optional[str],
@@ -840,7 +1069,9 @@ class MemoryEngine:
                            subject_key: str, claim_kind: str,
                            trusted_graph_keys: Optional[frozenset] = None,
                            poisoning: Optional[PoisoningDecision] = None,
-                           trusted_write: bool = True) -> dict:
+                           trusted_write: bool = True,
+                           transactional_finalizer: Optional[Callable[[str], None]] = None,
+                           defer_external_index: bool = False) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
         ``self._write_lock`` for the whole call (atomicity of the resolve decision).
 
@@ -917,9 +1148,12 @@ class MemoryEngine:
             conflicted_with = None
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
-            self.store.reinforce(_required_resolution_target(decision), boost=scoring.INTERACTION_BOOST["create"])
-            self.store.audit("resolver", "noop", _required_resolution_target(decision), decision.reason)
-            return {"id": _required_resolution_target(decision), "op": "noop", "reason": decision.reason}
+            target_id = _required_resolution_target(decision)
+            self.store.reinforce(target_id, boost=scoring.INTERACTION_BOOST["create"])
+            self.store.audit("resolver", "noop", target_id, decision.reason)
+            if transactional_finalizer is not None:
+                transactional_finalizer(target_id)
+            return {"id": target_id, "op": "noop", "reason": decision.reason}
 
         # Before anything reads it: demote graph hints this write cannot prove came from
         # an Extractor, so the "structured_extractor" feed below can only ever see
@@ -1029,6 +1263,9 @@ class MemoryEngine:
                     "resolver", "invalidate", target_id, resolution_reason,
                     commit=False,
                 )
+            if transactional_finalizer is not None:
+                transactional_finalizer(mid)
+            if invalidating:
                 self.store.conn.commit()
         except BaseException:
             if invalidating and self.store.conn.transaction_owned_by_current_thread():
@@ -1060,55 +1297,62 @@ class MemoryEngine:
             )
         if vec is None:
             raise RuntimeError("non-quarantined memory was stored without an embedding")
-        if vector_index_requires_sync(self.index, self.store):
-            try:
-                self.index.upsert(
-                    [mid], vec.reshape(1, -1),
-                    [{"model": self.embedding_space}],
-                )
-            except Exception as exc:  # noqa: BLE001 — a failed index write must not lose the memory
-                # …but it must not be silent either: without the derived index row this
-                # memory is invisible to that semantic backend until re-indexed. The
-                # NumPy backend searches Store.mem_vectors directly and is already
-                # coherent after Store.add_memory, so it never enters this duplicate path.
-                logger.warning("vector-index upsert failed for %s (%s)",
-                               mid, type(exc).__name__)
-                try:
-                    self.store.audit(
-                        "engine", "index_upsert_failed", mid,
-                        "failure_type=%s" % type(exc).__name__)
-                except Exception as audit_exc:  # noqa: BLE001
-                    self._warn_redacted_failure("vector-index failure audit", audit_exc)
+        if not defer_external_index:
+            self._upsert_external_vector(mid, vec)
         if trusted_write and repo_id and scope != Scope.SESSION:
             self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
 
-        # Optional graph population (backends.graph_extractor). Structured fact metadata
-        # from llm_structured is already validated before storage, so feed it directly
-        # into the graph even when the regex graph extractor is disabled; then run the
-        # configured text extractor too (idempotent via feed/store de-duping).
-        # ``meta`` was demoted above, so any hint still under a GRAPH_HINT_KEYS name here
-        # was vouched for by ingest() — the "structured_extractor" label below is earned,
-        # not merely asserted by whoever built the metadata dict.
-        if (trusted_write and scope != Scope.SESSION
-                and self._has_structured_graph_metadata(meta)):
+        # Structured fact metadata is already validated before storage, so an injected
+        # graph feeder may ingest it even when the configured text extractor is disabled;
+        # then the configured extractor runs too (idempotent via Store de-duplication).
+        # ``meta`` was demoted above, so any graph hint still here was vouched for by
+        # ingest(), not merely asserted by whoever built the metadata dictionary.
+        if (
+            trusted_write
+            and scope != Scope.SESSION
+            and self.graph_feeder is not None
+            and self._has_structured_graph_metadata(meta)
+        ):
             try:
-                from engraphis.backends.graph_extractor import (
-                    StructuredMetadataGraphExtractor, feed as _graph_feed,
+                self.graph_feeder(
+                    self.store,
+                    content,
+                    workspace_id=workspace_id,
+                    repo_id=repo_id,
+                    title=title,
+                    extractor=None,
+                    structured_metadata=meta,
+                    provenance={
+                        "source": "structured_extractor",
+                        "memory_id": mid,
+                    },
+                    valid_from=rec.valid_from,
+                    ingested_at=rec.ingested_at,
                 )
-                _graph_feed(self.store, content, workspace_id=workspace_id,
-                            repo_id=repo_id, title=title,
-                            extractor=StructuredMetadataGraphExtractor(meta),
-                            provenance={"source": "structured_extractor", "memory_id": mid},
-                            valid_from=rec.valid_from, ingested_at=rec.ingested_at)
             except Exception as exc:
                 self._warn_redacted_failure("structured graph enrichment", exc)
-        if trusted_write and scope != Scope.SESSION and self.graph_extractor is not None:
+        if (
+            trusted_write
+            and scope != Scope.SESSION
+            and self.graph_extractor is not None
+            and self.graph_feeder is not None
+        ):
             try:
-                from engraphis.backends.graph_extractor import feed as _graph_feed
-                _graph_feed(self.store, content, workspace_id=workspace_id,
-                            repo_id=repo_id, title=title, extractor=self.graph_extractor,
-                            provenance={"source": "graph_extractor", "memory_id": mid},
-                            valid_from=rec.valid_from, ingested_at=rec.ingested_at)
+                self.graph_feeder(
+                    self.store,
+                    content,
+                    workspace_id=workspace_id,
+                    repo_id=repo_id,
+                    title=title,
+                    extractor=self.graph_extractor,
+                    structured_metadata=None,
+                    provenance={
+                        "source": "graph_extractor",
+                        "memory_id": mid,
+                    },
+                    valid_from=rec.valid_from,
+                    ingested_at=rec.ingested_at,
+                )
             except Exception as exc:
                 self._warn_redacted_failure("graph extraction", exc)
         if trusted_write and scope != Scope.SESSION:
@@ -1148,12 +1392,17 @@ class MemoryEngine:
                     "resolver", "conflict_detected", conflicted_with,
                     f"new_memory={mid}; deterministic contradiction (no safe supersession)",
                 )
+                self.store.advance_memory_modified_hlc(
+                    conflicted_with, commit=False,
+                )
                 self.store.conn.execute(
                     "UPDATE memories SET confidence=MIN(confidence, ?) WHERE id=?",
                     (round(CONFLICT_CONFIDENCE_FACTOR, 4), conflicted_with),
                 )
                 self.store.conn.commit()
             except Exception as exc:  # noqa: BLE001 — best-effort repair, never fail the write
+                if self.store.conn.transaction_owned_by_current_thread():
+                    self.store.conn.rollback()
                 self._warn_redacted_failure("conflict repair", exc)
         out: dict[str, object]
         if decision is not None and decision.op == ResolutionOp.RELATE:
@@ -1454,7 +1703,7 @@ class MemoryEngine:
             nrec = self.store.get_memory(nid)
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
-                    and (scope != Scope.SESSION or nrec.session_id == session_id)
+                    and nrec.session_id == session_id
                     and prompt_eligible(nrec.provenance, nrec.metadata)
                     and (memory_matches_filter(nrec, flt)
                          or (current_fallback and nrec.expired_at is None
@@ -1575,6 +1824,8 @@ class MemoryEngine:
         # Raw input may be sent to a configured extractor, so block credentials before
         # extraction rather than relying only on the final derived-memory write.
         reject_secrets((("ingest content", text), ("metadata", metadata)))
+        if scope is not None and Scope(scope) == Scope.USER:
+            raise ValueError(_USER_SCOPE_WRITE_ERROR)
         facts = None
         extracted = False
         # Quarantine precedes optional extraction. An explicitly untrusted payload that
@@ -1596,12 +1847,30 @@ class MemoryEngine:
         results = []
         base_metadata = dict(metadata or {})
         source_sha256 = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        fallback_detected = False
         for fact_index, f in enumerate(facts, start=1):
             fact_own = dict(getattr(f, "metadata", {}) or {})
             extracted_metadata = {
                 key: value for key, value in fact_own.items()
                 if key in EXTRACTOR_METADATA_KEYS
             }
+            raw_fallback = extracted_metadata.get("extraction_fallback")
+            if isinstance(raw_fallback, dict):
+                mode = str(raw_fallback.get("mode") or "")
+                reason = str(raw_fallback.get("reason") or "")
+                if (
+                    mode in {"llm", "llm_structured"}
+                    and reason == "provider_or_output_error"
+                ):
+                    extracted_metadata["extraction_fallback"] = {
+                        "mode": mode,
+                        "reason": reason,
+                    }
+                    fallback_detected = True
+                else:
+                    extracted_metadata.pop("extraction_fallback", None)
+            else:
+                extracted_metadata.pop("extraction_fallback", None)
             if isinstance(extracted_metadata.get("llm_extraction"), dict):
                 # Group all facts derived from one source without retaining the raw
                 # source or prompt. The dashboard activity viewer can therefore explain
@@ -1618,18 +1887,38 @@ class MemoryEngine:
             # that boundary, so provenance/quarantine and other authority fields remain
             # service-owned even when an extractor returns arbitrary metadata.
             trusted = frozenset(k for k in GRAPH_HINT_KEYS if k in extracted_metadata)
+            fact_metadata = {**base_metadata, **extracted_metadata}
+            if isinstance(extracted_metadata.get("llm_extraction"), dict):
+                # First separate caller-supplied hints from the extractor's own output.
+                # Then preserve the model-produced hints as review evidence without
+                # allowing either set to materialize graph state before approval.
+                fact_metadata = _rehome_untrusted_graph_hints(fact_metadata, trusted)
+                _, fact_metadata, _ = pending_llm_extraction_envelope(
+                    fact_metadata.get("provenance"), fact_metadata,
+                )
+                trusted = frozenset({_INTERNAL_DERIVED_GRAPH_KEY})
             results.append(self.remember_with_resolution(
                 f.content, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
                 title=f.title, importance=f.importance, keywords=f.keywords,
-                metadata={**base_metadata, **extracted_metadata},
+                metadata=fact_metadata,
                 resolve_conflicts=resolve_conflicts, _trusted_graph_keys=trusted,
             ))
-        return {"facts": results, "count": len(results), "extracted": extracted}
+        return {
+            "facts": results,
+            "count": len(results),
+            "extracted": bool(extracted and not fallback_detected),
+        }
 
     # ── consolidation: the sleep-time loop, callable on demand (Phase 4) ───────
-    def consolidate(self, *, workspace_id: str, repo_id: Optional[str] = None,
-                    dry_run: bool = False, llm=None, **kw) -> dict:
+    def consolidate(
+        self, *, workspace_id: str, repo_id: Optional[str] = None,
+        min_cluster: int = 3, subject_jaccard: float = 0.40,
+        archive_below: float = 0.05, dry_run: bool = False,
+        profiles: bool = False, min_mentions: int = 3,
+        infer: bool = False, structured: bool = False,
+        llm=None, now: Optional[float] = None,
+    ) -> dict:
         """One sleep-time consolidation sweep — episodic→semantic distillation plus
         decayed-transient archival. See ``core.consolidate.consolidate`` for knobs.
 
@@ -1639,8 +1928,19 @@ class MemoryEngine:
         """
         from engraphis.core.consolidate import consolidate as _consolidate
         return _consolidate(
-            self, workspace_id=workspace_id, repo_id=repo_id,
-            dry_run=dry_run, llm=llm, **kw,
+            self,
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            min_cluster=min_cluster,
+            subject_jaccard=subject_jaccard,
+            archive_below=archive_below,
+            dry_run=dry_run,
+            profiles=profiles,
+            min_mentions=min_mentions,
+            infer=infer,
+            structured=structured,
+            llm=llm,
+            now=now,
         )
 
     # ── read ──────────────────────────────────────────────────────────────────
@@ -2198,26 +2498,26 @@ class MemoryEngine:
         return {"id": memory_id, "pinned": pinned}
 
     def correct(self, memory_id: str, new_content: str, *, reason: str = "",
-               actor: str = "user") -> dict:
-        """Replace a memory's content without losing history: insert a new memory
-        carrying the same scope/type/title, then close the old validity window — an
-        explicit INVALIDATE, not an in-place edit (AGENTS.md §3.2/§3.3: never overwrite).
+                actor: str = "user") -> dict:
+        with self._write_lock:
+            return self._correct_locked(
+                memory_id, new_content, reason=reason, actor=actor,
+            )
 
-        Write-then-retire order is load-bearing (same as ``promote``/``merge``): if the
-        replacement write raises, the original must still be live. A record whose
-        ``scope``/``repo_id`` disagree — reachable through the sync apply path, which
-        doesn't go through ``remember``'s validation — used to be retired *first* and
-        then hit ``ValueError`` on the way back in, destroying it with no replacement.
-        """
+    def _correct_locked(self, memory_id: str, new_content: str, *, reason: str,
+                        actor: str) -> dict:
+        """Insert a replacement and close its predecessor as one atomic transition."""
         old = self.store.get_memory(memory_id)
         if old is None:
             raise KeyError(f"no memory with id '{memory_id}'")
+        effective_at = now_ts()
+        if not _governable_source(old, at=effective_at):
+            raise ValueError("only a current or quarantined memory can be corrected")
         metadata = dict(old.metadata)
         metadata["corrects"] = memory_id
-        # Missing/legacy provenance is deliberately not allowed to fall through to
-        # the direct-engine trusted default.  Corrections preserve an approved source
-        # only when it was explicitly approved; every other record remains reviewable
-        # but prompt-ineligible.
+        metadata["supersedes"] = [memory_id]
+        # Missing/legacy provenance must not fall through to the direct-engine trusted
+        # default. A correction preserves trust only when the source was approved.
         metadata["provenance"] = (
             dict(old.provenance)
             if provenance_is_approved(old.provenance)
@@ -2228,24 +2528,45 @@ class MemoryEngine:
                 "trust_origin": "derived_unapproved",
             }
         )
+
+        def finalize_correction(new_id: str) -> None:
+            self.store.advance_memory_modified_hlc(new_id, commit=False)
+            self.store.conn.execute(
+                "UPDATE memories SET pinned=?, sensitivity=?, stability=?, access_count=?, "
+                "last_access=? WHERE id=?",
+                (
+                    int(old.pinned),
+                    old.sensitivity or "normal",
+                    old.stability,
+                    old.access_count,
+                    old.last_access,
+                    new_id,
+                ),
+            )
+            self.store.close_validity(
+                memory_id, at=effective_at, actor=actor,
+                reason=reason or "corrected",
+            )
+
         new_id = self.remember(
-            new_content, workspace_id=_required_memory_workspace_id(old), repo_id=old.repo_id,
-            session_id=old.session_id, mtype=old.mtype,
-            scope=_writable_scope(old.scope, old.repo_id), title=old.title,
-            importance=old.importance, keywords=old.keywords, metadata=metadata,
-            resolve_conflicts=False,   # the supersede decision was just made explicitly
+            new_content,
+            workspace_id=_required_memory_workspace_id(old),
+            repo_id=old.repo_id,
+            session_id=old.session_id,
+            mtype=old.mtype,
+            scope=_writable_scope(old.scope, old.repo_id),
+            title=old.title,
+            importance=old.importance,
+            confidence=old.confidence,
+            keywords=old.keywords,
+            metadata=metadata,
+            valid_from=effective_at,
+            resolve_conflicts=False,
+            subject_key=old.subject_key,
+            claim_kind=old.claim_kind,
+            _transactional_finalizer=finalize_correction,
         )
-        # Persist inherited protection + confidentiality (the write path defaults
-        # pinned to False and sensitivity to 'normal' — a correction must not silently
-        # unpin a protected memory or downgrade a sensitive one; mirrors ``merge``).
-        if old.sensitivity and old.sensitivity != "normal":
-            self.store.conn.execute("UPDATE memories SET sensitivity=? WHERE id=?",
-                                    (old.sensitivity, new_id))
-            self.store.conn.commit()
-        if old.pinned:
-            self.store.set_pinned(new_id, True)
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "corrected")
-        # The old vector is historical evidence; SearchFilter validity hides it from
+        # The old vector is historical evidence; temporal filtering hides it from
         # current recall while keeping semantic time travel complete.
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
 
@@ -2341,6 +2662,27 @@ class MemoryEngine:
                     "approved_from": old.id,
                 },
             }
+            if (old.metadata or {}).get("proactive"):
+                metadata["proactive"] = old.metadata["proactive"]
+
+            def finalize_approval(new_id: str) -> None:
+                self.store.advance_memory_modified_hlc(new_id, commit=False)
+                self.store.conn.execute(
+                    "UPDATE memories SET pinned=?, sensitivity=?, stability=?, "
+                    "access_count=?, last_access=? WHERE id=?",
+                    (
+                        int(old.pinned),
+                        old.sensitivity or "normal",
+                        old.stability,
+                        old.access_count,
+                        old.last_access,
+                        new_id,
+                    ),
+                )
+                self.store.audit(
+                    "human_review", "approve", new_id,
+                    f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",
+                )
             result = self.remember_with_resolution(
                 content,
                 workspace_id=_required_memory_workspace_id(old),
@@ -2350,6 +2692,7 @@ class MemoryEngine:
                 scope=_writable_scope(old.scope, old.repo_id),
                 title=old.title,
                 importance=old.importance,
+                confidence=old.confidence,
                 keywords=old.keywords,
                 metadata=metadata,
                 valid_from=old.valid_from,
@@ -2357,38 +2700,19 @@ class MemoryEngine:
                 subject_key=old.subject_key,
                 claim_kind=old.claim_kind,
                 _approval_override=True,
-            )
-            # The ordinary write path intentionally starts with normal sensitivity and
-            # no pin.  An approval changes review state, not confidentiality or the
-            # stable identity of the governed claim.
-            if old.sensitivity and old.sensitivity != "normal":
-                self.store.conn.execute(
-                    "UPDATE memories SET sensitivity=? WHERE id=?",
-                    (old.sensitivity, result["id"]),
-                )
-                self.store.conn.commit()
-            if old.pinned:
-                self.store.set_pinned(result["id"], True)
-            # Carry the proactive-agenda flag ("always"/"never") onto the approved
-            # successor. The user's explicit agenda choice is a governance decision,
-            # not review-dependent content, so it must survive the approval ceremony.
-            if (old.metadata or {}).get("proactive"):
-                successor = self.store.get_memory(result["id"])
-                successor_meta = dict(successor.metadata or {}) if successor else {}
-                successor_meta.setdefault("proactive", old.metadata["proactive"])
-                self.store.conn.execute(
-                    "UPDATE memories SET metadata=? WHERE id=?",
-                    (_dumps(successor_meta), result["id"]),
-                )
-                self.store.conn.commit()
-            self.store.audit(
-                "human_review", "approve", result["id"],
-                f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",
+                _transactional_finalizer=finalize_approval,
             )
             return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
+        with self._write_lock:
+            return self._promote_locked(
+                memory_id, target_scope, reason=reason, actor=actor,
+            )
+
+    def _promote_locked(self, memory_id: str, target_scope: Scope, *, reason: str,
+                        actor: str) -> dict:
         """Widen one live memory's scope without rewriting it in place.
 
         Promotion creates (or deduplicates into) a wider-scoped record first, then
@@ -2408,6 +2732,10 @@ class MemoryEngine:
                 or (old.valid_from is not None and old.valid_from > now)
                 or (old.valid_to is not None and old.valid_to <= now)):
             raise ValueError("only a live memory can be promoted")
+        if old.scope == Scope.SESSION:
+            source_session = self.store.get_session(str(old.session_id or ""))
+            if source_session is None or source_session.get("status") != "active":
+                raise ValueError("cannot promote memory from a closed session")
         target_scope = Scope(target_scope)
         if target_scope == Scope.USER:
             raise ValueError(
@@ -2444,6 +2772,85 @@ class MemoryEngine:
             }
         )
 
+        def finalize_promotion(promoted_id: str) -> None:
+            promoted = self.store.get_memory(promoted_id)
+            if promoted is None:
+                raise RuntimeError("promotion target was not stored")
+            # Unknown labels fail closed by outranking every known sensitivity.
+            sensitivity = max(
+                (old.sensitivity, promoted.sensitivity),
+                key=lambda value: _SENSITIVITY_RANK.get(
+                    value, len(_SENSITIVITY_RANK)
+                ),
+            )
+            promoted_metadata = dict(promoted.metadata)
+            inherited_from = promoted_metadata.get("promoted_from")
+            inherited_from = (
+                list(inherited_from) if isinstance(inherited_from, list) else []
+            )
+            old_chain = old.metadata.get("promoted_from")
+            for source_id in [
+                *(old_chain if isinstance(old_chain, list) else []),
+                old.id,
+            ]:
+                if source_id not in inherited_from:
+                    inherited_from.append(source_id)
+            promoted_metadata["promoted_from"] = inherited_from
+            promoted_metadata["promotion"] = {
+                "from_scope": old.scope.value,
+                "to_scope": target_scope.value,
+                "reason": reason[:500],
+            }
+            promoted_provenance = dict(promoted.provenance)
+            trusted = all(
+                provenance_is_approved(record.provenance)
+                for record in (old, promoted)
+            )
+            if not trusted:
+                promoted_provenance["trusted"] = False
+                promoted_provenance["review_state"] = REVIEW_PENDING
+            promoted_metadata["provenance"] = promoted_provenance
+            self.store.advance_memory_modified_hlc(promoted_id, commit=False)
+            self.store.conn.execute(
+                "UPDATE memories SET pinned=?, sensitivity=?, confidence=?, stability=?, "
+                "access_count=?, last_access=?, metadata=?, provenance=? WHERE id=?",
+                (
+                    int(old.pinned or promoted.pinned),
+                    sensitivity,
+                    min(old.confidence, promoted.confidence),
+                    max(old.stability, promoted.stability),
+                    max(old.access_count, promoted.access_count),
+                    max(old.last_access or 0.0, promoted.last_access or 0.0) or None,
+                    json.dumps(
+                        promoted_metadata, ensure_ascii=False, separators=(",", ":")
+                    ),
+                    json.dumps(
+                        promoted_provenance, ensure_ascii=False, separators=(",", ":")
+                    ),
+                    promoted_id,
+                ),
+            )
+            self.store.close_validity(
+                old.id, at=now, actor=actor,
+                reason=(
+                    reason
+                    or f"promoted from {old.scope.value} to {target_scope.value}"
+                ),
+            )
+            if not self.store.has_link(promoted_id, old.id, relation="promotes"):
+                self.store.add_link(
+                    promoted_id, old.id, "promotes",
+                    reason=reason or "scope promotion",
+                    allow_scope_transition=True,
+                )
+            self.store.audit(
+                actor, "promote", promoted_id,
+                (
+                    f"from {old.id} ({old.scope.value}->{target_scope.value}): "
+                    f"{reason}"
+                )[:1000],
+            )
+
         result = self.remember_with_resolution(
             old.content,
             workspace_id=_required_memory_workspace_id(old),
@@ -2453,78 +2860,18 @@ class MemoryEngine:
             scope=target_scope,
             title=old.title,
             importance=old.importance,
+            confidence=old.confidence,
             keywords=old.keywords,
             metadata=metadata,
             valid_from=old.valid_from,
             resolve_conflicts=True,
             subject_key=old.subject_key,
             claim_kind=old.claim_kind,
-            # Promotion copies a record already approved by the owner; it is not new
-            # untrusted ingress. Re-running a newer detector against that exact copy
-            # could quarantine the successor after this method retires the source.
+            # This copies a record already approved by the owner; it is not ingress.
             _approval_override=True,
+            _transactional_finalizer=finalize_promotion,
         )
         promoted_id = result["id"]
-        promoted = self.store.get_memory(promoted_id)
-        if promoted is None:  # defensive: the write path must return a durable record
-            raise RuntimeError("promotion target was not stored")
-
-        # Fail closed on an unrecognised label (same rule as ``merge``): an unknown
-        # sensitivity outranks every known one rather than silently downgrading to
-        # 'normal', so a corrupt/foreign label can never widen exposure.
-        sensitivity = max(
-            (old.sensitivity, promoted.sensitivity),
-            key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
-        )
-        promoted_metadata = dict(promoted.metadata)
-        inherited_from = promoted_metadata.get("promoted_from")
-        inherited_from = list(inherited_from) if isinstance(inherited_from, list) else []
-        old_chain = old.metadata.get("promoted_from")
-        for source_id in [*(old_chain if isinstance(old_chain, list) else []), old.id]:
-            if source_id not in inherited_from:
-                inherited_from.append(source_id)
-        promoted_metadata["promoted_from"] = inherited_from
-        promoted_metadata["promotion"] = {
-            "from_scope": old.scope.value,
-            "to_scope": target_scope.value,
-            "reason": reason[:500],
-        }
-        promoted_provenance = dict(promoted.provenance)
-        trusted = all(provenance_is_approved(record.provenance)
-                      for record in (old, promoted))
-        if not trusted:
-            promoted_provenance["trusted"] = False
-            promoted_provenance["review_state"] = REVIEW_PENDING
-        promoted_metadata["provenance"] = promoted_provenance
-        self.store.conn.execute(
-            "UPDATE memories SET pinned=?, sensitivity=?, stability=?, access_count=?, "
-            "last_access=?, metadata=?, provenance=? WHERE id=?",
-            (
-                int(old.pinned or promoted.pinned),
-                sensitivity,
-                max(old.stability, promoted.stability),
-                max(old.access_count, promoted.access_count),
-                max(old.last_access or 0.0, promoted.last_access or 0.0) or None,
-                json.dumps(promoted_metadata, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(promoted_provenance, ensure_ascii=False, separators=(",", ":")),
-                promoted_id,
-            ),
-        )
-        self.store.conn.commit()
-
-        self.store.close_validity(
-            old.id, actor=actor,
-            reason=reason or f"promoted from {old.scope.value} to {target_scope.value}",
-        )
-        # Preserve the source vector for historical/as_of inspection.
-        if not self.store.has_link(promoted_id, old.id, relation="promotes"):
-            self.store.add_link(
-                promoted_id, old.id, "promotes", reason=reason or "scope promotion"
-            )
-        self.store.audit(
-            actor, "promote", promoted_id,
-            f"from {old.id} ({old.scope.value}->{target_scope.value}): {reason}"[:1000],
-        )
         return {
             "id": promoted_id,
             "promoted_from": old.id,
@@ -2538,73 +2885,111 @@ class MemoryEngine:
               title: Optional[str] = None, mtype: Optional[MemoryType] = None,
               scope: Optional[Scope] = None, keywords: Optional[list] = None,
               reason: str = "", actor: str = "user") -> dict:
-        """Merge several memories into one, retiring the sources into history.
+        """Merge live memories into one atomic, temporally bounded successor."""
+        with self._write_lock:
+            return self._merge_locked(
+                source_ids, merged_content, title=title, mtype=mtype, scope=scope,
+                keywords=keywords, reason=reason, actor=actor,
+            )
 
-        A manual N→1 governance operation — the multi-input generalization of
-        ``correct``. Unlike ``consolidate`` (automatic, episodic-only, and
-        *non-destructive*: sources stay live), ``merge`` is user-driven, works on any
-        type, and retires every source: each source's validity window is closed (never
-        a hard delete — AGENTS.md §3.2), the new memory records ``supersedes`` on every
-        source so the version chain renders in why/timeline/inspector, and a ``merges``
-        link is written back to each source.
-
-        Safety (this is a write path over possibly-untrusted memories — SECURITY.md §5):
-        the merged memory inherits the *most restrictive* ``sensitivity`` of its sources
-        and is marked ``trusted: false`` if any source is untrusted, so a merge can never
-        launder secret/untrusted content into a trusted, lower-sensitivity fact. If any
-        source is pinned the result is pinned (a merge can't silently strip protection).
-        Audited on both sides, with a token-compaction number (§3.7).
-        """
-        ids, sources, seen = [], [], set()
-        for sid in source_ids:
-            if sid in seen:
+    def _merge_locked(self, source_ids: list, merged_content: str, *,
+                      title: Optional[str], mtype: Optional[MemoryType],
+                      scope: Optional[Scope], keywords: Optional[list],
+                      reason: str, actor: str) -> dict:
+        ids: list[str] = []
+        sources: list[MemoryRecord] = []
+        seen: set[str] = set()
+        effective_at = now_ts()
+        for raw_id in source_ids:
+            memory_id = str(raw_id)
+            if memory_id in seen:
                 continue
-            seen.add(sid)
-            rec = self.store.get_memory(sid)
-            if rec is None:
-                raise KeyError(f"no memory with id '{sid}'")
-            ids.append(sid)
-            sources.append(rec)
+            seen.add(memory_id)
+            record = self.store.get_memory(memory_id)
+            if record is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            ids.append(memory_id)
+            sources.append(record)
         if len(sources) < 2:
             raise ValueError("merge needs at least two distinct source memories")
-        # Scope confinement (defense in depth — the service also authorizes the
-        # workspace): a merge can never cross a workspace boundary.
-        if len({r.workspace_id for r in sources}) != 1:
+        if len({record.workspace_id for record in sources}) != 1:
             raise ValueError("cannot merge memories from different workspaces")
 
         primary = sources[0]
-        repo_id = primary.repo_id if len({r.repo_id for r in sources}) == 1 else None
-        mt = mtype or primary.mtype
-        # Cross-repo merges are explicitly permitted (``service.merge``), which drops
-        # ``repo_id`` to None — so a 'repo' scope inherited from the primary source would
-        # be an unstorable combination. Widen it to the workspace the sources already
-        # share rather than failing (see ``_writable_scope``).
-        sc = _writable_scope(scope or primary.scope, repo_id)
-        importance = max([r.importance or 0.0 for r in sources] + [0.5])
-        pinned_any = any(r.pinned for r in sources)
-        sensitivity = max((r.sensitivity or "normal" for r in sources),
-                          key=lambda s: _SENSITIVITY_RANK.get(s, len(_SENSITIVITY_RANK)))
-        trusted = all(provenance_is_approved(r.provenance) for r in sources)
+        repo_id = (
+            primary.repo_id
+            if len({record.repo_id for record in sources}) == 1
+            else None
+        )
+        target_type = MemoryType(mtype or primary.mtype)
+        target_scope = _writable_scope(scope or primary.scope, repo_id)
+        if target_scope == Scope.WORKSPACE:
+            repo_id = None
+        target_session_id: Optional[str] = None
+        if target_scope == Scope.SESSION:
+            session_ids = {record.session_id for record in sources}
+            if len(session_ids) != 1 or None in session_ids or "" in session_ids:
+                raise ValueError(
+                    "session-scoped merge requires sources from one session; "
+                    "choose repo or workspace scope for a cross-session merge"
+                )
+            target_session_id = str(next(iter(session_ids)))
+            session = self.store.get_session(target_session_id)
+            if session is None or session.get("status") != "active":
+                raise ValueError("session-scoped merge requires one active session")
+            if (
+                session.get("workspace_id") != primary.workspace_id
+                or session.get("repo_id") != repo_id
+            ):
+                raise ValueError("merge session does not match source workspace/repo")
+
+        importance = max([record.importance or 0.0 for record in sources] + [0.5])
+        pinned_any = any(record.pinned for record in sources)
+        sensitivity = max(
+            (record.sensitivity or "normal" for record in sources),
+            key=lambda value: _SENSITIVITY_RANK.get(
+                value, len(_SENSITIVITY_RANK)
+            ),
+        )
+        trusted = all(
+            provenance_is_approved(record.provenance) for record in sources
+        )
         if keywords is None:
-            keywords, kseen = [], set()
-            for r in sources:
-                for kw in (r.keywords or []):
-                    if kw not in kseen:
-                        kseen.add(kw)
-                        keywords.append(kw)
-            keywords = keywords[:32]
+            merged_keywords: list = []
+            seen_keywords: set = set()
+            for record in sources:
+                for keyword in record.keywords or []:
+                    if keyword in seen_keywords:
+                        continue
+                    seen_keywords.add(keyword)
+                    merged_keywords.append(keyword)
+            keywords = merged_keywords[:32]
 
-        tokens_before = sum(estimate_tokens(f"{r.title} {r.content}") for r in sources)
+        tokens_before = sum(
+            estimate_tokens(f"{record.title} {record.content}")
+            for record in sources
+        )
         title_final = title if title is not None else (primary.title or "")
-
-        # Write the merged record BEFORE retiring anything (same ordering as
-        # ``promote``/``correct``). Retiring first meant a failed ``remember()`` — e.g.
-        # an unstorable scope/repo combination, a full disk, a bad session_id — left
-        # every source closed with no merged record to replace them: unrecoverable data
-        # loss from a governance operation that is supposed to preserve history. The
-        # resolver is skipped here (the supersede decision is explicit), so the
-        # still-live sources can't be deduplicated into, and evolution stays a no-op.
+        source_set = set(ids)
+        merge_key = hashlib.sha256(json.dumps(
+            {
+                "source_ids": sorted(source_set),
+                "content": merged_content,
+                "title": title_final,
+                "mtype": target_type.value,
+                "scope": target_scope.value,
+                "workspace_id": primary.workspace_id,
+                "repo_id": repo_id,
+                "session_id": target_session_id,
+                "keywords": list(keywords or []),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        merge_link_reason = f"merge-key:{merge_key}"
         merge_metadata = {
+            "merge_key": merge_key,
             "supersedes": list(ids),
             "provenance": {
                 "source": "merge",
@@ -2613,9 +2998,6 @@ class MemoryEngine:
                 "merges": list(ids),
             },
         }
-        # A merge is not an approval ceremony.  If any source was quarantined,
-        # preserve that containment even when the user supplies paraphrased merged
-        # content that no longer matches a detector rule.
         if any(
             metadata_is_quarantined(record.metadata)
             or bool((record.provenance or {}).get("quarantined"))
@@ -2625,42 +3007,134 @@ class MemoryEngine:
                 merge_metadata,
                 PoisoningDecision(True, reasons=("inherited_quarantine",)),
             )
-        merged_id = self.remember(
-            merged_content, workspace_id=primary.workspace_id, repo_id=repo_id,
-            session_id=primary.session_id, mtype=mt, scope=sc, title=title_final,
-            importance=importance, keywords=keywords,
-            metadata=merge_metadata,
-            resolve_conflicts=False,   # the supersede decision was just made explicitly
-        )
-        # Persist inherited confidentiality + protection (the write path defaults
-        # sensitivity to 'normal' and pinned to False; a merge must not downgrade either).
-        if sensitivity != "normal":
-            self.store.conn.execute("UPDATE memories SET sensitivity=? WHERE id=?",
-                                    (sensitivity, merged_id))
-            self.store.conn.commit()
-        if pinned_any:
-            self.store.set_pinned(merged_id, True)
-        for r in sources:
-            self.store.close_validity(r.id, actor=actor,
-                                      reason=reason or "merged into a combined memory")
-            # Preserve source vectors for historical/as_of retrieval.
-        # Linking/auditing stays a separate pass so the audit trail keeps its original
-        # shape: every source's invalidate entry, then every source's merge entry.
-        for r in sources:
-            self.store.add_link(merged_id, r.id, "merges")
-            self.store.audit(actor, "merge", r.id, f"merged into {merged_id}")
-        self.store.audit(actor, "merge", merged_id,
-                         f"merged {len(ids)} memories: {', '.join(ids)}")
 
-        tokens_after = estimate_tokens(f"{title_final} {merged_content}")
-        saved = max(0, tokens_before - tokens_after)
-        return {"id": merged_id, "merged": list(ids), "count": len(ids),
-                "sensitivity": sensitivity, "trusted": trusted, "pinned": pinned_any,
+        subject_keys = {record.subject_key for record in sources}
+        claim_kinds = {record.claim_kind for record in sources}
+        subject_key = next(iter(subject_keys)) if len(subject_keys) == 1 else ""
+        claim_kind = next(iter(claim_kinds)) if len(claim_kinds) == 1 else ""
+        confidence = min(record.confidence for record in sources)
+
+        def merge_result(merged_id: str) -> dict:
+            tokens_after = estimate_tokens(f"{title_final} {merged_content}")
+            saved = max(0, tokens_before - tokens_after)
+            return {
+                "id": merged_id,
+                "merged": list(ids),
+                "count": len(ids),
+                "sensitivity": sensitivity,
+                "trusted": trusted,
+                "pinned": pinned_any,
                 "reason": reason,
-                "compaction": {"tokens_before": tokens_before,
-                               "tokens_after": tokens_after, "tokens_saved": saved,
-                               "reduction_pct": round(100.0 * saved / tokens_before, 1)
-                               if tokens_before else 0.0, "units": len(ids)}}
+                "compaction": {
+                    "tokens_before": tokens_before,
+                    "tokens_after": tokens_after,
+                    "tokens_saved": saved,
+                    "reduction_pct": (
+                        round(100.0 * saved / tokens_before, 1)
+                        if tokens_before else 0.0
+                    ),
+                    "units": len(ids),
+                },
+            }
+
+        retry_links = self.store.conn.execute(
+            "SELECT a, b FROM mem_links "
+            "WHERE relation='merges' AND reason=? "
+            "AND valid_to IS NULL AND expired_at IS NULL "
+            "AND (a=? OR b=?) "
+            "ORDER BY a, b LIMIT 2",
+            (merge_link_reason, ids[0], ids[0]),
+        ).fetchall()
+        for link in retry_links:
+            candidate_id = (
+                str(link["b"]) if str(link["a"]) == ids[0] else str(link["a"])
+            )
+            candidate = self.store.get_memory(candidate_id)
+            supersedes = (
+                (candidate.metadata or {}).get("supersedes")
+                if candidate is not None
+                else None
+            )
+            if (
+                candidate is not None
+                and _governable_source(candidate, at=effective_at)
+                and candidate.metadata.get("merge_key") == merge_key
+                and isinstance(supersedes, list)
+                and {str(source_id) for source_id in supersedes} == source_set
+                and candidate.content == merged_content
+                and candidate.title == title_final
+                and candidate.mtype == target_type
+                and candidate.scope == target_scope
+                and candidate.workspace_id == primary.workspace_id
+                and candidate.repo_id == repo_id
+                and candidate.session_id == target_session_id
+                and list(candidate.keywords or []) == list(keywords or [])
+            ):
+                return merge_result(candidate.id)
+
+        for record in sources:
+            if not _governable_source(record, at=effective_at):
+                raise ValueError(
+                    "only current or quarantined source memories can be merged"
+                )
+
+        def finalize_merge(merged_id: str) -> None:
+            self.store.advance_memory_modified_hlc(merged_id, commit=False)
+            self.store.conn.execute(
+                "UPDATE memories SET pinned=?, sensitivity=?, stability=?, "
+                "access_count=?, last_access=? WHERE id=?",
+                (
+                    int(pinned_any),
+                    sensitivity,
+                    max(record.stability for record in sources),
+                    max(record.access_count for record in sources),
+                    max(
+                        (record.last_access or 0.0 for record in sources),
+                        default=0.0,
+                    ) or None,
+                    merged_id,
+                ),
+            )
+            for record in sources:
+                self.store.close_validity(
+                    record.id, at=effective_at, actor=actor,
+                    reason=reason or "merged into a combined memory",
+                )
+                self.store.add_link(
+                    merged_id,
+                    record.id,
+                    "merges",
+                    allow_scope_transition=True,
+                    reason=merge_link_reason,
+                )
+                self.store.audit(
+                    actor, "merge", record.id, f"merged into {merged_id}"
+                )
+            self.store.audit(
+                actor, "merge", merged_id,
+                f"merged {len(ids)} memories: {', '.join(ids)}",
+            )
+
+        merged_id = self.remember(
+            merged_content,
+            workspace_id=_required_memory_workspace_id(primary),
+            repo_id=repo_id,
+            session_id=target_session_id,
+            mtype=target_type,
+            scope=target_scope,
+            title=title_final,
+            importance=importance,
+            confidence=confidence,
+            keywords=keywords,
+            metadata=merge_metadata,
+            valid_from=effective_at,
+            resolve_conflicts=False,
+            subject_key=subject_key,
+            claim_kind=claim_kind,
+            _transactional_finalizer=finalize_merge,
+        )
+
+        return merge_result(merged_id)
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
     def link(self, a: str, b: str, relation: str = "related", *, layer=None,
@@ -2701,14 +3175,16 @@ class MemoryEngine:
         §"Network exposure"). ``max_files``/``max_file_bytes`` just bound resource use
         on an unexpectedly large tree, not a security sandbox.
         """
-        from engraphis.backends.codegraph import (
-            SourceWalkLimitExceeded,
-            detect_lang,
-            get_code_indexer,
-            iter_source_files,
-        )
-
-        indexer = get_code_indexer(prefer=prefer)
+        indexer_factory = self._code_indexer_factory
+        language_detector = self._code_language_detector
+        source_iterator = self._code_source_iterator
+        if not (
+            callable(indexer_factory)
+            and callable(language_detector)
+            and callable(source_iterator)
+        ):
+            raise RuntimeError("code indexing backend is not configured")
+        indexer = indexer_factory(prefer=prefer)
         # index_repo is an explicit local-filesystem capability: callers select a
         # repository in one of the approved local roots. Canonicalizing then checking
         # containment confines the capability to the operator's configured/default
@@ -2752,8 +3228,8 @@ class MemoryEngine:
         backend_name = type(indexer).__name__
         scan_complete = True
         try:
-            for file_path in iter_source_files(str(root)):
-                lang = detect_lang(file_path)
+            for file_path in source_iterator(str(root)):
+                lang = language_detector(file_path)
                 if (
                     lang is None
                     or (languages and lang not in languages)
@@ -2823,7 +3299,7 @@ class MemoryEngine:
                     backend=backend_name, commit=False,
                 )
                 files_indexed += 1
-        except SourceWalkLimitExceeded:
+        except self._code_walk_limit_error:
             scan_complete = False
 
         removed = 0
@@ -2867,6 +3343,177 @@ class MemoryEngine:
             "backend": backend_name,
             "incremental": True,
             "scan_complete": scan_complete,
+            "code_memory_links": code_memory_links,
+        }
+
+    def index_repo_incremental(
+        self, repo_id: str, root_path: str, paths: list[str], *,
+        languages: Optional[set] = None, prefer: str = "auto",
+        max_file_bytes: int = 2_000_000,
+    ) -> dict:
+        """Re-index explicit paths under the same source policy as the full walk."""
+        indexer_factory = self._code_indexer_factory
+        language_detector = self._code_language_detector
+        source_policy = self._code_source_policy
+        if not (
+            callable(indexer_factory)
+            and callable(language_detector)
+            and callable(source_policy)
+        ):
+            raise RuntimeError("code indexing backend is not configured")
+
+        canonical_root = os.path.normcase(
+            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
+        )
+        canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
+        safe_root: Optional[str] = None
+        for approved_root in _approved_local_index_roots():
+            normalized_approved = os.path.normcase(os.path.realpath(approved_root))
+            approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
+            if canonical_root_with_sep.startswith(approved_prefix):
+                safe_root = canonical_root_with_sep
+                break
+        if safe_root is None:
+            raise ValueError("repo root is outside approved local roots")
+        root = Path(safe_root)
+        if not root.exists():
+            raise ValueError(f"repo root not found: {root_path}")
+        if not root.is_dir():
+            raise ValueError(f"repo root is not a directory: {root_path}")
+
+        indexer = indexer_factory(prefer=prefer)
+        max_file_bytes = max(1, int(max_file_bytes))
+        existing = {
+            row["file"]: row
+            for row in self.store.list_code_files(repo_id, languages=languages)
+        }
+        files_scanned = files_indexed = files_unchanged = 0
+        files_removed = files_failed = files_skipped = 0
+        symbols_indexed = edges_indexed = 0
+        lang_counts: dict[str, int] = defaultdict(int)
+        backend_name = type(indexer).__name__
+        seen_relative: set[str] = set()
+
+        for supplied_path in paths:
+            # This predicate performs containment, symlink, excluded-directory, ignore
+            # file, and supported-extension checks before this method stats or reads the
+            # candidate. Missing eligible paths remain allowed so deletions can retire
+            # their prior index rows.
+            if not source_policy(str(root), os.fspath(supplied_path)):
+                files_skipped += 1
+                continue
+            raw_candidate = os.fspath(supplied_path)
+            if not os.path.isabs(raw_candidate):
+                raw_candidate = os.path.join(str(root), raw_candidate)
+            safe_candidate = Path(os.path.realpath(os.path.abspath(raw_candidate)))
+            try:
+                relative = safe_candidate.relative_to(root).as_posix()
+            except ValueError:
+                files_skipped += 1
+                continue
+            if relative in seen_relative:
+                continue
+            seen_relative.add(relative)
+            files_scanned += 1
+            if not safe_candidate.exists():
+                if relative in existing:
+                    self.store.remove_code_file(repo_id, relative, commit=False)
+                    files_removed += 1
+                continue
+            if not safe_candidate.is_file():
+                files_skipped += 1
+                continue
+            language = language_detector(str(safe_candidate))
+            if (
+                language is None
+                or (languages and language not in languages)
+                or not indexer.supports(language)
+            ):
+                files_skipped += 1
+                continue
+            lang_counts[language] += 1
+            try:
+                stat = safe_candidate.stat()
+                if stat.st_size > max_file_bytes:
+                    files_skipped += 1
+                    continue
+                raw = safe_candidate.read_bytes()
+            except OSError:
+                files_failed += 1
+                continue
+            content_hash = hashlib.sha256(raw).hexdigest()
+            previous = existing.get(relative)
+            if previous and previous.get("content_hash") == content_hash:
+                files_unchanged += 1
+                continue
+            try:
+                indexed = indexer.index_file(
+                    relative, raw.decode("utf-8", errors="replace"), language
+                )
+            except Exception:
+                files_failed += 1
+                continue
+            self.store.clear_symbols_for_file(repo_id, relative, commit=False)
+            for symbol in indexed.symbols:
+                self.store.upsert_symbol(
+                    repo_id=repo_id, kind=symbol.kind, name=symbol.name,
+                    fqname=symbol.fqname, file=symbol.file, span=symbol.span,
+                    signature=symbol.signature, docstring=symbol.docstring,
+                    lang=symbol.lang, exported=symbol.exported,
+                    content_hash=symbol.content_hash, commit=False,
+                )
+                symbols_indexed += 1
+            for edge in indexed.edges:
+                self.store.add_code_edge(
+                    repo_id=repo_id, src=edge.src, dst=edge.dst,
+                    relation=edge.relation, file=edge.file, line=edge.line,
+                    commit=False,
+                )
+                edges_indexed += 1
+            self.store.upsert_code_file(
+                repo_id=repo_id, file=relative, lang=language,
+                content_hash=content_hash, size_bytes=stat.st_size,
+                mtime_ns=getattr(stat, "st_mtime_ns", 0),
+                backend=backend_name, commit=False,
+            )
+            files_indexed += 1
+
+        self.store.conn.commit()
+        code_memory_links = self.rebuild_code_memory_links(repo_id=repo_id)
+        primary_lang = (
+            max(lang_counts.items(), key=lambda item: item[1])[0]
+            if lang_counts else ""
+        )
+        self.store.update_repo_index(
+            repo_id, root_path=str(root), primary_lang=primary_lang,
+            settings={
+                "code_graph_backend": backend_name,
+                "code_graph_languages": sorted(lang_counts),
+                "code_graph_last_report": {
+                    "files_scanned": files_scanned,
+                    "files_indexed": files_indexed,
+                    "files_unchanged": files_unchanged,
+                    "files_removed": files_removed,
+                    "incremental": True,
+                },
+            },
+        )
+        return {
+            "root_path": str(root),
+            "files_scanned": files_scanned,
+            "files_indexed": files_indexed,
+            "files_unchanged": files_unchanged,
+            "files_removed": files_removed,
+            "files_failed": files_failed,
+            "files_skipped": files_skipped,
+            "symbols_indexed": symbols_indexed,
+            "edges_indexed": edges_indexed,
+            "symbols": self.store.count_symbols(repo_id),
+            "edges": self.store.count_code_edges(repo_id),
+            "languages": dict(sorted(lang_counts.items())),
+            "backend": backend_name,
+            "incremental": True,
+            "scan_complete": True,
             "code_memory_links": code_memory_links,
         }
 
@@ -3006,90 +3653,235 @@ class MemoryEngine:
         self.store.prune_code_memory_links(repo_id)
         return linked
 
-    def code_path(self, source: str, target: str, *, repo_id: str,
-                  max_depth: int = 8, flt: Optional[SearchFilter] = None) -> dict:
-        """Shortest path across definitions, calls, imports, and symbol aliases."""
-        self._validate_code_filter(repo_id, flt)
-        symbols = self.store.list_symbols(repo_id, flt=flt)
-        stored_edges = self.store.list_code_edges(repo_id, flt=flt)
-        adjacency: dict[str, list[tuple[str, dict, bool]]] = defaultdict(list)
+    def _load_bounded_code_graph(
+        self, *, repo_id: str, flt: Optional[SearchFilter],
+        capacity: int, include_memory: bool,
+    ) -> dict:
+        """Load one bounded graph whose indexed symbol nodes are stable symbol IDs."""
+        capacity = _code_traversal_capacity(capacity)
+        symbol_rows = self.store.list_symbols(
+            repo_id, limit=capacity + 1, flt=flt,
+        )
+        edge_rows = self.store.list_code_edges(
+            repo_id, limit=capacity + 1, flt=flt,
+        )
+        memory_rows = (
+            self.store.list_code_memory_links(
+                repo_id, flt=flt, limit=capacity + 1,
+            )
+            if include_memory
+            else []
+        )
+        truncated_sources = {
+            "symbols": len(symbol_rows) > capacity,
+            "edges": len(edge_rows) > capacity,
+            "memory_links": len(memory_rows) > capacity,
+        }
+        symbols = symbol_rows[:capacity]
+        stored_edges = edge_rows[:capacity]
+        memory_links = memory_rows[:capacity]
+
+        exact: dict[str, list[str]] = defaultdict(list)
+        folded: dict[str, list[str]] = defaultdict(list)
         node_meta: dict[str, dict] = {}
-        for sym in symbols:
-            meta = {
-                "kind": "symbol", "name": sym["name"], "fqname": sym["fqname"],
-                "symbol_kind": sym["kind"], "file": sym["file"], "span": sym["span"],
-            }
-            for key in {sym["name"], sym["fqname"]}:
-                if key:
-                    node_meta.setdefault(key, meta)
-            if sym["name"] and sym["fqname"] and sym["name"] != sym["fqname"]:
-                alias = {"relation": "alias", "layer": "entity", "file": sym["file"],
-                         "line": 0}
-                adjacency[sym["name"]].append((sym["fqname"], alias, True))
-                adjacency[sym["fqname"]].append((sym["name"], alias, False))
-        for edge in stored_edges:
-            src, dst = edge["src"], edge["dst"]
-            adjacency[src].append((dst, edge, True))
-            adjacency[dst].append((src, edge, False))
-            node_meta.setdefault(src, {"kind": "code", "name": src})
-            node_meta.setdefault(dst, {"kind": "code", "name": dst})
-        symbol_by_id = {symbol["id"]: symbol for symbol in symbols}
-        for link in self.store.list_code_memory_links(repo_id, flt=flt):
-            symbol = symbol_by_id.get(link.get("symbol_id"))
-            if not symbol or not link.get("memory_id"):
+        for symbol in symbols:
+            symbol_id = str(symbol.get("id") or "")
+            if not symbol_id:
                 continue
-            code_node = symbol.get("fqname") or symbol.get("name")
-            if not code_node:
-                continue
-            memory_node = link["memory_id"]
-            bridge = {
-                "relation": link.get("relation") or "mentions",
-                "layer": "semantic",
+            node_meta[symbol_id] = {
+                "kind": "code",
+                "name": symbol.get("name") or "",
+                "fqname": symbol.get("fqname") or "",
                 "file": symbol.get("file") or "",
+                "span": symbol.get("span") or "",
+            }
+            for value in {
+                symbol_id,
+                str(symbol.get("name") or ""),
+                str(symbol.get("fqname") or ""),
+            }:
+                if not value:
+                    continue
+                exact[value].append(symbol_id)
+                folded[value.casefold()].append(symbol_id)
+
+        def endpoint_ids(value: object, *, edge_id: str, side: str) -> list[str]:
+            raw = str(value or "").strip()
+            matches = sorted(set(exact.get(raw) or folded.get(raw.casefold()) or []))
+            if len(matches) == 1:
+                return matches
+            if len(matches) > 1:
+                fallback = f"ambiguous:{edge_id}:{side}"
+                node_meta[fallback] = {
+                    "kind": "ambiguous_code",
+                    "name": raw,
+                    "fqname": raw,
+                    "file": "",
+                    "candidates": matches,
+                }
+                return [fallback]
+            fallback = f"code:{raw}"
+            node_meta.setdefault(
+                fallback,
+                {"kind": "code", "name": raw, "fqname": raw, "file": ""},
+            )
+            return [fallback]
+
+        expanded_edges: list[dict] = []
+        expansion_truncated = False
+        for edge_index, edge in enumerate(stored_edges):
+            edge_id = str(edge.get("id") or edge_index)
+            for source_id in endpoint_ids(
+                edge.get("src"), edge_id=edge_id, side="source",
+            ):
+                for target_id in endpoint_ids(
+                    edge.get("dst"), edge_id=edge_id, side="target",
+                ):
+                    if len(expanded_edges) >= capacity:
+                        expansion_truncated = True
+                        break
+                    expanded_edges.append({
+                        **edge,
+                        "source_id": source_id,
+                        "target_id": target_id,
+                    })
+                if expansion_truncated:
+                    break
+            if expansion_truncated:
+                break
+        truncated_sources["expanded_edges"] = expansion_truncated
+
+        adjacency: dict[str, list[tuple[str, dict, bool]]] = defaultdict(list)
+        for edge in expanded_edges:
+            source_id = edge["source_id"]
+            target_id = edge["target_id"]
+            adjacency[source_id].append((target_id, edge, True))
+            adjacency[target_id].append((source_id, edge, False))
+        for link in memory_links:
+            memory_id = str(link.get("memory_id") or "")
+            symbol_id = str(link.get("symbol_id") or "")
+            if not memory_id or not symbol_id or symbol_id not in node_meta:
+                continue
+            node_meta[memory_id] = {
+                "kind": "memory",
+                "name": link.get("title") or memory_id,
+                "fqname": "",
+                "file": "",
+            }
+            bridge = {
+                "source_id": memory_id,
+                "target_id": symbol_id,
+                "relation": "memory_mentions",
+                "layer": "memory",
+                "file": link.get("file") or "",
                 "line": 0,
             }
-            adjacency[code_node].append((memory_node, bridge, True))
-            adjacency[memory_node].append((code_node, bridge, False))
-            node_meta[memory_node] = {
-                "kind": "memory",
-                "name": link.get("title") or memory_node,
-                "mtype": link.get("mtype") or "",
-            }
+            adjacency[memory_id].append((symbol_id, bridge, True))
+            adjacency[symbol_id].append((memory_id, bridge, False))
+        for node in adjacency:
+            adjacency[node].sort(
+                key=lambda item: (
+                    item[0],
+                    str(item[1].get("relation") or ""),
+                    not item[2],
+                )
+            )
+        return {
+            "capacity": capacity,
+            "truncated": any(truncated_sources.values()),
+            "truncated_sources": truncated_sources,
+            "symbols": symbols,
+            "stored_edges": stored_edges,
+            "expanded_edges": expanded_edges,
+            "memory_links": memory_links,
+            "adjacency": adjacency,
+            "node_meta": node_meta,
+        }
 
-        resolved_source = self._resolve_code_node(source, symbols, adjacency)
-        resolved_target = self._resolve_code_node(target, symbols, adjacency)
-        if not resolved_source or not resolved_target:
+    def code_path(
+        self, source: str, target: str, *, repo_id: str,
+        max_depth: int = 8,
+        capacity: int = CODE_TRAVERSAL_DEFAULT_CAPACITY,
+        flt: Optional[SearchFilter] = None,
+    ) -> dict:
+        """Return one deterministic shortest path within a bounded stable-ID graph."""
+        self._validate_code_filter(repo_id, flt)
+        graph = self._load_bounded_code_graph(
+            repo_id=repo_id,
+            flt=flt,
+            capacity=capacity,
+            include_memory=True,
+        )
+        source_id, source_candidates = self._resolve_code_node(
+            source, graph["symbols"], graph["adjacency"],
+        )
+        target_id, target_candidates = self._resolve_code_node(
+            target, graph["symbols"], graph["adjacency"],
+        )
+        common = {
+            "capacity": graph["capacity"],
+            "truncated": graph["truncated"],
+            "truncated_sources": graph["truncated_sources"],
+        }
+        if source_candidates or target_candidates:
             return {
-                "found": False, "source": source, "target": target,
-                "reason": "source or target was not found in the indexed graph",
-                "path": [], "edges": [],
+                "found": False,
+                "source": source,
+                "target": target,
+                "reason": "source or target is ambiguous",
+                "ambiguous": {
+                    "source": source_candidates,
+                    "target": target_candidates,
+                },
+                "path": [],
+                "edges": [],
+                **common,
             }
-        max_depth = max(1, min(32, int(max_depth)))
-        queue = deque([resolved_source])
-        depth = {resolved_source: 0}
+        if not source_id or not target_id:
+            return {
+                "found": False,
+                "source": source,
+                "target": target,
+                "reason": "source or target was not found in the bounded indexed graph",
+                "path": [],
+                "edges": [],
+                **common,
+            }
+        try:
+            max_depth = int(max_depth)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("max_depth must be an integer") from exc
+        max_depth = max(1, min(32, max_depth))
+        queue = deque([source_id])
+        depth = {source_id: 0}
         parent: dict[str, tuple[str, dict, bool]] = {}
         while queue:
             current = queue.popleft()
-            if current == resolved_target:
+            if current == target_id:
                 break
             if depth[current] >= max_depth:
                 continue
-            for neighbor, edge, forward in adjacency.get(current, []):
+            for neighbor, edge, forward in graph["adjacency"].get(current, []):
                 if neighbor in depth:
                     continue
                 depth[neighbor] = depth[current] + 1
                 parent[neighbor] = (current, edge, forward)
                 queue.append(neighbor)
-
-        if resolved_target not in depth:
+        if target_id not in depth:
             return {
-                "found": False, "source": resolved_source, "target": resolved_target,
-                "reason": f"no path within {max_depth} hops", "path": [], "edges": [],
+                "found": False,
+                "source": source_id,
+                "target": target_id,
+                "reason": f"no path within {max_depth} hops"
+                + (" in the bounded graph" if graph["truncated"] else ""),
+                "path": [],
+                "edges": [],
+                **common,
             }
-        nodes = [resolved_target]
+        node_ids = [target_id]
         path_edges: list[dict] = []
-        cursor = resolved_target
-        while cursor != resolved_source:
+        cursor = target_id
+        while cursor != source_id:
             previous, edge, forward = parent[cursor]
             path_edges.append({
                 "from": previous,
@@ -3100,78 +3892,104 @@ class MemoryEngine:
                 "file": edge.get("file") or "",
                 "line": edge.get("line") or 0,
             })
-            nodes.append(previous)
+            node_ids.append(previous)
             cursor = previous
-        nodes.reverse()
+        node_ids.reverse()
         path_edges.reverse()
         return {
             "found": True,
-            "source": resolved_source,
-            "target": resolved_target,
+            "source": source_id,
+            "target": target_id,
             "hops": len(path_edges),
-            "path": [{"id": node, **node_meta.get(node, {"kind": "code", "name": node})}
-                     for node in nodes],
+            "path": [
+                {
+                    "id": node_id,
+                    **graph["node_meta"].get(
+                        node_id,
+                        {"kind": "code", "name": node_id, "fqname": "", "file": ""},
+                    ),
+                }
+                for node_id in node_ids
+            ],
             "edges": path_edges,
+            **common,
         }
 
     @staticmethod
-    def _resolve_code_node(query: str, symbols: list[dict],
-                           adjacency: dict) -> Optional[str]:
+    def _resolve_code_node(
+        query: str, symbols: list[dict], adjacency: dict,
+    ) -> tuple[Optional[str], list[str]]:
         raw = str(query or "").strip()
-        if raw in adjacency:
-            return raw
-        lowered = raw.lower()
-        exact = [
-            s for s in symbols
-            if str(s.get("name") or "").lower() == lowered
-            or str(s.get("fqname") or "").lower() == lowered
-            or str(s.get("file") or "").lower() == lowered
-        ]
-        candidates = exact or [
-            s for s in symbols
-            if lowered in str(s.get("name") or "").lower()
-            or lowered in str(s.get("fqname") or "").lower()
-            or lowered in str(s.get("file") or "").lower()
-        ]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda s: (
-            0 if str(s.get("fqname") or "").lower() == lowered else 1,
-            len(str(s.get("fqname") or "")),
-        ))
-        chosen = candidates[0]
-        for key in (chosen.get("fqname"), chosen.get("name"), chosen.get("file")):
-            if key in adjacency:
-                return key
-        return chosen.get("fqname") or chosen.get("name")
+        if not raw:
+            return None, []
+        symbol_ids = {str(symbol.get("id") or "") for symbol in symbols}
+        if raw in symbol_ids or raw in adjacency:
+            return raw, []
+        fallback = f"code:{raw}"
+        if fallback in adjacency:
+            return fallback, []
+        folded = raw.casefold()
+        tiers = (
+            [s for s in symbols if str(s.get("fqname") or "") == raw],
+            [s for s in symbols if str(s.get("name") or "") == raw],
+            [s for s in symbols if str(s.get("file") or "") == raw],
+            [
+                s for s in symbols
+                if folded in {
+                    str(s.get("fqname") or "").casefold(),
+                    str(s.get("name") or "").casefold(),
+                    str(s.get("file") or "").casefold(),
+                }
+            ],
+            [
+                s for s in symbols
+                if folded in str(s.get("fqname") or "").casefold()
+                or folded in str(s.get("name") or "").casefold()
+                or folded in str(s.get("file") or "").casefold()
+            ],
+        )
+        candidates = next((tier for tier in tiers if tier), [])
+        candidate_ids = sorted({
+            str(candidate.get("id") or "")
+            for candidate in candidates
+            if candidate.get("id")
+        })
+        if len(candidate_ids) == 1:
+            return candidate_ids[0], []
+        if candidate_ids:
+            return None, candidate_ids
+        return None, []
 
-    def analyze_code_graph(self, *, repo_id: str,
-                           limit: Optional[int] = None,
-                           edge_limit: Optional[int] = None,
-                           flt: Optional[SearchFilter] = None) -> dict:
-        """Deterministic weighted communities, hotspots, and cross-file connections.
-
-        ``limit``/``edge_limit`` bound the symbol/edge fetch. They default to ``None``
-        (unbounded) so ``analyze_impact`` keeps today's exact answer; ``export_code_graph``
-        passes its own caps because that payload is reachable by a ``viewer``.
-        """
+    def analyze_code_graph(
+        self, *, repo_id: str,
+        capacity: int = CODE_TRAVERSAL_DEFAULT_CAPACITY,
+        flt: Optional[SearchFilter] = None,
+    ) -> dict:
+        """Analyze one explicitly bounded stable-ID code graph."""
         self._validate_code_filter(repo_id, flt)
-        edges = self.store.list_code_edges(repo_id, limit=edge_limit, flt=flt)
-        symbols = self.store.list_symbols(repo_id, limit=limit, flt=flt)
+        graph = self._load_bounded_code_graph(
+            repo_id=repo_id,
+            flt=flt,
+            capacity=capacity,
+            include_memory=False,
+        )
         adjacency: dict[str, dict[str, float]] = defaultdict(dict)
         degree: dict[str, int] = defaultdict(int)
-        for edge in edges:
-            src, dst = edge["src"], edge["dst"]
-            if not src or not dst:
-                continue
+        for edge in graph["expanded_edges"]:
+            source_id, target_id = edge["source_id"], edge["target_id"]
             weight = (
-                1.5 if edge.get("relation") in {"calls", "inherits", "implements"} else 1.0
+                1.5
+                if edge.get("relation") in {"calls", "inherits", "implements"}
+                else 1.0
             )
-            adjacency[src][dst] = adjacency[src].get(dst, 0.0) + weight
-            adjacency[dst][src] = adjacency[dst].get(src, 0.0) + weight
-            degree[src] += 1
-            degree[dst] += 1
-
+            adjacency[source_id][target_id] = (
+                adjacency[source_id].get(target_id, 0.0) + weight
+            )
+            adjacency[target_id][source_id] = (
+                adjacency[target_id].get(source_id, 0.0) + weight
+            )
+            degree[source_id] += 1
+            degree[target_id] += 1
         labels = {node: node for node in adjacency}
         for _ in range(30):
             changed = False
@@ -3195,40 +4013,50 @@ class MemoryEngine:
         )
         node_community: dict[str, int] = {}
         summaries = []
-        for cid, members in enumerate(communities):
+        for community_id, members in enumerate(communities):
             for node in members:
-                node_community[node] = cid
+                node_community[node] = community_id
             ranked = sorted(members, key=lambda node: (-degree[node], node))
             summaries.append({
-                "id": cid,
+                "id": community_id,
                 "size": len(members),
                 "top_nodes": [
-                    {"node": node, "degree": degree[node]} for node in ranked[:8]
+                    {
+                        "node": node,
+                        "name": graph["node_meta"].get(node, {}).get("name") or node,
+                        "file": graph["node_meta"].get(node, {}).get("file") or "",
+                        "degree": degree[node],
+                    }
+                    for node in ranked[:8]
                 ],
             })
-
-        symbol_file = {}
-        for symbol in symbols:
-            for key in (symbol.get("name"), symbol.get("fqname")):
-                if key:
-                    symbol_file.setdefault(key, symbol.get("file") or "")
-        cross_file: list[dict] = []
+        cross_file = []
         cross_degree: dict[str, int] = defaultdict(int)
-        for edge in edges:
-            src, dst = edge.get("src") or "", edge.get("dst") or ""
-            src_file = symbol_file.get(src) or edge.get("file") or ""
-            dst_file = symbol_file.get(dst) or ""
-            if not src_file or not dst_file or src_file == dst_file:
+        for edge in graph["expanded_edges"]:
+            source_id, target_id = edge["source_id"], edge["target_id"]
+            source_file = (
+                graph["node_meta"].get(source_id, {}).get("file")
+                or edge.get("file")
+                or ""
+            )
+            target_file = graph["node_meta"].get(target_id, {}).get("file") or ""
+            if not source_file or not target_file or source_file == target_file:
                 continue
-            cross_degree[src] += 1
-            cross_degree[dst] += 1
+            cross_degree[source_id] += 1
+            cross_degree[target_id] += 1
             cross_file.append({
-                "src": src, "dst": dst, "relation": edge.get("relation") or "",
-                "src_file": src_file, "dst_file": dst_file,
+                "src": source_id,
+                "dst": target_id,
+                "relation": edge.get("relation") or "",
+                "src_file": source_file,
+                "dst_file": target_file,
             })
         cross_file.sort(key=lambda item: (
             -(degree[item["src"]] + degree[item["dst"]]),
-            item["src_file"], item["dst_file"], item["src"], item["dst"],
+            item["src_file"],
+            item["dst_file"],
+            item["src"],
+            item["dst"],
         ))
         threshold = max(
             5,
@@ -3237,7 +4065,10 @@ class MemoryEngine:
         )
         hotspots = [
             {
-                "node": node, "degree": count,
+                "node": node,
+                "name": graph["node_meta"].get(node, {}).get("name") or node,
+                "file": graph["node_meta"].get(node, {}).get("file") or "",
+                "degree": count,
                 "cross_file_degree": cross_degree.get(node, 0),
                 "god_node": count >= threshold,
             }
@@ -3247,7 +4078,11 @@ class MemoryEngine:
         ]
         return {
             "nodes": len(adjacency),
-            "edges": len(edges),
+            "edges": len(graph["expanded_edges"]),
+            "source_edge_rows": len(graph["stored_edges"]),
+            "capacity": graph["capacity"],
+            "truncated": graph["truncated"],
+            "truncated_sources": graph["truncated_sources"],
             "algorithm": "weighted_label_propagation",
             "communities": summaries,
             "hotspots": hotspots,
@@ -3255,42 +4090,55 @@ class MemoryEngine:
             "_node_community": node_community,
         }
 
-    def analyze_impact(self, changed_files: list[str], *, repo_id: str,
-                       flt: Optional[SearchFilter] = None) -> dict:
-        """Estimate graph and memory impact for a git diff / PR file list."""
+    def analyze_impact(
+        self, changed_files: list[str], *, repo_id: str,
+        capacity: int = CODE_TRAVERSAL_DEFAULT_CAPACITY,
+        flt: Optional[SearchFilter] = None,
+    ) -> dict:
+        """Estimate impact from one explicitly bounded stable-ID graph."""
         self._validate_code_filter(repo_id, flt)
-        normalized = []
+        capacity = _code_traversal_capacity(capacity)
+        normalized: list[str] = []
         seen = set()
-        for file in changed_files:
-            rel = str(file or "").strip().replace("\\", "/")
-            while rel.startswith("./"):
-                rel = rel[2:]
-            if rel.startswith("/"):
-                rel = rel[1:]
-            if rel and rel not in seen:
-                seen.add(rel)
-                normalized.append(rel)
-        symbols = self.store.symbols_for_files(repo_id, normalized, flt=flt)
-        touched_names = {
-            name for sym in symbols for name in (sym.get("name"), sym.get("fqname")) if name
-        }
-        touched_leaf_names = {str(name).split(".")[-1] for name in touched_names}
-        edges = self.store.list_code_edges(repo_id, flt=flt)
+        files_truncated = False
+        for index, file in enumerate(changed_files):
+            if index >= capacity:
+                files_truncated = True
+                break
+            relative = str(file or "").strip().replace("\\", "/")
+            while relative.startswith("./"):
+                relative = relative[2:]
+            if relative.startswith("/"):
+                relative = relative[1:]
+            if relative and relative not in seen:
+                seen.add(relative)
+                normalized.append(relative)
+        graph = self._load_bounded_code_graph(
+            repo_id=repo_id,
+            flt=flt,
+            capacity=capacity,
+            include_memory=True,
+        )
+        normalized_set = set(normalized)
+        symbols = [
+            symbol for symbol in graph["symbols"]
+            if str(symbol.get("file") or "").replace("\\", "/") in normalized_set
+        ]
+        touched_ids = {str(symbol.get("id") or "") for symbol in symbols}
         inbound = [
-            edge for edge in edges
-            if edge.get("dst") in touched_names
-            or str(edge.get("dst") or "").split(".")[-1]
-            in touched_leaf_names
+            edge for edge in graph["expanded_edges"]
+            if edge["target_id"] in touched_ids
         ]
         dependent_files = sorted({
-            file for edge in inbound
-            if isinstance((file := edge.get("file")), str) and file and file not in normalized
+            file
+            for edge in inbound
+            if isinstance((file := edge.get("file")), str)
+            and file
+            and file not in normalized_set
         })
-
         memory_mentions: dict[str, dict] = {}
-        touched_symbol_ids = {symbol["id"] for symbol in symbols}
-        for link in self.store.list_code_memory_links(repo_id, flt=flt):
-            if link.get("symbol_id") not in touched_symbol_ids:
+        for link in graph["memory_links"]:
+            if str(link.get("symbol_id") or "") not in touched_ids:
                 continue
             item = memory_mentions.setdefault(
                 link["memory_id"],
@@ -3301,29 +4149,37 @@ class MemoryEngine:
                     "symbols": [],
                 },
             )
-            symbol_name = link.get("fqname") or link.get("name") or ""
-            if symbol_name and symbol_name not in item["symbols"]:
-                item["symbols"].append(symbol_name)
-        names_for_mentions = sorted(
-            {str(s.get("name")) for s in symbols
-             if s.get("name") and len(str(s.get("name"))) >= 3}
-        )[:80]
-        for name in names_for_mentions:
-            rows = self.store.memories_mentioning(
+            name = link.get("fqname") or link.get("name") or ""
+            if name and name not in item["symbols"]:
+                item["symbols"].append(name)
+        mention_names = sorted({
+            str(symbol.get("name"))
+            for symbol in symbols
+            if symbol.get("name") and len(str(symbol.get("name"))) >= 3
+        })[:80]
+        for name in mention_names:
+            for row in self.store.memories_mentioning(
                 repo_id, name, flt=flt, limit=10,
-            )
-            for row in rows:
+            ):
                 item = memory_mentions.setdefault(
                     row["id"],
-                    {"id": row["id"], "title": row["title"] or "",
-                     "mtype": row["mtype"], "symbols": []},
+                    {
+                        "id": row["id"],
+                        "title": row["title"] or "",
+                        "mtype": row["mtype"],
+                        "symbols": [],
+                    },
                 )
-                item["symbols"].append(name)
-
-        analysis = self.analyze_code_graph(repo_id=repo_id, flt=flt)
+                if name not in item["symbols"]:
+                    item["symbols"].append(name)
+        analysis = self.analyze_code_graph(
+            repo_id=repo_id, capacity=capacity, flt=flt,
+        )
         node_community = analysis.pop("_node_community")
         communities_affected = sorted({
-            node_community[name] for name in touched_names if name in node_community
+            node_community[symbol_id]
+            for symbol_id in touched_ids
+            if symbol_id in node_community
         })
         score = min(
             100,
@@ -3333,17 +4189,19 @@ class MemoryEngine:
             + len(memory_mentions) * 2
             + len(communities_affected) * 5,
         )
-        if score < 25:
-            level = "low"
-        elif score < 55:
-            level = "medium"
-        elif score < 80:
-            level = "high"
-        else:
-            level = "critical"
-        hotspot_names = {item["node"] for item in analysis["hotspots"][:10]}
-        conflict_zones = sorted(touched_names & hotspot_names)
+        level = (
+            "low" if score < 25
+            else "medium" if score < 55
+            else "high" if score < 80
+            else "critical"
+        )
+        hotspot_ids = {item["node"] for item in analysis["hotspots"][:10]}
+        truncated_sources = dict(graph["truncated_sources"])
+        truncated_sources["changed_files"] = files_truncated
         return {
+            "capacity": capacity,
+            "truncated": graph["truncated"] or files_truncated,
+            "truncated_sources": truncated_sources,
             "changed_files": normalized,
             "risk": {"score": score, "level": level},
             "metrics": {
@@ -3359,7 +4217,7 @@ class MemoryEngine:
             "dependent_files": dependent_files[:200],
             "memory_mentions": list(memory_mentions.values())[:100],
             "communities_affected": communities_affected,
-            "potential_conflict_zones": conflict_zones,
+            "potential_conflict_zones": sorted(touched_ids & hotspot_ids),
             "graph": analysis,
         }
 
@@ -3378,20 +4236,27 @@ class MemoryEngine:
         gives entity edges. ``payload['truncated']`` says whether a cap actually bit.
         """
         limit = max(1, min(CODE_EXPORT_MAX_LIMIT, int(limit)))
-        edge_cap = max(limit * 8, 2_000)
+        edge_cap = min(
+            CODE_TRAVERSAL_MAX_CAPACITY,
+            max(limit * 8, 2_000),
+        )
         self._validate_code_filter(repo_id, flt)
-        analysis = self.analyze_code_graph(repo_id=repo_id, limit=limit,
-                                           edge_limit=edge_cap, flt=flt)
+        analysis = self.analyze_code_graph(
+            repo_id=repo_id, capacity=edge_cap, flt=flt,
+        )
         analysis.pop("_node_community", None)
-        # Fetch one sentinel row beyond the payload cap so truncation stays observable
-        # without materializing every indexed file in a large repository.
         files = self.store.list_code_files(repo_id, flt=flt, limit=limit + 1)
-        truncated_files = len(files) > limit
-        files = files[:limit]
-        nodes = self.store.list_symbols(repo_id, limit=limit, flt=flt)
-        edges = self.store.list_code_edges(repo_id, limit=edge_cap, flt=flt)
+        nodes = self.store.list_symbols(repo_id, limit=limit + 1, flt=flt)
+        edges = self.store.list_code_edges(repo_id, limit=edge_cap + 1, flt=flt)
         memory_links = self.store.list_code_memory_links(
-            repo_id, flt=flt, limit=edge_cap
+            repo_id, flt=flt, limit=edge_cap + 1,
+        )
+        truncated = bool(
+            len(files) > limit
+            or len(nodes) > limit
+            or len(edges) > edge_cap
+            or len(memory_links) > edge_cap
+            or analysis.get("truncated")
         )
         return {
             "format": "engraphis-code-graph/1",
@@ -3399,14 +4264,11 @@ class MemoryEngine:
             "repo_id": repo_id,
             "limit": limit,
             "edge_limit": edge_cap,
-            "truncated": bool(
-                truncated_files or len(nodes) >= limit or len(edges) >= edge_cap
-                or len(memory_links) >= edge_cap
-            ),
-            "files": files,
-            "nodes": nodes,
-            "edges": edges,
-            "memory_links": memory_links,
+            "truncated": truncated,
+            "files": files[:limit],
+            "nodes": nodes[:limit],
+            "edges": edges[:edge_cap],
+            "memory_links": memory_links[:edge_cap],
             "analysis": analysis,
         }
 

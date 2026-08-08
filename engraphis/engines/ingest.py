@@ -15,8 +15,15 @@ from typing import Any, Optional
 import numpy as np
 
 from engraphis.core.secrets import reject_secrets
+from engraphis.models import (
+    MAX_BATCH_ITEMS as _MAX_BATCH_ITEMS,
+    MAX_CONTENT_CHARS as _MAX_CONTENT_CHARS,
+    MAX_METADATA_BYTES as _MAX_METADATA_BYTES,
+    MAX_NAME_CHARS as _MAX_NAME_CHARS,
+    MAX_TITLE_CHARS as _MAX_TITLE_CHARS,
+)
 from engraphis.engines import embedder
-from engraphis.stores import now_ts
+from engraphis.stores import get_conn, now_ts
 from engraphis.stores import graph as graph_store
 from engraphis.stores import ledger as ledger_store
 from engraphis.stores import vectors as mem_store
@@ -63,9 +70,7 @@ _STOPWORDS = {
 }
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_MAX_CONTENT_CHARS = 100_000
-_MAX_TITLE_CHARS = 1_000
-_MAX_NAME_CHARS = 200
+_MAX_FUTURE_TIMESTAMP_SECONDS = 300.0
 
 
 def _normalize_text(value: Any, *, field: str, max_chars: int, required: bool = True) -> str:
@@ -92,8 +97,10 @@ def _normalize_timestamp(value: Any, *, field: str) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be a finite number")
     result = float(value)
-    if not math.isfinite(result):
-        raise ValueError(f"{field} must be a finite number")
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"{field} must be a non-negative finite number")
+    if result > now_ts() + _MAX_FUTURE_TIMESTAMP_SECONDS:
+        raise ValueError(f"{field} is too far in the future")
     return result
 
 
@@ -152,6 +159,7 @@ def ingest_document(
     memory_type: str = "semantic",
     vector: Optional[np.ndarray] = None,
     trusted: bool = True,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """Full ingestion pipeline: embed (or use provided vector) → store → extract entities → append event.
 
@@ -206,9 +214,13 @@ def ingest_document(
     provenance["review_state"] = "approved" if trusted else "pending"
     stamped_metadata = {**clean_metadata, "provenance": provenance}
     try:
-        json.dumps(stamped_metadata, ensure_ascii=False)
+        encoded_metadata = json.dumps(
+            stamped_metadata, ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
     except (TypeError, ValueError, OverflowError, RecursionError):
         raise ValueError("metadata must be JSON-serializable") from None
+    if len(encoded_metadata) > _MAX_METADATA_BYTES:
+        raise ValueError(f"metadata exceeds {_MAX_METADATA_BYTES} bytes")
 
     ts = now_ts()
     created_at = ts if created_at is None else created_at
@@ -218,42 +230,57 @@ def ingest_document(
         embedder.embed(full_text)
     )
 
-    mem = mem_store.upsert_memory(
-        namespace=namespace,
-        document_id=document_id,
-        title=title,
-        content=content,
-        metadata=stamped_metadata,
-        source_type=source_type,
-        priority=priority,
-        vector=vec,
-        created_at=created_at,
-        updated_at=updated_at,
-        memory_type=memory_type,
-    )
-
+    conn = get_conn()
     entities = _extract_entities_from_doc(title, content)
-    for name, etype in entities:
-        graph_store.upsert_entity(namespace, name, etype)
-        ledger_store.append_event(
-            namespace=namespace,
-            entity_name=name,
-            event_type="ingest",
-            description=f"Entity seen in document '{title}'",
-            payload={"document_id": document_id, "entity_type": etype},
-            timestamp=updated_at,
-        )
-
     relations = _extract_relations(full_text, entities)
-    for src, rel, tgt in relations:
-        graph_store.upsert_edge(namespace, src, tgt, rel)
-
-    job = ledger_store.create_job(
-        namespace=namespace,
-        job_type="ingest",
-        payload={"document_id": document_id, "entity_count": len(entities), "edge_count": len(relations)},
-    )
-
+    try:
+        mem = mem_store.upsert_memory(
+            namespace=namespace,
+            document_id=document_id,
+            title=title,
+            content=content,
+            metadata=stamped_metadata,
+            source_type=source_type,
+            priority=priority,
+            vector=vec,
+            created_at=created_at,
+            updated_at=updated_at,
+            memory_type=memory_type,
+            commit=False,
+        )
+        graph_store.replace_document_evidence(
+            namespace,
+            document_id,
+            entities,
+            relations,
+            updated_at=updated_at,
+            commit=False,
+        )
+        for name, entity_type in entities:
+            ledger_store.append_event(
+                namespace=namespace,
+                entity_name=name,
+                event_type="ingest",
+                description=f"Entity seen in document '{title}'",
+                payload={"document_id": document_id, "entity_type": entity_type},
+                timestamp=updated_at,
+                commit=False,
+            )
+        job = ledger_store.create_job(
+            namespace=namespace,
+            job_type="ingest",
+            payload={
+                "document_id": document_id,
+                "entity_count": len(entities),
+                "edge_count": len(relations),
+            },
+            commit=False,
+        )
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {
         **mem,
         "jobId": job["job_id"],
@@ -264,34 +291,52 @@ def ingest_document(
 
 
 def ingest_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Ingest multiple documents, preserving each item's trust decision."""
+    """Ingest a bounded batch atomically; failures never leave a partial prefix."""
     if not isinstance(items, list):
         raise ValueError("items must be a list")
+    if len(items) > _MAX_BATCH_ITEMS:
+        raise ValueError(f"items exceeds {_MAX_BATCH_ITEMS} entries")
+    conn = get_conn()
     results = []
-    for item in items:
-        if not isinstance(item, Mapping):
-            raise ValueError("each item must be an object")
-        results.append(ingest_document(
-            namespace=item.get("namespace"),
-            document_id=item.get("documentId") or item.get("document_id"),
-            title=item.get("title", ""),
-            content=item.get("content"),
-            metadata=item.get("metadata"),
-            source_type=item.get("sourceType") or item.get("source_type"),
-            priority=item.get("priority"),
-            created_at=item.get("createdAt") if item.get("createdAt") is not None
-            else item.get("created_at"),
-            updated_at=item.get("updatedAt") if item.get("updatedAt") is not None
-            else item.get("updated_at"),
-            memory_type=item.get("memory_type") or item.get("memoryType") or "semantic",
-            vector=item.get("vector"),
-            trusted=item.get("trusted", True),
-        ))
-    job = ledger_store.create_job(
-        namespace=None,
-        job_type="batch_ingest",
-        payload={"count": len(results)},
-    )
+    try:
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ValueError("each item must be an object")
+            results.append(ingest_document(
+                namespace=item.get("namespace"),
+                document_id=item.get("documentId") or item.get("document_id"),
+                title=item.get("title", ""),
+                content=item.get("content"),
+                metadata=item.get("metadata"),
+                source_type=item.get("sourceType") or item.get("source_type"),
+                priority=item.get("priority"),
+                created_at=(
+                    item.get("createdAt")
+                    if item.get("createdAt") is not None
+                    else item.get("created_at")
+                ),
+                updated_at=(
+                    item.get("updatedAt")
+                    if item.get("updatedAt") is not None
+                    else item.get("updated_at")
+                ),
+                memory_type=(
+                    item.get("memory_type") or item.get("memoryType") or "semantic"
+                ),
+                vector=item.get("vector"),
+                trusted=item.get("trusted", True),
+                commit=False,
+            ))
+        job = ledger_store.create_job(
+            namespace=None,
+            job_type="batch_ingest",
+            payload={"count": len(results)},
+            commit=False,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {"accepted": results, "jobId": job["job_id"], "count": len(results)}
 
 
@@ -394,3 +439,58 @@ def _extract_relations(text: str, entities: list[tuple[str, str]]) -> list[tuple
         if len(nearby) >= 2:
             relations.append((nearby[0], rel, nearby[1]))
     return relations[:20]
+
+
+
+def extract_entities(content: str, title: str = "") -> list[tuple[str, str]]:
+    """Public deterministic extractor used by legacy graph migration."""
+    return _extract_entities_from_doc(title, content)
+
+
+def extract_relations(
+    text: str,
+    entities: list[tuple[str, str]],
+) -> list[tuple[str, str, str]]:
+    """Public deterministic relation extractor used by legacy graph migration."""
+    return _extract_relations(text, entities)
+
+
+def update_document(
+    *,
+    namespace: str,
+    document_id: str,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    memory_type: Optional[str] = None,
+) -> dict[str, Any]:
+    """Apply a validated edit and refresh derived graph state atomically."""
+    existing = mem_store.get_memory(namespace, document_id)
+    if existing is None:
+        raise ValueError("memory not found")
+    current_metadata = existing.get("metadata")
+    next_metadata = metadata if metadata is not None else current_metadata
+    provenance = (
+        current_metadata.get("provenance", {})
+        if isinstance(current_metadata, Mapping)
+        else {}
+    )
+    result = ingest_document(
+        namespace=namespace,
+        document_id=document_id,
+        title=existing["title"] if title is None else title,
+        content=existing["content"] if content is None else content,
+        metadata=next_metadata,
+        source_type=existing.get("source_type"),
+        priority=existing.get("priority"),
+        created_at=existing.get("created_at"),
+        updated_at=now_ts(),
+        memory_type=(
+            existing.get("memory_type", "semantic")
+            if memory_type is None
+            else memory_type
+        ),
+        trusted=provenance.get("trusted") is True,
+    )
+    result["status"] = "updated"
+    return result

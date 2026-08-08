@@ -11,6 +11,35 @@ from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Node, Scope, SearchFilter
 
 
+class _RecordingExternalIndex:
+    """Small separately-backed index used to observe publication ordering."""
+
+    shares_store_vector_table = False
+
+    def __init__(self):
+        self.ids = set()
+        self.upserts = []
+        self.deletes = []
+
+    def search(self, _vec, _k, *, filter=None):
+        return []
+
+    def upsert(self, ids, _vecs, meta=None, *, commit=True):
+        self.upserts.append(tuple(ids))
+        self.ids.update(ids)
+
+    def delete(self, ids, *, commit=True):
+        self.deletes.append(tuple(ids))
+        self.ids.difference_update(ids)
+
+
+def _use_recording_external_index(engine):
+    index = _RecordingExternalIndex()
+    engine.index = index
+    engine.recall_engine.index = index
+    return index
+
+
 def test_engine_remember_and_recall():
     eng = MemoryEngine.create(":memory:")          # offline defaults
     wid = eng.store.get_or_create_workspace("w")
@@ -177,6 +206,91 @@ def test_index_upsert_failure_preserves_memory_and_audits(caplog):
     }
     assert "simulated index outage" not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_session_rollback_does_not_publish_an_external_vector(monkeypatch):
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    workspace_id = eng.store.get_or_create_workspace("session-index-rollback")
+    repo_id = eng.store.get_or_create_repo(workspace_id, "repo")
+    session_id = eng.start_session(workspace_id, repo_id)
+    index = _use_recording_external_index(eng)
+
+    def fail_after_old_upsert_position(*_args, **_kwargs):
+        raise RuntimeError("late session failure")
+
+    monkeypatch.setattr(eng, "_evolve", fail_after_old_upsert_position)
+    with pytest.raises(RuntimeError, match="late session failure"):
+        eng.remember(
+            "session write that must roll back",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            session_id=session_id,
+            scope=Scope.SESSION,
+            resolve_conflicts=False,
+        )
+
+    assert index.upserts == []
+    assert index.ids == set()
+    assert eng.store.list_memories(
+        SearchFilter(workspace_id=workspace_id, session_id=session_id),
+        include_invalid=True,
+    ) == []
+    assert eng.store.conn.in_transaction is False
+
+
+def test_lifecycle_rollback_does_not_publish_an_external_vector(monkeypatch):
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    workspace_id = eng.store.get_or_create_workspace("lifecycle-index-rollback")
+    original_id = eng.remember(
+        "the original deployment target",
+        workspace_id=workspace_id,
+        resolve_conflicts=False,
+    )
+    index = _use_recording_external_index(eng)
+
+    def fail_after_old_upsert_position(*_args, **_kwargs):
+        raise RuntimeError("late lifecycle failure")
+
+    monkeypatch.setattr(eng, "_evolve", fail_after_old_upsert_position)
+    with pytest.raises(RuntimeError, match="late lifecycle failure"):
+        eng.correct(original_id, "the corrected deployment target")
+
+    assert index.upserts == []
+    assert index.ids == set()
+    records = eng.store.list_memories(
+        SearchFilter(workspace_id=workspace_id), include_invalid=True,
+    )
+    assert [record.id for record in records] == [original_id]
+    assert eng.store.get_memory(original_id).valid_to is None
+    assert original_id in eng.store.get_vectors([original_id])
+    assert eng.store.conn.in_transaction is False
+
+
+def test_caller_owned_transaction_rejects_external_index_before_mutation():
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    workspace_id = eng.store.get_or_create_workspace("caller-index-transaction")
+    index = _use_recording_external_index(eng)
+    eng.store.conn.execute("BEGIN IMMEDIATE")
+
+    with pytest.raises(
+        RuntimeError,
+        match="caller-owned transactions cannot write through a separate vector index",
+    ):
+        eng.remember(
+            "a caller-owned write must not escape its transaction",
+            workspace_id=workspace_id,
+            resolve_conflicts=False,
+        )
+
+    assert eng.store.conn.transaction_owned_by_current_thread()
+    assert eng.store.conn.in_transaction is True
+    assert index.upserts == []
+    assert index.ids == set()
+    assert eng.store.list_memories(
+        SearchFilter(workspace_id=workspace_id), include_invalid=True,
+    ) == []
+    eng.store.conn.rollback()
+    assert eng.store.conn.in_transaction is False
 
 
 def test_graph_extraction_failure_is_nonfatal_and_redacted(caplog):
@@ -366,6 +480,8 @@ def test_engine_infers_scope_and_rejects_impossible_parents():
     session_grouped = eng.remember(
         "Session-grouped repo fact.", workspace_id=wid, session_id=session_id
     )
+    assert eng.store.conn.in_transaction is False
+    assert eng.store.conn.transaction_owned_by_current_thread() is False
     grouped = eng.store.get_memory(session_grouped)
     assert grouped.scope == Scope.REPO and grouped.repo_id == rid
 
@@ -790,6 +906,7 @@ def test_promote_widens_scope_and_preserves_source_history_and_safety():
     source = eng.remember(
         "All release tags must be signed.", workspace_id=wid, repo_id=rid,
         session_id=sid, scope=Scope.SESSION,
+        confidence=0.1,
     )
     eng.store.set_pinned(source, True)
     eng.store.conn.execute(
@@ -806,6 +923,7 @@ def test_promote_widens_scope_and_preserves_source_history_and_safety():
     assert promoted.scope == Scope.REPO and promoted.repo_id == rid
     assert promoted.pinned is True and promoted.sensitivity == "secret"
     assert promoted.stability >= 9.0 and promoted.access_count >= 4
+    assert promoted.confidence == pytest.approx(0.1)
     assert promoted.metadata["promoted_from"] == [source]
     assert eng.store.has_link(promoted.id, source, relation="promotes")
 
@@ -818,10 +936,12 @@ def test_promote_deduplicates_into_existing_wider_memory():
     wider = eng.remember(
         text, workspace_id=wid, scope=Scope.WORKSPACE,
         metadata={"provenance": {"source": "agent", "trusted": True}},
+        confidence=0.9,
     )
     source = eng.remember(
         text, workspace_id=wid, repo_id=rid, scope=Scope.REPO,
         metadata={"provenance": {"source": "agent", "trusted": True}},
+        confidence=0.1,
     )
 
     out = eng.promote(source, Scope.WORKSPACE)
@@ -832,6 +952,7 @@ def test_promote_deduplicates_into_existing_wider_memory():
     promoted = eng.store.get_memory(wider)
     assert promoted.metadata["promoted_from"] == [source]
     assert promoted.provenance["trusted"] is True
+    assert promoted.confidence == pytest.approx(0.1)
 
 
 def test_promote_keeps_owner_approved_detector_match_live():
@@ -876,6 +997,30 @@ def test_promote_rejects_same_or_narrower_scope():
 
 
 # ── why / timeline / recall_proactive ────────────────────────────────────────────
+
+
+
+def test_user_scope_writes_fail_before_extraction_or_persistence():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+
+    class ForbiddenExtractor:
+        def extract(self, *_args, **_kwargs):
+            raise AssertionError("extractor must not run")
+
+    eng.extractor = ForbiddenExtractor()
+    expected = (
+        "user scope is not supported until owner-aware memories are implemented; "
+        "use workspace, repo, or session"
+    )
+    with pytest.raises(ValueError, match=expected):
+        eng.remember("fact", workspace_id=wid, scope=Scope.USER)
+    with pytest.raises(ValueError, match=expected):
+        eng.ingest("document", workspace_id=wid, scope=Scope.USER)
+    assert eng.store.list_memories(
+        SearchFilter(workspace_id=wid), include_invalid=True,
+    ) == []
+
 
 def test_why_surfaces_live_answer_and_superseded_history():
     eng = MemoryEngine.create(":memory:")
@@ -1165,6 +1310,29 @@ def test_link_unknown_id_raises():
     a = eng.remember("Memory A.", workspace_id=wid, repo_id=rid)
     with pytest.raises(KeyError):
         eng.link(a, "mem_nope")
+
+
+def test_link_rejects_cross_workspace_endpoints():
+    eng = MemoryEngine.create(":memory:")
+    first_workspace = eng.store.get_or_create_workspace("first")
+    second_workspace = eng.store.get_or_create_workspace("second")
+    first_repo = eng.store.get_or_create_repo(first_workspace, "repo")
+    second_repo = eng.store.get_or_create_repo(second_workspace, "repo")
+    first = eng.remember(
+        "First workspace memory.",
+        workspace_id=first_workspace,
+        repo_id=first_repo,
+    )
+    second = eng.remember(
+        "Second workspace memory.",
+        workspace_id=second_workspace,
+        repo_id=second_repo,
+    )
+
+    with pytest.raises(ValueError, match="must share workspace ownership"):
+        eng.link(first, second)
+
+    assert eng.store.get_links(first) == []
 
 
 def test_record_event_persists():
@@ -1499,6 +1667,74 @@ def test_code_path_and_impact_preserve_hidden_repo_paths(tmp_path):
     impact = eng.analyze_impact([".github/workflow.py"], repo_id=rid)
     assert impact["changed_files"] == [".github/workflow.py"]
     assert {row["name"] for row in impact["symbols"]} == {"deploy"}
+
+
+def test_code_path_does_not_resolve_ambiguous_leaf_edges_to_local_symbols():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    caller_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="caller", fqname="Alpha.caller",
+        file="alpha.py", span="1-1",
+    )
+    alpha_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="run", fqname="Alpha.run",
+        file="alpha.py", span="2-2",
+    )
+    beta_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="run", fqname="Beta.run",
+        file="beta.py", span="1-1",
+    )
+    eng.store.add_code_edge(
+        repo_id=rid, src="Alpha.caller", dst="run", relation="calls",
+        file="alpha.py", line=1,
+    )
+
+    assert not eng.code_path("Alpha.caller", "Alpha.run", repo_id=rid)["found"]
+    assert not eng.code_path("Alpha.run", "Beta.run", repo_id=rid)["found"]
+    ambiguous = eng.code_path("run", "Alpha.caller", repo_id=rid)
+    assert ambiguous["found"] is False
+    assert ambiguous["reason"] == "source or target is ambiguous"
+    assert set(ambiguous["ambiguous"]["source"]) == {alpha_id, beta_id}
+    assert caller_id not in ambiguous["ambiguous"]["source"]
+
+
+def test_code_path_applies_row_capacity_and_reports_truncation(monkeypatch):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    symbol_ids = [
+        eng.store.upsert_symbol(
+            repo_id=rid, kind="function", name=f"fn_{index}",
+            fqname=f"module.fn_{index}", file=f"{index}.py", span="1-1",
+        )
+        for index in range(4)
+    ]
+    requested_limits = {}
+    for method_name in (
+        "list_symbols", "list_code_edges", "list_code_memory_links",
+    ):
+        original = getattr(eng.store, method_name)
+
+        def tracked(*args, _name=method_name, _original=original, **kwargs):
+            requested_limits[_name] = kwargs.get("limit")
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(eng.store, method_name, tracked)
+
+    result = eng.code_path(symbol_ids[0], symbol_ids[0], repo_id=rid, capacity=3)
+
+    assert result["found"] is True
+    assert result["capacity"] == 3
+    assert result["truncated"] is True
+    assert result["truncated_sources"]["symbols"] is True
+    assert requested_limits == {
+        "list_symbols": 4,
+        "list_code_edges": 4,
+        "list_code_memory_links": 4,
+    }
+    with pytest.raises(ValueError, match="capacity"):
+        eng.code_path(symbol_ids[0], symbol_ids[0], repo_id=rid, capacity=50_001)
 
 
 def test_code_memory_paths_hide_forgotten_memories(tmp_path):
@@ -2003,3 +2239,807 @@ def test_extracted_graph_evidence_inherits_memory_temporal_anchors():
         valid_at=earlier,
     ))[0]
     assert edge.valid_from == earlier
+
+
+
+def test_correct_preserves_claim_identity_protection_and_temporal_boundary():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    original_id = eng.remember(
+        "The deployment target is blue.",
+        workspace_id=wid,
+        confidence=0.42,
+        subject_key="deployment",
+        claim_kind="target",
+        valid_from=time.time() - 1.0,
+        resolve_conflicts=False,
+    )
+    eng.store.conn.execute(
+        "UPDATE memories SET pinned=1, sensitivity='sensitive', stability=9, "
+        "access_count=4, last_access=123 WHERE id=?",
+        (original_id,),
+    )
+    eng.store.conn.commit()
+
+    result = eng.correct(original_id, "The deployment target is green.")
+    original = eng.store.get_memory(original_id)
+    replacement = eng.store.get_memory(result["id"])
+
+    assert original.valid_to == replacement.valid_from
+    assert replacement.subject_key == "deployment"
+    assert replacement.claim_kind == "target"
+    assert replacement.confidence == pytest.approx(0.42)
+    assert replacement.pinned is True
+    assert replacement.sensitivity == "sensitive"
+    assert replacement.stability == pytest.approx(9)
+    assert replacement.access_count == 4
+    assert replacement.last_access == pytest.approx(123)
+    before = eng.store.list_memories(SearchFilter(
+        workspace_id=wid, valid_at=original.valid_to - 0.001,
+    ))
+    after = eng.store.list_memories(SearchFilter(
+        workspace_id=wid, valid_at=original.valid_to + 0.001,
+    ))
+    assert {record.id for record in before} == {original_id}
+    assert {record.id for record in after} == {replacement.id}
+
+
+def test_lifecycle_finalizers_roll_back_every_authoritative_change(monkeypatch):
+    def memory_ids(engine, workspace_id):
+        return {
+            record.id
+            for record in engine.store.list_memories(
+                SearchFilter(workspace_id=workspace_id), include_invalid=True,
+            )
+        }
+
+    def reject_action(engine, action):
+        original_audit = engine.store.audit
+
+        def audited(actor, candidate_action, target, detail="", **kwargs):
+            if candidate_action == action:
+                raise RuntimeError(f"fail {action}")
+            return original_audit(
+                actor, candidate_action, target, detail, **kwargs,
+            )
+
+        return audited
+
+    # Correction: the successor insert and predecessor closure are one transaction.
+    correction = MemoryEngine.create(":memory:")
+    correction_wid = correction.store.get_or_create_workspace("correct")
+    correction_source = correction.remember(
+        "old", workspace_id=correction_wid, resolve_conflicts=False,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(correction.store, "audit", reject_action(correction, "invalidate"))
+        with pytest.raises(RuntimeError, match="fail invalidate"):
+            correction.correct(correction_source, "new")
+    assert memory_ids(correction, correction_wid) == {correction_source}
+    assert correction.store.get_memory(correction_source).valid_to is None
+
+    # Approval: a failed required audit cannot leave a prompt-eligible successor.
+    approval = MemoryEngine.create(":memory:")
+    approval_wid = approval.store.get_or_create_workspace("approval")
+    pending = approval.remember(
+        "pending",
+        workspace_id=approval_wid,
+        metadata={"provenance": {
+            "source": "web", "trusted": False, "review_state": "pending",
+        }},
+        resolve_conflicts=False,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(approval.store, "audit", reject_action(approval, "approve"))
+        with pytest.raises(RuntimeError, match="fail approve"):
+            approval.approve_for_prompt(pending, reviewer="owner", reason="verified")
+    assert memory_ids(approval, approval_wid) == {pending}
+    approved = approval.approve_for_prompt(
+        pending, reviewer="owner", reason="verified",
+    )
+    approved_retry = approval.approve_for_prompt(
+        pending, reviewer="owner", reason="transport retry",
+    )
+    assert approved_retry["id"] == approved["id"]
+    successor = approval.store.get_memory(approved["id"])
+    assert successor.provenance["review_state"] == "approved"
+    source = approval.store.get_memory(pending)
+    assert (
+        successor.pinned,
+        successor.sensitivity,
+        successor.stability,
+        successor.access_count,
+        successor.last_access,
+    ) == (
+        source.pinned,
+        source.sensitivity,
+        source.stability,
+        source.access_count,
+        source.last_access,
+    )
+    assert approval.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE action='approve' AND target=?",
+        (approved["id"],),
+    ).fetchone()[0] == 1
+
+    # Promotion: target, source closure, link, metadata, and audit roll back together.
+    promotion = MemoryEngine.create(":memory:")
+    promotion_wid = promotion.store.get_or_create_workspace("promotion")
+    promotion_rid = promotion.store.get_or_create_repo(promotion_wid, "repo")
+    promotion_source = promotion.remember(
+        "repo fact", workspace_id=promotion_wid, repo_id=promotion_rid,
+        scope=Scope.REPO, resolve_conflicts=False,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(promotion.store, "audit", reject_action(promotion, "promote"))
+        with pytest.raises(RuntimeError, match="fail promote"):
+            promotion.promote(promotion_source, Scope.WORKSPACE)
+    assert memory_ids(promotion, promotion_wid) == {promotion_source}
+    assert promotion.store.get_memory(promotion_source).valid_to is None
+    assert promotion.store.get_links(promotion_source) == []
+
+    # Merge: no partial successor, closures, links, or audits survive a late failure.
+    merging = MemoryEngine.create(":memory:")
+    merge_wid = merging.store.get_or_create_workspace("merge")
+    source_a = merging.remember(
+        "alpha", workspace_id=merge_wid, resolve_conflicts=False,
+    )
+    source_b = merging.remember(
+        "beta", workspace_id=merge_wid, resolve_conflicts=False,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(merging.store, "audit", reject_action(merging, "merge"))
+        with pytest.raises(RuntimeError, match="fail merge"):
+            merging.merge([source_a, source_b], "combined")
+    assert memory_ids(merging, merge_wid) == {source_a, source_b}
+    assert merging.store.get_memory(source_a).valid_to is None
+    assert merging.store.get_memory(source_b).valid_to is None
+    assert merging.store.get_links(source_a) == []
+    assert merging.store.get_links(source_b) == []
+
+    original_close = merging.store.close_validity
+    close_calls = 0
+
+    def fail_second_close(memory_id, *args, **kwargs):
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls == 2:
+            raise RuntimeError("fail second close")
+        return original_close(memory_id, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(merging.store, "close_validity", fail_second_close)
+        with pytest.raises(RuntimeError, match="fail second close"):
+            merging.merge([source_a, source_b], "combined")
+    assert memory_ids(merging, merge_wid) == {source_a, source_b}
+    assert merging.store.get_memory(source_a).valid_to is None
+    assert merging.store.get_memory(source_b).valid_to is None
+    assert merging.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE action='merge'"
+    ).fetchone()[0] == 0
+
+
+def test_engine_descriptive_writers_advance_memory_clocks(monkeypatch):
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+
+    conflict_workspace = eng.store.get_or_create_workspace("clock-conflict")
+    conflict_repo = eng.store.get_or_create_repo(conflict_workspace, "repo")
+    conflicted = eng.remember_with_resolution(
+        "The API uses JWT tokens for authentication.",
+        workspace_id=conflict_workspace,
+        repo_id=conflict_repo,
+    )["id"]
+
+    correction_workspace = eng.store.get_or_create_workspace("clock-correction")
+    correction_source = eng.remember(
+        "The deployment target is blue.",
+        workspace_id=correction_workspace,
+        resolve_conflicts=False,
+    )
+
+    approval_workspace = eng.store.get_or_create_workspace("clock-approval")
+    pending = eng.remember(
+        "Owner-reviewed pending fact.",
+        workspace_id=approval_workspace,
+        metadata={"provenance": {
+            "source": "web", "trusted": False, "review_state": "pending",
+        }},
+        resolve_conflicts=False,
+    )
+
+    promotion_workspace = eng.store.get_or_create_workspace("clock-promotion")
+    promotion_repo = eng.store.get_or_create_repo(promotion_workspace, "repo")
+    wider = eng.remember(
+        "Shared promotion fact.",
+        workspace_id=promotion_workspace,
+        scope=Scope.WORKSPACE,
+        resolve_conflicts=False,
+    )
+    promotion_source = eng.remember(
+        "Shared promotion fact.",
+        workspace_id=promotion_workspace,
+        repo_id=promotion_repo,
+        scope=Scope.REPO,
+        resolve_conflicts=False,
+    )
+
+    merge_workspace = eng.store.get_or_create_workspace("clock-merge")
+    merge_sources = [
+        eng.remember(
+            content,
+            workspace_id=merge_workspace,
+            resolve_conflicts=False,
+        )
+        for content in ("alpha", "beta")
+    ]
+
+    advances = {}
+    original_advance = eng.store.advance_memory_modified_hlc
+
+    def tracked_advance(memory_id, *, observed_hlc="", commit=True):
+        before = eng.store.get_memory(memory_id).modified_hlc
+        after = original_advance(
+            memory_id, observed_hlc=observed_hlc, commit=commit,
+        )
+        advances.setdefault(memory_id, []).append((before, after))
+        return after
+
+    monkeypatch.setattr(
+        eng.store, "advance_memory_modified_hlc", tracked_advance,
+    )
+
+    conflict_result = eng.remember_with_resolution(
+        "The API does not use JWT tokens for authentication.",
+        workspace_id=conflict_workspace,
+        repo_id=conflict_repo,
+    )
+    correction_result = eng.correct(
+        correction_source, "The deployment target is green.",
+    )
+    approval_result = eng.approve_for_prompt(
+        pending, reviewer="owner", reason="verified",
+    )
+    promotion_result = eng.promote(promotion_source, Scope.WORKSPACE)
+    merge_result = eng.merge(merge_sources, "combined")
+
+    assert conflict_result["conflict_with"] == conflicted
+    assert promotion_result["id"] == wider
+    expected = {
+        conflicted,
+        correction_result["id"],
+        approval_result["id"],
+        wider,
+        merge_result["id"],
+    }
+    assert set(advances) == expected
+    assert all(
+        before < after
+        for calls in advances.values()
+        for before, after in calls
+    )
+
+
+def test_conflict_repair_rolls_back_clock_only_partial_failure(monkeypatch):
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    workspace_id = eng.store.get_or_create_workspace("clock-conflict-rollback")
+    repo_id = eng.store.get_or_create_repo(workspace_id, "repo")
+    original_id = eng.remember_with_resolution(
+        "The API uses JWT tokens for authentication.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+    )["id"]
+    before = eng.store.get_memory(original_id)
+    original_advance = eng.store.advance_memory_modified_hlc
+
+    def advance_then_fail(memory_id, *, observed_hlc="", commit=True):
+        original_advance(
+            memory_id, observed_hlc=observed_hlc, commit=commit,
+        )
+        raise RuntimeError("fail conflict confidence")
+
+    monkeypatch.setattr(
+        eng.store, "advance_memory_modified_hlc", advance_then_fail,
+    )
+
+    result = eng.remember_with_resolution(
+        "The API does not use JWT tokens for authentication.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+    )
+
+    after = eng.store.get_memory(original_id)
+    assert result["conflict_with"] == original_id
+    assert after.modified_hlc == before.modified_hlc
+    assert after.confidence == before.confidence
+    assert not eng.store.conn.transaction_owned_by_current_thread()
+
+
+def test_promotion_descriptive_clock_rolls_back_with_failed_finalizer(monkeypatch):
+    eng = MemoryEngine.create(":memory:")
+    workspace_id = eng.store.get_or_create_workspace("clock-rollback")
+    repo_id = eng.store.get_or_create_repo(workspace_id, "repo")
+    wider = eng.remember(
+        "Shared promotion fact.",
+        workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        resolve_conflicts=False,
+    )
+    source = eng.remember(
+        "Shared promotion fact.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        scope=Scope.REPO,
+        resolve_conflicts=False,
+    )
+    before = eng.store.get_memory(wider)
+    original_audit = eng.store.audit
+
+    def reject_promotion(actor, action, target, detail="", **kwargs):
+        if action == "promote":
+            raise RuntimeError("fail promote")
+        return original_audit(actor, action, target, detail, **kwargs)
+
+    monkeypatch.setattr(eng.store, "audit", reject_promotion)
+
+    with pytest.raises(RuntimeError, match="fail promote"):
+        eng.promote(source, Scope.WORKSPACE)
+
+    after = eng.store.get_memory(wider)
+    assert after.modified_hlc == before.modified_hlc
+    assert after.metadata == before.metadata
+    assert eng.store.get_memory(source).valid_to is None
+
+
+
+def test_merge_exact_retry_returns_original_successor():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    source_a = eng.remember(
+        "alpha", workspace_id=wid, keywords=["a"], resolve_conflicts=False,
+    )
+    source_b = eng.remember(
+        "beta", workspace_id=wid, keywords=["b"], resolve_conflicts=False,
+    )
+
+    first = eng.merge([source_a, source_b], "combined", reason="deduplicate")
+    retried = eng.merge([source_a, source_b], "combined", reason="deduplicate")
+
+    assert retried == first
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE content='combined'"
+    ).fetchone()[0] == 1
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE actor='user' AND action='merge'"
+    ).fetchone()[0] == 3
+
+
+def test_concurrent_lifecycle_retries_create_exactly_one_successor():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    def run_pair(operation):
+        barrier = Barrier(3)
+
+        def invoke():
+            barrier.wait()
+            return operation()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(invoke) for _ in range(2)]
+            barrier.wait()
+            return [future.result() for future in futures]
+
+    approval = MemoryEngine.create(":memory:")
+    approval_wid = approval.store.get_or_create_workspace("approval-concurrency")
+    pending = approval.remember(
+        "The deployment target is blue.",
+        workspace_id=approval_wid,
+        metadata={"provenance": {
+            "source": "web", "trusted": False, "review_state": "pending",
+        }},
+        resolve_conflicts=False,
+    )
+    approved = run_pair(lambda: approval.approve_for_prompt(
+        pending, reviewer="owner", reason="verified",
+    ))
+    assert len({result["id"] for result in approved}) == 1
+    assert approval.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE provenance LIKE '%\"approved_from\"%'"
+    ).fetchone()[0] == 1
+    assert approval.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE action='approve'"
+    ).fetchone()[0] == 1
+
+    merging = MemoryEngine.create(":memory:")
+    merge_wid = merging.store.get_or_create_workspace("merge-concurrency")
+    source_a = merging.remember(
+        "alpha", workspace_id=merge_wid, resolve_conflicts=False,
+    )
+    source_b = merging.remember(
+        "beta", workspace_id=merge_wid, resolve_conflicts=False,
+    )
+    merged = run_pair(lambda: merging.merge(
+        [source_a, source_b], "combined", reason="deduplicate",
+    ))
+    assert len({result["id"] for result in merged}) == 1
+    assert merging.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE content='combined'"
+    ).fetchone()[0] == 1
+    assert merging.store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE action='merge'"
+    ).fetchone()[0] == 3
+
+
+def test_merge_retry_identity_is_not_lost_behind_unrelated_links():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("merge-key")
+    source_a = eng.remember(
+        "alpha", workspace_id=wid, keywords=["a"], resolve_conflicts=False,
+    )
+    source_b = eng.remember(
+        "beta", workspace_id=wid, keywords=["b"], resolve_conflicts=False,
+    )
+    for index in range(65):
+        distractor = eng.remember(
+            f"distractor {index}",
+            workspace_id=wid,
+            resolve_conflicts=False,
+        )
+        eng.store.add_link(source_a, distractor, "merges")
+
+    first = eng.merge([source_a, source_b], "combined", reason="deduplicate")
+    retried = eng.merge([source_a, source_b], "combined", reason="deduplicate")
+
+    assert retried == first
+    assert eng.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE content='combined'"
+    ).fetchone()[0] == 1
+
+def test_cross_session_merge_requires_explicit_broader_target():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    first_session = eng.start_session(wid, rid)
+    second_session = eng.start_session(wid, rid)
+    first = eng.remember(
+        "first", workspace_id=wid, repo_id=rid, session_id=first_session,
+        scope=Scope.SESSION, resolve_conflicts=False,
+    )
+    second = eng.remember(
+        "second", workspace_id=wid, repo_id=rid, session_id=second_session,
+        scope=Scope.SESSION, resolve_conflicts=False,
+    )
+
+    with pytest.raises(ValueError, match="cross-session merge"):
+        eng.merge([first, second], "combined")
+    result = eng.merge([first, second], "combined", scope=Scope.REPO)
+    merged = eng.store.get_memory(result["id"])
+    assert merged.scope == Scope.REPO
+    assert merged.repo_id == rid
+    assert merged.session_id is None
+
+
+def test_cross_session_merge_can_explicitly_widen_to_workspace_scope():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    first_session = eng.start_session(wid, rid)
+    second_session = eng.start_session(wid, rid)
+    first = eng.remember(
+        "first workspace fact", workspace_id=wid, repo_id=rid,
+        session_id=first_session, scope=Scope.SESSION, resolve_conflicts=False,
+    )
+    second = eng.remember(
+        "second workspace fact", workspace_id=wid, repo_id=rid,
+        session_id=second_session, scope=Scope.SESSION, resolve_conflicts=False,
+    )
+
+    result = eng.merge(
+        [first, second], "combined workspace fact", scope=Scope.WORKSPACE,
+    )
+
+    merged = eng.store.get_memory(result["id"])
+    assert merged.scope == Scope.WORKSPACE
+    assert merged.repo_id is None
+    assert merged.session_id is None
+
+
+def test_session_merge_rejects_an_ended_target_session():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    session_id = eng.start_session(wid, rid)
+    first = eng.remember(
+        "first", workspace_id=wid, repo_id=rid, session_id=session_id,
+        scope=Scope.SESSION, resolve_conflicts=False,
+    )
+    second = eng.remember(
+        "second", workspace_id=wid, repo_id=rid, session_id=session_id,
+        scope=Scope.SESSION, resolve_conflicts=False,
+    )
+    eng.end_session(session_id)
+
+    with pytest.raises(ValueError, match="active session"):
+        eng.merge([first, second], "combined", scope=Scope.SESSION)
+    assert eng.store.get_memory(first).valid_to is None
+    assert eng.store.get_memory(second).valid_to is None
+
+
+def test_read_only_engine_recall_does_not_mutate_database(tmp_path):
+    db_path = tmp_path / "readonly.db"
+    writer = MemoryEngine.create(str(db_path), vector_backend="numpy")
+    wid = writer.store.get_or_create_workspace("w")
+    writer.remember(
+        "The production deployment target is blue.",
+        workspace_id=wid,
+        resolve_conflicts=False,
+    )
+    writer.store.close()
+    before = db_path.read_bytes()
+
+    reader = MemoryEngine.create(
+        str(db_path), vector_backend="numpy", read_only=True,
+    )
+    recalled = reader.recall("production deployment target", workspace_id=wid)
+    reader.store.close()
+
+    assert recalled.count == 1
+    assert recalled.chunks[0]["content"] == "The production deployment target is blue."
+    assert db_path.read_bytes() == before
+
+
+def test_read_only_engine_rejects_a_mismatched_embedding_space(monkeypatch, tmp_path):
+    from engraphis import factory as factory_module
+
+    db_path = tmp_path / "readonly-mismatch.db"
+    writer = MemoryEngine.create(str(db_path), vector_backend="numpy")
+    workspace_id = writer.store.get_or_create_workspace("w")
+    writer.remember(
+        "Embedding fingerprint fixture.",
+        workspace_id=workspace_id,
+        resolve_conflicts=False,
+    )
+    writer.store.close()
+    before = db_path.read_bytes()
+
+    class DifferentEmbedder:
+        dim = 384
+        embedding_identity = "test-different-embedder"
+        embedding_version = "v1"
+        supports_semantic_search = True
+
+    monkeypatch.setattr(
+        factory_module,
+        "get_embedder",
+        lambda *_args, **_kwargs: DifferentEmbedder(),
+    )
+
+    with pytest.raises(RuntimeError, match="matching embedder"):
+        MemoryEngine.create(
+            str(db_path), vector_backend="numpy", read_only=True,
+        )
+
+    assert db_path.read_bytes() == before
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+
+
+
+def test_engine_factory_closes_owned_resources_when_composition_fails(monkeypatch):
+    from engraphis import factory as factory_module
+
+    opened_stores = []
+    real_store = factory_module.Store
+
+    class TrackingStore(real_store):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.close_count = 0
+            opened_stores.append(self)
+
+        def close(self):
+            self.close_count += 1
+            return super().close()
+
+    monkeypatch.setattr(factory_module, "Store", TrackingStore)
+
+    def fail_embedder(*_args, **_kwargs):
+        raise RuntimeError("embedder unavailable")
+
+    monkeypatch.setattr(factory_module, "get_embedder", fail_embedder)
+    with pytest.raises(RuntimeError, match="embedder unavailable"):
+        MemoryEngine.create(":memory:")
+    assert opened_stores[0].close_count == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_stores[0].conn.execute("SELECT 1")
+
+    class FakeEmbedder:
+        dim = 4
+
+    class ClosableIndex:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    index = ClosableIndex()
+    monkeypatch.setattr(
+        factory_module, "get_embedder", lambda *_args, **_kwargs: FakeEmbedder(),
+    )
+    monkeypatch.setattr(
+        factory_module, "get_vector_index", lambda *_args, **_kwargs: index,
+    )
+
+    def fail_reranker(*_args, **_kwargs):
+        raise RuntimeError("reranker unavailable")
+
+    monkeypatch.setattr(factory_module, "get_reranker", fail_reranker)
+    with pytest.raises(RuntimeError, match="reranker unavailable"):
+        MemoryEngine.create(":memory:")
+    assert opened_stores[1].close_count == 1
+    assert index.closed == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_stores[1].conn.execute("SELECT 1")
+
+
+def test_engine_factory_closes_all_owned_resources_when_rebuild_fails(monkeypatch):
+    from engraphis import factory as factory_module
+
+    opened_stores = []
+    real_store = factory_module.Store
+
+    class TrackingStore(real_store):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened_stores.append(self)
+
+    class Closable:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    class FakeEmbedder(Closable):
+        dim = 4
+        embedding_identity = "factory-cleanup"
+        embedding_version = "v1"
+
+    resources = {
+        name: (FakeEmbedder() if name == "embedder" else Closable())
+        for name in ("embedder", "index", "reranker", "extractor", "graph", "supervisor")
+    }
+    monkeypatch.setattr(factory_module, "Store", TrackingStore)
+    monkeypatch.setattr(
+        factory_module, "get_embedder",
+        lambda *_args, **_kwargs: resources["embedder"],
+    )
+    monkeypatch.setattr(
+        factory_module, "get_vector_index",
+        lambda *_args, **_kwargs: resources["index"],
+    )
+    monkeypatch.setattr(
+        factory_module, "get_reranker",
+        lambda *_args, **_kwargs: resources["reranker"],
+    )
+    monkeypatch.setattr(
+        factory_module, "get_extractor",
+        lambda *_args, **_kwargs: resources["extractor"],
+    )
+    monkeypatch.setattr(
+        factory_module, "get_graph_extractor",
+        lambda *_args, **_kwargs: resources["graph"],
+    )
+    monkeypatch.setattr(
+        factory_module, "get_retention_supervisor",
+        lambda *_args, **_kwargs: resources["supervisor"],
+    )
+
+    def fail_rebuild(_self):
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(
+        MemoryEngine, "_rebuild_versioned_embeddings", fail_rebuild,
+    )
+
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        MemoryEngine.create(
+            ":memory:",
+            extractor="fake",
+            graph_extractor="fake",
+            retention_supervisor="fake",
+        )
+
+    assert all(resource.closed == 1 for resource in resources.values())
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_stores[0].conn.execute("SELECT 1")
+
+
+def test_engine_factory_transfers_successful_composition_ownership(monkeypatch):
+    from engraphis import factory as factory_module
+
+    engine_ref = {}
+
+    class ClosableReranker:
+        def __init__(self):
+            self.close_count = 0
+
+        def close(self):
+            engine_ref["engine"].store.conn.execute("SELECT 1")
+            self.close_count += 1
+
+    reranker = ClosableReranker()
+    monkeypatch.setattr(
+        factory_module, "get_reranker", lambda *_args, **_kwargs: reranker,
+    )
+    eng = MemoryEngine.create(":memory:")
+    engine_ref["engine"] = eng
+
+    eng.close()
+    eng.close()
+
+    assert reranker.close_count == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        eng.store.conn.execute("SELECT 1")
+
+
+def test_service_close_releases_factory_owned_engine_resources(monkeypatch):
+    from engraphis import factory as factory_module
+    from engraphis.service import MemoryService
+
+    service_ref = {}
+
+    class ClosableReranker:
+        def __init__(self):
+            self.close_count = 0
+
+        def close(self):
+            service_ref["service"].store.conn.execute("SELECT 1")
+            self.close_count += 1
+
+    reranker = ClosableReranker()
+    monkeypatch.setattr(
+        factory_module, "get_reranker", lambda *_args, **_kwargs: reranker,
+    )
+    service = MemoryService.create(":memory:")
+    service_ref["service"] = service
+
+    service.close()
+    service.close()
+
+    assert reranker.close_count == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        service.store.conn.execute("SELECT 1")
+
+
+def test_public_outer_factory_constructs_the_default_engine():
+    from engraphis import create_memory_engine
+
+    eng = create_memory_engine(":memory:", vector_backend="numpy")
+    wid = eng.store.get_or_create_workspace("w")
+    memory_id = eng.remember(
+        "Outer composition works.", workspace_id=wid, resolve_conflicts=False,
+    )
+
+    assert eng.store.get_memory(memory_id).content == "Outer composition works."
+
+
+def test_importing_core_engine_does_not_import_concrete_backends():
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys; import engraphis.core.engine; "
+        "loaded = sorted(n for n in sys.modules if n.startswith('engraphis.backends.')); "
+        "assert loaded == [], loaded"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr

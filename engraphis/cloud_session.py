@@ -631,19 +631,57 @@ def credential_field(response: dict, key: str) -> str:
     return credential_text(response.get(key))
 
 
-def _selected_refresh(saved: dict) -> str:
+def _persisted_refresh_selected(saved: dict) -> bool:
+    """Return whether the active refresh comes from the saved credential family."""
     persisted = saved.get("refresh_credential")
-    if persisted is not None and (not isinstance(persisted, str) or persisted.strip()):
-        return credential_text(persisted)
+    # Only accept string credentials; non-string truthy values (e.g. lists from
+    # corrupted JSON) must not suppress the environment fallback.
+    return isinstance(persisted, str) and bool(persisted.strip())
+
+
+def _selected_refresh(saved: dict) -> str:
+    if _persisted_refresh_selected(saved):
+        return credential_text(saved.get("refresh_credential"))
     return credential_text(os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""))
 
 
 def _selected_refresh_is_invalid(saved: dict) -> bool:
-    persisted = saved.get("refresh_credential")
-    if persisted is not None and (not isinstance(persisted, str) or persisted.strip()):
-        return bool(persisted) and not credential_text(persisted)
+    if _persisted_refresh_selected(saved):
+        return bool(saved.get("refresh_credential")) and not credential_text(
+            saved.get("refresh_credential")
+        )
     environment = os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "")
     return bool(environment.strip()) and not credential_text(environment)
+
+
+def _credential_family_urls(saved: dict) -> Tuple[str, str]:
+    """Return control/compute URLs bound to the selected refresh credential.
+
+    Once a control-plane rotation is persisted, environment endpoint changes cannot
+    redirect that bearer family. A new environment bootstrap may choose endpoints and
+    persists them with its first successful rotation.
+    """
+    if _persisted_refresh_selected(saved):
+        return (
+            str(saved.get("control_url") or "").strip(),
+            str(saved.get("compute_url") or "").strip(),
+        )
+    control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
+    compute = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
+    return (
+        control or str(saved.get("control_url") or "").strip(),
+        compute or str(saved.get("compute_url") or "").strip(),
+    )
+
+
+def credential_bound_control_url() -> str:
+    """Return the control URL bound to the credential selected for the next call."""
+    direct_token = credential_text(os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", ""))
+    direct_org = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
+    if direct_token and direct_org:
+        return os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
+    control, _ = _credential_family_urls(_load())
+    return control
 
 
 def save_bootstrap(response: dict, *, control_url: str,
@@ -862,9 +900,7 @@ def configured(*, require_compute: bool = True) -> bool:
     refresh = _selected_refresh(saved)
     if _refresh_is_unusable(saved, refresh):
         refresh = ""
-    control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
-    control = control or str(saved.get("control_url") or "").strip()
-    compute = direct_compute or str(saved.get("compute_url") or "").strip()
+    control, compute = _credential_family_urls(saved)
     if refresh and control:
         _token_subject(saved)
     return bool(refresh and control and (compute or not require_compute))
@@ -925,9 +961,7 @@ def access_for_workspace(
                 "installation again.",
                 status=409,
             )
-        control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
-        control = control or str(saved.get("control_url") or "").strip()
-        compute = direct_compute or str(saved.get("compute_url") or "").strip()
+        control, compute = _credential_family_urls(saved)
         if not refresh or not control or (require_compute and not compute):
             raise CloudSessionError(
                 "Connect this installation to Engraphis Cloud first.", status=401

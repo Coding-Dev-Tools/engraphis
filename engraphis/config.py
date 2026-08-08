@@ -12,6 +12,7 @@ import stat
 import sys
 import time
 from contextlib import contextmanager
+from io import StringIO
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -20,21 +21,66 @@ from typing import Optional
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
+    ensure_owner_private_dir,
     private_file_stat,
     read_private_text,
 )
 
-try:
-    from dotenv import load_dotenv
-    # ``engraphis-init`` writes the configuration contract to ``./.env``. Calling
-    # ``load_dotenv()`` without a path makes python-dotenv search from this module's
-    # installed location, so a wheel install silently ignored the file it had just told
-    # the user to create. Load only the process working directory (no parent traversal),
-    # and retain python-dotenv's default ``override=False`` so an explicit environment
-    # always wins.
-    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
-except Exception:
-    pass
+_MAX_CONFIG_ENV_BYTES = 1024 * 1024
+
+
+def _resolve_config_env_path(
+    *,
+    environ: Optional[dict] = None,
+    home: Optional[Path] = None,
+) -> tuple[Path, bool]:
+    """Return the process-fixed trusted config path and whether it was explicit."""
+    values = os.environ if environ is None else environ
+    configured = str(values.get("ENGRAPHIS_ENV_FILE") or "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("ENGRAPHIS_ENV_FILE must be an absolute path")
+        return candidate, True
+    root = Path.home() if home is None else Path(home)
+    return root / ".engraphis" / "config.env", False
+
+
+_CONFIG_ENV_PATH, _CONFIG_ENV_EXPLICIT = _resolve_config_env_path()
+
+
+def trusted_env_path() -> Path:
+    """Return the config leaf selected before any dotenv values were applied."""
+    return _CONFIG_ENV_PATH
+
+
+def _load_trusted_dotenv() -> None:
+    raw = read_private_text(
+        _CONFIG_ENV_PATH,
+        max_bytes=_MAX_CONFIG_ENV_BYTES,
+        allow_missing=not _CONFIG_ENV_EXPLICIT,
+        owner_only=True,
+    )
+    if raw is None:
+        return
+    try:
+        from dotenv import dotenv_values
+    except ImportError as exc:
+        raise RuntimeError(
+            "python-dotenv is required to load ENGRAPHIS_ENV_FILE"
+        ) from exc
+    parsed = dotenv_values(stream=StringIO(raw))
+    for key, value in parsed.items():
+        if key == "ENGRAPHIS_ENV_FILE" or value is None:
+            continue
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", key) is None:
+            raise ValueError("trusted config contains an invalid environment setting")
+        if "\x00" in value:
+            raise ValueError("trusted config contains an invalid environment value")
+        os.environ.setdefault(key, value)
+
+
+_load_trusted_dotenv()
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_NOTICES = set()
@@ -54,12 +100,12 @@ def _default_db_path(root: Path = _PROJECT_ROOT, *, os_name: Optional[str] = Non
         return str(root / "engraphis.db")
     os_name = os.name if os_name is None else os_name
     platform = sys.platform if platform is None else platform
-    environ = os.environ if environ is None else environ
+    environment = os.environ if environ is None else environ
     home = Path.home() if home is None else home
     if os_name == "nt":
         win_home = PureWindowsPath(str(home))
         base = PureWindowsPath(
-            environ.get("LOCALAPPDATA") or (win_home / "AppData" / "Local")
+            environment.get("LOCALAPPDATA") or (win_home / "AppData" / "Local")
         )
     elif platform == "darwin":
         posix_home = PurePosixPath(str(home).replace("\\", "/"))
@@ -67,7 +113,7 @@ def _default_db_path(root: Path = _PROJECT_ROOT, *, os_name: Optional[str] = Non
     else:
         posix_home = PurePosixPath(str(home).replace("\\", "/"))
         base = PurePosixPath(
-            environ.get("XDG_DATA_HOME") or (posix_home / ".local" / "share")
+            environment.get("XDG_DATA_HOME") or (posix_home / ".local" / "share")
         )
     return str(base / "engraphis" / "engraphis.db")
 
@@ -536,13 +582,14 @@ def _env_bool(key: str, default: bool) -> bool:
 
 
 def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
-    """Upsert non-secret runtime settings in the project-local ``.env`` atomically.
+    """Upsert non-secret runtime settings in the trusted config file atomically.
 
-    Dashboard controls use this for settings that must survive a restart. Explicit
-    process-environment values still remain authoritative on the next launch because
-    python-dotenv loads with ``override=False``.
+    With no explicit *path*, dashboard controls persist beside other owner-private
+    Engraphis state. The process-fixed ``ENGRAPHIS_ENV_FILE`` override is selected
+    before file values are applied, and explicit process environment still wins.
     """
-    target = Path(path) if path is not None else Path.cwd() / ".env"
+    trusted_target = path is None
+    target = Path(path) if path is not None else trusted_env_path()
     clean: dict[str, str] = {}
     for key, value in values.items():
         name = str(key or "").strip()
@@ -553,13 +600,27 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
             raise ValueError("environment setting values must be single-line")
         clean[name] = text
 
-    source_stat = private_file_stat(target, allow_missing=True)
+    source_stat = private_file_stat(
+        target,
+        allow_missing=True,
+        owner_only=trusted_target,
+    )
     existed = source_stat is not None
-    existing = (read_private_text(target, max_bytes=1024 * 1024) or "") if existed else ""
-    # Replacing an existing .env through a fresh default-mode file can silently widen
-    # permissions from 0600 to 0644 while the preserved lines still contain API keys.
-    # Carry the original mode forward; new files start private regardless of umask.
-    mode = source_stat.st_mode & 0o777 if source_stat is not None else 0o600
+    existing = (
+        read_private_text(
+            target,
+            max_bytes=_MAX_CONFIG_ENV_BYTES,
+            owner_only=trusted_target,
+        )
+        or ""
+    ) if existed else ""
+    # Explicit project/test paths preserve their existing mode. The default trusted
+    # config is never allowed to carry group/other permissions.
+    mode = (
+        0o600
+        if trusted_target or source_stat is None
+        else source_stat.st_mode & 0o777
+    )
     lines = existing.splitlines()
     found: set[str] = set()
     rendered: list[str] = []
@@ -578,9 +639,14 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
         if key not in found:
             rendered.append(f"{key}={value}")
 
+    if trusted_target:
+        ensure_owner_private_dir(target.parent)
     atomic_private_text(
-        target, "\n".join(rendered).rstrip() + "\n", mode=mode,
-        expected_stat=source_stat)
+        target,
+        "\n".join(rendered).rstrip() + "\n",
+        mode=mode,
+        expected_stat=source_stat,
+    )
     return target
 
 

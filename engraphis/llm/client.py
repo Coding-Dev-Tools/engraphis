@@ -92,14 +92,24 @@ _CHAT_SYSTEM_PROMPT = (
 class _LLMProviderError(RuntimeError):
     """Sanitized provider failure safe to expose outside this client boundary."""
 
-    def __init__(self, *, status: Optional[int] = None, unreachable: bool = False) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        status: Optional[int] = None,
+        unreachable: bool = False,
+        message: Optional[str] = None,
+    ) -> None:
         self.status = status
         self.unreachable = unreachable
-        if status is not None:
-            message = "LLM provider rejected the request (HTTP %d)" % status
+        if message is not None:
+            resolved = message
+        elif args:
+            resolved = str(args[0])
+        elif status is not None:
+            resolved = "LLM provider rejected the request (HTTP %d)" % status
         else:
-            message = "Could not reach the configured LLM provider"
-        super().__init__(message)
+            resolved = "Could not reach the configured LLM provider"
+        super().__init__(resolved)
 
 
 class LLMClient:
@@ -375,8 +385,8 @@ class LLMClient:
                     last_exc = exc
                     continue
                 raise _LLMProviderError(status=status) from None
-            except httpx.TimeoutException as exc:
-                raise TimeoutError("LLM request exceeded its deadline") from exc
+            except httpx.TimeoutException:
+                raise TimeoutError("LLM request exceeded its deadline") from None
             except httpx.RequestError:
                 if attempt < _MAX_RETRIES:
                     wait = 2.0 * (attempt + 1)
@@ -571,16 +581,29 @@ def parse_provider_chain(env_var: str = "ENGRAPHIS_LLM_PROVIDERS") -> LLMProvide
         # But ceiling is numeric, so we check if the last segment is a valid float
         ceiling_str: Optional[str] = None
         remainder = entry
-        # Try to extract ceiling: split on last ':' and check if it's numeric
         last_colon = remainder.rfind(":")
         if last_colon >= 0:
             candidate = remainder[last_colon + 1:].strip()
-            # Only treat as ceiling if it looks numeric and isn't part of a URL scheme
-            if candidate and not candidate.startswith("//"):
+            # Only treat as ceiling if it looks numeric and cannot be a URL port.
+            # A bare port like ":8080" at end-of-string has no "/" but follows a
+            # host segment; detect this by checking whether the text before the
+            # colon ends with a digit (port pattern) or contains "://" (scheme).
+            prefix = remainder[:last_colon]
+            is_port = (
+                candidate.isdigit()
+                and not prefix.endswith("/")
+                and "://" in prefix
+            )
+            if (
+                candidate
+                and not candidate.startswith("//")
+                and "/" not in candidate
+                and not is_port
+            ):
                 try:
                     float(candidate)
                     ceiling_str = candidate
-                    remainder = remainder[:last_colon]
+                    remainder = prefix
                 except ValueError:
                     pass
 

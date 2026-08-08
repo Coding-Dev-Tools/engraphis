@@ -14,16 +14,149 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import re
 from numbers import Integral
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 import numpy as np
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
-from engraphis.backends.model_source import validate_model_source
+from engraphis.backends.model_source import is_local_model_source, validate_model_source
 
 
 LOCAL_MODEL_PREFIX = "local:"
+
+
+_IMMUTABLE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+
+
+_LOCAL_ARTIFACT_HASH_CHUNK = 1_048_576
+
+
+def _stat_signature(info: os.stat_result) -> tuple[int, ...]:
+    identity = (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
+    # Windows exposes creation time as st_ctime and can update its reported
+    # precision when a descriptor is opened. POSIX st_ctime is a useful mutation
+    # signal, so retain it only where path-stat and descriptor-stat are stable.
+    return identity if os.name == "nt" else identity + (int(info.st_ctime_ns),)
+
+
+def _local_artifact_inventory(model_name: str):
+    source = Path(os.path.expanduser(model_name))
+    if not source.exists():
+        return None
+    root = source.resolve(strict=True)
+    single_file = root.is_file()
+    files = [root] if single_file else sorted(
+        (path for path in root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    state = tuple(
+        (
+            path.name if single_file else path.relative_to(root).as_posix(),
+            *_stat_signature(path.stat()),
+        )
+        for path in files
+    )
+    return root, files, state
+
+
+def _local_artifact_state(model_name: str):
+    try:
+        inventory = _local_artifact_inventory(model_name)
+    except OSError:
+        raise RuntimeError("local model artifacts could not be inspected") from None
+    return inventory[2] if inventory is not None else None
+
+
+def _local_artifact_version(
+    model_name: str,
+    *,
+    expected_state=None,
+    verify_expected: bool = False,
+) -> str:
+    """Hash local artifact bytes once, while proving the manifest stayed stable."""
+    try:
+        inventory = _local_artifact_inventory(model_name)
+        state = inventory[2] if inventory is not None else None
+        if verify_expected and state != expected_state:
+            raise RuntimeError("local model artifacts changed while the model was loading")
+        if inventory is None:
+            return ""
+        _, files, state = inventory
+        digest = hashlib.sha256(b"engraphis-local-artifact-v1\0")
+        for path, expected in zip(files, state):
+            relative, *expected_signature = expected
+            digest.update(relative.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+            digest.update(str(expected_signature[2]).encode("ascii"))
+            digest.update(b"\0")
+            with path.open("rb") as stream:
+                if _stat_signature(os.fstat(stream.fileno())) != tuple(expected_signature):
+                    raise RuntimeError(
+                        "local model artifacts changed while they were fingerprinted"
+                    )
+                while True:
+                    chunk = stream.read(_LOCAL_ARTIFACT_HASH_CHUNK)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                if _stat_signature(os.fstat(stream.fileno())) != tuple(expected_signature):
+                    raise RuntimeError(
+                        "local model artifacts changed while they were fingerprinted"
+                    )
+        after = _local_artifact_inventory(model_name)
+        if after is None or after[2] != state:
+            raise RuntimeError("local model artifacts changed while they were fingerprinted")
+        return "local-content:" + digest.hexdigest()
+    except RuntimeError:
+        raise
+    except OSError:
+        raise RuntimeError("local model artifacts could not be fingerprinted") from None
+
+
+def _loaded_commit(model: object) -> str:
+    """Return the immutable Hub commit recorded by sentence-transformers/transformers."""
+    first = None
+    first_module = getattr(model, "_first_module", None)
+    if callable(first_module):
+        try:
+            first = first_module()
+        except Exception:
+            first = None
+    auto_model = getattr(first, "auto_model", None)
+    candidates = (
+        model,
+        getattr(model, "_model_card_vars", None),
+        first,
+        auto_model,
+        getattr(auto_model, "config", None),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            values = (
+                candidate.get("_commit_hash"),
+                candidate.get("commit_hash"),
+                candidate.get("revision"),
+            )
+        else:
+            values = (
+                getattr(candidate, "_commit_hash", None),
+                getattr(candidate, "commit_hash", None),
+                getattr(candidate, "revision", None),
+            )
+        for value in values:
+            normalized = str(value or "").strip().lower()
+            if _IMMUTABLE_COMMIT.fullmatch(normalized):
+                return normalized
+    return ""
 
 
 class SentenceTransformerEmbedder:
@@ -39,12 +172,19 @@ class SentenceTransformerEmbedder:
         local_files_only: bool = False,
         require_immutable_models: Optional[bool] = None,
     ) -> None:
+        validation_source = (
+            f"{LOCAL_MODEL_PREFIX}{model_name}"
+            if local_files_only and not is_local_model_source(model_name)
+            else model_name
+        )
         validate_model_source(
-            model_name,
+            validation_source,
             revision,
             require_immutable_models=require_immutable_models,
             loader="sentence-transformers model",
         )
+        local_source = is_local_model_source(model_name)
+        local_before = _local_artifact_state(model_name) if local_source else None
         from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
         kwargs: dict[str, Any] = {"trust_remote_code": False}
         if revision:
@@ -61,9 +201,31 @@ class SentenceTransformerEmbedder:
         self.revision = revision
         self.local_files_only = local_files_only
         self.model = SentenceTransformer(model_name, **kwargs)
+        local_after = (
+            _local_artifact_version(
+                model_name,
+                expected_state=local_before,
+                verify_expected=True,
+            )
+            if local_source
+            else ""
+        )
+        resolved_commit = _loaded_commit(self.model)
+        declared_commit = str(revision or "").strip().lower()
+        if not resolved_commit and _IMMUTABLE_COMMIT.fullmatch(declared_commit):
+            resolved_commit = declared_commit
+        self._artifact_version = (
+            local_after or (f"hf-commit:{resolved_commit}" if resolved_commit else "")
+        )
         dimension = self.model.get_embedding_dimension()
-        if isinstance(dimension, bool) or not isinstance(dimension, Integral) or int(dimension) <= 0:
-            raise ValueError('sentence-transformers model did not report a positive embedding dimension')
+        if (
+            isinstance(dimension, bool)
+            or not isinstance(dimension, Integral)
+            or int(dimension) <= 0
+        ):
+            raise ValueError(
+                "sentence-transformers model did not report a positive embedding dimension"
+            )
         self._dim = int(dimension)
 
     @property
@@ -72,8 +234,11 @@ class SentenceTransformerEmbedder:
 
     @property
     def embedding_version(self) -> str:
-        """Identify the configured model space without exposing local paths or tokens."""
-        configured = f"{self.model_name}\0{self.revision or 'unversioned'}"
+        """Identify the loaded artifact space without exposing model paths."""
+        artifact_version = str(getattr(self, "_artifact_version", "") or "").strip()
+        if not artifact_version:
+            return ""
+        configured = f"v2\0{self.model_name}\0{artifact_version}"
         digest = hashlib.sha256(configured.encode("utf-8")).hexdigest()[:24]
         return f"st:{digest}"
 
@@ -83,8 +248,8 @@ class SentenceTransformerEmbedder:
         try:
             vecs = self.model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
             result = np.asarray(vecs, dtype=np.float32)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("sentence-transformers returned malformed embeddings") from exc
+        except (TypeError, ValueError, OverflowError, RuntimeError):  # noqa: BLE001
+            raise RuntimeError("sentence-transformers returned malformed embeddings") from None
         if result.ndim == 1 and len(texts) == 1:
             result = result.reshape(1, -1)
         if result.shape != (len(texts), self._dim) or not np.isfinite(result).all():
@@ -125,16 +290,20 @@ def get_embedder(
             require_immutable_models=require_immutable_models,
             loader="sentence-transformers model",
         )
-        local_files_only = raw_model_name.startswith(LOCAL_MODEL_PREFIX)
+        has_local_prefix = raw_model_name.startswith(LOCAL_MODEL_PREFIX)
+        local_files_only = has_local_prefix or is_local_model_source(raw_model_name)
         resolved_model_name = (
             raw_model_name[len(LOCAL_MODEL_PREFIX):].strip()
-            if local_files_only
+            if has_local_prefix
             else raw_model_name
         )
         try:
             if not resolved_model_name:
                 raise ValueError("local embedder selector requires a path or cached model name")
-            factory_kwargs: dict[str, Any] = {'revision': revision}
+            factory_kwargs: dict[str, Any] = {
+                "revision": revision,
+                "require_immutable_models": require_immutable_models,
+            }
             if local_files_only:
                 factory_kwargs["local_files_only"] = True
             emb = SentenceTransformerEmbedder(resolved_model_name, **factory_kwargs)

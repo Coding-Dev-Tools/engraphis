@@ -1,6 +1,8 @@
 """Client-side Cloud Sync encryption and fail-closed relay behavior."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("cryptography")
@@ -124,9 +126,9 @@ def test_sync_engine_applies_later_encrypted_bundle_after_unreadable_relay_objec
     assert report["totals"]["added"] == 1
     assert report["peers_applied"] == 1
     assert report["complete"] is False
-    assert report["errors"] == [
-        {"bundle": "?", "error": "transport failure", "error_type": "RelayError"}
-    ]
+    assert {item["error"] for item in report["errors"]} == {
+        "transport failure", "snapshot freshness unavailable",
+    }
 
 
 def test_sync_engine_converges_through_encrypted_relay_without_plaintext_storage():
@@ -151,3 +153,94 @@ def test_sync_engine_converges_through_encrypted_relay_without_plaintext_storage
     stored = b"".join(relay.bundles.values())
     assert b"customer private fact" not in stored
     assert b"other private fact" not in stored
+
+
+def test_authenticated_snapshot_replay_is_rejected_after_newer_tombstone():
+    relay = _MemoryRelay()
+    key = bytes(range(32))
+    source = MemoryEngine.create(":memory:")
+    receiver = MemoryEngine.create(":memory:")
+    source_workspace = source.store.get_or_create_workspace("acme")
+    receiver_workspace = receiver.store.get_or_create_workspace("acme")
+    memory_id = source.remember(
+        "pre-erasure fact",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+    )
+    source_sync = SyncEngine(source.store)
+    receiver_sync = SyncEngine(receiver.store)
+
+    encrypted = EncryptedRelayTransport(relay, key)
+    source_sync.sync(encrypted, source_workspace)
+    source_name = encrypted._opaque_name(
+        "bundle-%s.json" % source_sync.device_id
+    )
+    generation_one = relay.bundles[source_name]
+    receiver_sync.sync(
+        EncryptedRelayTransport(relay, key), receiver_workspace
+    )
+
+    source.store.secure_erase_memory(memory_id)
+    source_sync.sync(EncryptedRelayTransport(relay, key), source_workspace)
+    receiver_sync.sync(
+        EncryptedRelayTransport(relay, key), receiver_workspace
+    )
+    assert receiver.store.get_memory(memory_id) is None
+
+    # A relay replaying a valid old ciphertext must not resurrect or roll back the
+    # authenticated tombstone checkpoint.
+    relay.bundles[source_name] = generation_one
+    rollback = receiver_sync.sync(
+        EncryptedRelayTransport(relay, key), receiver_workspace
+    )
+
+    assert rollback["complete"] is False
+    assert rollback["errors"][0]["error"] == "bundle rejected"
+    assert receiver.store.get_memory(memory_id) is None
+    decrypted = [
+        json.loads(data)
+        for _, data in EncryptedRelayTransport(relay, key).pull()
+    ]
+    own = next(
+        bundle for bundle in decrypted
+        if bundle["device_id"] == receiver_sync.device_id
+    )
+    assert own["generation"] >= 3
+    assert any(item["id"] == memory_id for item in own["tombstones"])
+
+
+def test_restored_device_merges_own_newer_snapshot_before_replacing_it():
+    relay = _MemoryRelay()
+    key = bytes(range(32))
+    source = MemoryEngine.create(":memory:")
+    source_workspace = source.store.get_or_create_workspace("acme")
+    memory_id = source.remember(
+        "pre-backup fact",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+    )
+    source_sync = SyncEngine(source.store)
+    source_sync.sync(EncryptedRelayTransport(relay, key), source_workspace)
+
+    # Stand in for a database backup taken after this device accepted its own first
+    # snapshot, but before the later local erase and generation checkpoint.
+    restored = MemoryEngine.create(":memory:")
+    restored_workspace = restored.store.get_or_create_workspace("acme")
+    restored_sync = SyncEngine(
+        restored.store,
+        device_id=source_sync.device_id,
+    )
+    generation_one = json.loads(next(iter(
+        EncryptedRelayTransport(relay, key).pull()
+    ))[1])
+    restored_sync.apply_bundle(generation_one, into_workspace="acme")
+    assert restored.store.get_memory(memory_id) is not None
+
+    source.store.secure_erase_memory(memory_id)
+    source_sync.sync(EncryptedRelayTransport(relay, key), source_workspace)
+    report = restored_sync.sync(
+        EncryptedRelayTransport(relay, key), restored_workspace
+    )
+
+    assert report["totals"]["tombstones_applied"] == 1
+    assert restored.store.get_memory(memory_id) is None

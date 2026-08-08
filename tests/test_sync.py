@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -16,17 +18,26 @@ import pytest
 from engraphis.backends import sync_folder
 from engraphis.backends.sync_folder import FolderTransport, get_transport
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    MemoryRecord,
+    MemoryType,
+    Scope,
+    SearchFilter,
+    format_modified_hlc,
+)
 from engraphis.core.store import Store
 from engraphis.core.sync import (
     MAX_CONTENT_CHARS,
+    TS_FUTURE_SKEW,
     SYNC_FORMAT,
     SyncEngine,
     SyncError,
+    _initialize_sync_store_defaults,
     _signature,
     _version_key,
+    _snapshot_hash,
+    _stable_hash,
     dict_to_record,
-    inherit_store_defaults,
     merge_record,
     record_to_dict,
 )
@@ -35,20 +46,21 @@ from engraphis.core.sync import (
 # ── pure merge lattice (the convergence guarantees) ───────────────────────────
 
 def test_merge_is_commutative_and_lww_by_version_key():
-    a = MemoryRecord(id="mem_1", content="hello", last_access=100.0, ingested_at=10.0,
+    a = MemoryRecord(id="mem_1", content="hello", last_access=300.0, ingested_at=10.0,
                      stability=2.0, access_count=3)
-    b = MemoryRecord(id="mem_1", content="hello v2", last_access=200.0, ingested_at=10.0,
+    b = MemoryRecord(id="mem_1", content="hello v2", last_access=200.0, ingested_at=20.0,
                      stability=1.0, access_count=5)
     m1, m2 = merge_record(a, b), merge_record(b, a)
     assert _signature(m1) == _signature(m2)          # order-independent
-    assert m1.content == "hello v2"                  # higher last_access wins the label
+    assert m1.content == "hello v2"                  # newer content clock wins the label
+    assert m1.last_access == 300.0                   # later read remains separate lattice
     assert m1.stability == 2.0                       # lattice: max
-    assert m1.access_count == 5                       # lattice: max
+    assert m1.access_count == 5                      # lattice: max
 
 
 def test_merge_is_idempotent():
-    a = MemoryRecord(id="mem_1", content="x", last_access=100.0, ingested_at=10.0)
-    b = MemoryRecord(id="mem_1", content="x edited", last_access=150.0, ingested_at=10.0)
+    a = MemoryRecord(id="mem_1", content="x", last_access=200.0, ingested_at=10.0)
+    b = MemoryRecord(id="mem_1", content="x edited", last_access=150.0, ingested_at=20.0)
     m = merge_record(a, b)
     assert _signature(merge_record(m, b)) == _signature(m)
     assert _signature(merge_record(m, a)) == _signature(m)
@@ -60,6 +72,45 @@ def test_merge_commutes_even_on_identical_clock():
     a = MemoryRecord(id="mem_1", content="alpha", last_access=5.0, ingested_at=5.0)
     b = MemoryRecord(id="mem_1", content="bravo", last_access=5.0, ingested_at=5.0)
     assert _signature(merge_record(a, b)) == _signature(merge_record(b, a))
+
+
+def test_three_peer_merge_keeps_newer_hlc_edit_despite_later_reads():
+    stale_read = MemoryRecord(
+        id="mem_1", content="old", ingested_at=300.0, last_access=500.0,
+        modified_hlc=format_modified_hlc(1, 0, f"dev_{'0' * 26}"),
+    )
+    intermediate = MemoryRecord(
+        id="mem_1", content="intermediate", ingested_at=200.0, last_access=50.0,
+        modified_hlc=format_modified_hlc(2, 0, f"dev_{'0' * 26}"),
+    )
+    newest_edit = MemoryRecord(
+        id="mem_1", content="new", ingested_at=100.0, last_access=5.0,
+        modified_hlc=format_modified_hlc(3, 0, f"dev_{'0' * 26}"),
+    )
+
+    left = merge_record(merge_record(stale_read, intermediate), newest_edit)
+    right = merge_record(stale_read, merge_record(intermediate, newest_edit))
+
+    assert left.content == right.content == "new"
+    assert left.modified_hlc == right.modified_hlc == newest_edit.modified_hlc
+    assert left.last_access == right.last_access == 500.0
+    assert _signature(left) == _signature(right)
+
+
+def test_concurrent_hlc_node_tiebreak_is_order_independent():
+    lower = MemoryRecord(
+        id="mem_1", content="lower-node edit", ingested_at=999.0,
+        modified_hlc=format_modified_hlc(10, 4, f"dev_{'0' * 26}"),
+    )
+    higher = MemoryRecord(
+        id="mem_1", content="higher-node edit", ingested_at=1.0,
+        modified_hlc=format_modified_hlc(10, 4, f"dev_{'1' * 26}"),
+    )
+
+    assert merge_record(lower, higher).content == "higher-node edit"
+    assert _signature(merge_record(lower, higher)) == _signature(
+        merge_record(higher, lower)
+    )
 
 
 def test_invalidation_is_earliest_wins_and_sticky():
@@ -81,22 +132,154 @@ def test_reinforcement_and_pin_are_monotone():
 
 
 def test_serialization_roundtrip_preserves_signature():
-    rec = MemoryRecord(id="mem_1", content="hi", title="T", keywords=["b", "a"],
-                       metadata={"k": 1}, pinned=True, stability=3.5,
-                       mtype=MemoryType.EPISODIC, scope=Scope.WORKSPACE, access_count=4)
-    r2 = dict_to_record(record_to_dict(rec))
+    modified_hlc = format_modified_hlc(10, 4, f"dev_{'1' * 26}")
+    rec = MemoryRecord(
+        id="mem_1", content="hi", title="T", keywords=["b", "a"],
+        metadata={"k": 1}, pinned=True, stability=3.5,
+        mtype=MemoryType.EPISODIC, scope=Scope.WORKSPACE, access_count=4,
+        valid_from=1.0, ingested_at=1.0, last_access=1.0,
+        modified_hlc=modified_hlc,
+    )
+    payload = record_to_dict(rec)
+    r2 = dict_to_record(payload)
+    assert payload["modified_hlc"] == modified_hlc
     assert r2 is not None
     assert r2.mtype == MemoryType.EPISODIC and r2.scope == Scope.WORKSPACE
     assert r2.pinned is True and r2.keywords == ["b", "a"]
+    assert r2.modified_hlc == modified_hlc
     assert _signature(r2) == _signature(rec)
+
+
+def test_sync_rejects_malformed_modified_hlc_without_aborting_parser():
+    assert dict_to_record({
+        "id": "mem_bad_hlc",
+        "content": "bad clock",
+        "modified_hlc": "999999999999",
+    }) is None
+
+
+def test_sync_rejects_future_hlc_without_aborting_other_rows():
+    now = time.time()
+    poisoned_hlc = format_modified_hlc(
+        int((now + TS_FUTURE_SKEW + 60.0) * 1000),
+        0,
+        f"dev_{'F' * 26}",
+    )
+    store = Store(":memory:")
+    report = SyncEngine(store).apply_bundle({
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "device_id": f"dev_{'1' * 26}",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [
+            {
+                "id": "mem_future_hlc",
+                "content": "poisoned future authority",
+                "modified_hlc": poisoned_hlc,
+            },
+            {"id": "mem_valid_hlc_peer", "content": "valid peer row"},
+        ],
+        "mem_links": [],
+    })
+
+    assert report["rejected"] == 1
+    assert report["added"] == 1
+    assert store.get_memory("mem_future_hlc") is None
+    assert store.get_memory("mem_valid_hlc_peer") is not None
+
+
+@pytest.mark.parametrize("missing_field", ["ingested_at", "valid_from"])
+def test_sync_rejects_hlc_row_missing_descriptive_clock_fields(missing_field):
+    row = {
+        "id": "mem_incomplete_hlc",
+        "content": "incomplete modern write",
+        "ingested_at": 10.0,
+        "valid_from": 10.0,
+        "modified_hlc": format_modified_hlc(10_000, 0, f"dev_{'1' * 26}"),
+    }
+    row.pop(missing_field)
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle({
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "device_id": f"dev_{'1' * 26}",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [row],
+        "mem_links": [],
+    })
+
+    assert report["rejected"] == 1
+    assert store.get_memory("mem_incomplete_hlc") is None
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "ingested_at",
+        "last_access",
+        "valid_to_recorded_at",
+        "expired_at",
+        "pinned_at",
+        "unpinned_at",
+    ],
+)
+def test_sync_rejects_supplied_future_system_timestamps(monkeypatch, field_name):
+    receiver_now = 1000.0
+    monkeypatch.setattr("engraphis.core.sync.now_ts", lambda: receiver_now)
+    row = {
+        "id": "mem_future_system_time",
+        "content": "future clock authority",
+        field_name: receiver_now + TS_FUTURE_SKEW + 60.0,
+    }
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle({
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [row],
+        "mem_links": [],
+    })
+
+    assert report["rejected"] == 1
+    assert store.get_memory("mem_future_system_time") is None
+
+
+def test_accepted_system_timestamp_is_not_receiver_relative_clamped(monkeypatch):
+    wire_time = 173_700.0  # inside the skew window for both receiver clocks below
+    signatures = []
+    for receiver_now in (1000.0, 2000.0):
+        monkeypatch.setattr("engraphis.core.sync.now_ts", lambda: receiver_now)
+        monkeypatch.setattr("engraphis.core.store.now_ts", lambda: receiver_now)
+        store = Store(":memory:")
+        report = SyncEngine(store).apply_bundle({
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "mem_near_future",
+                "content": "portable timestamp",
+                "ingested_at": wire_time,
+            }],
+            "mem_links": [],
+        })
+        row = store.get_memory("mem_near_future")
+        assert report["added"] == 1
+        assert row is not None
+        assert row.ingested_at == row.valid_from == row.last_access == wire_time
+        signatures.append(_signature(row))
+
+    assert signatures[0] == signatures[1]
 
 
 def test_sync_whitelist_includes_confidence_and_roundtrips_it():
     """``confidence`` is a first-class sync field: it is emitted, clamped, and
     re-read, and it participates in the last-writer-wins label/hash."""
-    from engraphis.core.sync import _LWW_FIELDS
-
-    assert "confidence" in _LWW_FIELDS
 
     rec = MemoryRecord(id="mem_conf", content="c", confidence=0.5,
                        last_access=1.0, ingested_at=1.0)
@@ -113,9 +296,16 @@ def test_sync_whitelist_includes_confidence_and_roundtrips_it():
     absent = dict_to_record({"id": "mem_absent", "content": "c"})
     assert absent is not None and absent.confidence == 1.0   # default
 
-    # merge_record carries the LWW winner's confidence.
-    local = MemoryRecord(id="mem_conf", content="c", confidence=0.5, last_access=1.0)
-    incoming = MemoryRecord(id="mem_conf", content="c", confidence=0.9, last_access=2.0)
+    # merge_record carries the newer content clock's confidence; read activity alone
+    # cannot select descriptive payload.
+    local = MemoryRecord(
+        id="mem_conf", content="c", confidence=0.5,
+        last_access=20.0, ingested_at=1.0,
+    )
+    incoming = MemoryRecord(
+        id="mem_conf", content="c", confidence=0.9,
+        last_access=2.0, ingested_at=2.0,
+    )
     assert merge_record(local, incoming).confidence == 0.9
 
 
@@ -231,11 +421,15 @@ def test_apply_bundle_rejection_continues_round_and_marks_incomplete(tmp_path):
     }
 
     class _RejectThenGood:
-        def push(self, name, data):
+        def push(self, name: str, data: bytes) -> None:
             pass
+
         def pull(self):
             yield "bundle-bad.json", json.dumps(bad_bundle).encode("utf-8")
             yield "bundle-good.json", json.dumps(good_bundle).encode("utf-8")
+
+        def list_names(self) -> list[str]:
+            return []
 
     result = se.sync(_RejectThenGood(), wid, push=False)
 
@@ -256,7 +450,110 @@ def test_apply_rejects_bad_header():
         se.apply_bundle("i am not a dict")
 
 
-def test_sync_exports_v2_but_accepts_legacy_v1_without_silent_downgrade():
+@pytest.mark.parametrize(
+    "bad_device",
+    ["peer/", {"peer": True}, "peer\nforged", "token-" + ("x" * 129), ["peer"]],
+)
+def test_apply_rejects_malformed_peer_device_identity(bad_device):
+    store = Store(":memory:")
+
+    class StaticTransport:
+        def push(self, name: str, data: bytes) -> None:
+            pass
+
+        def pull(self):
+            return [(
+                "bundle-peer.json",
+                json.dumps({
+                    "format": SYNC_FORMAT,
+                    "version": 1,
+                    "device_id": bad_device,
+                    "workspace_name": "w",
+                    "repos": {},
+                    "memories": [{"id": "mem_remote", "content": "remote"}],
+                    "mem_links": [],
+                }).encode("utf-8"),
+            )]
+
+        def list_names(self) -> list[str]:
+            return []
+
+    report = SyncEngine(store).sync(
+        StaticTransport(),
+        store.get_or_create_workspace("w"),
+    )
+    assert report["complete"] is False
+    assert store.get_memory("mem_remote") is None
+    assert str(bad_device) not in json.dumps(report)
+
+
+def test_sync_report_hashes_untyped_device_identity_without_reflection():
+    marker = "credential-marker"
+    payload = _peer_bundle(marker, "mem_remote")
+
+    class StaticTransport:
+        def pull(self):
+            return [("bundle-peer.json", payload)]
+
+        def push(self, name, data):
+            pass
+
+        def list_names(self):
+            return []
+
+    store = Store(":memory:")
+    report = SyncEngine(store).sync(
+        StaticTransport(), store.get_or_create_workspace("w"), push=False,
+    )
+
+    assert store.get_memory("mem_remote") is not None
+    assert marker not in json.dumps(report)
+    assert report["applied"][0]["from_device"].startswith("legacy_")
+
+
+def test_shared_database_device_identity_is_atomic_and_durable(tmp_path):
+    path = str(tmp_path / "shared-device.db")
+    seed = Store(path)
+    workspace = seed.get_or_create_workspace("w")
+    seed.close()
+    barrier = threading.Barrier(2)
+
+    def open_syncer():
+        store = Store(path)
+        try:
+            barrier.wait()
+            return SyncEngine(store).device_id
+        finally:
+            store.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        device_ids = list(pool.map(lambda _: open_syncer(), range(2)))
+
+    assert device_ids[0] == device_ids[1]
+
+    first = Store(path)
+    second = Store(path)
+    try:
+        first_sync = SyncEngine(first)
+        second_sync = SyncEngine(second)
+        assert first_sync.device_id == second_sync.device_id == device_ids[0]
+        assert (
+            first_sync.export_bundle(workspace)["device_id"]
+            == second_sync.export_bundle(workspace)["device_id"]
+            == device_ids[0]
+        )
+    finally:
+        first.close()
+        second.close()
+
+    reopened = Store(path)
+    try:
+        assert SyncEngine(reopened).device_id == device_ids[0]
+    finally:
+        reopened.close()
+
+
+def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrade():
     engine = MemoryEngine.create(":memory:")
     wid = engine.store.get_or_create_workspace("w")
     engine.remember(
@@ -268,7 +565,10 @@ def test_sync_exports_v2_but_accepts_legacy_v1_without_silent_downgrade():
     )
     syncer = SyncEngine(engine.store)
     exported = syncer.export_bundle(wid)
-    assert exported["version"] == 2
+    assert exported["version"] == 3
+    assert exported["generation"] == 1
+    assert exported["previous_hash"] == ""
+    assert len(exported["state_hash"]) == 64
     assert exported["memories"][0]["subject_key"] == "api-cap"
 
     legacy = dict(exported)
@@ -276,11 +576,215 @@ def test_sync_exports_v2_but_accepts_legacy_v1_without_silent_downgrade():
     legacy["memories"] = [{
         key: value
         for key, value in exported["memories"][0].items()
-        if key not in {"subject_key", "claim_kind", "valid_to_recorded_at"}
+        if key not in {
+            "subject_key", "claim_kind", "valid_to_recorded_at", "modified_hlc",
+        }
     }]
     target = Store(":memory:")
     report = SyncEngine(target).apply_bundle(legacy)
     assert report["added"] == 1
+    restored = target.get_memory(exported["memories"][0]["id"])
+    assert restored is not None
+    assert restored.modified_hlc == ""  # preserve the v1/v2 ordering sentinel
+
+
+def test_direct_apply_persists_snapshot_high_water_mark():
+    source = Store(":memory:")
+    source_workspace = source.get_or_create_workspace("w")
+    source.add_memory(MemoryRecord(
+        id="mem_replay",
+        content="pre-erasure",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+    ))
+
+    class CaptureTransport:
+        def __init__(self):
+            self.bundles = []
+
+        def push(self, name: str, data: bytes) -> None:
+            self.bundles.append(json.loads(data))
+
+        def pull(self):
+            return []
+
+        def list_names(self):
+            return []
+
+    transport = CaptureTransport()
+    source_sync = SyncEngine(source)
+    source_sync.sync(transport, source_workspace)
+    generation_one = transport.bundles[-1]
+    source.secure_erase_memory("mem_replay")
+    source_sync.sync(transport, source_workspace)
+    generation_two = transport.bundles[-1]
+
+    target = Store(":memory:")
+    target_sync = SyncEngine(target)
+    target_sync.apply_bundle(generation_one, into_workspace="w")
+    target_sync.apply_bundle(generation_two, into_workspace="w")
+
+    assert target.get_memory("mem_replay") is None
+    with pytest.raises(SyncError, match="generation rolled back"):
+        target_sync.apply_bundle(generation_one, into_workspace="w")
+
+
+def test_sync_commits_local_generation_only_after_successful_push():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_export_checkpoint",
+        content="shareable",
+        workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+    ))
+    syncer = SyncEngine(store)
+
+    class FailingPush:
+        def pull(self):
+            return []
+
+        def push(self, name, data):
+            raise RuntimeError("remote write failed")
+
+        def list_names(self):
+            return []
+
+    with pytest.raises(RuntimeError, match="remote write failed"):
+        syncer.sync(FailingPush(), workspace)
+    assert store.conn.execute(
+        "SELECT 1 FROM sync_state WHERE key LIKE 'sync_snapshot:%'"
+    ).fetchone() is None
+    assert store.get_memory_sync_export(memory_id) is None
+
+    pushed = []
+
+    class SuccessfulPush:
+        def pull(self):
+            return []
+
+        def push(self, name, data):
+            pushed.append(json.loads(data))
+
+        def list_names(self):
+            return []
+
+    syncer.sync(SuccessfulPush(), workspace)
+
+    assert pushed[0]["generation"] == 1
+    assert [item["id"] for item in pushed[0]["memories"]] == [memory_id]
+    marker = store.get_memory_sync_export(memory_id)
+    assert marker is not None
+    assert marker["workspace_id"] == workspace
+    checkpoint = store.conn.execute(
+        "SELECT value FROM sync_state WHERE key LIKE 'sync_snapshot:%'"
+    ).fetchone()
+    assert checkpoint is not None
+    assert json.loads(checkpoint["value"])["generation"] == 1
+
+
+def test_failed_push_after_pull_leaves_connection_clean_and_pull_durable():
+    source = Store(":memory:")
+    source_workspace = source.get_or_create_workspace("w")
+    source.add_memory(MemoryRecord(
+        id="mem_remote_before_failed_push",
+        content="the pulled snapshot remains durable",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+    ))
+    payload = json.dumps(SyncEngine(source).export_bundle(source_workspace)).encode(
+        "utf-8"
+    )
+
+    target = Store(":memory:")
+    target_workspace = target.get_or_create_workspace("w")
+    syncer = SyncEngine(target)
+
+    class PullThenFailPush:
+        def pull(self):
+            return [("bundle-peer.json", payload)]
+
+        def push(self, name, data):
+            raise RuntimeError("remote write failed")
+
+        def list_names(self):
+            return []
+
+    with pytest.raises(RuntimeError, match="remote write failed"):
+        syncer.sync(PullThenFailPush(), target_workspace)
+
+    assert target.get_memory("mem_remote_before_failed_push") is not None
+    assert target.conn.transaction_owned_by_current_thread() is False
+    assert target.conn.in_transaction is False
+    assert target.get_sync_state(
+        syncer._checkpoint_key(target_workspace, None, syncer.device_id)
+    ) is None
+
+
+def test_sync_rejects_caller_owned_transaction_before_transport_io():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    calls = []
+
+    class Transport:
+        def pull(self):
+            calls.append("pull")
+            return []
+
+        def push(self, name, data):
+            calls.append("push")
+
+        def list_names(self):
+            return []
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(RuntimeError, match="active store transaction"):
+        SyncEngine(store).sync(Transport(), workspace)
+    assert store.conn.transaction_owned_by_current_thread() is True
+    assert calls == []
+    store.conn.rollback()
+
+
+def test_receive_accounting_failure_does_not_pin_connection(monkeypatch):
+    source = Store(":memory:")
+    source_workspace = source.get_or_create_workspace("w")
+    source.add_memory(MemoryRecord(
+        id="mem_durable_before_accounting_failure",
+        content="the applied peer write is already durable",
+        workspace_id=source_workspace,
+        scope=Scope.WORKSPACE,
+    ))
+    payload = json.dumps(SyncEngine(source).export_bundle(source_workspace)).encode(
+        "utf-8"
+    )
+
+    target = Store(":memory:")
+    target_workspace = target.get_or_create_workspace("w")
+    original_add_sync_bytes = target.add_sync_bytes
+
+    def fail_after_accounting_write(*args, **kwargs):
+        original_add_sync_bytes(*args, **kwargs)
+        raise RuntimeError("sync accounting failed")
+
+    monkeypatch.setattr(target, "add_sync_bytes", fail_after_accounting_write)
+
+    class Transport:
+        def pull(self):
+            return [("bundle-peer.json", payload)]
+
+        def push(self, name, data):
+            raise AssertionError("push must not run after local accounting fails")
+
+        def list_names(self):
+            return []
+
+    with pytest.raises(RuntimeError, match="sync accounting failed"):
+        SyncEngine(target).sync(Transport(), target_workspace)
+
+    assert target.get_memory("mem_durable_before_accounting_failure") is not None
+    assert target.conn.transaction_owned_by_current_thread() is False
+    assert target.conn.in_transaction is False
+    assert target.get_sync_stats() == []
 
 
 def test_apply_clamps_and_drops_bad_rows():
@@ -320,12 +824,14 @@ def test_sync_rehomes_forged_provenance_and_quarantines_payload():
 
     report = SyncEngine(store).apply_bundle(bundle)
     record = store.get_memory("mem_forged")
+    assert record is not None
 
     assert report["added"] == 1
     assert record.provenance["source"] == "sync"
     assert record.provenance["trusted"] is False
     assert record.provenance["trust_origin"] == "sync_untrusted"
-    assert record.provenance["synced_from_device"] == "peer-claimed-trusted"
+    assert record.provenance["synced_from_device"] == report["from_device"]
+    assert "peer-claimed-trusted" not in json.dumps(report)
     assert record.provenance["quarantined"] is True
     assert record.provenance["quarantine_reasons"] == [
         "instruction_override", "secret_exfiltration",
@@ -356,6 +862,7 @@ def test_sync_quarantine_overwrite_removes_existing_vector(caplog):
         last_access=1.0,
         ingested_at=1.0,
         valid_from=1.0,
+        modified_hlc=format_modified_hlc(1, 0, f"dev_{'0' * 26}"),
         provenance={"source": "sync", "trusted": False},
         embedding=np.asarray([1.0, 0.0], dtype=np.float32),
     ))
@@ -374,6 +881,7 @@ def test_sync_quarantine_overwrite_removes_existing_vector(caplog):
             "last_access": 10.0,
             "ingested_at": 10.0,
             "valid_from": 1.0,
+            "modified_hlc": format_modified_hlc(2, 0, f"dev_{'1' * 26}"),
         }],
         "mem_links": [],
     }
@@ -506,6 +1014,116 @@ def test_sync_cannot_attach_peer_graph_edges_to_a_trusted_local_memory():
     assert store.conn.execute("SELECT 1 FROM mem_links").fetchone() is None
 
 
+def _scope_transition_bundle(
+        relation: str, *, evidence: bool, reverse: bool = False,
+        temporal: bool = False) -> dict:
+    evidence_key = "promoted_from" if relation == "promotes" else "supersedes"
+    wide_metadata = {evidence_key: ["mem_narrow"]} if evidence else {}
+    link: dict[str, object] = {
+        "a": "mem_narrow" if reverse else "mem_wide",
+        "b": "mem_wide" if reverse else "mem_narrow",
+        "relation": relation,
+        "layer": "semantic",
+        "reason": "governed scope transition",
+    }
+    if temporal:
+        link.update({"valid_from": 1.0, "ingested_at": 1.0})
+    return {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {"remote_repo": "repo"},
+        "memories": [
+            {
+                "id": "mem_wide",
+                "content": "wide",
+                "scope": "workspace",
+                "metadata": wide_metadata,
+            },
+            {
+                "id": "mem_narrow",
+                "content": "narrow",
+                "scope": "repo",
+                "repo_id": "remote_repo",
+            },
+        ],
+        "mem_links": [link],
+    }
+
+
+@pytest.mark.parametrize("relation", ["promotes", "merges"])
+@pytest.mark.parametrize("temporal", [False, True])
+def test_sync_accepts_governed_scope_transition_link(relation, temporal):
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle(
+        _scope_transition_bundle(
+            relation, evidence=True, temporal=temporal,
+        )
+    )
+
+    assert report["added"] == 2
+    assert report["links_added"] == 1
+    assert report["rejected"] == 0
+    assert store.has_link("mem_wide", "mem_narrow", relation=relation)
+
+
+def test_sync_rejects_future_temporal_link_instead_of_treating_it_as_v1(monkeypatch):
+    receiver_now = 1000.0
+    monkeypatch.setattr("engraphis.core.sync.now_ts", lambda: receiver_now)
+    bundle = _scope_transition_bundle("promotes", evidence=True, temporal=True)
+    bundle["mem_links"][0]["ingested_at"] = receiver_now + TS_FUTURE_SKEW + 60.0
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["added"] == 2
+    assert report["links_added"] == 0
+    assert report["rejected"] == 1
+    assert not store.has_link("mem_wide", "mem_narrow", relation="promotes")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_sync_rejects_inverted_link_interval_in_live_and_dry_run(dry_run):
+    bundle = _scope_transition_bundle("promotes", evidence=True, temporal=True)
+    bundle["mem_links"][0].update({"valid_from": 20.0, "valid_to": 10.0})
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle(bundle, dry_run=dry_run)
+
+    assert report["links_added"] == 0
+    assert report["rejected"] == 1
+    assert not store.has_link("mem_wide", "mem_narrow", relation="promotes")
+
+
+@pytest.mark.parametrize(
+    ("relation", "evidence", "reverse"),
+    [("promotes", False, False), ("merges", True, True)],
+    ids=["unproven-promotion", "wrong-direction-merge"],
+)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_sync_rejects_ungoverned_scope_transition_without_aborting(
+        relation, evidence, reverse, dry_run):
+    store = Store(":memory:")
+
+    report = SyncEngine(store).apply_bundle(
+        _scope_transition_bundle(
+            relation, evidence=evidence, reverse=reverse,
+        ),
+        dry_run=dry_run,
+    )
+
+    assert report["rejected"] == 1
+    assert report["links_added"] == 0
+    assert store.conn.execute("SELECT 1 FROM mem_links").fetchone() is None
+    if dry_run:
+        assert report["added"] == 2
+        assert store.get_memory("mem_wide") is None
+    else:
+        assert report["added"] == 2
+        assert store.get_memory("mem_wide") is not None
+
+
 def test_apply_is_idempotent_on_replay():
     store = Store(":memory:")
     se = SyncEngine(store)
@@ -525,8 +1143,8 @@ def test_sync_reactivates_closed_link_once_and_preserves_history(monkeypatch):
     store = Store(":memory:")
     syncer = SyncEngine(store)
     memories = [
-        {"id": "mem_a", "content": "one"},
-        {"id": "mem_b", "content": "two"},
+        {"id": "mem_a", "content": "one", "valid_from": 0.0, "ingested_at": 0.0},
+        {"id": "mem_b", "content": "two", "valid_from": 0.0, "ingested_at": 0.0},
     ]
     syncer.apply_bundle({
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
@@ -759,17 +1377,17 @@ def test_workspace_export_excludes_live_and_invalidated_session_rows_and_links()
         MemoryRecord(id="mem_public_b", content="public b", workspace_id=wid,
                      scope=Scope.WORKSPACE),
         MemoryRecord(id="mem_public_closed", content="public history", workspace_id=wid,
-                     scope=Scope.WORKSPACE, valid_to=1.0),
+                     scope=Scope.WORKSPACE, valid_from=0.0, valid_to=1.0),
         MemoryRecord(id="mem_session_live", content="private live", workspace_id=wid,
                      session_id="ses_private", scope=Scope.SESSION),
         MemoryRecord(id="mem_session_closed", content="private history", workspace_id=wid,
-                     session_id="ses_private", scope=Scope.SESSION, valid_to=1.0),
+                     session_id="ses_private", scope=Scope.SESSION,
+                     valid_from=0.0, valid_to=1.0),
     )
     for record in records:
         store.add_memory(record)
     store.add_link("mem_public_a", "mem_public_b", "public")
     store.add_link("mem_public_a", "mem_public_closed", "public-history")
-    store.add_link("mem_public_a", "mem_session_live", "private")
     store.add_link("mem_session_live", "mem_session_closed", "private-history")
 
     bundle = SyncEngine(store).export_bundle(wid)
@@ -792,18 +1410,17 @@ def test_repo_export_excludes_session_rows_from_the_selected_repo():
         MemoryRecord(id="mem_keep", content="keep", workspace_id=wid,
                      repo_id=keep, scope=Scope.REPO),
         MemoryRecord(id="mem_keep_closed", content="keep history", workspace_id=wid,
-                     repo_id=keep, scope=Scope.REPO, valid_to=1.0),
+                     repo_id=keep, scope=Scope.REPO, valid_from=0.0, valid_to=1.0),
         MemoryRecord(id="mem_keep_private", content="private", workspace_id=wid,
                      repo_id=keep, session_id="ses_private", scope=Scope.SESSION),
         MemoryRecord(id="mem_keep_private_closed", content="private history",
                      workspace_id=wid, repo_id=keep, session_id="ses_private",
-                     scope=Scope.SESSION, valid_to=1.0),
+                     scope=Scope.SESSION, valid_from=0.0, valid_to=1.0),
         MemoryRecord(id="mem_drop", content="drop", workspace_id=wid,
                      repo_id=drop, scope=Scope.REPO),
     ):
         store.add_memory(record)
     store.add_link("mem_keep", "mem_keep_closed", "public-history")
-    store.add_link("mem_keep", "mem_keep_private", "private")
     store.add_link("mem_keep_private", "mem_keep_private_closed", "private-history")
 
     bundle = SyncEngine(store).export_bundle(wid, repo_id=keep)
@@ -827,6 +1444,27 @@ def _contents(engine: MemoryEngine, wid: str) -> set:
     return {m.content for m in _live(engine, wid)}
 
 
+class _FakeDirEntry:
+    def __init__(self, name):
+        self.name = name
+        self.path = name
+
+    def is_file(self, *, follow_symlinks):
+        assert follow_symlinks is False
+        return True
+
+
+class _FakeScandir:
+    def __init__(self, names):
+        self.names = names
+
+    def __enter__(self):
+        return iter(_FakeDirEntry(name) for name in self.names)
+
+    def __exit__(self, *_args):
+        return False
+
+
 def test_folder_transport_is_a_valid_synctransport(tmp_path):
     t = get_transport("folder", root=str(tmp_path / "share"))
     assert isinstance(t, FolderTransport)
@@ -834,7 +1472,7 @@ def test_folder_transport_is_a_valid_synctransport(tmp_path):
     (tmp_path / "share" / "README.txt").write_bytes(b"ignore me")  # non-json ignored
     names = t.list_names()
     assert names == ["bundle-x.json"]
-    assert t.pull() == [("bundle-x.json", b"{}")]
+    assert list(t.pull()) == [("bundle-x.json", b"{}")]
     with pytest.raises(ValueError, match="name is invalid"):
         t.push("../escape.json", b"{}")
 
@@ -857,7 +1495,10 @@ def test_folder_transport_bounds_count_total_and_ignores_symlinks(tmp_path, monk
     monkeypatch.setattr(sync_folder, "MAX_TOTAL_PULL_BYTES", 3)
     transport = FolderTransport(str(root))
     assert transport.list_names() == ["bundle-a.json", "bundle-b.json"]
-    assert transport.pull() == [("bundle-a.json", b"12")]
+    pulled = iter(transport.pull())
+    assert next(pulled) == ("bundle-a.json", b"12")
+    with pytest.raises(RuntimeError, match="folder pull incomplete"):
+        next(pulled)
 
     outside = tmp_path / "outside.json"
     outside.write_bytes(b'{"secret":true}')
@@ -867,6 +1508,22 @@ def test_folder_transport_bounds_count_total_and_ignores_symlinks(tmp_path, monk
     except (OSError, NotImplementedError):
         return
     assert "bundle-0-link.json" not in transport.list_names()
+
+
+def test_folder_transport_safe_named_symlink_marks_pull_incomplete(tmp_path):
+    root = tmp_path / "share"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b'{"secret":true}')
+    try:
+        os.symlink(outside, root / "bundle-peer.json")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable (e.g. unprivileged Windows)")
+    transport = FolderTransport(str(root))
+
+    assert transport.list_names() == []
+    with pytest.raises(RuntimeError, match="folder pull incomplete"):
+        list(transport.pull())
 
 
 def test_folder_transport_rejects_file_swapped_after_enumeration(tmp_path, monkeypatch):
@@ -887,8 +1544,60 @@ def test_folder_transport_rejects_file_swapped_after_enumeration(tmp_path, monke
         return original_open(path, flags)
 
     monkeypatch.setattr(sync_folder.os, "open", swap_then_open)
-    assert FolderTransport(str(root)).pull() == []
+    with pytest.raises(RuntimeError, match="folder pull incomplete"):
+        list(FolderTransport(str(root)).pull())
     assert swapped is True
+
+
+def test_folder_transport_cap_marks_sync_round_incomplete_after_good_bundle(
+        tmp_path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "bundle-a.json").write_bytes(_peer_bundle("peer-a", "mem_a"))
+    (root / "bundle-b.json").write_bytes(_peer_bundle("peer-b", "mem_b"))
+    monkeypatch.setattr(sync_folder, "MAX_BUNDLES", 1)
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+
+    report = SyncEngine(store).sync(
+        FolderTransport(str(root)), workspace, push=False,
+    )
+
+    assert store.get_memory("mem_a") is not None
+    assert store.get_memory("mem_b") is None
+    assert report["peers_applied"] == 1
+    assert report["complete"] is False
+    assert any(item["error"] == "transport failure" for item in report["errors"])
+
+
+def test_folder_transport_reports_default_65th_bundle_as_incomplete(
+        tmp_path, monkeypatch):
+    names = [f"bundle-{index:03d}.json" for index in range(65)]
+    monkeypatch.setattr(
+        sync_folder.os, "scandir", lambda _root: _FakeScandir(names)
+    )
+    monkeypatch.setattr(
+        FolderTransport, "_read_regular_bundle", staticmethod(lambda _path: b"{}")
+    )
+    seen = []
+
+    with pytest.raises(RuntimeError, match="folder pull incomplete"):
+        for item in FolderTransport(str(tmp_path / "share")).pull():
+            seen.append(item)
+
+    assert [name for name, _data in seen] == names[:64]
+
+
+def test_folder_transport_reports_10001_junk_entries_without_silent_starvation(
+        tmp_path, monkeypatch):
+    names = [f"junk-{index:05d}.txt" for index in range(10_001)]
+    names.append("bundle-valid.json")
+    monkeypatch.setattr(
+        sync_folder.os, "scandir", lambda _root: _FakeScandir(names)
+    )
+
+    with pytest.raises(RuntimeError, match="folder pull incomplete"):
+        list(FolderTransport(str(tmp_path / "share")).pull())
 
 
 def test_folder_transport_push_never_writes_through_planted_symlinks(tmp_path):
@@ -1052,11 +1761,14 @@ def test_disallowed_workspace_cannot_be_exported_or_pushed(monkeypatch):
         return record_to_dict(record)
 
     class TrackingTransport:
-        def push(self, name, data):
+        def push(self, name: str, data: bytes) -> None:
             network_calls.append(("push", name, data))
 
         def pull(self):
             network_calls.append(("pull",))
+            return []
+
+        def list_names(self) -> list[str]:
             return []
 
     monkeypatch.setattr(store, "list_memories", track_listing)
@@ -1151,7 +1863,7 @@ def test_nonfinite_numeric_fields_are_clamped():
     se = SyncEngine(store)
     bundle = {"format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
               "memories": [{"id": "mem_p", "content": "p", "stability": float("inf"),
-                            "importance": float("nan"), "last_access": float("inf")}],
+                            "importance": float("nan")}],
               "mem_links": []}
     assert se.apply_bundle(bundle)["added"] == 1                    # no crash
     got = store.get_memory("mem_p")
@@ -1159,7 +1871,22 @@ def test_nonfinite_numeric_fields_are_clamped():
     from engraphis.core.retention_policy import MAX_STABILITY_DAYS
     assert _m.isfinite(got.stability) and got.stability <= MAX_STABILITY_DAYS
     assert _m.isfinite(got.importance) and 0.0 <= got.importance <= 1.0
-    assert got.last_access is None or _m.isfinite(got.last_access)
+
+    invalid_clock = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": "mem_bad_clock",
+            "content": "bad clock",
+            "last_access": float("inf"),
+        }],
+        "mem_links": [],
+    }
+    rejected = se.apply_bundle(invalid_clock)
+    assert rejected["rejected"] == 1
+    assert store.get_memory("mem_bad_clock") is None
 
 
 def test_oversized_direct_retention_state_converges_after_sync_round_trip():
@@ -1616,30 +2343,26 @@ def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
 # ── regression: merge_record must be idempotent (ingested_at is LWW, not a lattice) ──
 
 def test_merge_takes_the_winners_ingested_at():
-    """``ingested_at`` is in _LWW_FIELDS and is the version key's second component.
-
-    Merging it as a min-lattice made _version_key(merged) < _version_key(winner), so a
-    replayed bundle re-ran LWW from a lowered key and fell through to the content-hash
-    tiebreak — silently reverting the later edit.
-    """
-    a = MemoryRecord(id="mem_1", content="old", last_access=100.0, ingested_at=50.0)
-    b = MemoryRecord(id="mem_1", content="new", last_access=200.0, ingested_at=10.0)
+    """The descriptive payload follows its ingress clock, not later reinforcement."""
+    a = MemoryRecord(id="mem_1", content="old", last_access=300.0, ingested_at=50.0)
+    b = MemoryRecord(id="mem_1", content="new", last_access=200.0, ingested_at=60.0)
 
     merged = merge_record(a, b)
 
-    assert merged.content == "new"                    # higher last_access wins
-    assert merged.ingested_at == b.ingested_at        # ...and brings its own ingested_at
-    assert _version_key(merged) == _version_key(b)    # merged IS the winner, key and all
+    assert merged.content == "new"
+    assert merged.ingested_at == b.ingested_at
+    assert merged.last_access == a.last_access
+    assert _version_key(merged) == _version_key(b)
 
 
 @pytest.mark.parametrize(
     ("la_a", "ing_a", "la_b", "ing_b"),
     [
-        (100.0, 50.0, 200.0, 10.0),    # incoming wins on last_access, lower ingested_at
-        (200.0, 10.0, 100.0, 50.0),    # local wins on last_access, lower ingested_at
-        (100.0, 10.0, 100.0, 50.0),    # tie on last_access, decided by ingested_at
-        (100.0, 50.0, 100.0, 50.0),    # full tie, decided by the content hash
-        (None, None, 100.0, 10.0),     # null clocks on one side
+        (100.0, 50.0, 200.0, 10.0),    # later read cannot select stale content
+        (200.0, 10.0, 100.0, 50.0),    # newer content clock wins despite earlier read
+        (100.0, 10.0, 100.0, 50.0),    # content clock decides directly
+        (100.0, 50.0, 100.0, 50.0),    # full tie, decided by content hash
+        (None, None, 100.0, 10.0),     # null content clock on one side
     ],
 )
 def test_merge_is_idempotent_for_unequal_ingested_at(la_a, ing_a, la_b, ing_b):
@@ -1651,9 +2374,9 @@ def test_merge_is_idempotent_for_unequal_ingested_at(la_a, ing_a, la_b, ing_b):
     assert _signature(merge_record(once, b)) == _signature(once)
     assert _signature(merge_record(b, once)) == _signature(once)
     assert _signature(merge_record(once, a)) == _signature(once)
-    # ...and the merge result carries the winner's version key exactly
     winner = a if _version_key(a) >= _version_key(b) else b
     assert _version_key(once) == _version_key(winner)
+    assert once.last_access == max(value for value in (la_a, la_b) if value is not None)
 
 
 @pytest.mark.parametrize("remote_content", ["first", "zzz", "aaa", "payload", "0"])
@@ -1675,6 +2398,9 @@ def test_replaying_a_bundle_reports_all_unchanged(remote_content):
     store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
                                   scope=Scope.WORKSPACE, last_access=100.0,
                                   ingested_at=90.0, valid_from=1.0,
+                                  modified_hlc=format_modified_hlc(
+                                      1, 0, f"dev_{'0' * 26}"
+                                  ),
                                   provenance={"source": "sync", "trusted": False}))
     # valid_from is set explicitly here, exactly as export_bundle/record_to_dict emit it.
     # A bundle that OMITS it converges too, but only because apply_bundle inherits
@@ -1708,9 +2434,7 @@ def test_replaying_a_bundle_reports_all_unchanged(remote_content):
 # ── regression: a bundle that OMITS a store-defaulted field must still converge ──
 
 def _valid_from_less_bundle(content):
-    """One row that omits ``valid_from`` but DOES supply ``last_access``/``ingested_at``,
-    so a replay ties on both ordered components of the version key and lands squarely on
-    the content-hash tiebreak — the only place the omission can decide anything."""
+    """One legacy row whose omitted ``valid_from`` has a portable ingest anchor."""
     return {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
         "memories": [{"id": "mem_a", "content": content, "scope": "workspace",
@@ -1719,27 +2443,14 @@ def _valid_from_less_bundle(content):
     }
 
 
-# Contents for which the *incoming* (valid_from-less) label hashes ABOVE the stored one at
-# valid_from=1000.0 — i.e. the ones that made the un-inherited tiebreak actually flip. Held
-# fixed rather than left to the wall clock so this pins the bug on every run, not ~half.
+# A varied corpus that previously exposed replay write amplification when missing clocks
+# were filled from receiver-local time.
 _FLIPPING_CONTENTS = ["first", "zzz", "0", "alpha", "m", "beta", "gamma"]
 
 
 @pytest.mark.parametrize("content", _FLIPPING_CONTENTS)
 def test_bundle_omitting_valid_from_never_rewrites_the_stored_default(content):
-    """A hand-crafted bundle row without ``valid_from`` must not rewrite itself forever.
-
-    ``dict_to_record`` leaves the field ``None`` and ``Store.add_memory`` then stamps it
-    with ``now()``. On replay the stored and incoming labels differed *only* in
-    ``valid_from``; with ``last_access`` and ``ingested_at`` tied, the version key fell
-    through to the content-hash tiebreak, so the row was reported ``updated`` and rewritten
-    with a FRESH ``valid_from`` — which changed the hash, so it flipped again next round.
-    Unbounded write amplification plus a ``sync_overwrite`` audit row per sync round,
-    reachable from an untrusted bundle (SECURITY.md — memory poisoning).
-
-    The local ``valid_from`` is seeded explicitly so the tiebreak is a pure function of the
-    test data; a rewrite would stamp a real ``now()``, nowhere near 1000.0.
-    """
+    """A legacy omission cannot rewrite a schema-13 local row on replay."""
     store = Store(":memory:")
     wid = store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
@@ -1765,9 +2476,7 @@ def test_bundle_omitting_valid_from_never_rewrites_the_stored_default(content):
 
 @pytest.mark.parametrize("content", ["first", "zzz", "aaa", "payload", "0", "alpha", "m"])
 def test_bundle_omitting_valid_from_converges_when_it_created_the_row(content):
-    """End-to-end shape of the same vector: the bundle CREATES the row (so the store, not
-    the test, supplies the defaulted ``valid_from``), then is replayed. Everything after
-    the first round must be all-unchanged and the stored default must never move."""
+    """A newly imported row gets a deterministic default, then replays unchanged."""
     store = Store(":memory:")
     store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
@@ -1776,7 +2485,7 @@ def test_bundle_omitting_valid_from_converges_when_it_created_the_row(content):
     first = syncer.apply_bundle(bundle)
     assert first["added"] == 1
     pinned = store.get_memory("mem_a").valid_from
-    assert pinned is not None                       # the store defaulted it on write
+    assert pinned == 90.0                           # canonical wire ingested_at anchor
 
     for _ in range(5):
         report = syncer.apply_bundle(bundle)
@@ -1789,20 +2498,68 @@ def test_bundle_omitting_valid_from_converges_when_it_created_the_row(content):
     assert spam == 0
 
 
+def test_omitted_sync_clocks_converge_across_receiver_wall_times(monkeypatch):
+    """Receiver time and candidate arrival order cannot change legacy merge output."""
+    def bundle(node, content, ingested_at=None):
+        row = {
+            "id": "mem_same",
+            "content": content,
+            "scope": "workspace",
+        }
+        if ingested_at is not None:
+            row["ingested_at"] = ingested_at
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": f"dev_{node * 26}",
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [row],
+            "mem_links": [],
+        }
+
+    bundles = [bundle("0", "missing"), bundle("1", "supplied", 10.0)]
+    signatures = []
+    winners = []
+    for receiver_now, ordered in (
+        (1000.001, bundles),
+        (1000.002, list(reversed(bundles))),
+    ):
+        monkeypatch.setattr("engraphis.core.sync.now_ts", lambda: receiver_now)
+        monkeypatch.setattr("engraphis.core.store.now_ts", lambda: receiver_now)
+        store = Store(":memory:")
+        syncer = SyncEngine(store)
+        for bundle in ordered:
+            syncer.apply_bundle(bundle, into_workspace="w")
+        row = store.get_memory("mem_same")
+        assert row is not None
+        assert row.valid_from == row.last_access == row.ingested_at == 10.0
+        signatures.append(_signature(row))
+        winners.append(row.content)
+
+    assert signatures[0] == signatures[1]
+    assert winners == ["supplied", "supplied"]
+
+
 def test_incoming_valid_from_still_wins_when_genuinely_supplied():
-    """The inheritance must only fill fields the bundle OMITTED — a real, newer
-    ``valid_from`` still has to win last-writer-wins (and then stay converged)."""
+    """A genuinely supplied newer ``valid_from`` still wins descriptive LWW."""
     store = Store(":memory:")
     wid = store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
     store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
                                   scope=Scope.WORKSPACE, last_access=100.0,
                                   ingested_at=90.0, valid_from=1.0,
+                                  modified_hlc=format_modified_hlc(
+                                      1, 0, f"dev_{'0' * 26}"
+                                  ),
                                   provenance={"source": "sync", "trusted": False}))
     bundle = {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
         "memories": [{"id": "mem_a", "content": "remote", "valid_from": 5000.0,
-                      "last_access": 200.0, "ingested_at": 90.0}],   # newer last_access
+                      "last_access": 50.0, "ingested_at": 91.0,
+                      "modified_hlc": format_modified_hlc(
+                          2, 0, f"dev_{'1' * 26}"
+                      )}],  # newer content clock
         "mem_links": [],
     }
 
@@ -1817,25 +2574,19 @@ def test_incoming_valid_from_still_wins_when_genuinely_supplied():
         assert store.get_memory("mem_a").valid_from == 5000.0
 
 
-def test_inherit_store_defaults_fills_only_omitted_fields():
-    """Unit-level contract: exactly the fields Store.add_memory defaults from the server
-    clock (valid_from / ingested_at / last_access) are inherited when omitted. valid_to and
-    expired_at are NOT — there ``None`` is a real, persistable 'still valid' value that the
-    earliest-non-null lattice already handles."""
-    existing = MemoryRecord(id="mem_1", content="a", valid_from=1.0, ingested_at=2.0,
-                            last_access=3.0, valid_to=4.0, expired_at=5.0)
-    incoming = MemoryRecord(id="mem_1", content="b")
+def test_sync_store_defaults_are_candidate_local_and_deterministic():
+    missing = MemoryRecord(id="mem_1", content="a")
+    supplied = MemoryRecord(
+        id="mem_2", content="b", valid_from=99.0,
+        ingested_at=98.0, last_access=97.0,
+    )
 
-    inherit_store_defaults(existing, incoming)
+    _initialize_sync_store_defaults(missing)
+    _initialize_sync_store_defaults(supplied)
 
-    assert (incoming.valid_from, incoming.ingested_at, incoming.last_access) == (1.0, 2.0, 3.0)
-    assert incoming.valid_to is None and incoming.expired_at is None
-    assert incoming.content == "b"                   # descriptive fields untouched
-
-    supplied = MemoryRecord(id="mem_1", content="b", valid_from=99.0,
-                            ingested_at=98.0, last_access=97.0)
-    inherit_store_defaults(existing, supplied)
+    assert (missing.valid_from, missing.ingested_at, missing.last_access) == (0.0, 0.0, 0.0)
     assert (supplied.valid_from, supplied.ingested_at, supplied.last_access) == (99.0, 98.0, 97.0)
+    assert missing.valid_to is None and missing.expired_at is None
 
 
 # ── regression: apply_bundle must not be N+1 with a commit per row ────────────
@@ -1956,8 +2707,10 @@ def test_apply_bundle_sees_a_duplicate_id_within_one_batch():
     bundle = {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
         "memories": [
-            {"id": "mem_dup", "content": "first", "last_access": 10.0},
-            {"id": "mem_dup", "content": "second", "last_access": 20.0},
+            {"id": "mem_dup", "content": "first",
+             "last_access": 20.0, "ingested_at": 10.0},
+            {"id": "mem_dup", "content": "second",
+             "last_access": 10.0, "ingested_at": 20.0},
         ],
         "mem_links": [],
     }
@@ -1967,6 +2720,83 @@ def test_apply_bundle_sees_a_duplicate_id_within_one_batch():
     assert report["added"] == 1                       # the 2nd is an update, not an add
     assert report["updated"] == 1
     assert store.get_memory("mem_dup").content == "second"
+
+
+def test_dry_run_duplicate_id_across_batches_matches_live_apply(monkeypatch):
+    """Bundle-wide write-through must not stop at an APPLY_BATCH boundary."""
+    from engraphis.core import sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "APPLY_BATCH", 1)
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [
+            {"id": "mem_dup", "content": "first", "ingested_at": 10.0},
+            {"id": "mem_dup", "content": "second", "ingested_at": 20.0},
+        ],
+        "mem_links": [],
+    }
+    dry_store = Store(":memory:")
+    live_store = Store(":memory:")
+
+    dry_report = SyncEngine(dry_store).apply_bundle(bundle, dry_run=True)
+    live_report = SyncEngine(live_store).apply_bundle(bundle)
+
+    for key in ("added", "updated", "unchanged", "rejected"):
+        assert dry_report[key] == live_report[key]
+    assert (dry_report["added"], dry_report["updated"]) == (1, 1)
+    assert dry_store.get_memory("mem_dup") is None
+    assert live_store.get_memory("mem_dup").content == "second"
+
+
+def test_live_batch_lookup_preserves_interleaved_local_hlc_edit(monkeypatch):
+    """A committed batch cache cannot hide a newer local edit from the next batch."""
+    from engraphis.core import sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "APPLY_BATCH", 1)
+    store = Store(":memory:")
+    original_get_memories = store.get_memories
+    lookups = 0
+
+    def get_memories_with_local_edit(ids):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 2:
+            current = store.get_memory("mem_dup")
+            assert current is not None
+            current.content = "newer local edit"
+            store.add_memory(current)
+            assert current.modified_hlc
+        return original_get_memories(ids)
+
+    monkeypatch.setattr(store, "get_memories", get_memories_with_local_edit)
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [
+            {"id": "mem_dup", "content": "legacy one", "ingested_at": 10.0},
+            {
+                "id": "mem_dup",
+                "content": "legacy two",
+                "ingested_at": 20.0,
+                "last_access": 10.0,
+            },
+        ],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    final = store.get_memory("mem_dup")
+    assert final is not None and final.content == "newer local edit"
+    assert final.modified_hlc
+    assert report["added"] == 1
+    assert report["updated"] == 0
+    assert report["unchanged"] == 1
 
 
 def test_apply_bundle_failure_keeps_committed_batches_and_frees_the_connection(monkeypatch):
@@ -2044,14 +2874,31 @@ class _FlakyTransport:
                 raise RuntimeError("relay request failed (404): %s" % name)
             yield name, data
 
+    def list_names(self):
+        return []
+
 
 def _peer_bundle(device, mem_id):
-    return json.dumps({
-        "format": SYNC_FORMAT, "version": 1, "device_id": device,
-        "workspace_name": "w", "repos": {},
-        "memories": [{"id": mem_id, "content": "from %s" % device, "last_access": 5.0}],
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 3,
+        "device_id": device,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": mem_id,
+            "content": "from %s" % device,
+            "last_access": 5.0,
+        }],
         "mem_links": [],
-    }).encode("utf-8")
+        "tombstones": [],
+        "generation": 1,
+        "previous_hash": "",
+        "tombstone_count": 0,
+        "tombstone_checkpoint": _stable_hash([]),
+    }
+    bundle["state_hash"] = _snapshot_hash(bundle)
+    return json.dumps(bundle).encode("utf-8")
 
 
 def test_sync_round_survives_a_transport_failure_mid_round():
@@ -2069,8 +2916,10 @@ def test_sync_round_survives_a_transport_failure_mid_round():
     assert result["totals"]["added"] == 1
     # The round is explicitly NOT a success: bundles were dropped.
     assert result["complete"] is False
-    assert len(result["errors"]) == 1
-    assert "transport" in result["errors"][0]["error"]
+    assert len(result["errors"]) == 2
+    assert {item["error"] for item in result["errors"]} == {
+        "snapshot freshness unavailable", "transport failure",
+    }
     assert result["peers_applied"] == 1
 
 
@@ -2091,16 +2940,39 @@ def test_sync_round_reports_incomplete_when_a_bundle_is_refused():
             return [("bundle-peer1.json", _peer_bundle("dev_peer1", "mem_p1")),
                     ("bundle-bad.json", bad)]
 
+        def list_names(self):
+            return []
+
     result = SyncEngine(store).sync(_Transport(), wid)
 
     assert store.get_memory("mem_p1") is not None
     assert result["complete"] is False
     assert result["peers_applied"] == 1
-    assert result["errors"] == [{
-        "bundle": "bundle-bad.json",
-        "error": "bundle rejected",
-        "error_type": "SyncError",
-    }]
+    assert [item["error"] for item in result["errors"]] == [
+        "snapshot freshness unavailable",
+        "bundle rejected",
+    ]
+
+
+def test_sync_bytes_do_not_persist_peer_controlled_device_ids():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    payloads = (
+        _peer_bundle("peer-one", "mem_p1"),
+        _peer_bundle("peer-two", "mem_p2"),
+    )
+    transport = _FlakyTransport(
+        ("bundle-peer1.json", payloads[0]),
+        ("bundle-peer2.json", payloads[1]),
+        fail_after=99,
+    )
+    syncer = SyncEngine(store)
+
+    syncer.sync(transport, workspace)
+
+    stats = store.get_sync_stats()
+    assert [row["device_id"] for row in stats] == [syncer.device_id]
+    assert stats[0]["bytes_received"] == sum(len(payload) for payload in payloads)
 
 
 def test_sync_report_does_not_expose_exception_text():
@@ -2116,6 +2988,9 @@ def test_sync_report_does_not_expose_exception_text():
             raise RuntimeError(secret)
             yield  # pragma: no cover - make this a generator
 
+        def list_names(self):
+            return []
+
     result = SyncEngine(store).sync(_Transport(), wid)
 
     rendered = json.dumps(result)
@@ -2130,19 +3005,25 @@ def test_sync_round_is_complete_when_every_bundle_applies():
     wid = store.get_or_create_workspace("w")
 
     class _Transport:
-        def push(self, name, data):
+        def push(self, name: str, data: bytes) -> None:
             pass
 
         def pull(self):
             return [("bundle-peer1.json", _peer_bundle("dev_peer1", "mem_p1")),
                     ("bundle-peer2.json", _peer_bundle("dev_peer2", "mem_p2"))]
 
-    result = SyncEngine(store).sync(_Transport(), wid)
+        def list_names(self) -> list[str]:
+            return []
 
+    first = SyncEngine(store)
+    bootstrap = first.sync(_Transport(), wid)
+    result = first.sync(_Transport(), wid)
+
+    assert bootstrap["complete"] is False
     assert result["complete"] is True
     assert result["errors"] == []
     assert result["peers_applied"] == 2
-    assert result["totals"]["added"] == 2
+    assert result["totals"]["unchanged"] == 2
 
 
 def test_apply_converges_independent_of_bundle_arrival_order():
@@ -2183,3 +3064,152 @@ def test_apply_converges_independent_of_bundle_arrival_order():
 
     assert signatures[0] == signatures[1]
     assert contents[0] == contents[1]
+
+
+def test_equal_logical_hlc_preserves_one_convergent_untrusted_conflict():
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+
+    def bundle(content, node):
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": node,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "same-hlc-id",
+                "content": content,
+                "scope": "workspace",
+                "valid_from": 1.0,
+                "last_access": 10.0,
+                "ingested_at": 10.0,
+                "modified_hlc": format_modified_hlc(10, 4, node),
+            }],
+            "mem_links": [],
+        }
+
+    variants = [
+        bundle("lower-node edit", lower_node),
+        bundle("higher-node edit", higher_node),
+    ]
+    conflict_ids = []
+    conflict_signatures = []
+    for order in (variants, list(reversed(variants))):
+        store = Store(":memory:")
+        syncer = SyncEngine(store)
+        first = syncer.apply_bundle(order[0], into_workspace="w")
+        second = syncer.apply_bundle(order[1], into_workspace="w")
+        assert first["conflicts_preserved"] == 0
+        assert second["conflicts_preserved"] == 1
+
+        for replay in order:
+            assert syncer.apply_bundle(
+                replay, into_workspace="w"
+            )["conflicts_preserved"] == 0
+
+        winner = store.get_memory("same-hlc-id")
+        assert winner is not None
+        assert winner.content == "higher-node edit"
+        rows = store.conn.execute(
+            "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+        ).fetchall()
+        assert len(rows) == 1
+        conflict_id = rows[0]["id"]
+        conflict = store.get_memory(conflict_id)
+        assert conflict is not None
+        assert conflict.content == "lower-node edit"
+        assert conflict.provenance["source"] == "sync_conflict"
+        assert conflict.provenance["trusted"] is False
+        assert conflict.provenance["review_state"] == "pending"
+        assert conflict.provenance["conflict_of"] == "same-hlc-id"
+        assert conflict.metadata["sync_conflict"]["memory_id"] == "same-hlc-id"
+        audit_row = store.conn.execute(
+            "SELECT COUNT(*) FROM audit "
+            "WHERE action='sync_conflict_preserved'"
+        ).fetchone()
+        assert audit_row is not None
+        assert audit_row[0] == 1
+        conflict_ids.append(conflict_id)
+        conflict_signatures.append(_signature(conflict))
+
+    assert conflict_ids[0] == conflict_ids[1]
+    assert conflict_signatures[0] == conflict_signatures[1]
+
+
+def test_local_equal_hlc_conflict_provenance_converges_across_peers():
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+    left = Store(":memory:")
+    right = Store(":memory:")
+    left_sync = SyncEngine(left, device_id=lower_node)
+    right_sync = SyncEngine(right, device_id=higher_node)
+    left_workspace = left.get_or_create_workspace("w")
+    right_workspace = right.get_or_create_workspace("w")
+    left.add_memory(MemoryRecord(
+        id="same-local-id",
+        content="lower-node edit",
+        workspace_id=left_workspace,
+        scope=Scope.WORKSPACE,
+        valid_from=1.0,
+        ingested_at=10.0,
+        last_access=10.0,
+        modified_hlc=format_modified_hlc(10, 4, lower_node),
+        provenance={"source": "local-left", "trusted": False},
+    ))
+    right.add_memory(MemoryRecord(
+        id="same-local-id",
+        content="higher-node edit",
+        workspace_id=right_workspace,
+        scope=Scope.WORKSPACE,
+        valid_from=1.0,
+        ingested_at=10.0,
+        last_access=10.0,
+        modified_hlc=format_modified_hlc(10, 4, higher_node),
+        provenance={"source": "local-right", "trusted": False},
+    ))
+    left_bundle = left_sync.export_bundle(left_workspace)
+    right_bundle = right_sync.export_bundle(right_workspace)
+
+    assert left_sync.apply_bundle(
+        right_bundle, into_workspace="w"
+    )["conflicts_preserved"] == 1
+    assert right_sync.apply_bundle(
+        left_bundle, into_workspace="w"
+    )["conflicts_preserved"] == 1
+
+    def conflict_record(store):
+        row = store.conn.execute(
+            "SELECT id FROM memories WHERE id <> 'same-local-id'"
+        ).fetchone()
+        assert row is not None
+        record = store.get_memory(row["id"])
+        assert record is not None
+        return record
+
+    left_conflict = conflict_record(left)
+    right_conflict = conflict_record(right)
+    assert left_conflict.id == right_conflict.id
+    assert _signature(left_conflict) == _signature(right_conflict)
+    assert left_conflict.provenance == right_conflict.provenance
+    assert left_conflict.provenance["synced_from_device"] == lower_node
+    assert "loser_provenance" not in left_conflict.metadata["sync_conflict"]
+
+    # Exchanging the synthesized successor is a no-op, not a nested conflict.
+    left_after = left_sync.export_bundle(left_workspace)
+    right_after = right_sync.export_bundle(right_workspace)
+    assert left_sync.apply_bundle(
+        right_after, into_workspace="w"
+    )["conflicts_preserved"] == 0
+    assert right_sync.apply_bundle(
+        left_after, into_workspace="w"
+    )["conflicts_preserved"] == 0
+
+    # A fresh peer still recognizes the imported row as an explicit conflict.
+    fresh = Store(":memory:")
+    fresh_sync = SyncEngine(fresh)
+    fresh_sync.apply_bundle(left_after, into_workspace="w")
+    fresh_conflict = fresh.get_memory(left_conflict.id)
+    assert fresh_conflict is not None
+    assert fresh_conflict.provenance["source"] == "sync_conflict"
+    assert fresh_conflict.provenance["conflict_of"] == "same-local-id"

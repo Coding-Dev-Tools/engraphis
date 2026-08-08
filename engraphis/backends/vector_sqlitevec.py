@@ -24,11 +24,13 @@ import numpy as np
 from engraphis.backends.embedder_deterministic import MAX_EMBEDDING_DIM
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import SearchFilter
-from engraphis.core.store import Store, memory_matches_filter
+from engraphis.core.store import Store
 
-
-def _visible(rec, flt: SearchFilter) -> bool:
-    return memory_matches_filter(rec, flt)
+_INDEX_FORMAT_VERSION = 3
+_VISIBILITY_BATCH_SIZE = 8
+_COVERAGE_BATCH_SIZE = 500
+_COVERAGE_RTOL = 1e-6
+_COVERAGE_ATOL = 1e-7
 
 
 def _cosine_from_l2(distance: float) -> float:
@@ -84,25 +86,197 @@ def _vector_query(vec: np.ndarray, dim: int) -> np.ndarray:
     return values
 
 
+def _expected_native_vector(
+    value: object, dimension: int,
+) -> tuple[bool, Optional[np.ndarray]]:
+    """Return whether a canonical blob is valid and its expected vec0 vector.
+
+    Zero vectors deliberately have no native row: both backends define a zero query or
+    candidate as contributing no cosine hit. Every other canonical vector is normalized
+    exactly as :meth:`SqliteVecVectorIndex.upsert` normalizes it before comparison.
+    """
+    try:
+        vector = np.frombuffer(value, dtype=np.float32)
+    except (TypeError, ValueError, BufferError):
+        return False, None
+    if vector.shape != (dimension,) or not np.isfinite(vector).all():
+        return False, None
+    normalized = vector.astype(np.float64, copy=True)
+    with np.errstate(over="ignore", invalid="ignore"):
+        norm = float(np.linalg.norm(normalized))
+    if not np.isfinite(norm):
+        return False, None
+    if norm == 0:
+        return True, None
+    normalized /= norm
+    return True, normalized.astype(np.float32)
+
+
+def _native_vector_matches(
+    value: object, expected: np.ndarray, dimension: int,
+) -> bool:
+    """Compare finite vec0 output while allowing float32 normalization roundoff."""
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        return False
+    try:
+        actual = np.frombuffer(value, dtype=np.float32)
+    except (TypeError, ValueError, BufferError):
+        return False
+    return bool(
+        actual.shape == (dimension,)
+        and np.isfinite(actual).all()
+        and np.allclose(
+            actual, expected, rtol=_COVERAGE_RTOL, atol=_COVERAGE_ATOL,
+        )
+    )
+
+
+def _native_mirror_covers_canonical(conn, dimension: int) -> bool:
+    """Whether vec0 exactly mirrors every same-dimension canonical vector.
+
+    Both scans are keyset-paginated and all counterpart lookups stay below SQLite's
+    conservative variable limit. The caller supplies the transaction: writable callers
+    hold ``BEGIN IMMEDIATE`` while publishing, and read-only callers hold one snapshot.
+    """
+    after_id = ""
+    while True:
+        canonical_rows = conn.execute(
+            "SELECT v.id, v.vector FROM mem_vectors v "
+            "JOIN memories m ON m.id=v.id "
+            "WHERE v.dim=? AND v.id>? ORDER BY v.id LIMIT ?",
+            (dimension, after_id, _COVERAGE_BATCH_SIZE),
+        ).fetchall()
+        if not canonical_rows:
+            break
+        ids = [str(row["id"]) for row in canonical_rows]
+        marks = ",".join("?" for _ in ids)
+        native_rows = conn.execute(
+            f"SELECT id, embedding FROM mem_vec_ann WHERE id IN ({marks})", ids,
+        ).fetchall()
+        native = {str(row["id"]): row["embedding"] for row in native_rows}
+        for row in canonical_rows:
+            memory_id = str(row["id"])
+            valid, expected = _expected_native_vector(row["vector"], dimension)
+            if not valid:
+                return False
+            if expected is None:
+                if memory_id in native:
+                    return False
+            elif not _native_vector_matches(
+                native.get(memory_id), expected, dimension,
+            ):
+                return False
+        after_id = ids[-1]
+        if len(canonical_rows) < _COVERAGE_BATCH_SIZE:
+            break
+
+    # The forward scan proves that nothing canonical is missing or stale. This reverse
+    # scan rejects orphaned native rows and rows whose canonical vector became zero or
+    # changed dimension after another backend wrote the portable mirror.
+    after_id = ""
+    while True:
+        native_rows = conn.execute(
+            "SELECT id, embedding FROM mem_vec_ann "
+            "WHERE id>? ORDER BY id LIMIT ?",
+            (after_id, _COVERAGE_BATCH_SIZE),
+        ).fetchall()
+        if not native_rows:
+            break
+        ids = [str(row["id"]) for row in native_rows]
+        marks = ",".join("?" for _ in ids)
+        canonical_rows = conn.execute(
+            "SELECT v.id, v.vector FROM mem_vectors v "
+            "JOIN memories m ON m.id=v.id "
+            f"WHERE v.dim=? AND v.id IN ({marks})",
+            (dimension, *ids),
+        ).fetchall()
+        canonical = {str(row["id"]): row["vector"] for row in canonical_rows}
+        for row in native_rows:
+            memory_id = str(row["id"])
+            valid, expected = _expected_native_vector(
+                canonical.get(memory_id), dimension,
+            )
+            if (
+                not valid
+                or expected is None
+                or not _native_vector_matches(
+                    row["embedding"], expected, dimension,
+                )
+            ):
+                return False
+        after_id = ids[-1]
+        if len(native_rows) < _COVERAGE_BATCH_SIZE:
+            break
+    return True
+
+
+def _native_index_status(conn, dimension: int):
+    """Return the live vec0 table row and whether its persisted state is current."""
+    existing = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='mem_vec_ann'"
+    ).fetchone()
+    state_table = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='mem_vec_ann_state'"
+    ).fetchone()
+    state = (
+        conn.execute(
+            "SELECT format_version, dimension FROM mem_vec_ann_state "
+            "WHERE singleton=1"
+        ).fetchone()
+        if state_table is not None
+        else None
+    )
+    declared_dimension = None
+    if existing and existing["sql"]:
+        match = re.search(
+            r"FLOAT\s*\[\s*(\d+)\s*\]", existing["sql"], re.IGNORECASE
+        )
+        if match:
+            declared_dimension = int(match.group(1))
+    current = bool(
+        existing
+        and declared_dimension == dimension
+        and state
+        and int(state["format_version"]) == _INDEX_FORMAT_VERSION
+        and int(state["dimension"]) == dimension
+    )
+    if current:
+        current = _native_mirror_covers_canonical(conn, dimension)
+    return existing, current
+
+
+_READ_ONLY_STALE_ERROR = (
+    "read-only sqlite-vec index is unavailable or stale; open the database writable "
+    "once to rebuild it, or use vector_backend='numpy'"
+)
+
+
+
+
 class SqliteVecVectorIndex:
     """Native exact KNN over embeddings using the sqlite-vec extension."""
 
     shares_store_vector_table = False
+    shares_store_transaction = True
 
     def __init__(self, store: Store, dim: int) -> None:
         dimension = _validated_dimension(dim)
-        # sqlite-vec is a loadable SQLite extension.  SQLCipher ships a different
+        # sqlite-vec is a loadable SQLite extension. SQLCipher ships a different
         # SQLite build, and loading both native libraries into one interpreter has
-        # caused hard crashes rather than a normal Python exception.  An `auto`
+        # caused hard crashes rather than a normal Python exception. An `auto`
         # request below can safely use NumPy instead; an explicit sqlite-vec
         # request gets this actionable error before any unsafe native call.
-        if any(name == "sqlcipher3" or name.startswith("sqlcipher3.")
-               for name in sys.modules):
+        if any(
+            name == "sqlcipher3" or name.startswith("sqlcipher3.")
+            for name in sys.modules
+        ):
             raise RuntimeError(
                 "sqlite-vec cannot share a process with SQLCipher; use "
                 "vector_backend='numpy' or run the accelerated backend in a fresh process"
             )
-        sqlite_vec = importlib.import_module('sqlite_vec')  # lazy optional extension
+        sqlite_vec = importlib.import_module("sqlite_vec")  # lazy optional extension
         self.store = store
         self.dim = dimension
         conn = store.conn
@@ -113,21 +287,94 @@ class SqliteVecVectorIndex:
             # Never leave extension loading enabled on a shared connection, including
             # when the optional native load fails.
             conn.enable_load_extension(False)
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_vec_ann'"
-        ).fetchone()
-        if existing and existing["sql"]:
-            match = re.search(r"FLOAT\s*\[\s*(\d+)\s*\]", existing["sql"], re.IGNORECASE)
-            if match and int(match.group(1)) != dimension:
-                raise ValueError(
-                    f"existing vector index dimension {match.group(1)} does not match "
-                    f"requested dimension {dimension}"
+
+        if store.read_only:
+            # Loading the extension only registers SQL functions. Never run DDL or
+            # update backend state against an immutable inspection Store.
+            owns_transaction = not conn.transaction_owned_by_current_thread()
+            try:
+                if owns_transaction:
+                    conn.execute("BEGIN")
+                _, current = _native_index_status(conn, dimension)
+            except Exception:
+                raise RuntimeError(_READ_ONLY_STALE_ERROR) from None
+            finally:
+                if owns_transaction and conn.transaction_owned_by_current_thread():
+                    conn.rollback()
+            if not current:
+                raise RuntimeError(_READ_ONLY_STALE_ERROR)
+            self.requires_rebuild = False
+            return
+
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS mem_vec_ann_state ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+                "format_version INTEGER NOT NULL, dimension INTEGER NOT NULL)"
+            )
+            existing, current = _native_index_status(conn, dimension)
+            # The composition root can inspect this capability before replaying the
+            # canonical mem_vectors mirror after a table creation or format change.
+            self.requires_rebuild = not current
+            if existing and not current:
+                # vec0 rows are a disposable mirror of canonical mem_vectors. Recreate
+                # on format/dimension changes; engine startup hydrates only after the
+                # canonical embedding-space gate is ready.
+                conn.execute("DROP TABLE mem_vec_ann")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec_ann USING vec0("
+                f"id TEXT PRIMARY KEY, embedding FLOAT[{dimension}])"
+            )
+            # DDL is not readiness: persist an incomplete marker until the engine has
+            # replayed every canonical row and calls ``mark_rebuild_complete``. A crash
+            # in that window must make read-only startup reject or fall back.
+            persisted_version = _INDEX_FORMAT_VERSION if current else 0
+            conn.execute(
+                "INSERT INTO mem_vec_ann_state("
+                "singleton, format_version, dimension) VALUES (1, ?, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET "
+                "format_version=excluded.format_version, dimension=excluded.dimension",
+                (persisted_version, dimension),
+            )
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
+
+    def mark_rebuild_complete(self) -> None:
+        """Publish native readiness only after the canonical mirror is fully hydrated."""
+        if self.store.read_only:
+            raise RuntimeError("read-only sqlite-vec indexes cannot publish rebuild state")
+        conn = self.store.conn
+        if conn.transaction_owned_by_current_thread():
+            raise RuntimeError(
+                "sqlite-vec rebuild completion requires its own transaction"
+            )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if not _native_mirror_covers_canonical(conn, self.dim):
+                raise RuntimeError(
+                    "sqlite-vec rebuild is incomplete; native mirror coverage differs "
+                    "from canonical vectors"
                 )
-        conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec_ann USING vec0("
-            f"id TEXT PRIMARY KEY, embedding FLOAT[{dimension}])"
-        )
-        conn.commit()
+            updated = conn.execute(
+                "UPDATE mem_vec_ann_state SET format_version=? "
+                "WHERE singleton=1 AND dimension=?",
+                (_INDEX_FORMAT_VERSION, self.dim),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sqlite-vec rebuild state is missing or stale")
+            conn.commit()
+        except BaseException:
+            if conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
+        self.requires_rebuild = False
 
     def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
                *, commit: bool = True) -> None:
@@ -168,7 +415,9 @@ class SqliteVecVectorIndex:
             # failures roll back to the previous index state.
             marks = ",".join("?" for _ in ids)
             conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
-            for mid, vector in zip(ids, normalized):
+            for mid, vector, keep in zip(ids, normalized, nonzero):
+                if not keep:
+                    continue
                 conn.execute(
                     "INSERT INTO mem_vec_ann(id, embedding) VALUES (?, ?)",
                     (mid, vector.tobytes()),
@@ -197,18 +446,24 @@ class SqliteVecVectorIndex:
                 conn.rollback()
             raise
 
-    def search(self, vec: np.ndarray, k: int,
-               *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
+    def search(
+        self,
+        vec: np.ndarray,
+        k: int,
+        *,
+        filter: Optional[SearchFilter] = None,
+    ) -> list[tuple[str, float]]:
         k = _validated_k(k)
         if k == 0:
             return []
         v = _vector_query(vec, self.dim)
         with np.errstate(over="ignore", invalid="ignore"):
-            n = float(np.linalg.norm(v))
-        if not np.isfinite(n):
+            norm = float(np.linalg.norm(v))
+        if not np.isfinite(norm):
             raise ValueError("query vector norm must be finite")
-        if n > 0:
-            v = v / n
+        if norm == 0:
+            return []
+        v = v / norm
         total_row = self.store.conn.execute(
             "SELECT COUNT(*) AS n FROM mem_vec_ann"
         ).fetchone()
@@ -216,8 +471,9 @@ class SqliteVecVectorIndex:
         if total == 0:
             return []
         # Fetch one look-ahead row so the common unique-distance case can prove the
-        # kth boundary complete without issuing a second metadata hydration query.
+        # kth boundary complete without issuing another native KNN query.
         limit = min(k + 1, total)
+        visibility: dict[str, bool] = {}
         while True:
             # The KNN cap uses vec0's explicit `k = ?` constraint, NOT `LIMIT ?`.
             rows = self.store.conn.execute(
@@ -226,15 +482,23 @@ class SqliteVecVectorIndex:
                 (v.tobytes(), int(limit)),
             ).fetchall()
             # Match NumPy's live-record contract even for direct callers that omit a
-            # filter; orphaned, closed, and future ANN rows must never leak.
+            # filter; orphaned, closed, and future ANN rows must never leak. Ask Store
+            # for IDs only so widening never hydrates large memory bodies.
             effective_filter = filter if filter is not None else SearchFilter()
-            visible_records = self.store.get_memories(row["id"] for row in rows)
-            eligible = []
-            for row in rows:
-                rec = visible_records.get(row["id"])
-                if rec is None or not _visible(rec, effective_filter):
-                    continue
-                eligible.append(row)
+            unchecked = [
+                row["id"] for row in rows if row["id"] not in visibility
+            ]
+            for start in range(0, len(unchecked), _VISIBILITY_BATCH_SIZE):
+                batch = unchecked[start:start + _VISIBILITY_BATCH_SIZE]
+                visible_ids = self.store.visible_memory_ids(
+                    batch, effective_filter
+                )
+                visibility.update(
+                    (memory_id, memory_id in visible_ids) for memory_id in batch
+                )
+            eligible = [
+                row for row in rows if visibility.get(row["id"], False)
+            ]
             eligible.sort(key=lambda row: (float(row["distance"]), str(row["id"])))
 
             # vec0 may choose an unspecified subset when equal-distance rows straddle
@@ -252,14 +516,8 @@ class SqliteVecVectorIndex:
             )
             if boundary_complete or exhausted:
                 selected = eligible[:k]
-                # A zero query has no direction; retain the NumPy backend's
-                # deterministic zero similarity rather than converting its
-                # distance to the mathematically unrelated 0.5.
                 return [
-                    (
-                        row["id"],
-                        0.0 if n == 0 else _cosine_from_l2(row["distance"]),
-                    )
+                    (row["id"], _cosine_from_l2(row["distance"]))
                     for row in selected
                 ]
             # Filtered search widens geometrically until k visible hits are found.

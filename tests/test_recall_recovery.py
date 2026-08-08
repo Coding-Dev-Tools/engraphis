@@ -475,6 +475,79 @@ def test_existing_v11_llm_repair_is_atomic_one_time_and_precedes_default_recall(
         reopened.close()
 
 
+def test_existing_v12_llm_extraction_repair_demotes_and_retires_graph(tmp_path):
+    db = tmp_path / "existing-v12-llm-extraction.db"
+    marker_key = "__schema_v12_llm_extraction_trust_repair"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    peer_id = store.add_memory(MemoryRecord(
+        id="", content="Independent trusted peer.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "local_store", "trusted": True,
+                    "review_state": "approved"},
+    ))
+    provenance = {
+        "source": "agent",
+        "trusted": True,
+        "review_state": "approved",
+        "trust_origin": "local_mcp_agent",
+    }
+    metadata = {
+        "provenance": provenance,
+        "llm_extraction": {"mode": "llm_structured", "provider": "test"},
+        "entities": ["Fabricated Service"],
+        "relations": [{
+            "source": "Fabricated Service",
+            "relation": "controls",
+            "target": "Production",
+        }],
+    }
+    legacy_id = store.add_memory(MemoryRecord(
+        id="", content="A model-authored unsupported claim.",
+        workspace_id=workspace_id, scope=Scope.WORKSPACE,
+        provenance=provenance, metadata=metadata,
+    ))
+    store.add_link(legacy_id, peer_id, "related")
+    store.conn.execute("DELETE FROM sync_state WHERE key=?", (marker_key,))
+    store.conn.commit()
+    store.close()
+
+    repaired = Store(str(db))
+    try:
+        record = repaired.get_memory(legacy_id)
+        assert record.provenance["trusted"] is False
+        assert record.provenance["review_state"] == "pending"
+        assert record.provenance["trust_origin"] == "llm_extraction"
+        assert record.provenance["derived_by_llm_extraction"] is True
+        assert record.provenance["derived_graph_inert"] is True
+        assert not prompt_eligible(record.provenance, record.metadata)
+        assert "entities" not in record.metadata and "relations" not in record.metadata
+        assert record.metadata["unverified_derived_graph"]["entities"] == [
+            "Fabricated Service",
+        ]
+        assert record.metadata["llm_extraction"]["review_required"] is True
+        assert repaired.get_links(legacy_id) == []
+        assert repaired.get_sync_state(marker_key) == "complete"
+        prompt_ids = {
+            memory.id for memory in repaired.list_memories(
+                SearchFilter(workspace_id=workspace_id), prompt_only=True,
+            )
+        }
+        assert legacy_id not in prompt_ids
+    finally:
+        repaired.close()
+
+    reopened = Store(str(db))
+    try:
+        assert reopened.conn.execute(
+            "SELECT COUNT(*) AS n FROM audit "
+            "WHERE action='llm_extraction_trust_repair' AND target=?",
+            (legacy_id,),
+        ).fetchone()["n"] == 1
+    finally:
+        reopened.close()
+
+
 def test_active_embedding_fingerprint_catches_a_to_b_to_a_switch(tmp_path):
     db = tmp_path / "embedding-switch.db"
     embedder_a = _VersionedSemanticEmbedder("A")

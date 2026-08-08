@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS memories (
     valid_to     REAL,
     valid_to_recorded_at REAL,                    -- system-time when valid_to was learned
     ingested_at  REAL,                             -- system-time validity
+    modified_hlc TEXT NOT NULL DEFAULT '',          -- descriptive-state hybrid logical clock
     expired_at   REAL,
     subject_key  TEXT DEFAULT '',                 -- stable claim subject, optional
     claim_kind   TEXT DEFAULT '',                 -- optional claim predicate/category
@@ -505,6 +506,20 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value      TEXT,
     updated_at REAL
 );
+
+-- Durable, content-free proof that a memory id crossed a sync boundary.
+-- This survives secure erasure so a later private form can still emit the remote
+-- deletion marker peers require, without inferring export authority from current scope.
+CREATE TABLE IF NOT EXISTS memory_sync_exports (
+    memory_id        TEXT PRIMARY KEY,
+    workspace_id     TEXT NOT NULL,
+    repo_id          TEXT,
+    first_exported_at REAL NOT NULL,
+    last_exported_at  REAL NOT NULL,
+    CHECK(last_exported_at >= first_exported_at)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_sync_exports_workspace
+    ON memory_sync_exports(workspace_id, repo_id, memory_id);
 -- ── Maintenance cursors (local bounded-sweep progress) ───────────────────────
 -- Consolidation scans are intentionally bounded. Persist their keyset cursor so
 -- recurring sweeps rotate past rows that are not currently clusterable instead of
@@ -537,6 +552,8 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
     device_id  TEXT NOT NULL,             -- origin device (sync attribution only)
     workspace_id TEXT,                    -- sync scope (may be NULL for legacy rows)
     repo_id    TEXT,                       -- repo scope; NULL means workspace scope/legacy
+    export_class TEXT NOT NULL DEFAULT 'never_export'
+        CHECK(export_class IN ('never_export', 'remote_erasure')),
     created_at REAL NOT NULL
 );
 -- Sync exports scope tombstones by workspace; keep that read bounded as erasures grow.

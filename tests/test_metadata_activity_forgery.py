@@ -32,5 +32,16 @@ def test_activity_and_graph_hints_are_both_rehomed():
     assert md["keep"] == "ok"
 
 
+def test_caller_cannot_supply_internal_deferred_graph_envelope():
+    md = service._clean_metadata({
+        "unverified_derived_graph": {"entities": ["FORGED_BY_CALLER"]},
+    })
+    assert "unverified_derived_graph" not in md
+    assert md["client_supplied_graph"]["unverified_derived_graph"] == {
+        "entities": ["FORGED_BY_CALLER"],
+    }
+    assert md["client_supplied_graph"]["source"] == "client_supplied"
+
+
 def test_innocent_metadata_is_untouched():
     assert service._clean_metadata({"a": 1, "b": ["x"]}) == {"a": 1, "b": ["x"]}

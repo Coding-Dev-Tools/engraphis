@@ -1,6 +1,9 @@
+import hashlib
 import io
+import os
 import sys
 import types
+import traceback
 import zipfile
 
 import pytest
@@ -62,6 +65,43 @@ def test_extract_path_rejects_oversized_media_before_transcription(tmp_path, mon
         assert str(exc_info.value) == "resource exceeds the 1-byte extraction limit"
 
 
+def test_extract_path_transcribes_and_hashes_the_same_snapshot(tmp_path, monkeypatch):
+    payload = b"stable-media-snapshot"
+    source = tmp_path / "recording.mp3"
+    source.write_bytes(payload)
+    transcribed = {}
+
+    def transcribe(path):
+        with open(path, "rb") as stream:
+            transcribed["bytes"] = stream.read()
+        return "stable transcript", {"duration": 1.0}
+
+    monkeypatch.setattr(resources, "_transcribe_path", transcribe)
+
+    document = LocalResourceExtractor().extract_path(str(source))
+
+    assert transcribed["bytes"] == payload
+    assert document.metadata["resource_bytes"] == len(payload)
+    assert document.metadata["resource_sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_extract_path_rejects_a_regular_file_swap_before_open(tmp_path, monkeypatch):
+    source = tmp_path / "resource.txt"
+    replacement = tmp_path / "replacement.txt"
+    source.write_text("original", encoding="utf-8")
+    replacement.write_text("replacement", encoding="utf-8")
+    original_open = resources.os.open
+
+    def swap_then_open(path, flags):
+        os.replace(replacement, source)
+        return original_open(path, flags)
+
+    monkeypatch.setattr(resources.os, "open", swap_then_open)
+
+    with pytest.raises(ResourceExtractionError, match="changed before it was opened"):
+        LocalResourceExtractor().extract_path(str(source))
+
+
 def test_docx_rejects_dtd_and_entity_declarations():
     xml = (
         '<?xml version="1.0"?>' + (" " * 5_000)
@@ -75,6 +115,141 @@ def test_docx_rejects_dtd_and_entity_declarations():
 
     with pytest.raises(ResourceExtractionError, match="entities are not allowed"):
         LocalResourceExtractor().extract_bytes("unsafe.docx", buf.getvalue())
+
+
+def _assert_redacted_failure(call, expected: str, marker: str):
+    with pytest.raises(ResourceExtractionError, match=expected) as exc_info:
+        call()
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert marker not in str(exc_info.value)
+    assert marker not in repr(exc_info.value)
+    assert marker not in rendered
+
+
+def test_docx_parser_error_is_redacted():
+    marker = "C:/private/customer/source.docx"
+    _assert_redacted_failure(
+        lambda: LocalResourceExtractor().extract_bytes(marker, b"not-a-zip"),
+        "invalid DOCX archive",
+        marker,
+    )
+
+
+def test_pdf_parser_error_is_redacted(monkeypatch):
+    marker = "signed-pdf-url-token"
+
+    class _Reader:
+        def __init__(self, _stream):
+            raise RuntimeError(marker)
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=_Reader))
+    _assert_redacted_failure(
+        lambda: resources._pdf_text(b"%PDF-fake"),
+        "PDF extraction failed",
+        marker,
+    )
+
+
+def test_image_parser_error_is_redacted(monkeypatch):
+    marker = "C:/private/customer/image.png"
+
+    class _Image:
+        @staticmethod
+        def open(_stream):
+            raise RuntimeError(marker)
+
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=_Image))
+    monkeypatch.setitem(sys.modules, "pytesseract", types.SimpleNamespace())
+    _assert_redacted_failure(
+        lambda: resources._image_text(b"not-an-image"),
+        "image OCR failed",
+        marker,
+    )
+
+
+def test_image_ocr_output_error_is_redacted(monkeypatch):
+    marker = "ocr-provider-secret"
+
+    class _OpenedImage:
+        width = 1
+        height = 1
+        format = "PNG"
+
+    class _Image:
+        @staticmethod
+        def open(_stream):
+            return _OpenedImage()
+
+    class _OCRText:
+        def __str__(self):
+            raise RuntimeError(marker)
+
+    class _OCR:
+        @staticmethod
+        def image_to_string(_image):
+            return _OCRText()
+
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=_Image))
+    monkeypatch.setitem(sys.modules, "pytesseract", _OCR())
+    _assert_redacted_failure(
+        lambda: resources._image_text(b"not-an-image"),
+        "image OCR failed",
+        marker,
+    )
+
+
+def test_transcription_error_is_redacted(monkeypatch):
+    marker = "super-secret-model-path"
+
+    class _WhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError(marker)
+
+    monkeypatch.setenv("ENGRAPHIS_WHISPER_MODEL", "configured-model")
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        types.SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    _assert_redacted_failure(
+        lambda: resources._transcribe_path("media.mp3"),
+        "transcription failed",
+        marker,
+    )
+
+
+def test_transcription_metadata_error_is_redacted(monkeypatch):
+    marker = "transcription-provider-secret"
+
+    class _Info:
+        language = "en"
+        language_probability = marker
+        duration = 1.0
+
+    class _WhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, *_args, **_kwargs):
+            return [], _Info()
+
+    monkeypatch.setenv("ENGRAPHIS_WHISPER_MODEL", "configured-model")
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        types.SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    _assert_redacted_failure(
+        lambda: resources._transcribe_path("media.mp3"),
+        "transcription failed",
+        marker,
+    )
 
 
 def test_pdf_extraction_bounds_pages_and_text(monkeypatch):

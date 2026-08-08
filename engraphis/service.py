@@ -200,6 +200,9 @@ MAX_GRAPH_INDEX_WORKERS = 2
 GRAPH_INDEX_BATCH_SIZE = 100
 GRAPH_INDEX_LEASE_SECONDS = 60.0
 GRAPH_INDEX_JOB_HISTORY = 100
+GRAPH_INDEX_SHUTDOWN_SECONDS = 10.0
+DEFAULT_CODE_QUERY_CAPACITY = 10_000
+MAX_CODE_QUERY_CAPACITY = 50_000
 # Inspector payloads are deliberately smaller than analysis payloads. The endpoint
 # reports complete counts, but bounds the returned detail so selecting a hub cannot
 # produce a multi-megabyte response or lock the inspector's DOM.
@@ -328,6 +331,16 @@ def _reject_secret_capture(fields) -> None:
         reject_secrets(fields)
     except SecretDetectedError as exc:
         raise ValidationError(str(exc)) from None
+
+
+def _code_query_capacity(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError("capacity must be an integer")
+    if not 1 <= value <= MAX_CODE_QUERY_CAPACITY:
+        raise ValidationError(
+            f"capacity must be between 1 and {MAX_CODE_QUERY_CAPACITY}"
+        )
+    return value
 
 
 class GraphSceneCapacityExceeded(ValidationError):
@@ -665,6 +678,11 @@ def _clean_keywords(value: Any) -> list[str]:
 # extractor's output (both arrive in the same ``metadata`` dict), so that check has to
 # happen before the caller's value ever reaches the engine — see _clean_metadata below.
 _GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
+# Internal review envelope produced only after the extractor boundary. A caller-provided
+# value under this name could otherwise be relabelled as model-derived evidence when a
+# genuine extractor emits activity metadata but no graph hints.
+_INTERNAL_GRAPH_HINT_KEYS = ("unverified_derived_graph",)
+_CALLER_GRAPH_HINT_KEYS = (*_GRAPH_HINT_KEYS, *_INTERNAL_GRAPH_HINT_KEYS)
 
 # Keys the /llm/activity audit view (routes/v2_api.py) trusts as authentic evidence that
 # a memory's content was sent to an LLM provider (``llm_extraction``) or consolidated
@@ -693,7 +711,7 @@ def _clean_metadata(value: Any) -> dict:
         # ``retention_class`` presets). Only ``remember()`` may set it, after
         # validating ``retention_class`` — never a caller-supplied metadata dict.
         value = {k: v for k, v in value.items() if k != "retention_supervision"}
-    if any(k in value for k in _GRAPH_HINT_KEYS):
+    if any(k in value for k in _CALLER_GRAPH_HINT_KEYS):
         # Graph poisoning with forged provenance (SECURITY.md): remember()/ingest() are
         # reachable directly (MCP tool, HTTP route, dashboard) with caller-chosen
         # metadata, so a caller could set these same keys itself and inherit the
@@ -705,8 +723,10 @@ def _clean_metadata(value: Any) -> dict:
         # tagged with an honest source, so they can never masquerade as trusted
         # extraction. Existing defanging/caps (backends/graph_extractor.py) are
         # untouched by this; only the label was the defect.
-        hints = {k: value[k] for k in _GRAPH_HINT_KEYS if k in value}
-        value = {k: v for k, v in value.items() if k not in _GRAPH_HINT_KEYS}
+        hints = {k: value[k] for k in _CALLER_GRAPH_HINT_KEYS if k in value}
+        value = {
+            k: v for k, v in value.items() if k not in _CALLER_GRAPH_HINT_KEYS
+        }
         value = {**value, "client_supplied_graph": {**hints, "source": "client_supplied"}}
     if any(k in value for k in _ACTIVITY_HINT_KEYS):
         # Forged LLM-activity provenance (same class as the graph keys above): re-home the
@@ -920,7 +940,23 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
         shutil.copy2(str(p), str(backup))          # preserve the untouched original first
         from scripts.migrate_to_v2 import migrate
         counts = migrate(str(p), str(tmp_new))      # reads p (untouched), writes tmp_new
-        os.replace(str(tmp_new), str(p))            # atomic swap only on full success
+        # On Windows os.replace is not atomic; use a two-step rename with a staging
+        # file so a crash mid-swap leaves either the original or the migrated DB intact.
+        staging = p.with_suffix(".v2_swap")
+        try:
+            if staging.exists():
+                staging.unlink()
+            os.rename(str(p), str(staging))
+            os.rename(str(tmp_new), str(p))
+            try:
+                staging.unlink()
+            except OSError:
+                pass  # best-effort cleanup; backup still exists
+        except Exception:
+            # Rollback: restore the original if the swap failed partway through.
+            if staging.exists() and not p.exists():
+                os.rename(str(staging), str(p))
+            raise
         print("[engraphis] v1->v2 auto-migration complete: %s" % counts, file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — must never brick startup worse than before
         print("[engraphis] v1->v2 auto-migration failed (%s) — leaving %s untouched; "
@@ -930,7 +966,6 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
             tmp_new.unlink(missing_ok=True)
         except Exception:
             pass
-
 
 class MemoryService:
     """High-level, validated operations over a single Engraphis database."""
@@ -965,6 +1000,49 @@ class MemoryService:
         self._graph_job_lock = threading.RLock()
         self._graph_job_threads: dict[str, threading.Thread] = {}
         self._graph_runner_id = make_id("device")
+        self._service_close_lock = threading.Lock()
+        self._closing = False
+        self._closed = False
+
+    def close(self, *, timeout: float = GRAPH_INDEX_SHUTDOWN_SECONDS) -> None:
+        """Cancel owned graph workers before closing the shared Store.
+
+        A provider-backed extractor can remain inside an in-flight call longer than the
+        shutdown budget. In that case the Store deliberately stays open and this method
+        raises: closing SQLite beneath a live worker would turn orderly shutdown into
+        use-after-close races and partial terminal job records. The persisted runner lease
+        lets the next process recover a worker that outlives process shutdown.
+        """
+        try:
+            timeout_value = float(timeout)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("timeout must be a finite non-negative number") from None
+        if not math.isfinite(timeout_value) or timeout_value < 0:
+            raise ValueError("timeout must be a finite non-negative number")
+
+        with self._service_close_lock:
+            if self._closed:
+                return
+            self._closing = True
+            with self._graph_job_lock:
+                workers = list(self._graph_job_threads.items())
+
+            deadline = time.monotonic() + timeout_value
+            for _job_id, thread in workers:
+                remaining = max(0.0, deadline - time.monotonic())
+                thread.join(remaining)
+            alive = [job_id for job_id, thread in workers if thread.is_alive()]
+            if alive:
+                raise RuntimeError(
+                    f"{len(alive)} graph index worker(s) did not stop before shutdown"
+                )
+
+            close_engine = getattr(self.engine, "close", None)
+            if callable(close_engine):
+                close_engine()
+            else:
+                self.store.close()
+            self._closed = True
 
     def _graph_scene_revision(self) -> tuple[int, int, int]:
         row = self.store.conn.execute("PRAGMA data_version").fetchone()
@@ -1002,7 +1080,7 @@ class MemoryService:
                graph_extractor: Optional[str] = None,
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
-               query_planner=None) -> "MemoryService":
+               query_planner=None, read_only: bool = False) -> "MemoryService":
         # extractor / graph_extractor default to the configured backends
         # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
         # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
@@ -1022,7 +1100,7 @@ class MemoryService:
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
-        if db_path != ":memory:":
+        if db_path != ":memory:" and not read_only:
             _auto_migrate_v1_if_needed(db_path)
         # Optional encryption at rest: if ENGRAPHIS_DB_KEY[_FILE] is set, memories are
         # stored in a SQLCipher-encrypted database. Off by default (returns None).
@@ -1037,7 +1115,7 @@ class MemoryService:
             extractor=extractor, graph_extractor=graph_extractor,
             retention_supervisor=retention_supervisor, connect=connect,
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
-            query_planner=query_planner,
+            query_planner=query_planner, read_only=read_only,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -1959,7 +2037,7 @@ class MemoryService:
                                repo: Optional[str] = None,
                                schemas: Optional[list] = None,
                                actor: str = "user") -> dict:
-        """Introspect a live PostgreSQL catalog into one schema memory plus graph nodes.
+        """Introspect PostgreSQL before opening the atomic local persistence transaction.
 
         The DSN is never persisted, logged, or returned. Only a one-way source digest
         produced by the backend is stored as provenance.
@@ -1973,6 +2051,11 @@ class MemoryService:
         actor = _clean_text(
             actor, field="actor", max_chars=MAX_NAME_CHARS, required=False
         ) or "user"
+        selection_digest = hashlib.sha256(
+            json.dumps(
+                selected or [], ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
         from engraphis.backends.postgres_schema import get_postgres_introspector
         snapshot = get_postgres_introspector().inspect(dsn, schemas=selected)
         pieces = (
@@ -1980,22 +2063,84 @@ class MemoryService:
             if len(snapshot.text) > MAX_CONTENT_CHARS
             else [(snapshot.text, snapshot.title)]
         )
+        return self._apply_postgres_schema_snapshot(
+            snapshot, pieces, workspace=ws, repo=rp, actor=actor,
+            selection_digest=selection_digest,
+        )
+
+    @_rollback_service_transaction
+    def _apply_postgres_schema_snapshot(
+        self, snapshot: Any, pieces: list, *, workspace: str,
+        repo: Optional[str], actor: str, selection_digest: str,
+    ) -> dict:
+        """Persist one inspected catalog atomically after all remote I/O has completed.
+
+        Stable per-source/schema/chunk claim keys let an identical successful retry
+        reuse its live memory instead of duplicating it. Changed chunks stay on the normal
+        guarded resolution path, preserving approval and bi-temporal safety policy.
+        """
+        source_identity = str(
+            snapshot.metadata.get("source_digest")
+            or snapshot.metadata.get("database")
+            or "unknown"
+        )
+        source_digest = hashlib.sha256(
+            source_identity.encode("utf-8")
+        ).hexdigest()[:24]
+        existing_wid = self._lookup_workspace(workspace)
+        existing_rid = (
+            self._lookup_repo(existing_wid, repo)
+            if existing_wid is not None and repo
+            else None
+        )
+        target_scope = Scope.REPO if repo else Scope.WORKSPACE
         stored_rows = []
         for index, (piece_content, piece_title) in enumerate(pieces):
+            title = piece_title or snapshot.title
+            subject_key = (
+                f"postgres_schema:{source_digest}:{selection_digest}:{index}"
+            )
+            expected_chunk = {"index": index, "of": len(pieces)}
+            if existing_wid is not None and (not repo or existing_rid is not None):
+                prior = self.store.list_live_claims(
+                    workspace_id=existing_wid,
+                    repo_id=existing_rid,
+                    session_id=None,
+                    scope=target_scope,
+                    mtype=MemoryType.SEMANTIC,
+                    subject_key=subject_key,
+                    claim_kind="catalog_snapshot_chunk",
+                )
+                exact = next((
+                    record for record in prior
+                    if record.content == piece_content
+                    and record.title == title
+                    and record.metadata.get("postgres_schema") == snapshot.metadata
+                    and record.metadata.get("chunk") == expected_chunk
+                ), None)
+                if exact is not None:
+                    stored_rows.append({
+                        "id": exact.id,
+                        "op": "noop",
+                        "stored": False,
+                    })
+                    continue
             stored_rows.append(self.remember(
-                piece_content, workspace=ws, repo=rp,
-                mtype="semantic", scope="repo" if rp else "workspace",
-                title=(piece_title or snapshot.title),
+                piece_content, workspace=workspace, repo=repo,
+                mtype="semantic", scope=target_scope.value,
+                title=title,
                 source="postgres_introspector", trusted=False,
                 kind="postgres_schema",
                 metadata={
                     "postgres_schema": snapshot.metadata,
-                    "chunk": {"index": index, "of": len(pieces)},
+                    "chunk": expected_chunk,
                 },
-                resolve_conflicts=False,
+                subject_key=subject_key,
+                claim_kind="catalog_snapshot_chunk",
+                resolve_conflicts=True,
             ))
         stored = stored_rows[0]
-        wid, rid = self._require_scope(ws, rp)
+        wid, rid = self._require_scope(workspace, repo)
         actual_ids: dict[str, str] = {}
         for entity in snapshot.entities:
             source_id = str(entity.get("id") or "")
@@ -2043,7 +2188,7 @@ class MemoryService:
             },
         )
         return {
-            "workspace": ws, "repo": rp, "id": stored["id"],
+            "workspace": workspace, "repo": repo, "id": stored["id"],
             "memory_ids": [row["id"] for row in stored_rows],
             "entities": len(actual_ids), "relations": relations_written,
             "schema": snapshot.metadata, "receipt": receipt,
@@ -2053,7 +2198,7 @@ class MemoryService:
                     dry_run: bool = False, min_cluster: int = 3,
                     archive_below: float = 0.05, profiles: bool = False,
                     min_mentions: int = 3, infer: bool = False,
-                    structured: bool = False, supersede_sources: bool = False) -> dict:
+                    structured: bool = False) -> dict:
         """Sleep-time consolidation sweep (episodic→semantic distillation + decayed-
         transient archival). The report includes a ``compaction`` block with the tokens
         the sweep saved. With ``profiles=True`` a third pass rolls each entity's memories
@@ -2069,10 +2214,8 @@ class MemoryService:
 
         ``structured=True`` asks a configured LLM to emit schema-validated consolidated
         facts with graph hints; any provider/schema failure falls back to the deterministic
-        digest path. ``supersede_sources=True`` is intentionally opt-in: it bi-temporally
-        closes the source episodes only after validated structured facts are written."""
-        if supersede_sources and not structured:
-            raise ValidationError("supersede_sources requires structured=true")
+        digest path. Model-derived facts remain review-pending and never supersede their
+        authoritative source episodes automatically."""
         if infer:
             raise ValidationError("dream inference is available through Engraphis Cloud")
         wid, rid = self._require_scope(workspace, repo)
@@ -2099,7 +2242,7 @@ class MemoryService:
                 min_cluster=min_cluster, archive_below=archive_below,
                 profiles=bool(profiles), min_mentions=min_mentions,
                 infer=False, structured=bool(structured),
-                supersede_sources=bool(supersede_sources), llm=llm)
+                llm=llm)
         finally:
             if llm is not None and hasattr(llm, "close"):
                 try:
@@ -2852,13 +2995,14 @@ class MemoryService:
 
     def merge(self, source_ids: list, merged_content: str, *, workspace: str,
               repo: Optional[str] = None, title: Optional[str] = None,
-              mtype: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
+              mtype: Optional[str] = None, scope: Optional[str] = None,
+              reason: str = "", actor: str = "user") -> dict:
         """Merge several memories into one (manual N→1), retiring the sources into
         history. Validated and authorized like every other governance op: the caller
         must name the workspace that owns the sources, and **every** source is
         ownership-checked, so a merge can neither read nor retire a memory outside the
-        caller's workspace. Ownership is checked at workspace level (not repo), so
-        near-duplicates spread across repos of the same workspace can still be merged;
+        caller's workspace. Session-scoped sources must share one session unless the
+        caller explicitly chooses an authorized wider ``repo`` or ``workspace`` target;
         the workspace itself stays a hard isolation boundary (``_check_owns``)."""
         ids = _clean_string_list(source_ids, field="source_ids", max_items=MAX_K,
                                  max_chars=MAX_NAME_CHARS)
@@ -2879,12 +3023,15 @@ class MemoryService:
                        else _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS,
                                         required=False))
         mt = _enum(mtype, MemoryType, "memory_type") if mtype else None
+        target_scope = _enum(scope, Scope, "scope") if scope else None
         wid, _ = self._require_scope(workspace, repo)
         for sid in uniq:
             self._check_owns(sid, wid, None)
         try:
-            out = self.engine.merge(uniq, merged_content, title=title_clean, mtype=mt,
-                                    reason=reason, actor=actor)
+            out = self.engine.merge(
+                uniq, merged_content, title=title_clean, mtype=mt, scope=target_scope,
+                reason=reason, actor=actor,
+            )
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
         out["workspace"] = self._clean_ws(workspace)
@@ -3266,7 +3413,9 @@ class MemoryService:
         )
 
     def code_path(self, source: str, target: str, *, workspace: str, repo: str,
-                  max_depth: int = 8, as_of: Optional[float] = None,
+                  max_depth: int = 8,
+                  capacity: int = DEFAULT_CODE_QUERY_CAPACITY,
+                  as_of: Optional[float] = None,
                   valid_at: Optional[float] = None,
                   known_at: Optional[float] = None) -> dict:
         if not repo:
@@ -3278,11 +3427,12 @@ class MemoryService:
             max_depth = max(1, min(32, int(max_depth)))
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("max_depth must be an integer")
+        capacity = _code_query_capacity(capacity)
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
         )
         return self.engine.code_path(
-            source, target, repo_id=rid, max_depth=max_depth,
+            source, target, repo_id=rid, max_depth=max_depth, capacity=capacity,
             flt=SearchFilter(
                 workspace_id=wid, repo_id=rid, include_ancestors=True,
                 as_of=as_of, valid_at=valid_at, known_at=known_at,
@@ -3290,6 +3440,7 @@ class MemoryService:
         )
 
     def code_impact(self, changed_files: list, *, workspace: str, repo: str,
+                    capacity: int = DEFAULT_CODE_QUERY_CAPACITY,
                     as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None) -> dict:
@@ -3299,11 +3450,12 @@ class MemoryService:
             changed_files, field="changed_files", max_items=2_000, max_chars=4_000
         )
         wid, rid = self._require_scope(workspace, repo)
+        capacity = _code_query_capacity(capacity)
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
         )
         return self.engine.analyze_impact(
-            files, repo_id=rid,
+            files, repo_id=rid, capacity=capacity,
             flt=SearchFilter(
                 workspace_id=wid, repo_id=rid, include_ancestors=True,
                 as_of=as_of, valid_at=valid_at, known_at=known_at,
@@ -3311,12 +3463,14 @@ class MemoryService:
         )
 
     def export_code_graph(self, *, workspace: str, repo: str,
+                          capacity: int = DEFAULT_CODE_QUERY_CAPACITY,
                           as_of: Optional[float] = None,
                           valid_at: Optional[float] = None,
                           known_at: Optional[float] = None) -> dict:
         if not repo:
             raise ValidationError("repo is required to export a code graph")
         wid, rid = self._require_scope(workspace, repo)
+        capacity = _code_query_capacity(capacity)
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
         )
@@ -3324,7 +3478,7 @@ class MemoryService:
             workspace_id=wid, repo_id=rid, include_ancestors=True,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
-        graph = self.engine.export_code_graph(repo_id=rid, flt=flt)
+        graph = self.engine.export_code_graph(repo_id=rid, limit=capacity, flt=flt)
         return {
             "graph": graph,
             "report_markdown": self.engine.code_graph_report(
@@ -4399,8 +4553,66 @@ class MemoryService:
         return {"source": src, "workspace": dst, "id": wid_dst,
                "memories_copied": len(memory_remap)}
 
+    def update_memory(
+        self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+        title: Optional[str] = None, mtype: Optional[str] = None,
+        importance: Optional[float] = None, actor: str = "user",
+    ) -> dict:
+        """Update changed metadata fields; an identical supplied retry is a true no-op."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        actor = (
+            _clean_text(
+                actor, field="actor", max_chars=MAX_NAME_CHARS, required=False
+            )
+            or "user"
+        )
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        existing = self.store.get_memory(mid)
+        if title is None and mtype is None and importance is None:
+            raise ValidationError("nothing to update")
+        if title is not None:
+            title = _clean_text(
+                title, field="title", max_chars=MAX_TITLE_CHARS, required=False
+            )
+            _reject_secret_capture((("title", title),))
+        if mtype is not None:
+            mtype = _enum(mtype, MemoryType, "memory_type").value
+        if importance is not None:
+            try:
+                importance = float(importance)
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError("importance must be a number")
+            if not math.isfinite(importance):
+                raise ValidationError("importance must be finite")
+            importance = max(0.0, min(1.0, importance))
+        # Check if FTS row exists; if title is provided but FTS is missing, rebuild it
+        fts_row = self.store.conn.execute(
+            "SELECT 1 FROM mem_fts WHERE id=?", (mid,)
+        ).fetchone()
+        needs_fts_rebuild = title is not None and fts_row is None
+
+        if (
+            not needs_fts_rebuild
+            and (title is None or title == existing.title)
+            and (mtype is None or mtype == existing.mtype.value)
+            and (importance is None or importance == existing.importance)
+        ):
+            return {"id": mid, "updated": []}
+        return self._update_memory_transactional(
+            mid,
+            workspace=workspace,
+            repo=repo,
+            title=title,
+            mtype=mtype,
+            importance=importance,
+            actor=actor,
+        )
+
+
     @_rollback_service_transaction
-    def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+    def _update_memory_transactional(
+            self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
                       actor: str = "user") -> dict:
@@ -4418,14 +4630,16 @@ class MemoryService:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
             _reject_secret_capture((("title", title),))
             title_changed = title != old_title
-            sets.append("title=?")
-            params.append(title)
-            changes.append("title")
+            if title_changed:
+                sets.append("title=?")
+                params.append(title)
+                changes.append("title")
         if mtype is not None:
             mt = _enum(mtype, MemoryType, "memory_type").value
-            sets.append("mtype=?")
-            params.append(mt)
-            changes.append(f"type={mt}")
+            if mt != existing.mtype.value:
+                sets.append("mtype=?")
+                params.append(mt)
+                changes.append(f"type={mt}")
         if importance is not None:
             try:
                 importance = float(importance)
@@ -4434,13 +4648,15 @@ class MemoryService:
             if not math.isfinite(importance):
                 raise ValidationError("importance must be finite")
             importance = max(0.0, min(1.0, importance))
-            sets.append("importance=?")
-            params.append(importance)
-            changes.append("importance")
-        if not sets:
-            raise ValidationError("nothing to update")
-        params.append(mid)
-        self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
+            if importance != existing.importance:
+                sets.append("importance=?")
+                params.append(importance)
+                changes.append("importance")
+        if not sets and title is None:
+            return {"id": mid, "updated": []}
+        if sets:
+            params.append(mid)
+            self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
         if title is not None:
             row = self.store.conn.execute(
                 "SELECT title, content, keywords FROM memories WHERE id=?", (mid,)).fetchone()
@@ -4512,15 +4728,9 @@ class MemoryService:
                     # Store owns the portable mirror for every backend. A separate
                     # index was synchronized above; NumPy searches this row directly.
                     self.store.put_vector(mid, vectors[0], model=model)
-                self.store._fts_upsert(
-                    mid, row["title"] or "", row["content"] or "", kw,
-                )
-            else:
-                # Re-apply the title even when its value is unchanged: older databases
-                # may be missing the lexical mirror, and title edits must restore it.
-                self.store._fts_upsert(
-                    mid, row["title"] or "", row["content"] or "", kw,
-                )
+            self.store._fts_upsert(
+                mid, row["title"] or "", row["content"] or "", kw,
+            )
 
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
@@ -5691,12 +5901,16 @@ class MemoryService:
         if clean_extractor != "regex":
             raise ValidationError("extractor must be 'regex'")
         with self._graph_job_lock:
+            if self._closing or self._closed:
+                raise ValidationError("memory service is shutting down")
             self._recover_stale_graph_jobs()
             self._graph_job_threads = {
                 key: value for key, value in self._graph_job_threads.items()
                 if value.is_alive()
             }
-            self.store.conn.execute("BEGIN IMMEDIATE")
+            owns_graph_txn = not self.store.conn.transaction_owned_by_current_thread()
+            if owns_graph_txn:
+                self.store.conn.execute("BEGIN IMMEDIATE")
             try:
                 current_scope = self.store.conn.execute(
                     "SELECT 1 FROM workspaces WHERE id=?", (wid,)
@@ -5819,9 +6033,10 @@ class MemoryService:
                         "updated_at=excluded.updated_at, last_error=''",
                         (wid, job_id, now),
                     )
-                self.store.conn.commit()
+                if owns_graph_txn:
+                    self.store.conn.commit()
             except BaseException:
-                if self.store.conn.transaction_owned_by_current_thread():
+                if owns_graph_txn and self.store.conn.transaction_owned_by_current_thread():
                     self.store.conn.rollback()
                 raise
             worker = threading.Thread(
@@ -5848,10 +6063,26 @@ class MemoryService:
                 )
                 self.store.conn.commit()
                 raise
-            row = self.store.conn.execute(
-                "SELECT * FROM jobs WHERE id=?", (job_id,)
-            ).fetchone()
-            return self._graph_job_dict(row)
+            # Build the response without another SELECT to avoid pinning the
+            # connection lock, which would block the worker thread from starting.
+            return {
+                "id": job_id,
+                "workspace_id": wid,
+                "repo_id": rid,
+                "kind": "graph_index",
+                "state": "queued",
+                "dry_run": bool(dry_run),
+                "total_items": total,
+                "processed_items": 0,
+                "progress": 0.0,
+                "counts": counts,
+                "errors": [],
+                "cancel_requested": False,
+                "created_at": now,
+                "started_at": None,
+                "finished_at": None,
+                "reused": False,
+            }
 
     def cancel_graph_index_job(self, job_id: str, *, workspace: str) -> dict:
         wid, _rid = self._require_scope(workspace, None)
@@ -5905,6 +6136,9 @@ class MemoryService:
         final_state = "failed"
         error_code = ""
         try:
+            if self._closing:
+                final_state = "cancelled"
+                return
             started = time.time()
             claimed = self.store.conn.execute(
                 "UPDATE jobs SET state='running', started_at=?, heartbeat_at=? "
@@ -5920,6 +6154,9 @@ class MemoryService:
             processed = 0
             stop = False
             while not stop:
+                if self._closing:
+                    final_state = "cancelled"
+                    break
                 cancellation = self.store.conn.execute(
                     "SELECT cancel_requested, state, runner_id FROM jobs WHERE id=?",
                     (job_id,),
@@ -5950,6 +6187,10 @@ class MemoryService:
                     final_state = "completed"
                     break
                 for candidate in candidate_rows:
+                    if self._closing:
+                        final_state = "cancelled"
+                        stop = True
+                        break
                     memory_id = candidate["id"]
                     last_memory_id = memory_id
                     if not prompt_eligible(

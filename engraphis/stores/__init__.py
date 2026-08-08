@@ -74,6 +74,49 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edge_src ON edges(namespace, source_entity);
 CREATE INDEX IF NOT EXISTS idx_edge_tgt ON edges(namespace, target_entity);
 
+CREATE TABLE IF NOT EXISTS graph_documents (
+    namespace   TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY(namespace, document_id),
+    FOREIGN KEY(namespace, document_id)
+        REFERENCES memories(namespace, document_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_graph_documents_updated
+    ON graph_documents(namespace, updated_at);
+
+CREATE TABLE IF NOT EXISTS document_entities (
+    namespace   TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    entity_name TEXT NOT NULL,
+    entity_type TEXT,
+    PRIMARY KEY(namespace, document_id, entity_name),
+    FOREIGN KEY(namespace, document_id)
+        REFERENCES graph_documents(namespace, document_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_entities_entity
+    ON document_entities(namespace, entity_name, document_id);
+
+CREATE TABLE IF NOT EXISTS document_edges (
+    namespace    TEXT NOT NULL,
+    document_id  TEXT NOT NULL,
+    source_entity TEXT NOT NULL,
+    target_entity TEXT NOT NULL,
+    relation      TEXT NOT NULL,
+    PRIMARY KEY(
+        namespace, document_id, source_entity, target_entity, relation
+    ),
+    FOREIGN KEY(namespace, document_id)
+        REFERENCES graph_documents(namespace, document_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_edges_source
+    ON document_edges(namespace, source_entity, document_id);
+CREATE INDEX IF NOT EXISTS idx_document_edges_target
+    ON document_edges(namespace, target_entity, document_id);
+
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     namespace   TEXT    NOT NULL,
@@ -165,9 +208,57 @@ def init_db() -> None:
     except sqlite3.OperationalError:
         pass  # column already exists
     conn.commit()
-    # Ensure a default vault exists
+    _backfill_graph_document_evidence(conn)
+    # Ensure a default vault exists.
     from engraphis.stores.vaults import ensure_default_vault
     ensure_default_vault()
+
+
+def _backfill_graph_document_evidence(conn: sqlite3.Connection) -> None:
+    """Migrate pre-marker v1 rows into document-scoped graph evidence once.
+
+    Only memories without a marker are replayed. This preserves aggregate graphs that may
+    have been created independently of document ingestion and avoids incrementing edge
+    weights again on every process start.
+    """
+    rows = conn.execute(
+        """SELECT m.namespace, m.document_id, m.title, m.content, m.updated_at
+           FROM memories AS m
+           LEFT JOIN graph_documents AS gd
+             ON gd.namespace=m.namespace AND gd.document_id=m.document_id
+           WHERE gd.document_id IS NULL
+           ORDER BY m.id"""
+    ).fetchall()
+    if not rows:
+        return
+    from engraphis.engines.ingest import extract_entities, extract_relations
+    from engraphis.stores.graph import _replace_support_rows, rebuild_namespace
+
+    try:
+        # Insert evidence rows without rebuilding the namespace graph per-document.
+        # Rebuild once per distinct namespace after all evidence is inserted to avoid
+        # O(N²) work when many documents share a namespace.
+        touched_namespaces: set[str] = set()
+        for row in rows:
+            content = row["content"] or ""
+            entities = extract_entities(content, row["title"] or "")
+            relations = extract_relations(content, entities)
+            entity_rows = sorted(set(entities))
+            relation_rows = sorted(set(relations))
+            _replace_support_rows(
+                row["namespace"],
+                row["document_id"],
+                entity_rows,
+                relation_rows,
+                updated_at=float(row["updated_at"]),
+            )
+            touched_namespaces.add(row["namespace"])
+        for ns in touched_namespaces:
+            rebuild_namespace(ns, commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ── Vector serialization helpers ────────────────────────────────────────────

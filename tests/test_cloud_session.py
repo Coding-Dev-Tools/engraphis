@@ -119,6 +119,69 @@ def test_persisted_refresh_subject_cannot_be_overridden_by_environment(monkeypat
     assert cloud_session._token_subject(saved) == "member"
 
 
+def test_persisted_refresh_endpoints_cannot_be_rebound_by_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv(
+        "ENGRAPHIS_CLOUD_CONTROL_URL",
+        "https://attacker-control.example.test",
+    )
+    monkeypatch.setenv(
+        "ENGRAPHIS_CLOUD_COMPUTE_URL",
+        "https://attacker-compute.example.test",
+    )
+    saved = {
+        "control_url": "https://control.example.test",
+        "compute_url": "https://compute.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "saved-refresh",
+        "token_subject": "member",
+    }
+    requests = []
+    writes = []
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(saved))
+    monkeypatch.setattr(cloud_session, "_save", writes.append)
+    monkeypatch.setattr(
+        cloud_session,
+        "validate_cloud_base_url",
+        lambda value: value.rstrip("/"),
+    )
+
+    def refresh(control_url, credential, workspace_id, token_subject):
+        requests.append((control_url, credential, workspace_id, token_subject))
+        return {
+            "access_token": "short-lived-access",
+            "organization_id": "org_1",
+            "refresh_credential": "rotated-refresh",
+            "token_subject": "member",
+        }
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", refresh)
+
+    assert (
+        cloud_session.credential_bound_control_url()
+        == "https://control.example.test"
+    )
+    result = cloud_session.access_for_workspace("ws", require_compute=True)
+
+    assert requests == [
+        (
+            "https://control.example.test",
+            "saved-refresh",
+            "ws",
+            "member",
+        )
+    ]
+    assert result == (
+        "short-lived-access",
+        "org_1",
+        "https://compute.example.test",
+    )
+    assert writes[0]["control_url"] == "https://control.example.test"
+    assert writes[0]["compute_url"] == "https://compute.example.test"
+
+
 def test_environment_bootstrap_persists_and_reuses_rotated_credential(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "env-bootstrap")
     monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")

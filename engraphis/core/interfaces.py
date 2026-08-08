@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable, Literal, Optional, Protocol, runtime_checkable
@@ -51,11 +52,114 @@ def _finite_timestamp(value: Optional[float], name: str) -> Optional[float]:
         raise ValueError(f"{name} must be a finite timestamp")
     try:
         timestamp = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{name} must be a finite timestamp") from exc
     if not math.isfinite(timestamp):
         raise ValueError(f"{name} must be a finite timestamp")
     return timestamp
+
+
+def _finite_number(value: float, name: str) -> float:
+    """Normalize persisted numeric values without admitting booleans or infinities."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be a finite number")
+    return number
+
+_MODIFIED_HLC_RE = re.compile(
+    r"^(?P<physical>[0-9A-F]{12}):(?P<logical>[0-9A-F]{8}):"
+    r"(?P<node>dev_[0-9A-HJKMNPQRSTVWXYZ]{26})$"
+)
+MAX_HLC_PHYSICAL_MS = (1 << 48) - 1
+MAX_HLC_LOGICAL = (1 << 32) - 1
+
+
+def parse_modified_hlc(value: str, *, allow_empty: bool = False) -> tuple[int, int, str]:
+    """Parse the canonical descriptive-state HLC.
+
+    The fixed-width hexadecimal prefix makes canonical strings lexicographically
+    sortable.  An empty value is reserved for rows created before the HLC schema.
+    """
+    if allow_empty and value == "":
+        return (0, 0, "")
+    if not isinstance(value, str):
+        raise ValueError("modified_hlc must be a canonical HLC string")
+    match = _MODIFIED_HLC_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("modified_hlc must be a canonical HLC string")
+    return (
+        int(match.group("physical"), 16),
+        int(match.group("logical"), 16),
+        match.group("node"),
+    )
+
+
+def format_modified_hlc(physical_ms: int, logical: int, node_id: str) -> str:
+    """Serialize one bounded HLC tuple into its stable total-order representation."""
+    if (
+        isinstance(physical_ms, bool)
+        or not isinstance(physical_ms, int)
+        or not 0 <= physical_ms <= MAX_HLC_PHYSICAL_MS
+    ):
+        raise ValueError("modified_hlc physical time is outside the 48-bit domain")
+    if (
+        isinstance(logical, bool)
+        or not isinstance(logical, int)
+        or not 0 <= logical <= MAX_HLC_LOGICAL
+    ):
+        raise ValueError("modified_hlc logical counter is outside the 32-bit domain")
+    candidate = f"{physical_ms:012X}:{logical:08X}:{node_id}"
+    parse_modified_hlc(candidate)
+    return candidate
+
+
+def advance_modified_hlc(
+    current: str,
+    *,
+    observed: str = "",
+    node_id: str,
+    now_ms: int,
+) -> str:
+    """Advance a hybrid logical clock despite wall-clock rollback or a remote lead."""
+    current_physical, current_logical, _ = parse_modified_hlc(
+        current, allow_empty=True
+    )
+    observed_physical, observed_logical, _ = parse_modified_hlc(
+        observed, allow_empty=True
+    )
+    if (
+        isinstance(now_ms, bool)
+        or not isinstance(now_ms, int)
+        or not 0 <= now_ms <= MAX_HLC_PHYSICAL_MS
+    ):
+        raise ValueError("modified_hlc current time is outside the 48-bit domain")
+    physical = max(now_ms, current_physical, observed_physical)
+    if physical == current_physical == observed_physical:
+        logical = max(current_logical, observed_logical) + 1
+    elif physical == current_physical:
+        logical = current_logical + 1
+    elif physical == observed_physical:
+        logical = observed_logical + 1
+    else:
+        logical = 0
+    if logical > MAX_HLC_LOGICAL:
+        if physical >= MAX_HLC_PHYSICAL_MS:
+            raise OverflowError("modified_hlc exhausted its representable domain")
+        physical += 1
+        logical = 0
+    return format_modified_hlc(physical, logical, node_id)
+
+
+def normalize_modified_hlc(value: str, *, allow_empty: bool = False) -> str:
+    """Validate and return one already-canonical descriptive-state HLC."""
+    parse_modified_hlc(value, allow_empty=allow_empty)
+    return value
+
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -95,8 +199,23 @@ class MemoryRecord:
     pinned_at: Optional[float] = None     # system-time when a pin last became effective
     unpinned_at: Optional[float] = None   # system-time when an unpin became effective
     confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
+    modified_hlc: str = ""            # monotonic version of descriptive/LWW fields
 
-
+    def __post_init__(self) -> None:
+        for name in (
+            "last_access",
+            "valid_from",
+            "valid_to",
+            "ingested_at",
+            "expired_at",
+            "valid_to_recorded_at",
+            "pinned_at",
+            "unpinned_at",
+        ):
+            setattr(self, name, _finite_timestamp(getattr(self, name), name))
+        self.modified_hlc = normalize_modified_hlc(
+            self.modified_hlc, allow_empty=True
+        )
 
 
 @dataclass
@@ -221,6 +340,23 @@ class Edge:
     provenance: dict[str, Any] = field(default_factory=dict)
     valid_to_recorded_at: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        self.weight = _finite_number(self.weight, "weight")
+        for name in (
+            "valid_from",
+            "valid_to",
+            "ingested_at",
+            "expired_at",
+            "valid_to_recorded_at",
+        ):
+            setattr(self, name, _finite_timestamp(getattr(self, name), name))
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError("edge valid_to cannot predate valid_from")
+
 
 @dataclass
 class ExtractedFact:
@@ -252,6 +388,7 @@ class RetentionDecision:
     importance: Optional[float] = None
     stability: Optional[float] = None
     reason: str = ""
+
 
 
 @dataclass
@@ -358,6 +495,10 @@ class VectorIndex(Protocol):
     :func:`vector_index_requires_sync` to avoid writing that same row twice. The
     optimization is accepted only when the index and caller share the identical Store
     object; unknown and separately-backed indexes retain the historical explicit sync.
+
+    A separate table on the same Store connection may instead expose
+    ``shares_store_transaction = True``. Its explicit sync then remains inside the
+    canonical transaction rather than being deferred as an external side effect.
     """
     def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
                *, commit: bool = True) -> None: ...
@@ -382,6 +523,17 @@ def vector_index_requires_sync(index: Optional[VectorIndex], store: object) -> b
     )
 
 
+def vector_index_shares_store_transaction(
+    index: Optional[VectorIndex], store: object,
+) -> bool:
+    """Whether explicit index writes participate in the Store's transaction."""
+    return bool(
+        index is not None
+        and getattr(index, "shares_store_transaction", False) is True
+        and getattr(index, "store", None) is store
+    )
+
+
 @runtime_checkable
 class LexicalIndex(Protocol):
     """BM25 / full-text arm of hybrid retrieval (§7.1)."""
@@ -389,14 +541,22 @@ class LexicalIndex(Protocol):
 
 
 @runtime_checkable
-class GraphStore(Protocol):
-    """Bi-temporal knowledge graph with PPR (§6.3, §13.5)."""
-    def upsert_node(self, node: Node) -> None: ...
-    def upsert_edge(self, edge: Edge) -> None: ...
-    def invalidate_edge(self, edge_id: str, at: float) -> None: ...
-    def neighbors(self, node_ids: list[str], *, hops: int = 1, at: Optional[float] = None,
-                  layers: Optional[list["GraphLayer"]] = None) -> list[Edge]: ...
-    def ppr(self, seeds: list[str], *, at: Optional[float] = None) -> dict[str, float]: ...
+class GraphReader(Protocol):
+    """Read-only bi-temporal graph traversal."""
+    def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
+                  layers: Optional[list["GraphLayer"]] = None,
+                  flt: Optional[SearchFilter] = None,
+                  limit: Optional[int] = None,
+                  prompt_only: bool = False) -> list[Edge]: ...
+
+
+@runtime_checkable
+class GraphWriter(Protocol):
+    """Durable graph mutation, independent from retrieval and ranking."""
+    def upsert_entity(self, node: Node, *, commit: bool = True) -> str: ...
+    def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str: ...
+    def invalidate_edge(self, edge_id: str, at: Optional[float] = None, *,
+                        commit: bool = True) -> None: ...
 
 
 @runtime_checkable

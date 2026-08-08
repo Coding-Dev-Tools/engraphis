@@ -31,16 +31,15 @@ therefore a **state-based CRDT** over memory rows, not a bespoke replication log
       (id + erasure time + origin device, never content) and merged earliest-wins;
       legacy repo-less markers remain global for compatibility, while a known marker
       cannot erase a same-id row from a sibling repository.
-    - descriptive fields (title/content/keywords/…): last-writer-wins under a
-      **deterministic total order** — ``(last_access, ingested_at, content-hash)`` —
-      so the winner is a function of the data, never of arrival order.
-
-The one honest limitation: without a per-field logical clock (HLC), a rare
-*simultaneous in-place edit of the same field on two devices* resolves by that
-deterministic order rather than by true causality — it converges (no divergence,
-no lost row), it just may pick a well-defined winner a human wouldn't. Corrections
-go through ``MemoryEngine.correct`` (a new bi-temporal row, not an edit), so this
-only bites raw ``title``/``mtype`` relabels. A follow-up increment adds an HLC.
+    - descriptive fields (title/content/keywords/…): last-writer-wins under the
+      canonical ``modified_hlc``. Any initialized HLC beats the empty v1/v2 sentinel;
+      legacy-only candidates retain bounded ``ingested_at`` plus a stable payload-hash
+      tie-break. Recall's independent ``last_access`` max-join therefore cannot make an
+      older edit win.
+    - equal physical/logical HLC instants from concurrent devices still choose one
+      deterministic winner by node id and payload hash, but the losing descriptive
+      variant is retained once as a deterministic, explicitly untrusted conflict
+      successor with a content-free audit trail. Replay cannot duplicate it.
 
 Untrusted input: a pulled bundle is attacker-controlled (SECURITY.md — memory
 poisoning is an explicit threat). ``apply_bundle`` validates and clamps every row,
@@ -53,7 +52,6 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterator
 from typing import Any, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
@@ -64,6 +62,8 @@ from engraphis.core.interfaces import (
     SearchFilter,
     SyncTransport,
     embedding_space_fingerprint,
+    normalize_modified_hlc,
+    parse_modified_hlc,
     vector_index_requires_sync,
 )
 from engraphis.core.poisoning import (
@@ -76,15 +76,20 @@ from engraphis.core.poisoning import (
 )
 from engraphis.core.secrets import SecretDetectedError, reject_secrets, secret_kind
 from engraphis.core.retention_policy import effective_access_count, effective_stability
-from engraphis.core.store import Store, now_ts
+from engraphis.core.store import (
+    Store,
+    TOMBSTONE_NEVER_EXPORT,
+    TOMBSTONE_REMOTE_ERASURE,
+    now_ts,
+)
 
 
 logger = logging.getLogger("engraphis.sync")
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
-SYNC_VERSION = 2
-SYNC_ACCEPTED_VERSIONS = frozenset({1, 2})
+SYNC_VERSION = 3
+SYNC_ACCEPTED_VERSIONS = frozenset({1, 2, 3})
 
 # ── tombstone bundle constants ────────────────────────────────────────────────
 MAX_TOMBSTONES = 200_000             # same cap as MAX_MEMORIES (ids only, no content)
@@ -99,6 +104,7 @@ MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 200
 MAX_JSON_CHARS = 40_000            # metadata / provenance serialized cap
 MAX_SESSION_ID_CHARS = 128
+MAX_DEVICE_ID_CHARS = 128
 MAX_REPOS = 10_000                 # cap repos map so an empty-memories bundle can't bloat
 # Rows applied per transaction / per batched existence lookup. Bounded so applying a
 # MAX_MEMORIES bundle never materializes the whole thing at once (see apply_bundle).
@@ -112,16 +118,30 @@ _VALID_SCOPES = frozenset(scope.value for scope in Scope)
 # Strip C0/C1 control + ANSI-escape bytes (keep \t\n\r) — the same defense the rest of
 # the ingest surface applies (service.py) against hidden-instruction / terminal-injection
 # payloads. The sync write path bypasses service.py, so it must strip here itself.
+_NORMALISED_LEGACY_DEVICE_ID_RE = re.compile(r"^legacy_[0-9a-f]{16}$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SAFE_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_TYPED_DEVICE_ID_RE = re.compile(r"^dev_[0-9A-HJKMNPQRSTVWXYZ]{26}$")
+_STATE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+MAX_SYNC_GENERATION = (1 << 63) - 1
 
-# Descriptive fields resolved by last-writer-wins (the version key). The lattice
-# fields below (valid_to/expired_at/stability/access_count/last_access/pinned) are
-# handled separately and are NOT part of this set.
-_LWW_FIELDS = (
-    "title", "content", "summary", "keywords", "metadata", "mtype", "scope",
-    "importance", "surprise", "confidence", "sensitivity", "valid_from", "ingested_at",
-    "session_id", "provenance", "subject_key", "claim_kind",
-)
+
+# Local trust/ingress and derived-index envelopes are persisted for policy and
+# diagnostics, but they are not peer-authored descriptive state. Excluding them from
+# the version hash prevents a round-tripped record from conflicting with itself.
+_LOCAL_METADATA_FIELDS = frozenset({
+    "provenance",
+    "quarantine",
+    "retention_supervision",
+    "entities",
+    "relations",
+    "structured_extraction",
+    "llm_extraction",
+    "structured_consolidation",
+    "sync_ingress",
+    "embed_model",
+})
 
 
 class SyncError(Exception):
@@ -143,6 +163,27 @@ def _stable_hash(obj: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _encode_crockford(value: int, width: int) -> str:
+    """Encode one bounded integer without introducing random conflict identity."""
+    chars = ["0"] * width
+    for index in range(width - 1, -1, -1):
+        chars[index] = _CROCKFORD32[value & 0x1F]
+        value >>= 5
+    if value:
+        raise ValueError("value does not fit Crockford field")
+    return "".join(chars)
+
+
+def _conflict_memory_id(physical_ms: int, digest: str) -> str:
+    """Build a deterministic, time-sortable typed ULID from an HLC and pair hash."""
+    randomness = int(digest[:20], 16)  # 80 deterministic bits, matching ULID width
+    return (
+        "mem_"
+        + _encode_crockford(physical_ms, 10)
+        + _encode_crockford(randomness, 16)
+    )
+
+
 def _min_nonnull(a: Optional[float], b: Optional[float]) -> Optional[float]:
     if a is None:
         return b
@@ -160,22 +201,31 @@ def _max_nonnull(a: Optional[float], b: Optional[float]) -> Optional[float]:
 
 
 def _label_tuple(rec: MemoryRecord) -> list:
-    """The descriptive payload, canonicalized for hashing/compare (order-stable)."""
+    """Canonical user-descriptive payload used only for version ordering."""
+    metadata = dict(rec.metadata or {})
+    for key in _LOCAL_METADATA_FIELDS:
+        metadata.pop(key, None)
     return [
         rec.title, rec.content, rec.summary, sorted(rec.keywords or []),
         _enum(rec.mtype), _enum(rec.scope), rec.importance, rec.surprise,
-        rec.confidence, rec.sensitivity, rec.valid_from, rec.session_id,
-        rec.subject_key, rec.claim_kind,
-        json.dumps(rec.metadata or {}, sort_keys=True, default=str),
-        json.dumps(rec.provenance or {}, sort_keys=True, default=str),
+        rec.confidence, rec.sensitivity, rec.valid_from, rec.ingested_at,
+        rec.session_id, rec.subject_key, rec.claim_kind,
+        json.dumps(metadata, sort_keys=True, default=str),
     ]
 
 
-def _version_key(rec: MemoryRecord) -> tuple:
-    """Total order for last-writer-wins. Content hash is the final tiebreak so the
-    winner depends only on the data — making merge commutative even when two devices
-    edited at the same clock instant."""
-    return (rec.last_access or 0.0, rec.ingested_at or 0.0, _stable_hash(_label_tuple(rec)))
+def _version_key(rec: MemoryRecord) -> tuple[int, str, float, str]:
+    """Total order for descriptive content, independent of reinforcement reads.
+
+    A canonical ``modified_hlc`` is the authoritative version. Any initialized HLC
+    sorts after the empty legacy sentinel, so a real descriptive update dominates
+    every pre-v13 copy. Two legacy rows retain the old ``ingested_at`` fallback;
+    the stable payload hash makes both regimes deterministic on an exact clock tie.
+    """
+    payload_hash = _stable_hash(_label_tuple(rec))
+    if rec.modified_hlc:
+        return (1, rec.modified_hlc, 0.0, payload_hash)
+    return (0, "", rec.ingested_at or 0.0, payload_hash)
 
 
 def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
@@ -203,17 +253,10 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         session_id=winner.session_id, provenance=dict(winner.provenance or {}),
         subject_key=winner.subject_key, claim_kind=winner.claim_kind,
         valid_from=winner.valid_from,
-        # ``ingested_at`` is a LWW field (_LWW_FIELDS), NOT a lattice field, and it is the
-        # SECOND component of _version_key. Merging it as a min-lattice made
-        # _version_key(merged) < _version_key(winner), so replaying the same bundle re-ran
-        # LWW from a lowered key and fell through to the content-hash tiebreak — silently
-        # reverting the later edit and breaking both merge(merge(a,b),b) == merge(a,b) and
-        # apply_bundle's "a second application reports all-unchanged" contract.
-        # Taking the winner's value makes _version_key(merged) == _version_key(winner)
-        # exactly: last_access is the max (which IS the winner's, since it is the key's
-        # primary component), ingested_at is the winner's, and _label_tuple is built
-        # entirely from the winner.
+        # Keep the HLC and ingress timestamp from the same whole-record winner.
+        # ``last_access`` remains an independent reinforcement lattice below.
         ingested_at=winner.ingested_at,
+        modified_hlc=winner.modified_hlc,
         # lattice fields: commutative joins (independent of the LWW winner)
         valid_to=valid_to,
         expired_at=_min_nonnull(local.expired_at, incoming.expired_at),
@@ -319,40 +362,26 @@ def _pin_lattice(local: MemoryRecord, incoming: MemoryRecord) -> tuple[bool, Opt
     return pinned, pinned_at, unpinned_at
 
 
-# Fields ``Store.add_memory`` fills in from the SERVER clock when they arrive as ``None``
-# (store.py: ``ingested_at``/``valid_from``/``last_access`` are each defaulted to ``now_ts()``).
-# For these, "omitted by the bundle" is NOT a competing value — the store has no way to
-# persist an unset one, so the omission can only ever mean "whatever the row already has".
-#
-# ``valid_to``/``expired_at`` are deliberately NOT in this set: there ``None`` is a genuine,
-# persistable value meaning "still valid / not retired", and the earliest-non-null lattice
-# already handles it.
-_STORE_DEFAULTED_FIELDS = ("valid_from", "ingested_at", "last_access")
+def _initialize_sync_store_defaults(rec: MemoryRecord) -> MemoryRecord:
+    """Give an imported row deterministic values for Store-required clocks.
 
-
-def inherit_store_defaults(existing: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
-    """Fill store-defaulted fields the incoming row OMITTED from ``existing`` (in place).
-
-    Must run before ``merge_record`` whenever the id already exists locally, otherwise
-    ``apply_bundle`` never converges for a bundle that omits one of these fields:
-    ``dict_to_record`` leaves it ``None``, ``add_memory`` then stamps it with ``now()``, so
-    on the next replay the stored and incoming labels differ *only* in that field. When
-    ``last_access`` and ``ingested_at`` tie, the version key falls through to the
-    content-hash tiebreak, which flips a coin — roughly half of all replays reported
-    ``updated``, rewrote the row with a FRESH default, and flipped again next round.
-    Unbounded write amplification and ``sync_overwrite`` audit spam on every sync round,
-    reachable from an untrusted bundle (SECURITY.md — memory poisoning).
-
-    Peer-to-peer bundles never tripped this because ``record_to_dict`` always emits all
-    three; a hand-crafted bundle does. This is NOT done inside ``merge_record``: that
-    function is a pure lattice over two complete records and has no notion of "the store
-    would have defaulted this". A value the incoming row genuinely supplies is untouched,
-    so a legitimately newer ``valid_from`` still wins last-writer-wins normally.
+    ``Store.add_memory`` normally fills these fields from the receiver's wall clock.
+    That is appropriate for a local write, but sync omission must have the same meaning
+    regardless of receiver time or bundle arrival order. Prefer wire ``ingested_at``;
+    a modern HLC supplies the next portable anchor, and zero is the explicit legacy
+    "unknown time" sentinel. Every candidate is canonicalized independently before merge.
     """
-    for field_name in _STORE_DEFAULTED_FIELDS:
-        if getattr(incoming, field_name) is None:
-            setattr(incoming, field_name, getattr(existing, field_name))
-    return incoming
+    if rec.ingested_at is None:
+        if rec.modified_hlc:
+            physical_ms, _, _ = parse_modified_hlc(rec.modified_hlc)
+            rec.ingested_at = physical_ms / 1000.0
+        else:
+            rec.ingested_at = 0.0
+    if rec.valid_from is None:
+        rec.valid_from = rec.ingested_at
+    if rec.last_access is None:
+        rec.last_access = rec.ingested_at
+    return rec
 
 
 def _same_sync_payload(left: MemoryRecord, right: MemoryRecord) -> bool:
@@ -385,9 +414,11 @@ def _same_sync_payload(left: MemoryRecord, right: MemoryRecord) -> bool:
 def _signature(rec: MemoryRecord) -> str:
     """Fingerprint of everything sync persists — to tell 'changed' from 'no-op'."""
     return _stable_hash(_label_tuple(rec) + [
+        json.dumps(rec.metadata or {}, sort_keys=True, default=str),
+        json.dumps(rec.provenance or {}, sort_keys=True, default=str),
+        rec.modified_hlc,
         rec.valid_to, rec.valid_to_recorded_at, rec.expired_at,
-        rec.ingested_at, rec.stability,
-        rec.access_count, rec.last_access, bool(rec.pinned),
+        rec.stability, rec.access_count, rec.last_access, bool(rec.pinned),
         rec.pinned_at, rec.unpinned_at,
     ])
 
@@ -406,6 +437,7 @@ def record_to_dict(rec: MemoryRecord) -> dict:
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
+        "modified_hlc": rec.modified_hlc,
         "pinned": bool(rec.pinned), "sensitivity": rec.sensitivity,
         "pinned_at": rec.pinned_at, "unpinned_at": rec.unpinned_at,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
@@ -438,23 +470,27 @@ def _clamp_num(v: Any, lo: float, hi: float, default: float) -> float:
 
 
 def _clamp_ts(v: Any, now: float) -> Optional[float]:
-    """Coerce a timestamp and bound it to ``[0, now + skew]``. Timestamps feed the
-    last-writer-wins version key, so an unclamped future value could permanently pin
-    poisoned content above every honest future edit; the skew still tolerates real
-    cross-device clock drift."""
+    """Coerce a system timestamp, preserving accepted values exactly.
+
+    ``ingested_at`` is the legacy descriptive version clock, so an unclamped future
+    value could permanently pin poisoned content above every honest future edit. A
+    receiver-relative upper clamp is not convergent, however: two replicas would store
+    different caps. Return ``None`` for an invalid/future value so the trust boundary can
+    reject a supplied value; retain the skew window for ordinary clock drift.
+    """
     f = _as_float(v, None)
-    if f is None:
+    if f is None or f > now + TS_FUTURE_SKEW:
         return None
-    return max(0.0, min(f, now + TS_FUTURE_SKEW))
+    return max(0.0, f)
 
 
 # World-time validity ceiling (year ~2100). ``valid_from``/``valid_to`` are WORLD time — a
-# fact may legitimately be true until a future date. Neither feeds the PRIMARY version-key
-# ordering (last_access, ingested_at — both system time, still clamped by _clamp_ts):
-# ``valid_to`` is a lattice field, and ``valid_from`` participates only in the version key's
-# deterministic content-hash TIEBREAK (clock-independent), so a future value can't pin
-# poisoned content above honest edits. Clamping these to now+skew truncated real future
-# validity, which the earliest-wins merge then spread to every device. Bound only to a sane
+# fact may legitimately be true until a future date. Neither feeds the primary
+# version-clock ordering (currently ``ingested_at``): ``valid_to`` is a lattice field,
+# and ``valid_from`` participates only in the version key's deterministic content-hash
+# tiebreak, so a future value cannot pin poisoned content above honest edits. Clamping
+# these to now+skew truncated real future validity, which the earliest-wins merge then
+# spread to every device. Bound only to a sane
 # far-future ceiling to reject absurd/overflow values.
 _WORLD_TS_MAX = 4_102_444_800.0
 
@@ -473,6 +509,25 @@ def _clamp_world_ts(v: Any) -> Optional[float]:
 def _clamp_str(v: Any, n: int) -> str:
     s = v if isinstance(v, str) else ("" if v is None else str(v))
     return _CONTROL_RE.sub("", s)[:n]
+
+
+def _normalise_device_id(value: Any) -> str:
+    """Return a bounded report/provenance identity or reject malformed metadata."""
+    if value is None or value == "":
+        return "legacy_anonymous"
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_DEVICE_ID_CHARS
+        or _SAFE_DEVICE_ID_RE.fullmatch(value) is None
+    ):
+        raise SyncError("bundle device_id is invalid")
+    if (
+        value == "legacy_anonymous"
+        or _TYPED_DEVICE_ID_RE.fullmatch(value) is not None
+        or _NORMALISED_LEGACY_DEVICE_ID_RE.fullmatch(value) is not None
+    ):
+        return value
+    return "legacy_" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _mtype(v: Any) -> MemoryType:
@@ -552,7 +607,48 @@ def loads_strict(data: bytes):
         raise ValueError("bundle JSON is nested too deeply")
 
 
-def dict_to_record(d: dict) -> Optional[MemoryRecord]:
+def _snapshot_hash(bundle: dict) -> str:
+    """Hash authenticated snapshot state while excluding its volatile wall clock."""
+    return _stable_hash({
+        key: value
+        for key, value in bundle.items()
+        if key not in {"created_at", "state_hash"}
+    })
+
+
+def _validated_snapshot_freshness(bundle: dict) -> Optional[tuple[int, str, str]]:
+    """Validate v3 generation/hash-chain metadata before any destructive apply."""
+    version = _as_int(bundle.get("version"), 0)
+    if version < 3:
+        return None
+    generation = bundle.get("generation")
+    previous_hash = bundle.get("previous_hash")
+    state_hash = bundle.get("state_hash")
+    tombstone_hash = bundle.get("tombstone_checkpoint")
+    tombstone_count = bundle.get("tombstone_count")
+    tombstones = bundle.get("tombstones") or []
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or not 1 <= generation <= MAX_SYNC_GENERATION
+        or not isinstance(previous_hash, str)
+        or (generation == 1 and previous_hash != "")
+        or (generation > 1 and _STATE_HASH_RE.fullmatch(previous_hash) is None)
+        or not isinstance(state_hash, str)
+        or _STATE_HASH_RE.fullmatch(state_hash) is None
+        or not isinstance(tombstone_hash, str)
+        or _STATE_HASH_RE.fullmatch(tombstone_hash) is None
+        or isinstance(tombstone_count, bool)
+        or not isinstance(tombstone_count, int)
+        or tombstone_count != len(tombstones)
+        or tombstone_hash != _stable_hash(tombstones)
+        or state_hash != _snapshot_hash(bundle)
+    ):
+        raise SyncError("bundle freshness metadata is invalid")
+    return generation, previous_hash, state_hash
+
+
+def dict_to_record(d: Any) -> Optional[MemoryRecord]:
     """Validate + clamp one untrusted bundle row into a MemoryRecord, or ``None`` if
     it is unusable (no id / no content). Never raises — this is the trust boundary."""
     if not isinstance(d, dict):
@@ -580,6 +676,41 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
     if sens not in _VALID_SENSITIVITY:
         sens = "normal"
     now = now_ts()
+    modified_hlc = d.get("modified_hlc", "")
+    try:
+        modified_hlc = normalize_modified_hlc(modified_hlc, allow_empty=True)
+        physical_ms, _, _ = parse_modified_hlc(modified_hlc, allow_empty=True)
+    except ValueError:
+        return None
+    if modified_hlc and physical_ms > int((now + TS_FUTURE_SKEW) * 1000):
+        # A peer-controlled clock beyond the same skew allowed for system timestamps
+        # could permanently win LWW ordering. Reject it; never clamp poison into authority.
+        return None
+    ingested_at = _clamp_ts(d.get("ingested_at"), now)
+    last_access = _clamp_ts(d.get("last_access"), now)
+    valid_to_recorded_at = _clamp_ts(d.get("valid_to_recorded_at"), now)
+    expired_at = _clamp_ts(d.get("expired_at"), now)
+    pinned_at = _clamp_ts(d.get("pinned_at"), now)
+    unpinned_at = _clamp_ts(d.get("unpinned_at"), now)
+    supplied_system_times = {
+        "ingested_at": ingested_at,
+        "last_access": last_access,
+        "valid_to_recorded_at": valid_to_recorded_at,
+        "expired_at": expired_at,
+        "pinned_at": pinned_at,
+        "unpinned_at": unpinned_at,
+    }
+    if any(
+        d.get(field_name) is not None and value is None
+        for field_name, value in supplied_system_times.items()
+    ):
+        return None
+    valid_from = _clamp_world_ts(d.get("valid_from"))
+    if modified_hlc and (ingested_at is None or valid_from is None):
+        # A real descriptive clock identifies a complete modern write. Allowing its
+        # descriptive timestamps to be omitted would synthesize receiver-side values
+        # under the same HLC and manufacture a false concurrent-edit conflict.
+        return None
     return MemoryRecord(
         id=_clamp_str(mid, 128), content=_clamp_str(content, MAX_CONTENT_CHARS),
         mtype=_mtype(d.get("mtype")), scope=_scope(d.get("scope")),
@@ -594,19 +725,20 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         stability=effective_stability(d.get("stability")),
         confidence=_clamp_num(d.get("confidence"), 0.0, 1.0, 1.0),
         access_count=effective_access_count(d.get("access_count")),
-        last_access=_clamp_ts(d.get("last_access"), now),
-        # World-time validity may be in the future; the system timestamps below may not
-        # (they are the version key's primary ordering / anti-poison defense).
-        valid_from=_clamp_world_ts(d.get("valid_from")),
+        last_access=last_access,
+        # World-time validity may be in the future. System timestamps and the HLC
+        # above are bounded against peer-controlled future-time authority.
+        valid_from=valid_from,
         valid_to=_clamp_world_ts(d.get("valid_to")),
-        valid_to_recorded_at=_clamp_ts(d.get("valid_to_recorded_at"), now),
-        ingested_at=_clamp_ts(d.get("ingested_at"), now),
-        expired_at=_clamp_ts(d.get("expired_at"), now),
+        valid_to_recorded_at=valid_to_recorded_at,
+        ingested_at=ingested_at,
+        expired_at=expired_at,
+        modified_hlc=modified_hlc,
         # Authority-bearing booleans are strict. In particular ``"false"`` must
         # not become truthy and then remain permanently pinned through the CRDT OR.
         pinned=d.get("pinned") is True, sensitivity=sens,
-        pinned_at=_clamp_ts(d.get("pinned_at"), now),
-        unpinned_at=_clamp_ts(d.get("unpinned_at"), now),
+        pinned_at=pinned_at,
+        unpinned_at=unpinned_at,
         subject_key=_clamp_str(d.get("subject_key"), 512),
         claim_kind=_clamp_str(d.get("claim_kind"), 256),
         provenance=_safe_json_obj(d.get("provenance")),
@@ -634,7 +766,7 @@ class SyncEngine:
             embedding_space_fingerprint(embedder) if embedder is not None else ""
         )
         self.index = vector_index
-        self.device_id = device_id or store.device_id()
+        self.device_id = _normalise_device_id(device_id or store.device_id())
 
         # Same hard boundary MemoryService enforces (SECURITY.md §3): when set, a bundle
         # may only be applied into one of these workspaces, so the folder transport can
@@ -642,8 +774,101 @@ class SyncEngine:
         self.allowed_workspaces = (frozenset(allowed_workspaces)
                                    if allowed_workspaces else None)
 
+    @staticmethod
+    def _checkpoint_key(workspace_id: str, repo_id: Optional[str],
+                        device_id: str) -> str:
+        scope = hashlib.sha256(
+            (str(workspace_id) + "\0" + str(repo_id or "")).encode("utf-8")
+        ).hexdigest()[:24]
+        device = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:24]
+        return f"sync_snapshot:{scope}:{device}"
+
+    def _load_snapshot_checkpoint(
+            self, workspace_id: str, repo_id: Optional[str],
+            device_id: str) -> Optional[tuple[int, str]]:
+        raw = self.store.get_sync_state(
+            self._checkpoint_key(workspace_id, repo_id, device_id)
+        )
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+            generation = value["generation"]
+            state_hash = value["state_hash"]
+        except (KeyError, TypeError, ValueError, RecursionError):
+            raise SyncError("local sync freshness checkpoint is invalid") from None
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or not 1 <= generation <= MAX_SYNC_GENERATION
+            or not isinstance(state_hash, str)
+            or _STATE_HASH_RE.fullmatch(state_hash) is None
+        ):
+            raise SyncError("local sync freshness checkpoint is invalid")
+        return generation, state_hash
+
+    def _save_snapshot_checkpoint(
+            self, workspace_id: str, repo_id: Optional[str], device_id: str,
+            generation: int, state_hash: str) -> None:
+        self.store.set_sync_state(
+            self._checkpoint_key(workspace_id, repo_id, device_id),
+            json.dumps(
+                {"generation": generation, "state_hash": state_hash},
+                separators=(",", ":"), sort_keys=True,
+            ),
+        )
+
+    def _stamp_snapshot(self, bundle: dict, workspace_id: str,
+                        repo_id: Optional[str], *, save_checkpoint: bool = True) -> dict:
+        device_id = _normalise_device_id(bundle["device_id"])
+        checkpoint = self._load_snapshot_checkpoint(
+            workspace_id, repo_id, device_id
+        )
+        generation = 1 if checkpoint is None else checkpoint[0] + 1
+        if generation > MAX_SYNC_GENERATION:
+            raise SyncError("local sync generation is exhausted")
+        bundle["generation"] = generation
+        bundle["previous_hash"] = "" if checkpoint is None else checkpoint[1]
+        tombstones = bundle.get("tombstones") or []
+        bundle["tombstone_count"] = len(tombstones)
+        bundle["tombstone_checkpoint"] = _stable_hash(tombstones)
+        bundle["state_hash"] = _snapshot_hash(bundle)
+        if save_checkpoint:
+            self._save_snapshot_checkpoint(
+                workspace_id, repo_id, device_id,
+                generation, bundle["state_hash"],
+            )
+        return bundle
+
+    def _check_incoming_freshness(
+            self, bundle: dict, workspace_id: str,
+            repo_id: Optional[str], device_id: str,
+    ) -> tuple[Optional[tuple[int, str, str]], bool, bool]:
+        freshness = _validated_snapshot_freshness(bundle)
+        checkpoint = self._load_snapshot_checkpoint(
+            workspace_id, repo_id, device_id
+        )
+        if freshness is None:
+            if checkpoint is not None:
+                raise SyncError("legacy snapshot is older than the local checkpoint")
+            return None, False, False
+        generation, previous_hash, state_hash = freshness
+        if checkpoint is None:
+            return freshness, True, False
+        known_generation, known_hash = checkpoint
+        if generation < known_generation:
+            raise SyncError("snapshot generation rolled back")
+        if generation == known_generation:
+            if state_hash != known_hash:
+                raise SyncError("snapshot generation conflicts with local checkpoint")
+            return freshness, False, True
+        if generation == known_generation + 1 and previous_hash != known_hash:
+            raise SyncError("snapshot hash chain does not extend local checkpoint")
+        return freshness, False, False
+
     # ── export ────────────────────────────────────────────────────────────────
-    def export_bundle(self, workspace_id: str, *, repo_id: Optional[str] = None) -> dict:
+    def export_bundle(self, workspace_id: str, *, repo_id: Optional[str] = None,
+                      _save_checkpoint: bool = True) -> dict:
         """Full-state snapshot of one workspace (all repos unless ``repo_id`` given).
 
         Includes invalidated memories on purpose: a closed ``valid_to`` is state that
@@ -669,13 +894,17 @@ class SyncEngine:
                 "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
         ids_in = [m.id for m in mems]
         links = self.store.links_among(ids_in, include_invalid=True) if ids_in else []
-        return {
+        tombstones = [
+            tomb for tomb in self.store.list_memory_tombstones(workspace_id, repo_id)
+            if tomb.get("export_class") == TOMBSTONE_REMOTE_ERASURE
+        ]
+        bundle = {
             "format": SYNC_FORMAT, "version": SYNC_VERSION,
-            "device_id": self.device_id, "created_at": now_ts(),
+            "device_id": _normalise_device_id(self.device_id), "created_at": now_ts(),
             "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
-            "tombstones": self.store.list_memory_tombstones(workspace_id, repo_id),
+            "tombstones": tombstones,
             "mem_links": [
                 {
                     "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
@@ -690,6 +919,9 @@ class SyncEngine:
                 for ln in links
             ],
         }
+        return self._stamp_snapshot(
+            bundle, workspace_id, repo_id, save_checkpoint=_save_checkpoint
+        )
 
     # ── apply (the trust boundary) ──────────────────────────────────────────────
     def apply_bundle(self, bundle: Any, *, into_workspace: Optional[str] = None,
@@ -707,7 +939,8 @@ class SyncEngine:
             raise SyncError("not an %s bundle" % SYNC_FORMAT)
         if _as_int(bundle.get("version"), 0) not in SYNC_ACCEPTED_VERSIONS:
             raise SyncError("unsupported bundle version %r" % bundle.get("version"))
-        src_device = bundle.get("device_id")
+        _validated_snapshot_freshness(bundle)
+        src_device = _normalise_device_id(bundle.get("device_id"))
 
         mem_dicts = bundle.get("memories") or []
         link_dicts = bundle.get("mem_links") or []
@@ -727,9 +960,12 @@ class SyncEngine:
             ws_name = "default"
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
-        report = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-                  "links_added": 0, "links_updated": 0, "tombstones_applied": 0,
-                  "workspace": ws_name, "dry_run": bool(dry_run)}
+        report = {
+            "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
+            "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
+            "tombstones_applied": 0,
+                  "workspace": ws_name, "from_device": src_device,
+                  "dry_run": bool(dry_run)}
 
         # Resolve scope by NAME (per-device ids differ; names are the sync key). A
         # dry run must not mutate, so it resolves existing ids only and never creates.
@@ -751,7 +987,7 @@ class SyncEngine:
             # Dry-run must evaluate the same repo-scoped acceptance path as a real
             # apply; ``None`` would incorrectly reject rows that the real apply would
             # accept after creating the workspace/repository.
-            local_ws = row["id"] if row else f"__dry_run_workspace__:{ws_name}"
+            local_ws = str(row["id"]) if row else f"__dry_run_workspace__:{ws_name}"
             for rid, rname in valid_remote_repos.items():
                 repo_row = (self.store.conn.execute(
                     "SELECT id FROM repos WHERE workspace_id=? AND name=?",
@@ -762,12 +998,23 @@ class SyncEngine:
                 )
         else:
             local_ws = self.store.get_or_create_workspace(ws_name)
+        accepted: dict[str, MemoryRecord] = {}
+        incoming_freshness, _, _ = self._check_incoming_freshness(
+            bundle, local_ws, only_repo_id, src_device
+        )
+        if not dry_run:
             for rid, rname in valid_remote_repos.items():
                 repo_remap[rid] = self.store.get_or_create_repo(local_ws, rname)
-
-        accepted: dict[str, MemoryRecord] = {}
+        report["rejected"] += sum(
+            1 for tomb in tomb_dicts
+            if (
+                not isinstance(tomb, dict)
+                or tomb.get("export_class") != TOMBSTONE_REMOTE_ERASURE
+            )
+        )
         parsed_tombstones = self._parse_tombstones(tomb_dicts, src_device)
         accepted_tombstones: list[dict] = []
+        tombstone_state_changed = False
 
         # Tombstones are scoped before they are applied. A bundle authorized for one
         # workspace must never hard-delete a known id owned by another workspace.
@@ -788,13 +1035,20 @@ class SyncEngine:
             # let a same-id marker from another workspace overwrite or poison the local
             # workspace's deletion state when the id is no longer present locally.
             tombstone_row = self.store.conn.execute(
-                "SELECT workspace_id, repo_id, deleted_at "
+                "SELECT workspace_id, repo_id, deleted_at, export_class "
                 "FROM memory_tombstones WHERE memory_id=?",
                 (tomb["id"],)
             ).fetchone()
             if (tombstone_row is not None
                     and tombstone_row["workspace_id"] is not None
                     and tombstone_row["workspace_id"] != local_ws):
+                report["rejected"] += 1
+                continue
+            # A never-export marker is durable local privacy state. A peer cannot
+            # upgrade it into a shareable remote-erasure marker after the source
+            # content and its classification have already been destroyed.
+            if (tombstone_row is not None
+                    and tombstone_row["export_class"] == TOMBSTONE_NEVER_EXPORT):
                 report["rejected"] += 1
                 continue
             # Once a tombstone has a repository identity, a marker from a sibling
@@ -823,6 +1077,24 @@ class SyncEngine:
                     and mapped_tomb_repo != only_repo_id):
                 report["rejected"] += 1
                 continue
+            # A peer assertion is not erase authority. Protected local records require a
+            # separately authenticated user/device authorization before their irreversible
+            # rows and derivatives may be removed.
+            if existing is not None and (
+                    existing.sensitivity == "secret"
+                    or existing.scope == Scope.SESSION
+                    or provenance_is_approved(existing.provenance)):
+                report["rejected"] += 1
+                if not dry_run:
+                    self.store.audit(
+                        "sync:%s" % _clamp_str(src_device or "peer", 128),
+                        "sync_trust_conflict",
+                        existing.id,
+                        "peer erasure ignored because local record is protected",
+                        commit=False,
+                    )
+                    tombstone_state_changed = True
+                continue
             # Preserve an already-known repository identity, but never infer one
             # from the live row for a legacy marker: doing so narrows a global marker
             # and permits a same-id row from a sibling repository to resurrect.
@@ -833,6 +1105,7 @@ class SyncEngine:
                 tombstone_row is None
                 or float(tomb["deleted_at"]) < float(tombstone_row["deleted_at"])
                 or tombstone_row["repo_id"] != stored_tomb_repo
+                or tombstone_row["export_class"] != TOMBSTONE_REMOTE_ERASURE
             )
             accepted_tombstones.append({
                 **tomb, "_mapped_repo_id": stored_tomb_repo,
@@ -842,7 +1115,9 @@ class SyncEngine:
                     tomb["id"], deleted_at=tomb["deleted_at"],
                     device_id=tomb["device"], workspace_id=local_ws,
                     repo_id=stored_tomb_repo,
+                    export_class=TOMBSTONE_REMOTE_ERASURE,
                 )
+                tombstone_state_changed = True
                 # A peer's secure erase must remove a row this device still holds
                 # immediately, not only block a future re-add.
                 if existing is not None:
@@ -858,7 +1133,7 @@ class SyncEngine:
                         raise
             if marker_changed or dry_run:
                 report["tombstones_applied"] += 1
-        if not dry_run and accepted_tombstones:
+        if not dry_run and (accepted_tombstones or tombstone_state_changed):
             self.store.conn.commit()
 
         # Bulk apply. Previously this was N+1: a SELECT per id to test existence, then a
@@ -888,6 +1163,14 @@ class SyncEngine:
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
             raise
+        if not dry_run and incoming_freshness is not None:
+            self._save_snapshot_checkpoint(
+                local_ws,
+                only_repo_id,
+                src_device,
+                incoming_freshness[0],
+                incoming_freshness[2],
+            )
         return report
 
     def _apply_memories(self, mem_dicts: list, report: dict,
@@ -927,6 +1210,13 @@ class SyncEngine:
             # get_memory() did.
             known = self.store.get_memories(
                 [rec.id for rec in parsed if rec is not None])
+            # Dry-run has no durable prior batch to query, so carry its simulated state
+            # across APPLY_BATCH boundaries. Live apply must trust the fresh DB lookup:
+            # a local edit may legitimately land between committed batches.
+            if dry_run:
+                for rec in parsed:
+                    if rec is not None and rec.id in accepted:
+                        known[rec.id] = accepted[rec.id]
             for d, rec in zip(batch, parsed):
                 self._apply_one(d, rec, report, accepted, known, local_ws,
                                 repo_remap, only_repo_id, src_device, dry_run,
@@ -995,6 +1285,9 @@ class SyncEngine:
             report["rejected"] += 1
             return
         existing = known.get(rec.id)
+        # Missing store-required clocks must be canonical per candidate. Inheriting
+        # them from whichever version arrived first makes legacy merge non-commutative.
+        _initialize_sync_store_defaults(rec)
         if existing is not None and existing.workspace_id != local_ws:
             # This id already lives in a DIFFERENT workspace: never let a bundle reach
             # across the scope boundary (SECURITY.md §3 confinement).
@@ -1045,7 +1338,12 @@ class SyncEngine:
         # all scope checks above so malformed remote rows are still rejected rather
         # than being disguised as harmless trust conflicts.
         if existing is not None and provenance_is_approved(existing.provenance):
-            if not dry_run and rec.content != existing.content:
+            content_changed = rec.content != existing.content
+            self._rehome_external_record(rec, src_device=src_device)
+            self._preserve_hlc_conflict(
+                existing, rec, report=report, known=known, dry_run=dry_run,
+            )
+            if not dry_run and content_changed:
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_trust_conflict",
@@ -1070,7 +1368,7 @@ class SyncEngine:
         # timestamp, or metadata/provenance change still receives a fresh untrusted
         # envelope below.
         if (existing is not None and "metadata" not in d and "provenance" not in d
-                and _same_sync_payload(existing, inherit_store_defaults(existing, rec))):
+                and _same_sync_payload(existing, rec)):
             rec.metadata = dict(existing.metadata or {})
             rec.provenance = dict(existing.provenance or {})
         else:
@@ -1079,10 +1377,21 @@ class SyncEngine:
         # same-id payload must not erase a local governance decision; only the local
         # interactive approval path may create a separate approved successor.
         if existing is not None and (
-                metadata_is_quarantined(existing.metadata)
-                or bool((existing.provenance or {}).get("quarantined"))):
+            metadata_is_quarantined(existing.metadata or {})
+            or bool((existing.provenance or {}).get("quarantined"))
+        ):
+            # Merge inherited quarantine with any existing reasons so the audit trail
+            # preserves why the record was originally quarantined (e.g. prompt injection)
+            # alongside the inheritance marker.
+            prior_reasons: tuple[str, ...] = ()
+            prior_q = (existing.metadata or {}).get("quarantine")
+            if isinstance(prior_q, dict):
+                raw = prior_q.get("reasons") or ()
+                if isinstance(raw, (list, tuple)):
+                    prior_reasons = tuple(str(r) for r in raw if isinstance(r, str))
+            merged_reasons = tuple(dict.fromkeys((*prior_reasons, "inherited_quarantine")))
             rec.metadata = apply_quarantine_metadata(
-                rec.metadata, PoisoningDecision(True, reasons=("inherited_quarantine",))
+                rec.metadata, PoisoningDecision(True, reasons=merged_reasons)
             )
             rec.provenance = dict(rec.metadata["provenance"])
             at = existing.valid_to if existing.valid_to is not None else now_ts()
@@ -1092,6 +1401,10 @@ class SyncEngine:
             rec.valid_to = at
             rec.valid_to_recorded_at = now_ts()
             rec.embedding = None
+        if existing is not None:
+            self._preserve_hlc_conflict(
+                existing, rec, report=report, known=known, dry_run=dry_run,
+            )
         if existing is None:
             if not dry_run:
                 self._write(rec, commit=False)
@@ -1113,11 +1426,7 @@ class SyncEngine:
             accepted[rec.id] = rec
         else:
             accepted[rec.id] = existing
-            # A field the bundle simply OMITTED is not a competing value: the store would
-            # only stamp it with now() on write, so inherit it from the row we already hold
-            # before merging. Without this, apply_bundle never converges for a bundle that
-            # omits valid_from — see inherit_store_defaults.
-            merged = merge_record(existing, inherit_store_defaults(existing, rec))
+            merged = merge_record(existing, rec)
             if _signature(merged) == _signature(existing):
                 report["unchanged"] += 1
             else:
@@ -1140,6 +1449,17 @@ class SyncEngine:
                      local_ws, only_repo_id, src_device, dry_run: bool) -> None:
         # mem_links: grow-only set; endpoints must be memories we actually hold.
         pending = 0
+
+        def owner_row(memory: MemoryRecord) -> dict:
+            return {
+                "id": memory.id,
+                "workspace_id": memory.workspace_id,
+                "repo_id": memory.repo_id,
+                "session_id": memory.session_id,
+                "scope": _enum(memory.scope),
+                "metadata": json.dumps(memory.metadata or {}, default=str),
+                "provenance": json.dumps(memory.provenance or {}, default=str),
+            }
         for ln in link_dicts:
             if not isinstance(ln, dict):
                 continue
@@ -1161,6 +1481,22 @@ class SyncEngine:
             if (only_repo_id is not None
                     and (ma.repo_id != only_repo_id or mb.repo_id != only_repo_id)):
                 continue
+            allow_scope_transition = rel in {"promotes", "merges"}
+            first_owner = (ma.repo_id, ma.session_id, _enum(ma.scope))
+            second_owner = (mb.repo_id, mb.session_id, _enum(mb.scope))
+            if allow_scope_transition and first_owner != second_owner:
+                try:
+                    # Use Store's single governance rule even for dry-run records that
+                    # deliberately do not exist in SQLite yet.
+                    self.store._validate_memory_link_owner_rows(
+                        owner_row(ma),
+                        owner_row(mb),
+                        rel,
+                        allow_scope_transition=True,
+                    )
+                except ValueError:
+                    report["rejected"] += 1
+                    continue
             # Link records carry no independent authenticated provenance. A peer
             # therefore cannot attach an arbitrary graph edge to a locally approved
             # memory, where it could influence graph recall despite the peer payload
@@ -1174,18 +1510,42 @@ class SyncEngine:
                 if not dry_run:
                     self.store.conn.commit()
                 pending = 0
-            # v2 bundles carry a complete bi-temporal link version. Preserve it
-            # verbatim (after the normal untrusted-input clamps), including closed
-            # intervals. v1 omitted these fields, so it retains the established
-            # grow-only/current-link merge below.
-            if ("valid_from" in ln and "ingested_at" in ln
-                    and _clamp_world_ts(ln.get("valid_from")) is not None
-                    and _clamp_ts(ln.get("ingested_at"), now_ts()) is not None):
+            # v2 bundles carry a complete bi-temporal link version. Preserve accepted
+            # timestamps verbatim, including closed intervals. A partial or invalid
+            # temporal payload is rejected rather than reinterpreted as a v1 link.
+            temporal_fields = (
+                "valid_from", "valid_to", "valid_to_recorded_at",
+                "ingested_at", "expired_at",
+            )
+            if any(field_name in ln for field_name in temporal_fields):
+                link_now = now_ts()
                 valid_from = _clamp_world_ts(ln.get("valid_from"))
                 valid_to = _clamp_world_ts(ln.get("valid_to"))
-                valid_to_recorded_at = _clamp_ts(ln.get("valid_to_recorded_at"), now_ts())
-                ingested_at = _clamp_ts(ln.get("ingested_at"), now_ts())
-                expired_at = _clamp_ts(ln.get("expired_at"), now_ts())
+                valid_to_recorded_at = _clamp_ts(
+                    ln.get("valid_to_recorded_at"), link_now
+                )
+                ingested_at = _clamp_ts(ln.get("ingested_at"), link_now)
+                expired_at = _clamp_ts(ln.get("expired_at"), link_now)
+                parsed_temporal = {
+                    "valid_from": valid_from,
+                    "valid_to": valid_to,
+                    "valid_to_recorded_at": valid_to_recorded_at,
+                    "ingested_at": ingested_at,
+                    "expired_at": expired_at,
+                }
+                if (
+                    "valid_from" not in ln
+                    or "ingested_at" not in ln
+                    or valid_from is None
+                    or ingested_at is None
+                    or (valid_to is not None and valid_to < valid_from)
+                    or any(
+                        ln.get(field_name) is not None and value is None
+                        for field_name, value in parsed_temporal.items()
+                    )
+                ):
+                    report["rejected"] += 1
+                    continue
                 existing_version = self.store.conn.execute(
                     "SELECT 1 FROM mem_links "
                     "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
@@ -1206,6 +1566,7 @@ class SyncEngine:
                         valid_to_recorded_at=valid_to_recorded_at,
                         ingested_at=ingested_at, expired_at=expired_at,
                         commit=False,
+                        allow_scope_transition=allow_scope_transition,
                     )
                     if inserted:
                         self.store.audit(
@@ -1235,11 +1596,15 @@ class SyncEngine:
                     self.store.add_link(
                         a, b, rel, layer=merged_layer, reason=merged_reason,
                         commit=False,
+                        allow_scope_transition=allow_scope_transition,
                     )
                 report["links_updated"] += 1
                 continue
             if not dry_run:
-                self.store.add_link(a, b, rel, layer=layer, reason=reason, commit=False)
+                self.store.add_link(
+                    a, b, rel, layer=layer, reason=reason, commit=False,
+                    allow_scope_transition=allow_scope_transition,
+                )
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_link", a,
@@ -1251,12 +1616,13 @@ class SyncEngine:
     def _parse_tombstones(self, tomb_dicts: list, src_device: object) -> list[dict]:
         """Validate + clamp untrusted bundle tombstones. Never raises.
 
-        A tombstone is ``{id, deleted_at, device, repo_id}`` — no content — so there is
-        nothing to quarantine; it is clamped like any other untrusted input and a
-        malformed entry is silently dropped (counted by the caller only for entries
-        that survive). ``deleted_at`` is bounded to ``[0, now + skew]`` so a hostile
-        far-future erasure cannot permanently tombstone a memory id. A missing
-        ``repo_id`` is a legacy global marker.
+        A tombstone is ``{id, deleted_at, device, repo_id, export_class}`` — no
+        content — so there is nothing to quarantine; it is clamped like any other
+        untrusted input and a malformed entry is silently dropped. Only an explicit
+        ``remote_erasure`` classification grants propagation authority; legacy or
+        unknown classifications fail closed. ``deleted_at`` is bounded to
+        ``[0, now + skew]`` so a hostile far-future erasure cannot permanently
+        tombstone a memory id. A missing ``repo_id`` is a legacy global marker.
         """
         # Scope is part of tombstone identity now.  Keep the earliest event for
         # each (memory id, repository) pair, but a legacy repo-less marker is
@@ -1266,6 +1632,8 @@ class SyncEngine:
         now = now_ts()
         for t in tomb_dicts:
             if not isinstance(t, dict):
+                continue
+            if t.get("export_class") != TOMBSTONE_REMOTE_ERASURE:
                 continue
             mid = t.get("id")
             deleted_at = _as_float(t.get("deleted_at"), None)
@@ -1277,7 +1645,13 @@ class SyncEngine:
                     or mid != _clamp_str(mid, 128)):
                 continue
             deleted_at = max(0.0, min(deleted_at, now + TS_FUTURE_SKEW))
-            device = _clamp_str(t.get("device"), 128) if t.get("device") else ""
+            try:
+                device = (
+                    _normalise_device_id(t.get("device"))
+                    if t.get("device") else _normalise_device_id(src_device)
+                )
+            except SyncError:
+                device = _normalise_device_id(src_device)
             repo_id = (
                 _clamp_str(t.get("repo_id"), 128)
                 if isinstance(t.get("repo_id"), str) and t.get("repo_id")
@@ -1291,6 +1665,7 @@ class SyncEngine:
                 "id": mid, "deleted_at": deleted_at,
                 "device": device or (_clamp_str(src_device, 128) if src_device else ""),
                 "repo_id": repo_id,
+                "export_class": TOMBSTONE_REMOTE_ERASURE,
             }
             if key not in positions:
                 positions[key] = len(positions)
@@ -1327,6 +1702,144 @@ class SyncEngine:
                 "could not audit sync vector-index failure (%s)",
                 type(audit_exc).__name__,
             )
+
+    @staticmethod
+    def _hlc_conflict(
+        left: MemoryRecord,
+        right: MemoryRecord,
+    ) -> Optional[tuple[int, int, str, str]]:
+        """Return logical time and payload hashes for one concurrent HLC conflict."""
+        if not left.modified_hlc or not right.modified_hlc:
+            return None
+        left_physical, left_logical, _ = parse_modified_hlc(left.modified_hlc)
+        right_physical, right_logical, _ = parse_modified_hlc(right.modified_hlc)
+        if (left_physical, left_logical) != (right_physical, right_logical):
+            return None
+        left_hash = _stable_hash(_label_tuple(left))
+        right_hash = _stable_hash(_label_tuple(right))
+        if left_hash == right_hash:
+            return None
+        return left_physical, left_logical, left_hash, right_hash
+
+    def _preserve_hlc_conflict(
+        self,
+        existing: MemoryRecord,
+        incoming: MemoryRecord,
+        *,
+        report: dict,
+        known: dict,
+        dry_run: bool,
+    ) -> None:
+        """Keep the losing concurrent edit as one deterministic untrusted successor."""
+        conflict = self._hlc_conflict(existing, incoming)
+        if conflict is None:
+            return
+        physical, logical, existing_hash, incoming_hash = conflict
+        winner = (
+            existing
+            if _version_key(existing) >= _version_key(incoming)
+            else incoming
+        )
+        loser = incoming if winner is existing else existing
+        winner_hash = existing_hash if winner is existing else incoming_hash
+        loser_hash = incoming_hash if winner is existing else existing_hash
+        variants = sorted((
+            (existing.modified_hlc, existing_hash),
+            (incoming.modified_hlc, incoming_hash),
+        ))
+        digest = _stable_hash({
+            "kind": "sync_hlc_conflict_v1",
+            "memory_id": existing.id,
+            "logical_time": [physical, logical],
+            "variants": variants,
+        })
+        conflict_id = _conflict_memory_id(physical, digest)
+        already_preserved = known.get(conflict_id)
+        if already_preserved is None and not dry_run:
+            already_preserved = self.store.get_memory(conflict_id)
+        metadata = dict(loser.metadata or {})
+        for key in _LOCAL_METADATA_FIELDS:
+            metadata.pop(key, None)
+        conflict_provenance = {
+            "source": "sync_conflict",
+            "trusted": False,
+            "review_state": "pending",
+            "trust_origin": "sync_untrusted",
+            "conflict_of": existing.id,
+        }
+        _, _, loser_node = parse_modified_hlc(loser.modified_hlc)
+        conflict_provenance["synced_from_device"] = loser_node
+        metadata["sync_conflict"] = {
+            "memory_id": existing.id,
+            "logical_time": f"{physical:012X}:{logical:08X}",
+            "winner_hlc": winner.modified_hlc,
+            "loser_hlc": loser.modified_hlc,
+            "winner_hash": winner_hash,
+            "loser_hash": loser_hash,
+        }
+        metadata["provenance"] = dict(conflict_provenance)
+        preserved = MemoryRecord(
+            id=conflict_id,
+            content=loser.content,
+            mtype=loser.mtype,
+            scope=loser.scope,
+            workspace_id=existing.workspace_id,
+            repo_id=existing.repo_id,
+            session_id=None,
+            title=loser.title,
+            summary=loser.summary,
+            keywords=list(loser.keywords or []),
+            metadata=metadata,
+            importance=loser.importance,
+            surprise=loser.surprise,
+            stability=loser.stability,
+            access_count=loser.access_count,
+            last_access=loser.last_access,
+            valid_from=loser.valid_from,
+            valid_to=loser.valid_to,
+            ingested_at=loser.ingested_at,
+            expired_at=loser.expired_at,
+            subject_key=loser.subject_key,
+            claim_kind=loser.claim_kind,
+            pinned=loser.pinned,
+            sensitivity=loser.sensitivity,
+            provenance=conflict_provenance,
+            valid_to_recorded_at=loser.valid_to_recorded_at,
+            pinned_at=loser.pinned_at,
+            unpinned_at=loser.unpinned_at,
+            confidence=loser.confidence,
+            modified_hlc=loser.modified_hlc,
+        )
+        if already_preserved is not None:
+            marker = (already_preserved.metadata or {}).get("sync_conflict")
+            expected = metadata["sync_conflict"]
+            core_keys = (
+                "memory_id", "logical_time", "winner_hlc", "loser_hlc",
+                "winner_hash", "loser_hash",
+            )
+            if (
+                not isinstance(marker, dict)
+                or any(marker.get(key) != expected[key] for key in core_keys)
+                or already_preserved.modified_hlc != preserved.modified_hlc
+                or not _same_sync_payload(already_preserved, preserved)
+            ):
+                raise SyncError("sync conflict identity collision")
+            return
+        if not dry_run:
+            self._write(preserved, commit=False)
+            self.store.audit(
+                "sync",
+                "sync_conflict_preserved",
+                conflict_id,
+                (
+                    f"concurrent variant of {existing.id} preserved at "
+                    f"{physical:012X}:{logical:08X}; "
+                    f"winner={winner_hash}; loser={loser_hash}"
+                ),
+                commit=False,
+            )
+        known[conflict_id] = preserved
+        report["conflicts_preserved"] += 1
 
     def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
@@ -1366,8 +1879,16 @@ class SyncEngine:
                     type(exc).__name__,
                 )
                 raise RuntimeError("sync embedding unavailable") from exc
-        # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False
-        self.store.add_memory(rec, audit=False, commit=False)
+        # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False.
+        # Preserve an empty v1/v2 clock so later legacy versions still resolve by the
+        # deterministic legacy key; stamping the first arrival with a local v13 HLC
+        # would make it permanently beat every subsequent legacy update.
+        self.store.add_memory(
+            rec,
+            audit=False,
+            commit=False,
+            _preserve_legacy_modified_hlc=True,
+        )
         if quarantined:
             # ``add_memory(..., embedding=None)`` deliberately leaves an existing
             # vector untouched for ordinary metadata updates. A sync overwrite that
@@ -1404,27 +1925,39 @@ class SyncEngine:
 
     @staticmethod
     def _rehome_external_record(rec: MemoryRecord, *, src_device: object) -> None:
-        """Replace peer-controlled provenance with a local untrusted envelope."""
+        """Replace peer control data with a canonical local untrusted envelope."""
         upstream = rec.provenance if isinstance(rec.provenance, dict) else {}
         upstream_source = _clamp_str(upstream.get("source"), 128)
         device = _clamp_str(src_device, 128) if src_device else ""
+        metadata = dict(rec.metadata or {})
+        marker = metadata.get("sync_conflict")
+        conflict_of = marker.get("memory_id") if isinstance(marker, dict) else None
+        conflict_hlc = marker.get("loser_hlc") if isinstance(marker, dict) else None
+        is_conflict = (
+            isinstance(conflict_of, str)
+            and bool(conflict_of)
+            and conflict_of == conflict_of.strip()
+            and not any(char.isspace() for char in conflict_of)
+            and conflict_of == _clamp_str(conflict_of, 128)
+            and conflict_hlc == rec.modified_hlc
+            and bool(rec.modified_hlc)
+        )
         provenance = {
-            "source": "sync",
+            "source": "sync_conflict" if is_conflict else "sync",
             "trusted": False,
             "review_state": "pending",
             "trust_origin": "sync_untrusted",
         }
-        if device:
+        if is_conflict:
+            _, _, conflict_node = parse_modified_hlc(rec.modified_hlc)
+            provenance["conflict_of"] = conflict_of
+            provenance["synced_from_device"] = conflict_node
+        elif device:
             provenance["synced_from_device"] = device
-        metadata = dict(rec.metadata or {})
         # Incoming control-plane keys must never survive as if this process had
         # produced them.  Record only a bounded diagnostic summary of the upstream
         # claim; raw source metadata remains in the peer's bundle, not local policy.
-        for key in (
-            "provenance", "quarantine", "retention_supervision", "entities",
-            "relations", "structured_extraction", "llm_extraction",
-            "structured_consolidation",
-        ):
+        for key in _LOCAL_METADATA_FIELDS:
             metadata.pop(key, None)
         metadata["provenance"] = dict(provenance)
         metadata["sync_ingress"] = {
@@ -1446,102 +1979,170 @@ class SyncEngine:
         rec.provenance = dict(metadata["provenance"])
 
     # ── one round-trip over a transport ─────────────────────────────────────────
-    def sync(self, transport: SyncTransport, workspace_id: str, *, repo_id: Optional[str] = None,
-             dry_run: bool = False, push: bool = True) -> dict:
-        """Push this device's snapshot, then pull and apply every *other* device's.
+    def sync(self, transport: SyncTransport, workspace_id: str, *,
+             repo_id: Optional[str] = None, dry_run: bool = False,
+             push: bool = True) -> dict:
+        """Pull and merge authenticated snapshots before replacing this device's copy.
 
-        Full-state and idempotent, so it is safe to run on any cadence (cron, a
-        file-watcher, or by hand) and safe to interrupt. Returns a per-peer report."""
-        bundle = self.export_bundle(workspace_id, repo_id=repo_id)
+        Per-device generation checkpoints reject rollback after a snapshot has been
+        observed. A first snapshot without an external manifest anchor is applied for
+        convergence but reported as incomplete until its checkpoint is established.
+        """
+        if self.store.conn.transaction_owned_by_current_thread():
+            raise RuntimeError("sync cannot run inside an active store transaction")
+        bundle = self.export_bundle(
+            workspace_id, repo_id=repo_id, _save_checkpoint=False
+        )
         ws_name = bundle["workspace_name"]
-
-        own_name = "bundle-%s.json" % self.device_id
-        pushed = False
-        pushed_bytes = 0
-        if not dry_run and push:
-            payload = json.dumps(bundle).encode("utf-8")
-            transport.push(own_name, payload)
-            pushed = True
-            pushed_bytes = len(payload)
-            # Record outbound byte count under this device (local-only telemetry).
-            self.store.add_sync_bytes(self.device_id, sent=pushed_bytes, commit=False)
+        local_device = _normalise_device_id(self.device_id)
+        own_name = "bundle-%s.json" % local_device
 
         applied: list[dict] = []
         totals = {
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-            "links_added": 0, "links_updated": 0, "tombstones_applied": 0,
+            "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
+            "tombstones_applied": 0,
         }
-        # Fetch each bundle inside its own try: a transport that raises while producing
-        # bundle N (a relay 404 on a bundle deleted mid-round, an oversized blob) used to
-        # propagate straight out of this loop, discarding both the remaining bundles AND
-        # the report for the peers already applied. Now the failure is recorded and the
-        # round completes with `complete: False`, so one poisoned/truncated bundle can no
-        # longer stall sync indefinitely. Nothing here weakens the trust boundary: every
-        # bundle that IS produced still goes through apply_bundle's validation, clamping,
-        # workspace authorization and confinement checks unchanged.
-        bundles: Iterator[tuple[str, bytes]]
+        received_bytes = 0
+        peers_applied = 0
         try:
             bundles = iter(transport.pull())
         except Exception as exc:  # noqa: BLE001 — transport setup failure
             logger.warning("sync transport pull failed (%s)", type(exc).__name__)
-            applied.append({"bundle": "?", "error": "transport failure",
-                            "error_type": type(exc).__name__})
+            applied.append({
+                "bundle": "?",
+                "error": "transport failure",
+                "error_type": type(exc).__name__,
+            })
             bundles = iter(())
+
         while True:
             try:
                 name, data = next(bundles)
             except StopIteration:
                 break
-            except Exception as exc:  # noqa: BLE001 — transport failure, not a bad bundle
+            except Exception as exc:  # noqa: BLE001 — partial transport failure
                 logger.warning("sync transport pull failed (%s)", type(exc).__name__)
-                applied.append({"bundle": "?", "error": "transport failure",
-                                "error_type": type(exc).__name__})
-                # A generator that raised is closed and cannot be resumed; a list-backed
-                # transport keeps going. Either way we stop here rather than abort the run.
+                applied.append({
+                    "bundle": "?",
+                    "error": "transport failure",
+                    "error_type": type(exc).__name__,
+                })
                 break
-            if name == own_name:
-                continue
             try:
                 remote = loads_strict(data)
-            except (ValueError, UnicodeDecodeError):
-                applied.append({"bundle": name, "error": "unreadable"})
-                continue
-            if not isinstance(remote, dict) or remote.get("device_id") == self.device_id:
-                continue  # our own writes (or a non-object blob) — never apply
-            try:
-                rep = self.apply_bundle(remote, into_workspace=ws_name,
-                                        only_repo_id=repo_id, dry_run=dry_run)
-            except Exception as exc:  # one hostile bundle must never abort the whole sync
+                if not isinstance(remote, dict):
+                    raise SyncError("bundle is not an object")
+                remote_device = _normalise_device_id(remote.get("device_id"))
+                freshness, bootstrap, duplicate = self._check_incoming_freshness(
+                    remote, workspace_id, repo_id, remote_device
+                )
+                if duplicate and remote_device == local_device:
+                    continue
+                rep = self.apply_bundle(
+                    remote, into_workspace=ws_name,
+                    only_repo_id=repo_id, dry_run=dry_run,
+                )
+                rep["from_device"] = remote_device
+                if freshness is None or bootstrap:
+                    rep["error"] = "snapshot freshness unavailable"
+                    rep["error_type"] = "SyncError"
+            except (ValueError, UnicodeDecodeError) as exc:
+                rep = {
+                    "bundle": name,
+                    "error": "unreadable",
+                    "error_type": type(exc).__name__,
+                }
+            except Exception as exc:  # one hostile bundle must never abort the round
                 logger.warning("sync bundle rejected (%s)", type(exc).__name__)
-                applied.append({"bundle": name, "error": "bundle rejected",
-                                "error_type": type(exc).__name__})
-                continue
-            rep["from_device"] = remote.get("device_id", "?")
-            # Inbound byte accounting: attribute received bytes to the origin device
-            # from the bundle header (falls back to a stable synthetic key so the
-            # counter row still increments when a peer omits its device_id).
-            inbound_device = (
-                remote.get("device_id") if isinstance(remote.get("device_id"), str)
-                and remote.get("device_id") else f"unknown:{name}"
-            )
-            self.store.add_sync_bytes(inbound_device, received=len(data), commit=False)
+                rep = {
+                    "bundle": name,
+                    "error": "bundle rejected",
+                    "error_type": type(exc).__name__,
+                }
+            else:
+                received_bytes += len(data)
+                peers_applied += 1
+                if not dry_run:
+                    # Attribute transport volume to this local device. Peer-controlled
+                    # identities remain report/provenance data and cannot create an
+                    # unbounded number of durable telemetry rows across repeated rounds.
+                    try:
+                        self.store.add_sync_bytes(
+                            local_device, received=len(data), commit=False
+                        )
+                    except BaseException:
+                        # sync() rejects a caller-owned transaction at entry, so any
+                        # transaction here belongs to this telemetry write. The peer's
+                        # applied bundle was committed independently and remains durable.
+                        if self.store.conn.transaction_owned_by_current_thread():
+                            self.store.conn.rollback()
+                        raise
+                for key in totals:
+                    totals[key] += rep.get(key, 0)
             applied.append(rep)
-            for k in totals:
-                totals[k] += rep.get(k, 0)
 
-        # Flush accumulated byte counters alongside the final sync-state commit.
-        if not dry_run:
-            try:
+        pushed = False
+        pushed_bytes = 0
+        try:
+            # Settle receive telemetry before external I/O. Pull application is already
+            # durable, and a failed push must never leave its local telemetry transaction
+            # pinning the shared connection.
+            if (
+                not dry_run
+                and self.store.conn.transaction_owned_by_current_thread()
+            ):
                 self.store.conn.commit()
-            except Exception:  # noqa: BLE001 — best-effort; counters are telemetry
-                pass
-        errors = [a for a in applied if "error" in a]
-        return {"pushed": own_name if pushed else None, "workspace": ws_name,
-                "device_id": self.device_id, "exported_memories": len(bundle["memories"]),
-                "read_only": bool(not push and not dry_run),
-                "peers_applied": len(applied) - len(errors),
-                "bytes_sent": pushed_bytes,
-                # Explicit: the round must NOT read as a success when bundles were dropped
-                # (refused for signature/authorization, unreadable, or never delivered).
-                "complete": not errors, "errors": errors,
-                "totals": totals, "applied": applied, "dry_run": bool(dry_run)}
+            if not dry_run and push:
+                # Re-export after pull: imported changes and checkpoints must be reflected
+                # in the snapshot that replaces this device's durable transport copy.
+                bundle = self.export_bundle(
+                    workspace_id, repo_id=repo_id, _save_checkpoint=False
+                )
+                # Bind content-free erasure eligibility to the exact live rows selected
+                # for this push. The marker batches and snapshot checkpoint share one
+                # transaction: a failed transport write rolls them all back, while a
+                # successful push cannot commit its checkpoint without the proof needed
+                # to propagate a later secure erasure.
+                exported_ids = [
+                    item["id"] for item in bundle["memories"]
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+                for start in range(0, len(exported_ids), APPLY_BATCH):
+                    self.store.mark_memories_sync_exported(
+                        exported_ids[start:start + APPLY_BATCH],
+                        workspace_id=workspace_id,
+                        commit=False,
+                    )
+                payload = json.dumps(bundle).encode("utf-8")
+                transport.push(own_name, payload)
+                pushed = True
+                pushed_bytes = len(payload)
+                self.store.add_sync_bytes(
+                    local_device, sent=pushed_bytes, commit=False
+                )
+                self._save_snapshot_checkpoint(
+                    workspace_id, repo_id, local_device,
+                    bundle["generation"], bundle["state_hash"],
+                )
+        except BaseException:
+            if self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            raise
+
+        errors = [item for item in applied if "error" in item]
+        return {
+            "pushed": own_name if pushed else None,
+            "workspace": ws_name,
+            "device_id": local_device,
+            "exported_memories": len(bundle["memories"]),
+            "read_only": bool(not push and not dry_run),
+            "peers_applied": peers_applied,
+            "bytes_sent": pushed_bytes,
+            "bytes_received": received_bytes,
+            "complete": not errors,
+            "errors": errors,
+            "totals": totals,
+            "applied": applied,
+            "dry_run": bool(dry_run),
+        }
