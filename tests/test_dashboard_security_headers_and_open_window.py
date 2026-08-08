@@ -11,6 +11,7 @@ from engraphis.config import settings  # noqa: E402
 
 def _client(monkeypatch, tmp_path, *, api_token="", client_addr=("127.0.0.1", 50000),
             allowed_workspaces=None):
+    monkeypatch.delenv("ENGRAPHIS_WORKSPACES", raising=False)
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "security.db"))
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "embed_dim", 384)

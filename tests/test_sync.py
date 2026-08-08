@@ -192,6 +192,60 @@ def test_sync_v1_omitted_claim_fields_do_not_erase_local_identity():
 
 # ── untrusted-bundle boundary (memory-poisoning threat, SECURITY.md) ──────────
 
+def test_apply_bundle_rejection_continues_round_and_marks_incomplete(tmp_path):
+    """Regression: apply_bundle raising must not abort the sync round.
+
+    The except block in SyncEngine.sync() records the error and continues to the
+    next bundle. Without the ``continue``, ``rep`` is unbound on the exception
+    path and the very next line raises UnboundLocalError, violating the
+    'one hostile bundle must never abort the whole sync' invariant.
+    """
+    store = Store(str(tmp_path / "sync-reject.db"))
+    wid = store.get_or_create_workspace("w")
+    se = SyncEngine(store)
+    se.device_id = "local-device"
+
+    good_bundle = {
+        "format": SYNC_FORMAT,
+        "version": 2,
+        "device_id": "remote-good",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": "mem_good", "content": "good payload",
+            "scope": "workspace", "mtype": "semantic",
+            "last_access": 1.0, "ingested_at": 1.0, "valid_from": 1.0,
+        }],
+        "links": [], "tombstones": [],
+    }
+    bad_bundle = {
+        "format": "not-engraphis",
+        "version": 2,
+        "device_id": "remote-bad",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{"id": "mem_bad", "content": "rejected",
+                      "scope": "workspace", "mtype": "semantic",
+                      "last_access": 1.0, "ingested_at": 1.0, "valid_from": 1.0}],
+        "links": [], "tombstones": [],
+    }
+
+    class _RejectThenGood:
+        def push(self, name, data):
+            pass
+        def pull(self):
+            yield "bundle-bad.json", json.dumps(bad_bundle).encode("utf-8")
+            yield "bundle-good.json", json.dumps(good_bundle).encode("utf-8")
+
+    result = se.sync(_RejectThenGood(), wid, push=False)
+
+    assert result["complete"] is False
+    assert any(e.get("error") == "bundle rejected" for e in result["errors"])
+    assert result["peers_applied"] >= 1
+    assert store.get_memory("mem_good") is not None
+    store.close()
+
+
 def test_apply_rejects_bad_header():
     se = SyncEngine(Store(":memory:"))
     with pytest.raises(SyncError):

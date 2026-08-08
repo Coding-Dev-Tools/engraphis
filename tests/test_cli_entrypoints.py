@@ -244,6 +244,7 @@ def test_local_cli_ingest_is_recallable_across_clean_processes(tmp_path):
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_UPDATE_CHECK": "0",
+        "ENGRAPHIS_WORKSPACES": "",
     }
     ingest = subprocess.run(
         [sys.executable, "-m", "scripts.cli", "ingest", "The release is blue.", "-n", "ops"],
