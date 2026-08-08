@@ -6265,7 +6265,7 @@ class Store:
             where += " AND repo_id=?"
             params.append(repo_id)
         rows = self.conn.execute(
-            "SELECT id, ts, repo_id, actor, payload FROM operation_receipts WHERE " + where,
+            "SELECT id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
         import time as _time
