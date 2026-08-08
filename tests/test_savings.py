@@ -62,7 +62,7 @@ def test_estimator_is_conservative_for_bad_counts_and_annotates_existing_usage()
 
     assert usage["estimated_saved_tokens"] == 60
     assert usage["savings_eligible"] is True
-    assert usage["release_version"] == "1.5"
+    assert usage["release_version"] == __version__
     abstained = estimate_savings(
         operation="adaptive_context",
         adaptive_mode="low_confidence_abstain",
