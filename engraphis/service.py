@@ -914,6 +914,10 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
     original file exactly as it was; ``Store`` then raises its normal (now unmasked)
     error instead of silently losing data."""
     p = Path(db_path)
+    # Recover from a crash during a previous two-step swap (legacy code).
+    staging = p.with_suffix(".v2_swap")
+    if not p.exists() and staging.exists():
+        os.replace(str(staging), str(p))
     if not p.exists() or not p.is_file():
         return  # fresh install, ":memory:", or nothing there yet — Store() creates v2 cleanly
     import sqlite3
@@ -940,23 +944,11 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
         shutil.copy2(str(p), str(backup))          # preserve the untouched original first
         from scripts.migrate_to_v2 import migrate
         counts = migrate(str(p), str(tmp_new))      # reads p (untouched), writes tmp_new
-        # On Windows os.replace is not atomic; use a two-step rename with a staging
-        # file so a crash mid-swap leaves either the original or the migrated DB intact.
-        staging = p.with_suffix(".v2_swap")
-        try:
-            if staging.exists():
-                staging.unlink()
-            os.rename(str(p), str(staging))
-            os.rename(str(tmp_new), str(p))
-            try:
-                staging.unlink()
-            except OSError:
-                pass  # best-effort cleanup; backup still exists
-        except Exception:
-            # Rollback: restore the original if the swap failed partway through.
-            if staging.exists() and not p.exists():
-                os.rename(str(staging), str(p))
-            raise
+        # Both paths are in the same directory, so os.replace gives the only
+        # single-name swap available on Windows: a failed replacement leaves the
+        # original at p, while a successful replacement makes the complete migrated
+        # file visible without an intermediate missing-path window.
+        os.replace(str(tmp_new), str(p))
         print("[engraphis] v1->v2 auto-migration complete: %s" % counts, file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — must never brick startup worse than before
         print("[engraphis] v1->v2 auto-migration failed (%s) — leaving %s untouched; "
@@ -1543,10 +1535,15 @@ class MemoryService:
                     title=mem.get("title", ""),
                     importance=mem.get("importance", 0.0),
                     keywords=mem.get("keywords"),
+                    metadata=mem.get("metadata"),
                     source=mem.get("source", "agent"),
                     trusted=mem.get("trusted", False),
                     kind=mem.get("kind"),
-                    resolve_conflicts=mem.get("dedupe", True),
+                    resolve_conflicts=mem.get(
+                        "resolve_conflicts", mem.get("dedupe", True)
+                    ),
+                    retention_class=mem.get("retention_class"),
+                    retention_reason=mem.get("retention_reason", ""),
                     valid_from=mem.get("valid_from"),
                     subject_key=mem.get("subject_key", ""),
                     claim_kind=mem.get("claim_kind", ""),
@@ -3514,15 +3511,30 @@ class MemoryService:
         symbols = self.store.list_symbols(rid, identifiers=[symbol_id])
         if not symbols:
             raise ValidationError(f"no symbol '{symbol_id}' in repo '{repo}'")
+        if len(symbols) > 1:
+            raise ValidationError(
+                f"symbol '{symbol_id}' is ambiguous; use the symbol ID or fully-qualified name"
+            )
         # Validate memory exists and belongs to this workspace/repo.
         self._check_owns(memory_id, wid, rid)
+        symbol = symbols[0]
         link_id = self.store.link_memory_symbol(
-            repo_id=rid, symbol_id=symbols[0]["id"], memory_id=memory_id,
+            repo_id=rid, symbol_id=symbol["id"], memory_id=memory_id,
             relation=relation, confidence=confidence,
         )
-        return {"link_id": link_id, "symbol_id": symbols[0]["id"],
+        receipt = self.store.record_receipt(
+            "link", workspace_id=wid, repo_id=rid, actor="agent",
+            target_count=1, status="ok",
+            metadata={"relation": relation, "result_count": 1},
+        )
+        self.store.audit(
+            "agent", "link_symbol", link_id,
+            f"symbol_id={symbol['id']}; memory_id={memory_id}; "
+            f"relation={relation}; confidence={confidence:.6f}",
+        )
+        return {"link_id": link_id, "symbol_id": symbol["id"],
                 "memory_id": memory_id, "relation": relation,
-                "workspace": workspace, "repo": repo}
+                "workspace": workspace, "repo": repo, "receipt": receipt}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
@@ -4655,6 +4667,10 @@ class MemoryService:
         if not sets and title is None:
             return {"id": mid, "updated": []}
         if sets:
+            # Descriptive fields participate in sync conflict ordering. Advance the
+            # hybrid logical clock in the same transaction as the direct SQL update so
+            # a peer cannot observe a changed title/type/importance at the old clock.
+            self.store.advance_memory_modified_hlc(mid, commit=False)
             params.append(mid)
             self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
         if title is not None:

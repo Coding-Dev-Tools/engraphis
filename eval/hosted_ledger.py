@@ -322,7 +322,7 @@ class PrivateHostedLedger:
             before = private_file_stat(self.path, allow_missing=True, owner_only=True)
             payload = read_private_text(
                 self.path, max_bytes=MAX_PRIVATE_LEDGER_BYTES, allow_missing=True,
-                owner_only=True, expected_version=before,
+                owner_only=True
             )
             after = private_file_stat(self.path, allow_missing=True, owner_only=True)
         except (OSError, UnsafeStateFile) as exc:
@@ -330,6 +330,8 @@ class PrivateHostedLedger:
                 "the private ledger is unsafe or unreadable"
             ) from exc
         if before is None:
+            if after is not None:
+                raise HostedLedgerError("the private ledger is unsafe or unreadable")
             return
         if after is None:
             raise HostedLedgerError("the private ledger is unsafe or unreadable")

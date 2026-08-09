@@ -57,6 +57,7 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
 
     base = {
         "grounded": True,
+        "abstained": False,
         "answer": "",
         "citations": [{"n": 1, "id": "mem_1", "content": ""}],
     }
@@ -64,6 +65,7 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
     result = _apply_response_budget(
         {
             "grounded": True,
+            "abstained": False,
             "answer": "A deliberately oversized grounded answer. [1] " * 20,
             "citations": [{
                 "n": 1,
@@ -78,6 +80,52 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
     assert result["citations"] == [{"n": 1, "id": "mem_1", "content": ""}]
     assert _response_tokens(result) <= budget
     assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
+def test_response_budget_keeps_grounded_answer_at_a_complete_citation():
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    budget = _response_tokens(_apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1]",
+            "citations": [citation.copy()],
+        },
+        1_000_000,
+    ))
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1] and additional detail that will not fit.",
+            "citations": [{**citation, "content": "supporting citation body " * 20}],
+        },
+        budget,
+    )
+
+    assert result["grounded"] is True
+    assert result["answer"] == "First supported fact [1]"
+    assert "[1]" in result["answer"]
+    assert _response_tokens(result) <= budget
+
+
+def test_response_budget_ignores_unbounded_citation_numbers():
+    from engraphis.mcp_server import _apply_response_budget
+
+    huge_number = "9" * 5_000
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": f"Untrusted text [{huge_number}]",
+            "citations": [{"n": 1, "id": "mem_1", "content": "support"}],
+        },
+        2,
+    )
+
+    assert _response_tokens(result) <= 2
 
 
 
@@ -197,7 +245,9 @@ def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
         workspace="acme",
         repo="api",
     ))
-    after_first = tuple(service.store.conn.iterdump())
+    after_first = service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone()
     second = json.loads(srv.engraphis_link_symbol(
         symbol_id=symbol_id,
         memory_id=memory["id"],
@@ -209,10 +259,16 @@ def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
     assert service.store.conn.execute(
         "SELECT COUNT(*) AS n FROM code_memory_links"
     ).fetchone()["n"] == 1
-    assert tuple(service.store.conn.iterdump()) == after_first
+    assert service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone() == after_first
     assert service.store.conn.execute(
         "SELECT COUNT(*) AS n FROM operation_receipts WHERE operation='link'"
-    ).fetchone()["n"] == 0
+    ).fetchone()["n"] == 2
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE action='link_symbol' AND target=?",
+        (first["link_id"],),
+    ).fetchone()["n"] == 2
     tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     annotations = tools["engraphis_link_symbol"].annotations
     assert annotations.readOnlyHint is False

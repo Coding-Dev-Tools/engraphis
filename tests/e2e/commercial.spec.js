@@ -457,7 +457,7 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // The header GET PRO badge opens this panel, so it must retain the matching checkout action.
+  // The sidebar CTA opens this panel, so it must retain the matching checkout action.
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))

@@ -558,7 +558,7 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("state,expected,absent", [
-    # The header plan badge opens this panel, so inactive and expired accounts keep the
+    # The sidebar CTA opens this panel, so inactive and expired accounts keep the
     # matching actionable destination here as well.
     ("inactive", "Start 3-day Pro trial", "Subscribe to Pro"),
     ("trial_expired", "Subscribe to Pro", "Start 3-day Pro trial"),

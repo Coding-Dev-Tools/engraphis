@@ -73,6 +73,36 @@ def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
     assert "trust_downgraded" not in record.provenance
 
 
+def test_remember_batch_forwards_write_options():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    calls = []
+    original = service.remember
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    service.remember = capture
+    result = service.remember_batch(
+        [{
+            "content": "Critical batch evidence.",
+            "metadata": {"ticket": "OPS-123"},
+            "retention_class": "critical",
+            "retention_reason": "incident runbook",
+            "resolve_conflicts": False,
+        }],
+        workspace="acme",
+    )
+
+    assert result["succeeded"] == 1
+    assert calls[0]["metadata"] == {"ticket": "OPS-123"}
+    assert calls[0]["resolve_conflicts"] is False
+    assert calls[0]["retention_class"] == "critical"
+    assert calls[0]["retention_reason"] == "incident runbook"
+    record = service.store.get_memory(result["results"][0]["id"])
+    assert record.metadata["retention_supervision"]["label"] == "critical"
+
+
 def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace():
     service = MemoryService.create(":memory:", graph_extractor="none")
     alpha = service.remember(
@@ -499,6 +529,21 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     assert (saved.title, saved.mtype.value, saved.importance) == (
         "Deployment runbook", "procedural", 0.9,
     )
+
+
+def test_update_memory_advances_descriptive_hlc():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    created = service.remember("A synced deployment note.", workspace="acme", title="Old")
+    before = service.store.get_memory(created["id"]).modified_hlc
+
+    result = service.update_memory(
+        created["id"], workspace="acme", title="New", importance=0.8,
+    )
+
+    after = service.store.get_memory(created["id"]).modified_hlc
+    assert result["updated"] == ["title", "importance"]
+    assert after != before
+    assert service.store.conn.in_transaction is False
 
 
 def test_update_memory_reembeds_changed_title_in_both_vector_mirrors(monkeypatch):
@@ -1061,6 +1106,31 @@ def test_index_repo_and_search_code(tmp_path):
     assert report["files_indexed"] == 1
     out = s.search_code("add", workspace="acme", repo="sample")
     assert any(sym["name"] == "add" for sym in out["symbols"])
+
+
+def test_link_symbol_rejects_ambiguous_short_name_but_accepts_qualified_name():
+    s = _svc()
+    workspace_id = s.store.get_or_create_workspace("acme")
+    repo_id = s.store.get_or_create_repo(workspace_id, "api")
+    first = s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="api.deploy",
+        file="api.py", span="1-1",
+    )
+    s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="worker.deploy",
+        file="worker.py", span="1-1",
+    )
+    memory = s.remember("Deploy uses the release runbook.", workspace="acme", repo="api")
+
+    with pytest.raises(ValidationError, match="ambiguous"):
+        s.link_symbol("deploy", memory["id"], workspace="acme", repo="api")
+
+    linked = s.link_symbol("api.deploy", memory["id"], workspace="acme", repo="api")
+    assert linked["symbol_id"] == first
+    assert linked["receipt"]["operation"] == "link"
+    assert s.store.conn.execute(
+        "SELECT action FROM audit WHERE action='link_symbol' AND target=?", (linked["link_id"],)
+    ).fetchone() is not None
 
 
 def test_search_code_requires_repo():

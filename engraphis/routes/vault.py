@@ -350,7 +350,24 @@ def import_folder(req: FolderImportReq):
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    folder = Path(safe_path)
+    try:
+        # Re-resolve the already allowlisted path immediately before traversal. This
+        # closes a directory-link swap between validation and the recursive walk and
+        # gives the walker a canonical Path rather than the raw request value.
+        folder = Path(safe_path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(404, f"Path not found: {req.path}") from None
+    canonical_folder = os.path.normcase(str(folder))
+    if not any(
+        canonical_folder == os.path.normcase(root)
+        or canonical_folder.startswith(os.path.normcase(root).rstrip(os.sep) + os.sep)
+        for root in allowed_roots
+    ):
+        raise HTTPException(
+            403,
+            "Import path must be under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
     if not folder.is_dir():
