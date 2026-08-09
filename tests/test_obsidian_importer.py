@@ -61,6 +61,44 @@ def test_unreadable_directory_is_reported_and_marks_vault_scan_incomplete(monkey
     )
 
 
+def test_unreadable_root_is_reported_and_marks_vault_scan_incomplete(monkeypatch, tmp_path: Path):
+    original_iterdir = Path.iterdir
+
+    def fail_root(path):
+        if path == tmp_path:
+            raise OSError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_root)
+    scan = scan_obsidian_vault(tmp_path)
+
+    assert scan.complete is False
+    assert any(
+        item.relative_path == "." and item.reason == "unreadable directory"
+        for item in scan.skipped
+    )
+
+
+def test_unreadable_vault_path_marks_scan_incomplete(monkeypatch, tmp_path: Path):
+    blocked = tmp_path / "blocked.md"
+    blocked.write_text("# blocked", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def fail_blocked(path):
+        if path == blocked:
+            raise OSError("permission denied")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_blocked)
+    scan = scan_obsidian_vault(tmp_path)
+
+    assert scan.complete is False
+    assert any(
+        item.relative_path == "blocked.md" and item.reason == "unreadable path"
+        for item in scan.skipped
+    )
+
+
 def test_import_reimport_revision_rename_and_missing(tmp_path: Path):
     vault = _vault(tmp_path)
     service = _service(tmp_path / "memory.db")

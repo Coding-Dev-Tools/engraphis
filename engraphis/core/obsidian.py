@@ -214,15 +214,28 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
     portable_paths = set()
     for path, issue in _walk_vault(root, root):
         raw_relative = path.relative_to(root).as_posix()
+        if issue:
+            # The root itself is represented by "." when its directory listing
+            # fails. Keep that sentinel as a valid issue path before normal path
+            # validation can reject it, and defer reconciliation for all
+            # unreadable paths so transient filesystem failures are not treated
+            # as deletions.
+            if raw_relative == ".":
+                relative = "."
+            else:
+                try:
+                    relative = normalize_obsidian_path(raw_relative)
+                except ValueError as exc:
+                    result.rejected.append(ObsidianFileIssue(raw_relative, str(exc)))
+                    continue
+            result.skipped.append(ObsidianFileIssue(relative, issue))
+            if issue in {"unreadable directory", "unreadable path"}:
+                result.complete = False
+            continue
         try:
             relative = normalize_obsidian_path(raw_relative)
         except ValueError as exc:
             result.rejected.append(ObsidianFileIssue(raw_relative, str(exc)))
-            continue
-        if issue:
-            result.skipped.append(ObsidianFileIssue(relative, issue))
-            if issue == "unreadable directory":
-                result.complete = False
             continue
         if relative in normalized_paths or relative.casefold() in portable_paths:
             result.rejected.append(ObsidianFileIssue(relative, "duplicate normalized source path"))

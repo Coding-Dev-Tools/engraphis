@@ -216,6 +216,11 @@ def test_rtf_and_additional_office_containers_are_dependency_free():
         "cyrillic.rtf",
     )
     assert cyrillic_rtf.body == "Пример"
+    literal_rtf = parse_document(
+        b"{\\rtf1\\ansi\\ansicpg1252 Caf\xe9}",
+        "literal.rtf",
+    )
+    assert literal_rtf.body == "Café"
 
     xlsx = _zip({
         "xl/sharedStrings.xml": "<sst><si><t>Revenue</t></si></sst>",

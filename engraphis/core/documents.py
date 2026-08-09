@@ -322,7 +322,7 @@ def parse_document(
     elif spec.container:
         content, body, title, metadata, warnings = _parse_container(spec.name, raw)
     else:
-        content, decode_warnings = _decode_text(raw)
+        content, decode_warnings = _decode_rtf(raw) if spec.name == "rtf" else _decode_text(raw)
         content = _canonical(content)
         if len(content) > MAX_DOCUMENT_CHARS:
             raise DocumentParseError("document exceeds 100000 character safety limit")
@@ -504,6 +504,29 @@ def _decode_text(raw: bytes) -> Tuple[str, List[str]]:
         return raw.decode("utf-8-sig"), []
     except UnicodeDecodeError:
         return raw.decode("utf-8-sig", errors="replace"), ["invalid UTF-8 was replaced with U+FFFD"]
+
+
+_RTF_ANSI_CODE_PAGE_RE = re.compile(rb"\\ansicpg([0-9]+)")
+
+
+def _decode_rtf(raw: bytes) -> Tuple[str, List[str]]:
+    """Decode literal RTF bytes using the document's declared ANSI code page."""
+    match = _RTF_ANSI_CODE_PAGE_RE.search(raw[:4096])
+    encoding = "cp1252"
+    if match:
+        encoding = "cp%s" % match.group(1).decode("ascii")
+        try:
+            codecs.lookup(encoding)
+        except LookupError:
+            # _rtf_body() reports the malformed control word without exposing
+            # the code-page value in the error surface.
+            encoding = "cp1252"
+    try:
+        return raw.decode(encoding), []
+    except UnicodeDecodeError:
+        return raw.decode(encoding, errors="replace"), [
+            "invalid %s was replaced with U+FFFD" % encoding.upper(),
+        ]
 
 
 def _looks_binary(raw: bytes) -> bool:
