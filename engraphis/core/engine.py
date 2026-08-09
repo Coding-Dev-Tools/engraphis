@@ -3435,6 +3435,13 @@ class MemoryEngine:
             try:
                 stat = safe_candidate.stat()
                 if stat.st_size > max_file_bytes:
+                    if relative in existing:
+                        # Incremental indexing has now observed the file exceed the
+                        # accepted size budget, so retire the previous live code-file
+                        # snapshot and its symbol/edge rows instead of leaving a stale
+                        # indexed view behind.  The history tables keep the audit trail.
+                        self.store.remove_code_file(repo_id, relative, commit=False)
+                        files_removed += 1
                     files_skipped += 1
                     continue
                 raw = safe_candidate.read_bytes()
