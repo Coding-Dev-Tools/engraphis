@@ -628,6 +628,16 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
 .graph-connections-dialog::backdrop { background: rgba(7, 11, 20, .72); }
 .graph-connections-panel { display: grid; gap: 14px; padding: 20px; }
 .browser-auth-dialog { width: min(520px, calc(100vw - 32px)); }
+.obsidian-import-dialog { width: min(860px, calc(100vw - 32px)); }
+.obsidian-import-grid label, .obsidian-confirm { display: grid; gap: 6px; }
+.obsidian-confirm { grid-template-columns: auto 1fr; align-items: start; color: var(--c-mid); font-size: 13px; }
+.obsidian-confirm input { margin-top: 3px; }
+.obsidian-import-report { max-height: min(260px, calc(100vh - 520px)); overflow: auto; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-inset); }
+.obsidian-import-report ul { margin: 0; padding: 0; list-style: none; }
+.obsidian-import-report li { padding: 9px 11px; border-bottom: 1px solid var(--c-line); font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+.obsidian-import-report li:last-child { border-bottom: 0; }
+.obsidian-import-report [data-status="reject"] { color: var(--c-bad); }
+.obsidian-import-report [data-status="update"] { color: var(--c-warn); }
 .browser-auth-form label { display: grid; gap: 6px; }
 .browser-auth-form .form-error { margin: 0; }
 .graph-connections-header { display: flex; align-items: start; justify-content: space-between; gap: 18px; }

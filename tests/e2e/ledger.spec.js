@@ -46,11 +46,13 @@ async function mockApi(page, options = {}) {
   requests.automationBootstraps = [];
   requests.syncRuns = [];
   requests.details = [];
+  requests.documentImports = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
   const licenseState = options.license || license();
   let automationPolicy = options.automationPolicy || null;
+  let documentPolls = 0;
   const memoriesFor = requestUrl => {
     const selected = requestUrl.searchParams.get('workspace') || workspace;
     return (options.memoriesByWorkspace && options.memoriesByWorkspace[selected]) || memories;
@@ -177,6 +179,41 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/health') return ok({ status: 'ok' });
+    if (path === '/workspaces/import-documents/sources') return ok({ sources: [] });
+    if (path === '/workspaces/import-documents/formats') {
+      return ok({ extensions: ['.md', '.txt'] });
+    }
+    if (path === '/workspaces/import-documents/preview') {
+      requests.documentImports.push({
+        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
+      });
+      return ok({
+        review_token: `review-${requests.documentImports.length}`,
+        review_expires_in: 300,
+        counts: { documents: 1 },
+        files: [{ path: 'Welcome.md', status: 'import' }],
+      });
+    }
+    if (path === '/workspaces/import-documents/run') {
+      requests.documentImports.push({
+        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
+      });
+      return ok({ job_id: 'job_document_e2e', state: 'queued' });
+    }
+    if (path === '/workspaces/import-documents/jobs/job_document_e2e/cancel') {
+      requests.documentImports.push({
+        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
+      });
+      return ok({ id: 'job_document_e2e', state: 'queued', cancel_requested: true });
+    }
+    if (path === '/workspaces/import-documents/jobs/job_document_e2e') {
+      documentPolls += 1;
+      requests.documentImports.push({ path, url: request.url(), body: '' });
+      return ok({
+        id: 'job_document_e2e',
+        state: documentPolls === 1 ? 'queued' : 'completed',
+      });
+    }
     if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
       return ok({
@@ -315,6 +352,78 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   expect(accessibility.violations).toEqual([]);
   expect(await page.evaluate(() => window.__ledgerCspViolations)).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test('document import invalidates previews and freezes the reviewed job workspace', async ({ page }) => {
+  await page.route('**/dashboard/review/csrf', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ review_csrf_token: 'csrf-document-e2e' }),
+  }));
+  const requests = await mockApi(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Library' }).click();
+
+  const open = page.locator('#obsidian-import-button');
+  const dialog = page.locator('#obsidian-import-dialog');
+  const files = page.locator('#obsidian-import-files');
+  const preview = page.locator('#obsidian-preview');
+  const run = page.locator('#obsidian-run');
+  const confirmed = page.locator('#obsidian-confirmed');
+  const workspaceInput = page.locator('#obsidian-workspace');
+
+  await open.click();
+  await expect(dialog).toBeVisible();
+  await page.locator('#obsidian-vault-label').fill('Notes');
+  await files.setInputFiles({
+    name: 'Welcome.md', mimeType: 'text/markdown', buffer: Buffer.from('# Welcome'),
+  });
+  await preview.click();
+  await expect(run).toBeEnabled();
+  await confirmed.check();
+
+  await page.locator('#obsidian-repo').fill('changed-after-preview');
+  await expect(confirmed).not.toBeChecked();
+  await expect(run).toBeDisabled();
+  await expect(page.locator('#obsidian-import-progress')).toContainText('Preview again');
+
+  await preview.click();
+  await expect(run).toBeEnabled();
+  await confirmed.check();
+  await page.locator('#obsidian-import-close').click();
+  await open.click();
+  await expect(confirmed).not.toBeChecked();
+  await expect(run).toBeDisabled();
+
+  await page.locator('#obsidian-vault-label').fill('Notes');
+  await workspaceInput.fill('started-workspace');
+  await files.setInputFiles({
+    name: 'Welcome.md', mimeType: 'text/markdown', buffer: Buffer.from('# Welcome'),
+  });
+  await preview.click();
+  await expect(run).toBeEnabled();
+  await confirmed.check();
+  await run.click();
+
+  const cancel = page.locator('#obsidian-cancel');
+  await expect(cancel).toBeVisible();
+  await workspaceInput.fill('mutated-workspace');
+  await cancel.click();
+  await expect.poll(() => requests.documentImports.some(item => item.path.endsWith('/cancel')))
+    .toBe(true);
+
+  const runRequest = requests.documentImports.find(item => item.path.endsWith('/run'));
+  const pollRequest = requests.documentImports.find(item => (
+    item.path === '/workspaces/import-documents/jobs/job_document_e2e'
+  ));
+  const cancelRequest = requests.documentImports.find(item => item.path.endsWith('/cancel'));
+  expect(runRequest.body).toContain('started-workspace');
+  expect(runRequest.body).toContain('review-');
+  expect(runRequest.body).not.toContain('mutated-workspace');
+  expect(new URL(pollRequest.url).searchParams.get('workspace')).toBe('started-workspace');
+  expect(cancelRequest.body).toContain('started-workspace');
+  expect(cancelRequest.body).not.toContain('mutated-workspace');
+  await expect(preview).toBeEnabled();
 });
 
 test('Ledger retries a failed lazy graph load and opens search evidence by keyboard', async ({ page }) => {

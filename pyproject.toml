@@ -98,7 +98,7 @@ mcp = [
 code = [
     "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
-    "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
+    "tree-sitter-language-pack==1.14.1; python_version >= '3.10'",
 ]
 # Local resource extraction. Text/code/HTML/DOCX remain stdlib-only; this adds PDF
 # extraction and image OCR bindings (the Tesseract executable is installed separately).
@@ -145,7 +145,7 @@ all = [
     "cryptography>=50.0.0; python_version >= '3.10'",
     "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
-    "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
+    "tree-sitter-language-pack==1.14.1; python_version >= '3.10'",
     "pypdf>=4.0",
     "Pillow>=12.3.0; python_version >= '3.10'",
     "pytesseract>=0.3.10; python_version >= '3.10'",
@@ -188,7 +188,7 @@ test = [
     "cryptography>=50.0.0; python_version >= '3.10'",
     "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
-    "tree-sitter-language-pack==1.13.5; python_version >= '3.10'",
+    "tree-sitter-language-pack==1.14.1; python_version >= '3.10'",
     "pypdf>=4.0",
     "Pillow>=12.3.0; python_version >= '3.10'",
     "pytesseract>=0.3.10; python_version >= '3.10'",
@@ -218,6 +218,7 @@ engraphis-dashboard = "scripts.start_dashboard:main"
 engraphis-consolidate = "scripts.consolidate:main"
 engraphis-graph = "scripts.graph_cli:main"
 engraphis-graph-server = "scripts.graph_server:main"
+engraphis-import = "scripts.importer:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
 

@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -571,6 +571,230 @@ CREATE TABLE IF NOT EXISTS sync_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_sync_stats_updated
     ON sync_stats(updated_at);
+
+-- Local source-import manifest (v14, generalized in v15).  It intentionally
+-- records no source root, document body, or attachment data: those remain owned
+-- by the selected local collection and the canonical memory rows respectively.
+CREATE TABLE IF NOT EXISTS source_vaults (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    root_digest     TEXT NOT NULL,
+    display_name    TEXT NOT NULL DEFAULT '',
+    workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repo_id         TEXT REFERENCES repos(id) ON DELETE CASCADE,
+    session_id      TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    scope           TEXT NOT NULL DEFAULT 'workspace',
+    memory_type     TEXT NOT NULL DEFAULT 'semantic',
+    importer_version TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    CHECK(kind IN ('documents','obsidian')),
+    CHECK(length(root_digest)=64 AND root_digest NOT GLOB '*[^0-9a-f]*'),
+    CHECK(length(display_name)<=200),
+    CHECK(length(importer_version)<=64),
+    CHECK(scope IN ('workspace','repo','session')),
+    CHECK(memory_type IN ('working','episodic','semantic','procedural')),
+    CHECK(
+        (scope='workspace' AND repo_id IS NULL AND session_id IS NULL)
+        OR (scope='repo' AND repo_id IS NOT NULL AND session_id IS NULL)
+        OR (scope='session' AND session_id IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_source_vaults_root
+    ON source_vaults(kind, root_digest);
+-- SQLite treats each NULL as distinct in a table UNIQUE constraint.  The
+-- expression index makes the vault identity genuinely unique for workspace,
+-- repo, and session scopes and therefore closes concurrent registration races.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_vaults_identity
+    ON source_vaults(
+        kind, root_digest, workspace_id,
+        COALESCE(repo_id, ''), COALESCE(session_id, '')
+    );
+
+CREATE TABLE IF NOT EXISTS source_imports (
+    id              TEXT PRIMARY KEY,
+    vault_id        TEXT NOT NULL REFERENCES source_vaults(id) ON DELETE CASCADE,
+    source_key      TEXT NOT NULL,
+    relative_path   TEXT NOT NULL,
+    memory_id       TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    subject_key     TEXT NOT NULL DEFAULT '',
+    content_sha256  TEXT NOT NULL DEFAULT '',
+    canonical_sha256 TEXT NOT NULL DEFAULT '',
+    importer_version TEXT NOT NULL,
+    file_size       INTEGER NOT NULL DEFAULT 0,
+    file_mtime_ns   INTEGER,
+    state           TEXT NOT NULL DEFAULT 'imported',
+    first_imported_at REAL,
+    last_imported_at REAL,
+    last_seen_at    REAL,
+    missing_at      REAL,
+    last_seen_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+    last_error      TEXT NOT NULL DEFAULT '',
+    UNIQUE(vault_id, source_key),
+    CHECK(length(source_key)=64 AND source_key NOT GLOB '*[^0-9a-f]*'),
+    CHECK(relative_path<>'' AND substr(relative_path,1,1)<>'/'
+          AND instr(relative_path, '\\')=0 AND instr(relative_path, ':')=0
+          AND instr(relative_path, '//')=0
+          AND relative_path NOT IN ('.','..')
+          AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%'
+          AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%'
+          AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'),
+    CHECK(length(relative_path)<=4096),
+    CHECK(content_sha256='' OR
+          (length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*')),
+    CHECK(canonical_sha256='' OR
+          (length(canonical_sha256)=64 AND canonical_sha256 NOT GLOB '*[^0-9a-f]*')),
+    CHECK(file_size>=0),
+    CHECK(length(importer_version)<=64),
+    CHECK(length(last_error)<=2000),
+    CHECK(state IN ('imported','unchanged','skipped','rejected','error','conflict','missing','renamed'))
+);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_state
+    ON source_imports(vault_id, state, relative_path);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_path
+    ON source_imports(vault_id, relative_path);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_hash
+    ON source_imports(vault_id, content_sha256);
+
+CREATE TABLE IF NOT EXISTS source_import_items (
+    id              TEXT PRIMARY KEY,
+    job_id          TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    source_id       TEXT REFERENCES source_imports(id) ON DELETE SET NULL,
+    relative_path   TEXT NOT NULL,
+    source_format   TEXT NOT NULL DEFAULT '',
+    planned_action  TEXT NOT NULL,
+    result_state    TEXT NOT NULL DEFAULT 'pending',
+    warning_count   INTEGER NOT NULL DEFAULT 0,
+    error_code      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    finished_at     REAL,
+    UNIQUE(job_id, relative_path, planned_action),
+    CHECK(relative_path<>'' AND substr(relative_path,1,1)<>'/'
+          AND instr(relative_path, '\\')=0 AND instr(relative_path, ':')=0
+          AND instr(relative_path, '//')=0
+          AND relative_path NOT IN ('.','..')
+          AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%'
+          AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%'
+          AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'),
+    CHECK(length(relative_path)<=4096),
+    CHECK(length(source_format)<=64
+          AND source_format NOT GLOB '*[^A-Za-z0-9_.+-]*'),
+    CHECK(planned_action IN ('imported','updated','skipped','rejected','renamed','missing','conflict')),
+    CHECK(result_state IN ('pending','imported','updated','skipped','rejected','renamed','missing','conflict','error','warning')),
+    CHECK(warning_count>=0)
+);
+CREATE INDEX IF NOT EXISTS idx_source_import_items_job_result
+    ON source_import_items(job_id, result_state, relative_path);
+
+-- SQLite cannot express these composite scope relationships as ordinary foreign
+-- keys without adding redundant public identifiers to the parent tables.  Keep
+-- the durable checks beside the schema so direct SQL writers cannot create a
+-- cross-workspace/repo/session importer lineage.
+CREATE TRIGGER IF NOT EXISTS trg_source_vault_scope_insert
+BEFORE INSERT ON source_vaults BEGIN
+    SELECT CASE WHEN NEW.repo_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM repos r
+        WHERE r.id=NEW.repo_id AND r.workspace_id=NEW.workspace_id
+    ) THEN RAISE(ABORT, 'source vault repo scope mismatch') END;
+    SELECT CASE WHEN NEW.session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id
+          AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'source vault session scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_vault_scope_update
+BEFORE UPDATE OF workspace_id, repo_id, session_id, scope ON source_vaults BEGIN
+    SELECT CASE WHEN NEW.repo_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM repos r
+        WHERE r.id=NEW.repo_id AND r.workspace_id=NEW.workspace_id
+    ) THEN RAISE(ABORT, 'source vault repo scope mismatch') END;
+    SELECT CASE WHEN NEW.session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id
+          AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'source vault session scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_scope_insert
+BEFORE INSERT ON source_imports WHEN NEW.memory_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM memories m JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE m.id=NEW.memory_id AND m.workspace_id=v.workspace_id
+          AND m.repo_id IS v.repo_id AND m.session_id IS v.session_id
+          AND m.scope=v.scope
+    ) THEN RAISE(ABORT, 'source import memory scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_scope_update
+BEFORE UPDATE OF vault_id, memory_id ON source_imports
+WHEN NEW.memory_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM memories m JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE m.id=NEW.memory_id AND m.workspace_id=v.workspace_id
+          AND m.repo_id IS v.repo_id AND m.session_id IS v.session_id
+          AND m.scope=v.scope
+    ) THEN RAISE(ABORT, 'source import memory scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_seen_job_insert
+BEFORE INSERT ON source_imports WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE j.id=NEW.last_seen_job_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_seen_job_update
+BEFORE UPDATE OF vault_id, last_seen_job_id ON source_imports
+WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE j.id=NEW.last_seen_job_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_job_insert
+BEFORE INSERT ON source_import_items BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j WHERE j.id=NEW.job_id
+          AND j.kind IN ('document_import','obsidian_import')
+    ) THEN RAISE(ABORT, 'source import item requires a document import job') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM source_imports i
+        JOIN source_vaults v ON v.id=i.vault_id
+        JOIN jobs j ON j.id=NEW.job_id
+        WHERE i.id=NEW.source_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) AND NEW.source_id IS NOT NULL
+    THEN RAISE(ABORT, 'source import job scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_job_update
+BEFORE UPDATE OF job_id, source_id ON source_import_items BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j WHERE j.id=NEW.job_id
+          AND j.kind IN ('document_import','obsidian_import')
+    ) THEN RAISE(ABORT, 'source import item requires a document import job') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM source_imports i
+        JOIN source_vaults v ON v.id=i.vault_id
+        JOIN jobs j ON j.id=NEW.job_id
+        WHERE i.id=NEW.source_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) AND NEW.source_id IS NOT NULL
+    THEN RAISE(ABORT, 'source import job scope mismatch') END;
+END;
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

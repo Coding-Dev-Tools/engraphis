@@ -7,6 +7,7 @@ encrypted connection (the re-open path exercises the exception-translating adapt
 key fails loudly, keys load from env or file, and the default (no key) path stays plaintext.
 """
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -189,6 +190,44 @@ def test_key_from_file(monkeypatch, tmp_path):
     svc.engine.store.conn.close()
     with pytest.raises(sqlite3.DatabaseError):
         sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()
+
+
+def test_encrypted_manifest_snapshot_is_immutable_and_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
+    db = str(tmp_path / "manifest.db")
+    service = MemoryService.create(db)
+    workspace_id = service.store.get_or_create_workspace("encrypted-manifest")
+    vault_id = service.store.register_source_vault(
+        kind="obsidian", root_digest="a" * 64, workspace_id=workspace_id,
+        display_name="Encrypted vault",
+    )
+    source_id = service.store.upsert_source_import_item(
+        vault_id=vault_id, source_key="b" * 64, relative_path="Notes/One.md",
+        content_sha256="c" * 64, importer_version="1", seen_at=10,
+    )
+    service.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.close()
+    tracked = [
+        Path(db), Path(db + "-wal"), Path(db + "-shm"), Path(db + "-journal"),
+    ]
+
+    def state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: state(path) for path in tracked}
+
+    snapshot = Store.snapshot_source_import_manifest(
+        db, connect=encrypted_db.connector_from_env(),
+    )
+
+    assert snapshot["schema_version"] >= 15
+    assert [vault["id"] for vault in snapshot["vaults"]] == [vault_id]
+    assert [item["id"] for item in snapshot["items"]] == [source_id]
+    assert {path.name: state(path) for path in tracked} == before
 
 
 def test_passphrase_key_non_hex(monkeypatch, tmp_path):

@@ -7,16 +7,21 @@ server (engraphis/app.py) untouched; run this with `python -m scripts.start_dash
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import hmac
+import inspect
+import json
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 import os as _os
 import secrets
+import threading
+import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import settings
+from engraphis.core.documents import supported_document_extensions
 from engraphis.http_security import wants_https
 from engraphis.local_auth import (
     BROWSER_SESSION_COOKIE,
@@ -36,6 +42,7 @@ from engraphis.local_auth import (
 from engraphis.routes import v2_api
 from engraphis.service import (
     MAX_IMPORT_FILES,
+    MAX_IMPORT_RESOURCE_BYTES,
     MAX_IMPORT_TOTAL_BYTES,
     MemoryService,
 )
@@ -54,7 +61,17 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-obsidian/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-obsidian/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-documents/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-documents/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
 }
+
+# The dashboard accepts only documents it can hand straight to the local importer.
+# It deliberately does not upload arbitrary binary files.  Obsidian is the one
+# exception: its attachments are represented as a content-free manifest, so note
+# links can be reported without keeping a second copy of attachment bytes.
+_DOCUMENT_SUFFIXES = frozenset(supported_document_extensions())
 
 
 class _RequestBodyTooLarge(Exception):
@@ -211,6 +228,8 @@ class _DashboardApprovalReq(BaseModel):
 
 
 _REVIEW_CSRF_HEADER = "X-Engraphis-Review-CSRF"
+_DOCUMENT_REVIEW_TTL_SECONDS = 5 * 60
+_DOCUMENT_REVIEW_LIMIT = 256
 
 
 def _embedder_status(embedder, configured_model: str) -> str:
@@ -313,7 +332,7 @@ def create_app() -> FastAPI:
                 settings.loop_interval,
             )
         try:
-            if _mcp_asgi is not None:
+            if _mcp_asgi is not None and _mcp_mgr is not None:
                 async with _mcp_mgr.run():
                     yield
             else:
@@ -421,6 +440,11 @@ def create_app() -> FastAPI:
     # credential. It is minted alongside a short-lived browser session and exists only
     # to authorize the narrowly scoped human-approval dashboard action below.
     app.state.review_csrf_tokens = {}
+    # A document preview authorizes exactly one subsequent import of the reviewed
+    # bytes into the reviewed target.  Records contain only a request digest, the
+    # already-opaque browser-session value, and a short process-local expiry.
+    app.state.document_import_reviews = {}
+    app.state.document_import_review_lock = threading.Lock()
     try:
         import sys as _sys
         _ed = svc.engine.embedder
@@ -565,6 +589,514 @@ def create_app() -> FastAPI:
         response = JSONResponse({"review_csrf_token": token})
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    def _require_document_browser_owner(request: Request) -> str:
+        """Keep local document uploads off generic bearer-token API/MCP surfaces.
+
+        A browser owner must hold the HttpOnly dashboard session *and* echo its
+        process-local CSRF nonce.  The general API middleware deliberately accepts a
+        bearer for automation clients; that authority is insufficient to upload a
+        selected local documents or make their imported content trusted.
+        """
+        if not settings.api_token:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "document import requires ENGRAPHIS_API_TOKEN"},
+            )
+        session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
+        if not browser_session_ok(session_value, settings.api_token):
+            raise HTTPException(status_code=401, detail={"error": "browser session required"})
+        if request.headers.get("X-Engraphis-Browser-Session") != "1":
+            raise HTTPException(status_code=403, detail={"error": "browser session header required"})
+        expected = app.state.review_csrf_tokens.get(session_value)
+        supplied = request.headers.get(_REVIEW_CSRF_HEADER, "")
+        if not expected or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=403, detail={"error": "owner confirmation required"})
+        # Include the process-local per-login nonce, not only the signed cookie.
+        # Two owner logins minted in the same second can otherwise share the same
+        # deterministic cookie value. Rotating the owner confirmation must also
+        # invalidate any outstanding import review minted by the earlier login.
+        return hashlib.sha256(
+            f"{session_value}\0{expected}".encode("utf-8"),
+        ).hexdigest()
+
+    def _document_review_digest(
+        *, uploads: list[tuple[str, bytes]], attachments: list[dict],
+        workspace: str, repo: str, session_id: str, scope: str,
+        memory_type: str, source_id: str, source_label: str,
+        on_conflict: str, source_mode: str,
+    ) -> str:
+        """Bind one preview to its exact local bytes, provenance, and write target."""
+
+        material = {
+            "attachments": sorted(
+                (
+                    {"path": str(item["path"]), "size": int(item["size"])}
+                    for item in attachments
+                ),
+                key=lambda item: (item["path"].casefold(), item["path"]),
+            ),
+            "files": sorted(
+                (
+                    {
+                        "path": path,
+                        "size": len(raw),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+                    for path, raw in uploads
+                ),
+                key=lambda item: (item["path"].casefold(), item["path"]),
+            ),
+            "target": {
+                "memory_type": str(memory_type),
+                "on_conflict": str(on_conflict),
+                "repo": str(repo),
+                "scope": str(scope),
+                "session_id": str(session_id),
+                "source_id": str(source_id),
+                "source_label": str(source_label),
+                "source_mode": str(source_mode),
+                "workspace": str(workspace),
+            },
+        }
+        encoded = json.dumps(
+            material, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _prune_document_reviews(now: float) -> None:
+        reviews = app.state.document_import_reviews
+        for token, record in list(reviews.items()):
+            if float(record["expires_at"]) <= now:
+                reviews.pop(token, None)
+        while len(reviews) >= _DOCUMENT_REVIEW_LIMIT:
+            oldest = min(
+                reviews, key=lambda token: float(reviews[token]["expires_at"]),
+            )
+            reviews.pop(oldest, None)
+
+    def _issue_document_review(
+        report: dict, *, owner_binding: str, digest: str,
+    ) -> dict:
+        now = time.monotonic()
+        token = secrets.token_urlsafe(32)
+        with app.state.document_import_review_lock:
+            _prune_document_reviews(now)
+            app.state.document_import_reviews[token] = {
+                "owner_binding": owner_binding,
+                "digest": digest,
+                "expires_at": now + _DOCUMENT_REVIEW_TTL_SECONDS,
+            }
+        response = dict(report)
+        response["review_token"] = token
+        response["review_expires_in"] = _DOCUMENT_REVIEW_TTL_SECONDS
+        return response
+
+    def _consume_document_review(
+        token: str, *, owner_binding: str, digest: str,
+    ) -> None:
+        supplied = str(token or "")
+        if not 32 <= len(supplied) <= 200:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "a fresh matching import preview is required"},
+            )
+        now = time.monotonic()
+        with app.state.document_import_review_lock:
+            _prune_document_reviews(now)
+            record = app.state.document_import_reviews.pop(supplied, None)
+        if (
+            record is None
+            or not hmac.compare_digest(
+                str(record["owner_binding"]), owner_binding,
+            )
+            or not hmac.compare_digest(str(record["digest"]), digest)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "a fresh matching import preview is required"},
+            )
+
+    def _document_relative_path(value: object) -> str:
+        raw = str(value or "").replace("\\", "/")
+        candidate = PurePosixPath(raw)
+        windows = PureWindowsPath(raw)
+        if (
+            not raw
+            or "\x00" in raw
+            or candidate.is_absolute()
+            or windows.is_absolute()
+            or bool(windows.drive)
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or any(ord(character) < 32 for character in raw)
+        ):
+            raise HTTPException(status_code=400, detail={"error": "invalid upload path"})
+        return candidate.as_posix()
+
+    async def _document_uploads(
+        files: list[UploadFile], *, source_mode: str,
+    ) -> list[tuple[str, bytes]]:
+        if not files or len(files) > MAX_IMPORT_FILES:
+            raise HTTPException(status_code=413, detail={"error": "invalid document file count"})
+        uploads: list[tuple[str, bytes]] = []
+        seen_paths: set[str] = set()
+        total = 0
+        for upload in files:
+            relative_path = _document_relative_path(upload.filename)
+            path_key = relative_path.casefold()
+            if path_key in seen_paths:
+                raise HTTPException(status_code=400, detail={"error": "duplicate upload path"})
+            seen_paths.add(path_key)
+            suffix = PurePosixPath(relative_path).suffix.lower()
+            if source_mode == "obsidian":
+                if suffix != ".md":
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": "Obsidian mode accepts Markdown note bytes only"},
+                    )
+            elif suffix not in _DOCUMENT_SUFFIXES:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "unsupported document format"},
+                )
+            raw = await upload.read(MAX_IMPORT_RESOURCE_BYTES + 1)
+            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+                raise HTTPException(status_code=413, detail={"error": "document file is too large"})
+            total += len(raw)
+            if total > MAX_IMPORT_TOTAL_BYTES:
+                raise HTTPException(status_code=413, detail={"error": "document upload is too large"})
+            uploads.append((relative_path, raw))
+        return uploads
+
+    def _document_attachments(raw_manifest: str, *, source_mode: str) -> list[dict]:
+        if source_mode != "obsidian" and raw_manifest not in {"", "[]", None}:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "attachment manifests are only supported in Obsidian mode"},
+            )
+        try:
+            manifest = json.loads(raw_manifest or "[]")
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise HTTPException(status_code=400, detail={"error": "invalid attachment manifest"}) from exc
+        if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
+            raise HTTPException(status_code=400, detail={"error": "invalid attachment manifest"})
+        safe = []
+        seen_paths: set[str] = set()
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise HTTPException(status_code=400, detail={"error": "invalid attachment manifest"})
+            path = _document_relative_path(entry.get("path"))
+            path_key = path.casefold()
+            if path_key in seen_paths:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "duplicate attachment path"},
+                )
+            seen_paths.add(path_key)
+            size = entry.get("size")
+            if type(size) is not int or not 0 <= size <= MAX_IMPORT_RESOURCE_BYTES:
+                raise HTTPException(status_code=400, detail={"error": "invalid attachment manifest"})
+            safe.append({"path": path, "size": size})
+        return safe
+
+    def _reject_document_path_overlap(
+        uploads: list[tuple[str, bytes]], attachments: list[dict],
+    ) -> None:
+        uploaded = {path.casefold() for path, _raw in uploads}
+        if uploaded.intersection(str(item["path"]).casefold() for item in attachments):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "upload and attachment paths overlap"},
+            )
+
+    def _document_source_identity(source_id: str, source_label: str) -> tuple[str, str]:
+        """Require an explicit identity before creating a browser-upload source."""
+        clean_id = source_id.strip()
+        clean_label = source_label.strip()
+        if not clean_id and not clean_label:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "source label is required for a new source"},
+            )
+        return clean_id, clean_label
+
+    def _document_service_call(
+        generic_name: str, legacy_name: str, *, generic_kwargs: dict,
+        legacy_kwargs: dict,
+    ):
+        """Call the universal facade when available, retaining old local databases.
+
+        Service rollout is intentionally independent from dashboard rollout.  Filter
+        arguments for an explicit service signature so an older local service keeps
+        serving its Obsidian compatibility routes during a staged upgrade.
+        """
+        method = getattr(svc, generic_name, None)
+        kwargs = generic_kwargs if method is not None else legacy_kwargs
+        if method is None:
+            method = getattr(svc, legacy_name)
+        signature = inspect.signature(method)
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            kwargs = {
+                name: value for name, value in kwargs.items()
+                if name in signature.parameters
+            }
+        return method(**kwargs)
+
+    def _document_sources(workspace: str):
+        method = getattr(svc, "list_source_vaults", None)
+        if method is None:
+            method = getattr(svc, "list_document_sources", None)
+        if method is None:
+            method = getattr(svc, "list_obsidian_vaults")
+        return method(workspace)
+
+    @app.get("/api/workspaces/import-documents/sources", include_in_schema=False)
+    def document_sources(workspace: str, request: Request):
+        _require_document_browser_owner(request)
+        try:
+            return {"sources": _document_sources(workspace)}
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+
+    @app.get("/api/workspaces/import-documents/formats", include_in_schema=False)
+    def document_formats(request: Request):
+        """Expose the local parser registry to the owner-only browser wizard.
+
+        This avoids treating the client-side picker as an authority while keeping
+        its supported-format hint synchronized with the server that validates every
+        uploaded byte.
+        """
+        _require_document_browser_owner(request)
+        return {"extensions": sorted(_DOCUMENT_SUFFIXES)}
+
+    @app.post("/api/workspaces/import-documents/preview", include_in_schema=False)
+    async def document_preview(
+        request: Request,
+        workspace: str = Form(...), repo: str = Form(""), session_id: str = Form(""),
+        scope: str = Form("workspace"), memory_type: str = Form("semantic"),
+        source_id: str = Form(""), source_label: str = Form(""), on_conflict: str = Form("error"),
+        source_mode: str = Form("documents"),
+        confirmed: str = Form("false"), attachment_manifest: str = Form("[]"),
+        files: list[UploadFile] = File(...),
+    ):
+        owner_binding = _require_document_browser_owner(request)
+        if source_mode not in {"documents", "obsidian"}:
+            raise HTTPException(status_code=400, detail={"error": "invalid document source mode"})
+        source_id, source_label = _document_source_identity(source_id, source_label)
+        uploads = await _document_uploads(files, source_mode=source_mode)
+        attachments = _document_attachments(attachment_manifest, source_mode=source_mode)
+        _reject_document_path_overlap(uploads, attachments)
+        try:
+            report = _document_service_call(
+                "preview_document_upload", "preview_obsidian_upload",
+                generic_kwargs={
+                    "files": uploads, "attachment_manifest": attachments,
+                    "workspace": workspace, "repo": repo or None,
+                    "session_id": session_id or None, "scope": scope,
+                    "memory_type": memory_type, "source_id": source_id or None,
+                    "source_label": source_label, "on_conflict": on_conflict,
+                },
+                legacy_kwargs={
+                    "files": uploads, "attachment_manifest": attachments,
+                    "workspace": workspace, "repo": repo or None,
+                    "session_id": session_id or None, "scope": scope,
+                    "memory_type": memory_type, "vault_id": source_id or None,
+                    "vault_label": source_label, "on_conflict": on_conflict,
+                    "confirmed": confirmed.strip().lower() == "true",
+                },
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+        digest = _document_review_digest(
+            uploads=uploads, attachments=attachments, workspace=workspace,
+            repo=repo, session_id=session_id, scope=scope,
+            memory_type=memory_type, source_id=source_id,
+            source_label=source_label, on_conflict=on_conflict,
+            source_mode=source_mode,
+        )
+        return _issue_document_review(
+            report, owner_binding=owner_binding, digest=digest,
+        )
+
+    @app.post("/api/workspaces/import-documents/run", include_in_schema=False)
+    async def document_run(
+        request: Request,
+        workspace: str = Form(...), repo: str = Form(""), session_id: str = Form(""),
+        scope: str = Form("workspace"), memory_type: str = Form("semantic"),
+        source_id: str = Form(""), source_label: str = Form(""), on_conflict: str = Form("error"),
+        source_mode: str = Form("documents"),
+        confirmed: str = Form("false"), review_token: str = Form(""),
+        attachment_manifest: str = Form("[]"),
+        files: list[UploadFile] = File(...),
+    ):
+        owner_binding = _require_document_browser_owner(request)
+        if confirmed.strip().lower() != "true":
+            raise HTTPException(status_code=403, detail={"error": "owner confirmation required"})
+        if source_mode not in {"documents", "obsidian"}:
+            raise HTTPException(status_code=400, detail={"error": "invalid document source mode"})
+        source_id, source_label = _document_source_identity(source_id, source_label)
+        uploads = await _document_uploads(files, source_mode=source_mode)
+        attachments = _document_attachments(attachment_manifest, source_mode=source_mode)
+        _reject_document_path_overlap(uploads, attachments)
+        digest = _document_review_digest(
+            uploads=uploads, attachments=attachments, workspace=workspace,
+            repo=repo, session_id=session_id, scope=scope,
+            memory_type=memory_type, source_id=source_id,
+            source_label=source_label, on_conflict=on_conflict,
+            source_mode=source_mode,
+        )
+        _consume_document_review(
+            review_token, owner_binding=owner_binding, digest=digest,
+        )
+        try:
+            return _document_service_call(
+                "import_document_upload", "import_obsidian_upload",
+                generic_kwargs={
+                    "files": uploads, "attachment_manifest": attachments,
+                    "workspace": workspace, "repo": repo or None,
+                    "session_id": session_id or None, "scope": scope,
+                    "memory_type": memory_type, "source_id": source_id or None,
+                    "source_label": source_label, "on_conflict": on_conflict,
+                    "confirmed": True,
+                },
+                legacy_kwargs={
+                    "files": uploads, "attachment_manifest": attachments,
+                    "workspace": workspace, "repo": repo or None,
+                    "session_id": session_id or None, "scope": scope,
+                    "memory_type": memory_type, "vault_id": source_id or None,
+                    "vault_label": source_label, "on_conflict": on_conflict,
+                    "confirmed": True,
+                },
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+
+    @app.get("/api/workspaces/import-documents/jobs/{job_id}", include_in_schema=False)
+    def document_job(job_id: str, workspace: str, request: Request):
+        _require_document_browser_owner(request)
+        try:
+            return _document_service_call(
+                "get_document_import_job", "get_obsidian_import_job",
+                generic_kwargs={"job_id": job_id, "workspace": workspace},
+                legacy_kwargs={"job_id": job_id, "workspace": workspace},
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=404, detail={"error": "import job not found"}) from None
+
+    @app.post("/api/workspaces/import-documents/jobs/{job_id}/cancel", include_in_schema=False)
+    def cancel_document_job(job_id: str, request: Request, workspace: str = Form(...)):
+        _require_document_browser_owner(request)
+        try:
+            return _document_service_call(
+                "cancel_document_import_job", "cancel_obsidian_import_job",
+                generic_kwargs={"job_id": job_id, "workspace": workspace},
+                legacy_kwargs={"job_id": job_id, "workspace": workspace},
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=404, detail={"error": "import job not found"}) from None
+
+    # The short-lived Obsidian routes remain browser-owner-only compatibility aliases
+    # for saved dashboard links.  The universal wizard uses import-documents above.
+    @app.get("/api/workspaces/import-obsidian/vaults", include_in_schema=False)
+    def obsidian_vaults(workspace: str, request: Request):
+        _require_document_browser_owner(request)
+        try:
+            return {"vaults": svc.list_obsidian_vaults(workspace)}
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+
+    @app.post("/api/workspaces/import-obsidian/preview", include_in_schema=False)
+    async def obsidian_preview_alias(
+        request: Request, workspace: str = Form(...), repo: str = Form(""),
+        session_id: str = Form(""), scope: str = Form("workspace"),
+        memory_type: str = Form("semantic"), vault_id: str = Form(""),
+        vault_label: str = Form(""), on_conflict: str = Form("error"),
+        confirmed: str = Form("false"), attachment_manifest: str = Form("[]"),
+        files: list[UploadFile] = File(...),
+    ):
+        owner_binding = _require_document_browser_owner(request)
+        vault_id, vault_label = _document_source_identity(vault_id, vault_label)
+        uploads = await _document_uploads(files, source_mode="obsidian")
+        attachments = _document_attachments(attachment_manifest, source_mode="obsidian")
+        _reject_document_path_overlap(uploads, attachments)
+        try:
+            report = svc.preview_obsidian_upload(
+                files=uploads, attachment_manifest=attachments, workspace=workspace,
+                repo=repo or None, session_id=session_id or None, scope=scope,
+                memory_type=memory_type, vault_id=vault_id or None,
+                vault_label=vault_label, on_conflict=on_conflict,
+                confirmed=confirmed.strip().lower() == "true",
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+        digest = _document_review_digest(
+            uploads=uploads, attachments=attachments, workspace=workspace,
+            repo=repo, session_id=session_id, scope=scope,
+            memory_type=memory_type, source_id=vault_id,
+            source_label=vault_label, on_conflict=on_conflict,
+            source_mode="obsidian",
+        )
+        return _issue_document_review(
+            report, owner_binding=owner_binding, digest=digest,
+        )
+
+    @app.post("/api/workspaces/import-obsidian/run", include_in_schema=False)
+    async def obsidian_run_alias(
+        request: Request, workspace: str = Form(...), repo: str = Form(""),
+        session_id: str = Form(""), scope: str = Form("workspace"),
+        memory_type: str = Form("semantic"), vault_id: str = Form(""),
+        vault_label: str = Form(""), on_conflict: str = Form("error"),
+        confirmed: str = Form("false"), review_token: str = Form(""),
+        attachment_manifest: str = Form("[]"),
+        files: list[UploadFile] = File(...),
+    ):
+        owner_binding = _require_document_browser_owner(request)
+        if confirmed.strip().lower() != "true":
+            raise HTTPException(status_code=403, detail={"error": "owner confirmation required"})
+        vault_id, vault_label = _document_source_identity(vault_id, vault_label)
+        uploads = await _document_uploads(files, source_mode="obsidian")
+        attachments = _document_attachments(attachment_manifest, source_mode="obsidian")
+        _reject_document_path_overlap(uploads, attachments)
+        digest = _document_review_digest(
+            uploads=uploads, attachments=attachments, workspace=workspace,
+            repo=repo, session_id=session_id, scope=scope,
+            memory_type=memory_type, source_id=vault_id,
+            source_label=vault_label, on_conflict=on_conflict,
+            source_mode="obsidian",
+        )
+        _consume_document_review(
+            review_token, owner_binding=owner_binding, digest=digest,
+        )
+        try:
+            return svc.import_obsidian_upload(
+                files=uploads, attachment_manifest=attachments, workspace=workspace,
+                repo=repo or None, session_id=session_id or None, scope=scope,
+                memory_type=memory_type, vault_id=vault_id or None,
+                vault_label=vault_label, on_conflict=on_conflict, confirmed=True,
+            )
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
+
+    @app.get("/api/workspaces/import-obsidian/jobs/{job_id}", include_in_schema=False)
+    def obsidian_job_alias(job_id: str, workspace: str, request: Request):
+        _require_document_browser_owner(request)
+        try:
+            return svc.get_obsidian_import_job(job_id, workspace=workspace)
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=404, detail={"error": "import job not found"}) from None
+
+    @app.post("/api/workspaces/import-obsidian/jobs/{job_id}/cancel", include_in_schema=False)
+    def cancel_obsidian_job_alias(job_id: str, request: Request, workspace: str = Form(...)):
+        _require_document_browser_owner(request)
+        try:
+            return svc.cancel_obsidian_import_job(job_id, workspace=workspace)
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=404, detail={"error": "import job not found"}) from None
 
     from engraphis.netutil import is_local_request
 

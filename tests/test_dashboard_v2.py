@@ -106,6 +106,431 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert "Estimated context saved" in page.text
 
 
+def test_dashboard_exposes_accessible_document_import_preview_and_job_contract(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        for fragment in (
+            'id="obsidian-import-button"',
+            'id="obsidian-import-dialog"',
+            'aria-labelledby="obsidian-import-title"',
+            'id="obsidian-import-files"',
+            'id="obsidian-import-folder"',
+            'webkitdirectory',
+            'id="obsidian-source-mode"',
+            'id="obsidian-workspace"',
+            'id="obsidian-repo"',
+            'id="obsidian-session"',
+            'id="obsidian-scope"',
+            'id="obsidian-memory-type"',
+            'id="obsidian-conflict"',
+            'id="obsidian-confirmed"',
+            'id="obsidian-report-filter"',
+            'id="obsidian-cancel"',
+        ):
+            assert fragment in page.text
+        # Folder selection must reveal every local file.  In document mode the
+        # browser uploads only supported document bytes; Obsidian mode retains a
+        # content-free attachment manifest for link/report accuracy.
+        assert 'accept=".md"' not in page.text
+        script = client.get("/v2-assets/ledger.js").text
+        for endpoint in (
+            '/workspaces/import-documents/sources?',
+            '/workspaces/import-documents/formats',
+            '/workspaces/import-documents/preview',
+            '/workspaces/import-documents/run',
+            '/workspaces/import-documents/jobs/',
+        ):
+            assert endpoint in script
+        assert "attachment_manifest" in script
+        assert "webkitRelativePath" in script
+        assert "documentExtensions" in script
+        assert "loadDocumentFormats" in script
+        assert "applySelectedDocumentSource" in script
+        assert "prefillNewSourceLabelFromFolder" in script
+        assert "requireNewSourceLabel" in script
+        assert "Enter a Source label before creating a new source." in script
+        assert "sourceMode === 'obsidian'" in script
+        assert "Confirm the selected scope before importing." in script
+        assert "review_token" in script
+        assert "reviewGeneration" in script
+        assert "invalidateDocumentImportPreview" in script
+        assert "selection.reviewToken = '';" in script
+        assert "if (obsidianImport.running) return;" in script
+        assert "pollObsidianImport(jobId, workspace)" in script
+        assert "dataset.workspace" in script
+        for material_control in (
+            "obsidian-import-files", "obsidian-import-folder", "obsidian-workspace",
+            "obsidian-repo", "obsidian-session", "obsidian-scope",
+            "obsidian-memory-type", "obsidian-vault-label", "obsidian-conflict",
+        ):
+            assert material_control in script
+
+
+def test_document_dashboard_endpoints_use_generic_service_and_reject_unknown_binary_uploads(
+        monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        monkeypatch.setattr(settings, "api_token", "dashboard-owner-token")
+        session = client.post("/api/auth/session", json={"token": "dashboard-owner-token"})
+        headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": session.json()["review_csrf_token"],
+        }
+        seen = {}
+
+        # The dashboard's generic bearer/API authority remains insufficient for
+        # document bytes, format disclosure, source metadata, or job control.
+        denied = client.get(
+            "/api/workspaces/import-documents/formats",
+            headers={"Authorization": "Bearer dashboard-owner-token"},
+        )
+        # The client still holds its session cookie, but the bearer cannot supply
+        # the required browser-session marker or the per-session CSRF nonce.
+        assert denied.status_code == 403
+
+        def preview_document_upload(**kwargs):
+            seen["preview"] = kwargs
+            return {"counts": {"documents": 1}, "files": [{"path": "notes/readme.txt", "status": "import"}]}
+
+        def import_document_upload(**kwargs):
+            seen["run"] = kwargs
+            return {"job_id": "job_document", "state": "queued"}
+
+        monkeypatch.setattr(client.app.state.service, "list_source_vaults", lambda workspace: [{"id": "vlt_1", "label": workspace}], raising=False)
+        monkeypatch.setattr(client.app.state.service, "preview_document_upload", preview_document_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "import_document_upload", import_document_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "get_document_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "state": "completed"}, raising=False)
+        monkeypatch.setattr(client.app.state.service, "cancel_document_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "cancel_requested": True}, raising=False)
+        payload = {
+            "workspace": "demo", "scope": "workspace", "memory_type": "semantic",
+            "source_id": "vlt_1", "source_label": "Notes", "on_conflict": "error",
+            "source_mode": "documents", "confirmed": "true", "attachment_manifest": "[]",
+        }
+        upload = [("files", ("notes/readme.txt", b"hello", "text/plain"))]
+        missing_label = {**payload, "source_id": "", "source_label": "   "}
+        preview_missing_label = client.post(
+            "/api/workspaces/import-documents/preview", data=missing_label,
+            files=upload, headers=headers,
+        )
+        assert preview_missing_label.status_code == 400
+        assert preview_missing_label.json()["detail"]["error"] == "source label is required for a new source"
+        run_missing_label = client.post(
+            "/api/workspaces/import-documents/run", data=missing_label,
+            files=upload, headers=headers,
+        )
+        assert run_missing_label.status_code == 400
+        sources = client.get("/api/workspaces/import-documents/sources?workspace=demo", headers=headers)
+        assert sources.json()["sources"] == [{"id": "vlt_1", "label": "demo"}]
+        formats = client.get("/api/workspaces/import-documents/formats", headers=headers)
+        assert formats.status_code == 200
+        assert ".png" in formats.json()["extensions"]
+        preview = client.post("/api/workspaces/import-documents/preview", data=payload, files=upload, headers=headers)
+        assert preview.status_code == 200
+        review_token = preview.json()["review_token"]
+        assert preview.json()["review_expires_in"] == 300
+        assert seen["preview"]["source_id"] == "vlt_1"
+        assert seen["preview"]["files"] == [("notes/readme.txt", b"hello")]
+        saved_source_without_label = client.post(
+            "/api/workspaces/import-documents/preview",
+            data={**payload, "source_label": ""}, files=upload, headers=headers,
+        )
+        assert saved_source_without_label.status_code == 200
+        image = client.post(
+            "/api/workspaces/import-documents/preview", data=payload,
+            files=[("files", ("notes/pic.png", b"png", "image/png"))], headers=headers,
+        )
+        assert image.status_code == 200
+        binary = client.post(
+            "/api/workspaces/import-documents/preview", data=payload,
+            files=[("files", ("notes/archive.bin", b"binary", "application/octet-stream"))],
+            headers=headers,
+        )
+        assert binary.status_code == 400
+        assert binary.json()["detail"]["error"] == "unsupported document format"
+        attachments = client.post(
+            "/api/workspaces/import-documents/preview",
+            data={**payload, "attachment_manifest": '[{"path":"notes/pic.png","size":3}]'},
+            files=upload, headers=headers,
+        )
+        assert attachments.status_code == 400
+        assert client.post(
+            "/api/workspaces/import-documents/run",
+            data={**payload, "confirmed": "false", "review_token": review_token},
+            files=upload, headers=headers,
+        ).status_code == 403
+        run_payload = {**payload, "review_token": review_token}
+        run = client.post(
+            "/api/workspaces/import-documents/run", data=run_payload,
+            files=upload, headers=headers,
+        )
+        assert run.status_code == 200
+        assert seen["run"]["confirmed"] is True
+        replay = client.post(
+            "/api/workspaces/import-documents/run", data=run_payload,
+            files=upload, headers=headers,
+        )
+        assert replay.status_code == 403
+        assert replay.json()["detail"]["error"] == "a fresh matching import preview is required"
+        assert client.get("/api/workspaces/import-documents/jobs/job_document?workspace=demo", headers=headers).status_code == 200
+        assert client.post(
+            "/api/workspaces/import-documents/jobs/job_document/cancel",
+            data={"workspace": "demo"}, headers=headers,
+        ).json()["cancel_requested"] is True
+
+
+def test_document_import_review_binds_owner_target_policy_manifest_and_exact_bytes(
+        monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        monkeypatch.setattr(settings, "api_token", "dashboard-owner-token")
+        session = client.post("/api/auth/session", json={"token": "dashboard-owner-token"})
+        headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": session.json()["review_csrf_token"],
+        }
+        imported = []
+
+        monkeypatch.setattr(
+            client.app.state.service,
+            "preview_document_upload",
+            lambda **kwargs: {"counts": {"documents": len(kwargs["files"])}},
+            raising=False,
+        )
+
+        def import_document_upload(**kwargs):
+            imported.append(kwargs)
+            return {"job_id": "job_bound", "state": "queued"}
+
+        monkeypatch.setattr(
+            client.app.state.service,
+            "import_document_upload",
+            import_document_upload,
+            raising=False,
+        )
+        base = {
+            "workspace": "demo", "repo": "repo-a", "session_id": "session-a",
+            "scope": "workspace", "memory_type": "semantic",
+            "source_id": "vlt_1", "source_label": "Notes",
+            "on_conflict": "error", "source_mode": "documents",
+            "confirmed": "true", "attachment_manifest": "[]",
+        }
+        upload = [("files", ("notes/Welcome.md", b"# Welcome", "text/markdown"))]
+
+        def preview_token(data=None, files=None):
+            response = client.post(
+                "/api/workspaces/import-documents/preview",
+                data=data or base, files=files or upload, headers=headers,
+            )
+            assert response.status_code == 200
+            return response.json()["review_token"]
+
+        token = preview_token()
+        missing = client.post(
+            "/api/workspaces/import-documents/run", data=base,
+            files=upload, headers=headers,
+        )
+        assert missing.status_code == 403
+        assert missing.json()["detail"]["error"] == (
+            "a fresh matching import preview is required"
+        )
+
+        mutations = {
+            "workspace": "beta",
+            "repo": "repo-b",
+            "session_id": "session-b",
+            "scope": "repo",
+            "memory_type": "episodic",
+            "source_id": "vlt_2",
+            "source_label": "Other notes",
+            "on_conflict": "update",
+            "source_mode": "obsidian",
+        }
+        for field, changed_value in mutations.items():
+            token = preview_token()
+            changed = {**base, field: changed_value, "review_token": token}
+            rejected = client.post(
+                "/api/workspaces/import-documents/run", data=changed,
+                files=upload, headers=headers,
+            )
+            assert rejected.status_code == 403, field
+            assert rejected.json()["detail"]["error"] == (
+                "a fresh matching import preview is required"
+            )
+
+        for changed_upload in (
+            [("files", ("notes/Renamed.md", b"# Welcome", "text/markdown"))],
+            [("files", ("notes/Welcome.md", b"# Changed", "text/markdown"))],
+        ):
+            token = preview_token()
+            rejected = client.post(
+                "/api/workspaces/import-documents/run",
+                data={**base, "review_token": token},
+                files=changed_upload, headers=headers,
+            )
+            assert rejected.status_code == 403
+
+        obsidian = {
+            **base,
+            "source_mode": "obsidian",
+            "attachment_manifest": '[{"path":"assets/pic.png","size":12}]',
+        }
+        token = preview_token(data=obsidian)
+        changed_manifest = {
+            **obsidian,
+            "attachment_manifest": '[{"path":"assets/pic.png","size":13}]',
+            "review_token": token,
+        }
+        assert client.post(
+            "/api/workspaces/import-documents/run", data=changed_manifest,
+            files=upload, headers=headers,
+        ).status_code == 403
+
+        token = preview_token()
+        with client.app.state.document_import_review_lock:
+            client.app.state.document_import_reviews[token]["expires_at"] = 0
+        expired = client.post(
+            "/api/workspaces/import-documents/run",
+            data={**base, "review_token": token}, files=upload, headers=headers,
+        )
+        assert expired.status_code == 403
+
+        token = preview_token()
+        replacement_session = client.post(
+            "/api/auth/session", json={"token": "dashboard-owner-token"},
+        )
+        replacement_headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": replacement_session.json()["review_csrf_token"],
+        }
+        rebound = client.post(
+            "/api/workspaces/import-documents/run",
+            data={**base, "review_token": token}, files=upload,
+            headers=replacement_headers,
+        )
+        assert rebound.status_code == 403
+        assert imported == []
+
+
+def test_obsidian_dashboard_endpoints_require_browser_owner_csrf_and_preserve_relative_paths(
+        monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        monkeypatch.setattr(settings, "api_token", "dashboard-owner-token")
+        payload = {
+            "workspace": "demo", "scope": "workspace", "memory_type": "semantic",
+            "vault_id": "", "vault_label": "Notes", "on_conflict": "error",
+            "confirmed": "true", "attachment_manifest": '[{"path":"assets/pic.png","size":12}]',
+        }
+        upload = [("files", ("notes/Welcome.md", b"# Welcome", "text/markdown"))]
+        # The generic bearer passes the outer API gate, but vault imports themselves are
+        # intentionally owner-browser-only.
+        denied = client.post(
+            "/api/workspaces/import-obsidian/preview", data=payload, files=upload,
+            headers={"Authorization": "Bearer dashboard-owner-token"},
+        )
+        assert denied.status_code == 401
+
+        session = client.post("/api/auth/session", json={"token": "dashboard-owner-token"})
+        assert session.status_code == 200
+        headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": session.json()["review_csrf_token"],
+        }
+        seen = {}
+
+        def preview_obsidian_upload(**kwargs):
+            seen["preview"] = kwargs
+            return {"counts": {"markdown_files": 1}, "files": [{"path": "notes/Welcome.md", "status": "import"}]}
+
+        def import_obsidian_upload(**kwargs):
+            seen["run"] = kwargs
+            return {"job_id": "job_obsidian", "state": "queued"}
+
+        monkeypatch.setattr(client.app.state.service, "list_obsidian_vaults", lambda workspace: [{"id": "v_1", "label": workspace}], raising=False)
+        monkeypatch.setattr(client.app.state.service, "preview_obsidian_upload", preview_obsidian_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "import_obsidian_upload", import_obsidian_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "get_obsidian_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "state": "completed"}, raising=False)
+        monkeypatch.setattr(client.app.state.service, "cancel_obsidian_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "cancel_requested": True}, raising=False)
+
+        missing_label = client.post(
+            "/api/workspaces/import-obsidian/preview",
+            data={**payload, "vault_label": "\t"}, files=upload, headers=headers,
+        )
+        assert missing_label.status_code == 400
+        assert missing_label.json()["detail"]["error"] == "source label is required for a new source"
+
+        vaults = client.get("/api/workspaces/import-obsidian/vaults?workspace=demo", headers=headers)
+        assert vaults.status_code == 200
+        assert vaults.json()["vaults"] == [{"id": "v_1", "label": "demo"}]
+        preview = client.post("/api/workspaces/import-obsidian/preview", data=payload, files=upload, headers=headers)
+        assert preview.status_code == 200
+        review_token = preview.json()["review_token"]
+        assert seen["preview"]["files"] == [("notes/Welcome.md", b"# Welcome")]
+        assert seen["preview"]["attachment_manifest"] == [{"path": "assets/pic.png", "size": 12}]
+
+        duplicate = client.post(
+            "/api/workspaces/import-obsidian/preview", data=payload,
+            files=[
+                ("files", ("notes/Dupe.md", b"one", "text/markdown")),
+                ("files", ("NOTES/DUPE.md", b"two", "text/markdown")),
+            ], headers=headers,
+        )
+        assert duplicate.status_code == 400
+        assert duplicate.json()["detail"]["error"] == "duplicate upload path"
+        for unsafe in ("C:/vault/Note.md", "//server/share/Note.md"):
+            rejected = client.post(
+                "/api/workspaces/import-obsidian/preview", data=payload,
+                files=[("files", (unsafe, b"unsafe", "text/markdown"))],
+                headers=headers,
+            )
+            assert rejected.status_code == 400
+        overlap_payload = {
+            **payload,
+            "attachment_manifest": '[{"path":"NOTES/welcome.MD","size":12}]',
+        }
+        overlap = client.post(
+            "/api/workspaces/import-obsidian/preview", data=overlap_payload,
+            files=upload, headers=headers,
+        )
+        assert overlap.status_code == 400
+        assert overlap.json()["detail"]["error"] == "upload and attachment paths overlap"
+
+        markdown_alias = client.post(
+            "/api/workspaces/import-obsidian/preview", data=payload,
+            files=[("files", ("notes/Legacy.markdown", b"legacy", "text/markdown"))],
+            headers=headers,
+        )
+        assert markdown_alias.status_code == 400
+        assert markdown_alias.json()["detail"]["error"] == (
+            "Obsidian mode accepts Markdown note bytes only"
+        )
+
+        payload["confirmed"] = "false"
+        assert client.post(
+            "/api/workspaces/import-obsidian/run",
+            data={**payload, "review_token": review_token}, files=upload, headers=headers,
+        ).status_code == 403
+        payload["confirmed"] = "true"
+        run_payload = {**payload, "review_token": review_token}
+        run = client.post(
+            "/api/workspaces/import-obsidian/run", data=run_payload,
+            files=upload, headers=headers,
+        )
+        assert run.status_code == 200
+        assert seen["run"]["confirmed"] is True
+        assert client.post(
+            "/api/workspaces/import-obsidian/run", data=run_payload,
+            files=upload, headers=headers,
+        ).status_code == 403
+        status = client.get("/api/workspaces/import-obsidian/jobs/job_obsidian?workspace=demo", headers=headers)
+        assert status.status_code == 200
+        assert status.json()["state"] == "completed"
+        cancelled = client.post(
+            "/api/workspaces/import-obsidian/jobs/job_obsidian/cancel",
+            data={"workspace": "demo"}, headers=headers,
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["cancel_requested"] is True
+
+
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (

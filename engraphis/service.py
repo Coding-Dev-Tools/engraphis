@@ -1000,6 +1000,7 @@ class MemoryService:
         self._graph_scene_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
         self._graph_job_lock = threading.RLock()
         self._graph_job_threads: dict[str, threading.Thread] = {}
+        self._obsidian_job_threads: dict[str, threading.Thread] = {}
         self._graph_runner_id = make_id("device")
         self._service_close_lock = threading.Lock()
         self._closing = False
@@ -1028,11 +1029,24 @@ class MemoryService:
             with self._graph_job_lock:
                 workers = list(self._graph_job_threads.items())
 
+            with self._graph_job_lock:
+                import_workers = list(self._obsidian_job_threads.items())
+            for job_id, _thread in import_workers:
+                self.store.conn.execute(
+                    "UPDATE jobs SET cancel_requested=1 WHERE id=? AND state='running'",
+                    (job_id,),
+                )
+            if import_workers:
+                self.store.conn.commit()
+
             deadline = time.monotonic() + timeout_value
-            for _job_id, thread in workers:
+            for _job_id, thread in [*workers, *import_workers]:
                 remaining = max(0.0, deadline - time.monotonic())
                 thread.join(remaining)
-            alive = [job_id for job_id, thread in workers if thread.is_alive()]
+            alive = [
+                job_id for job_id, thread in [*workers, *import_workers]
+                if thread.is_alive()
+            ]
             if alive:
                 raise RuntimeError(
                     f"{len(alive)} graph index worker(s) did not stop before shutdown"
@@ -2033,6 +2047,771 @@ class MemoryService:
         return {"workspace": ws, "scanned": len(files), "imported": imported,
                 "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
                 "details": details[:50], "warnings": warnings[:50]}
+
+    # ── Universal local document import (v2 source manifest) ────────────────
+    def _document_registered_target(
+        self, source_id: Optional[str], *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> Optional[str]:
+        """Validate a selected source collection before creating scope rows."""
+        if source_id is None:
+            return None
+        clean_id = _clean_text(
+            source_id, field="source_id", max_chars=MAX_NAME_CHARS,
+        )
+        if not clean_id.startswith("vlt_"):
+            raise ValidationError("registered document source was not found")
+        _ws, wid, rid, sid, selected_scope, selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None or (repo is not None and rid is None):
+            raise ValidationError("registered document source was not found")
+        source = self.store.get_source_vault(clean_id)
+        if (
+            source is None
+            or source.get("kind") != "documents"
+            or source.get("workspace_id") != wid
+            or source.get("repo_id") != rid
+            or source.get("session_id") != sid
+        ):
+            raise ValidationError("registered document source does not belong to that target")
+        if (
+            source.get("scope") != selected_scope.value
+            or source.get("memory_type") != selected_type.value
+        ):
+            raise ValidationError("registered document source has different import defaults")
+        return clean_id
+
+    def _document_label(self, value: str, *, source_id: Optional[str] = None) -> str:
+        label = _clean_text(
+            value, field="source_label", max_chars=MAX_NAME_CHARS, required=False,
+        )
+        if not label and source_id:
+            source = self.store.get_source_vault(source_id)
+            label = str(source.get("display_name") or "") if source else ""
+        if not label:
+            raise ValidationError("source_label is required for a new browser source")
+        _reject_secret_capture((("source_label", label),))
+        return label
+
+    @staticmethod
+    def _document_report(report: dict) -> dict:
+        """Expose the selected adapter explicitly on every generic response."""
+        report.setdefault("adapter", "documents")
+        report.setdefault("source_adapter", "documents")
+        return report
+
+    @staticmethod
+    def _document_upload_inputs(
+        files: list[tuple[str, bytes]], attachment_manifest: Optional[list[dict]],
+    ) -> tuple[list[tuple[str, bytes]], list[dict]]:
+        """Validate mixed document bytes and content-free attachment metadata."""
+        if not isinstance(files, list) or not files or len(files) > MAX_IMPORT_FILES:
+            raise ValidationError(f"files must contain 1 to {MAX_IMPORT_FILES} uploads")
+        from engraphis.core.documents import normalize_document_path
+
+        uploads: list[tuple[str, bytes]] = []
+        for entry in files:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValidationError("each upload must contain a path and bytes")
+            relative_path, raw = entry
+            if not isinstance(relative_path, str) or not isinstance(raw, bytes):
+                raise ValidationError("each upload must contain a path and bytes")
+            try:
+                path = normalize_document_path(relative_path)
+            except ValueError:
+                raise ValidationError("upload contains an invalid path") from None
+            uploads.append((path, raw))
+
+        manifest = [] if attachment_manifest is None else attachment_manifest
+        if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
+            raise ValidationError("attachment_manifest is invalid")
+        attachments: list[dict] = []
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise ValidationError("attachment_manifest is invalid")
+            raw_path = entry.get("path")
+            if not isinstance(raw_path, str):
+                raise ValidationError("attachment_manifest contains an invalid path")
+            try:
+                path = normalize_document_path(raw_path)
+            except ValueError:
+                raise ValidationError("attachment_manifest contains an invalid path") from None
+            size = entry.get("size")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise ValidationError("attachment_manifest contains an invalid size")
+            attachments.append({"path": path, "size": size})
+        return uploads, attachments
+
+    def preview_document_tree(
+        self, path: str, *, workspace: str, repo: Optional[str] = None,
+        session_id: Optional[str] = None, scope: Optional[str] = None,
+        memory_type: str = "semantic", source_id: Optional[str] = None,
+        source_label: str = "", on_conflict: str = "error",
+    ) -> dict:
+        """Scan and plan a mixed local document collection without Store writes."""
+        from engraphis.core.documents import scan_document_tree
+        from engraphis.document_import import DocumentImporter, local_document_adapter
+
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        scan = scan_document_tree(path, adapter=local_document_adapter)
+        label = self._document_label(source_label or Path(path).name)
+        report = DocumentImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def import_document_tree(
+        self, path: str, *, workspace: str, repo: Optional[str] = None,
+        session_id: Optional[str] = None, scope: Optional[str] = None,
+        memory_type: str = "semantic", source_id: Optional[str] = None,
+        source_label: str = "", on_conflict: str = "error",
+        confirmed: bool = False, actor: str = "local_cli_operator",
+        cancel_check=None, progress=None, _scan=None,
+    ) -> dict:
+        """Import mixed local documents synchronously and atomically per source file."""
+        from engraphis.core.documents import scan_document_tree
+        from engraphis.document_import import DocumentImporter, local_document_adapter
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        # The local CLI passes its already-previewed immutable scan so confirmation
+        # applies to exactly those bytes. Other callers receive the same secure scan
+        # here, immediately before target creation.
+        scan = _scan or scan_document_tree(path, adapter=local_document_adapter)
+        label = self._document_label(source_label or Path(path).name)
+        clean_actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS)
+        _reject_secret_capture((("actor", clean_actor),))
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        report = DocumentImporter(self).import_scan(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, confirmed=True,
+            actor=clean_actor, strict_root=True,
+            cancel_check=cancel_check, progress=progress,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def preview_document_upload(
+        self, *, files: list[tuple[str, bytes]],
+        attachment_manifest: Optional[list[dict]], workspace: str,
+        repo: Optional[str] = None, session_id: Optional[str] = None,
+        scope: Optional[str] = None, memory_type: str = "semantic",
+        source_id: Optional[str] = None, source_label: str = "",
+        on_conflict: str = "error", confirmed: bool = False,
+    ) -> dict:
+        """Preview browser-selected mixed document bytes without persisting a copy."""
+        del confirmed
+        from engraphis.document_import import DocumentImporter, scan_document_upload
+
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
+        label = self._document_label(source_label, source_id=source_id)
+        scan = scan_document_upload(uploads, source_label=label)
+        report = DocumentImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, strict_root=False,
+            attachment_manifest=attachments,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def import_document_upload(
+        self, *, files: list[tuple[str, bytes]],
+        attachment_manifest: Optional[list[dict]], workspace: str,
+        repo: Optional[str] = None, session_id: Optional[str] = None,
+        scope: Optional[str] = None, memory_type: str = "semantic",
+        source_id: Optional[str] = None, source_label: str = "",
+        on_conflict: str = "error", confirmed: bool = False,
+    ) -> dict:
+        """Start an owner-confirmed mixed-document import without upload persistence."""
+        from engraphis.document_import import DocumentImporter, scan_document_upload
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
+        label = self._document_label(source_label, source_id=source_id)
+        scan = scan_document_upload(uploads, source_label=label)
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        importer = DocumentImporter(self)
+        prepared = importer.prepare_import(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, confirmed=True,
+            strict_root=False,
+        )
+        job_id = str(prepared["job_id"])
+
+        def run() -> None:
+            try:
+                importer.import_scan(
+                    scan, workspace_id=wid, repo_id=rid, session_id=sid,
+                    scope=sc, memory_type=mt, source_id=source_id,
+                    source_label=label, on_conflict=policy, confirmed=True,
+                    actor="dashboard_browser_session", strict_root=False,
+                    attachment_manifest=attachments, prepared=prepared,
+                )
+            except BaseException:
+                logger.exception("Document import worker failed before final reporting")
+                try:
+                    self.store.conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? WHERE id=?",
+                        (time.time(), time.time(), job_id),
+                    )
+                    self.store.conn.commit()
+                except Exception:
+                    logger.exception("Document import worker finalization failed")
+            finally:
+                with self._graph_job_lock:
+                    self._obsidian_job_threads.pop(job_id, None)
+
+        worker = threading.Thread(
+            target=run, name=f"engraphis-document-import-{job_id[-8:]}", daemon=True,
+        )
+        with self._graph_job_lock:
+            self._obsidian_job_threads[job_id] = worker
+        worker.start()
+        return {
+            "job_id": job_id, "id": job_id, "state": "running", "status": "running",
+            "source_id": prepared.get("source_id", prepared["vault_id"]),
+            "adapter": "documents", "source_adapter": "documents",
+            "workspace": ws, "repo": repo,
+            "total_items": len(scan.documents) + len(scan.rejected) + len(scan.skipped),
+        }
+
+    def list_document_sources(self, workspace: str) -> list[dict]:
+        """List universal and legacy Markdown source identities for one workspace."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            return []
+        result = []
+        for row in self.store.list_source_vaults(workspace_id=wid):
+            if row.get("kind") not in {"documents", "obsidian"}:
+                continue
+            repo_name = None
+            if row.get("repo_id"):
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (row["repo_id"],),
+                ).fetchone()
+                repo_name = str(repo_row["name"]) if repo_row else None
+            result.append({
+                "id": row["id"],
+                "label": row.get("display_name") or "Local documents",
+                "kind": row.get("kind"),
+                "adapter": "obsidian" if row.get("kind") == "obsidian" else "documents",
+                "formats": row.get("formats") or {},
+                "workspace": ws, "repo": repo_name,
+                "session_id": row.get("session_id"), "scope": row.get("scope"),
+                "memory_type": row.get("memory_type"),
+                "importer_version": row.get("importer_version"),
+            })
+        return result
+
+    def get_document_import_job(self, job_id: str, *, workspace: str) -> dict:
+        """Return a content-free universal or compatibility import report."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? "
+            "AND kind IN ('document_import','obsidian_import')",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise KeyError(clean_id)
+        items = self.store.list_source_import_job_items(job_id=clean_id)
+        files = [{
+            "relative_path": item["relative_path"],
+            "status": item["result_state"], "action": item["planned_action"],
+            "reason": item.get("error_code") or "",
+            "warning_count": int(item.get("warning_count") or 0),
+            "format": item.get("source_format") or "",
+        } for item in items]
+        counts = _loads(row["counts"], {})
+        return {
+            "id": clean_id, "job_id": clean_id, "workspace": ws,
+            "kind": row["kind"], "state": row["state"], "status": row["state"],
+            "total_items": int(row["total_items"]),
+            "processed_items": int(row["processed_items"]),
+            "counts": counts, "files": files,
+            "report": {"state": row["state"], "counts": counts, "files": files},
+        }
+
+    def cancel_document_import_job(self, job_id: str, *, workspace: str) -> dict:
+        """Request cancellation at the next per-document atomic boundary."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        changed = self.store.conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=? AND workspace_id=? "
+            "AND kind IN ('document_import','obsidian_import') "
+            "AND state IN ('queued','running')",
+            (clean_id, wid),
+        ).rowcount
+        self.store.conn.commit()
+        if not changed:
+            row = self.store.conn.execute(
+                "SELECT state FROM jobs WHERE id=? AND workspace_id=? "
+                "AND kind IN ('document_import','obsidian_import')", (clean_id, wid),
+            ).fetchone()
+            if row is None:
+                raise KeyError(clean_id)
+            return {"id": clean_id, "state": row["state"], "cancel_requested": False}
+        return {"id": clean_id, "state": "running", "cancel_requested": True}
+
+    # ── Obsidian compatibility import ────────────────────────────────────────
+    def _obsidian_target(self, *, workspace: str, repo: Optional[str],
+                         session_id: Optional[str], scope: Optional[str],
+                         memory_type: str, create: bool) -> tuple[
+                             str, Optional[str], Optional[str], Optional[str], Scope, MemoryType
+                         ]:
+        """Resolve an import target through the ordinary v2 hierarchy rules."""
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        mt = _enum(memory_type, MemoryType, "memory_type")
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
+        if sc == Scope.USER:
+            raise ValidationError("user scope is read-only")
+        if sc == Scope.WORKSPACE and (rp or session_id):
+            raise ValidationError(
+                "workspace scope requires repo and session_id to be omitted"
+            )
+        wid = self._get_or_create_workspace(ws) if create else self._lookup_workspace(ws)
+        if wid is None:
+            if session_id:
+                raise ValidationError("session scope requires an existing workspace")
+            return ws, None, None, None, sc, mt
+        rid = (
+            self.store.get_or_create_repo(wid, rp) if create and rp
+            else self._lookup_repo(wid, rp) if rp else None
+        )
+        if rp and rid is None:
+            return ws, wid, None, None, sc, mt
+        if session_id:
+            session = self._session_for_write(session_id, wid, rid)
+            if session is None:
+                raise ValidationError("session_id is required")
+            session_id = str(session["id"])
+            if rid is None:
+                rid = session.get("repo_id")
+            if sc == Scope.REPO and rid is None:
+                raise ValidationError("repo scope requires a repo-backed session_id")
+        if sc == Scope.REPO and rid is None:
+            raise ValidationError("repo scope requires repo")
+        return ws, wid, rid, session_id, sc, mt
+
+    def _obsidian_registered_target(
+        self, vault_id: Optional[str], *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> Optional[str]:
+        """Validate a selected vault before an import may create hierarchy rows.
+
+        A new import is allowed to create its workspace/repository. Re-importing a
+        registered vault is different: its target already exists, and a misspelled or
+        cross-workspace request must fail without first creating attacker-controlled
+        hierarchy state. The importer performs the authoritative vault-row comparison;
+        this preflight makes that comparison mutation-free.
+        """
+        if vault_id is None:
+            return None
+        clean_id = _clean_text(
+            vault_id, field="vault_id", max_chars=MAX_NAME_CHARS,
+        )
+        if not clean_id.startswith("vlt_"):
+            raise ValidationError("registered vault was not found")
+        _ws, wid, rid, sid, selected_scope, selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None or (repo is not None and rid is None):
+            raise ValidationError("registered vault was not found")
+        vault = self.store.get_source_vault(clean_id)
+        if (
+            vault is None
+            or vault.get("kind") != "obsidian"
+            or vault.get("workspace_id") != wid
+            or vault.get("repo_id") != rid
+            or vault.get("session_id") != sid
+        ):
+            raise ValidationError("registered vault does not belong to that target")
+        if (
+            vault.get("scope") != selected_scope.value
+            or vault.get("memory_type") != selected_type.value
+        ):
+            raise ValidationError("registered vault has different import defaults")
+        return clean_id
+
+    def _obsidian_label(self, value: str, *, vault_id: Optional[str] = None) -> str:
+        label = _clean_text(
+            value, field="vault_label", max_chars=MAX_NAME_CHARS, required=False,
+        )
+        if not label and vault_id:
+            vault = self.store.get_source_vault(vault_id)
+            label = str(vault.get("display_name") or "") if vault else ""
+        if not label:
+            raise ValidationError("vault_label is required for a new browser source")
+        _reject_secret_capture((("vault_label", label),))
+        return label
+
+    @staticmethod
+    def _obsidian_conflict_policy(value: str) -> str:
+        policy = _clean_text(
+            value, field="on_conflict", max_chars=MAX_NAME_CHARS,
+        ).casefold()
+        policy = {"report": "error", "supersede": "replace"}.get(policy, policy)
+        if policy not in {"error", "replace", "new"}:
+            raise ValidationError("on_conflict must be error, replace, or new")
+        return policy
+
+    @staticmethod
+    def _obsidian_upload_inputs(
+        files: list[tuple[str, bytes]], attachment_manifest: Optional[list[dict]],
+    ) -> tuple[list[tuple[str, bytes]], list[dict]]:
+        """Apply transport-independent upload bounds and manifest validation."""
+        if not isinstance(files, list) or not files or len(files) > MAX_IMPORT_FILES:
+            raise ValidationError(f"files must contain 1 to {MAX_IMPORT_FILES} uploads")
+        uploads: list[tuple[str, bytes]] = []
+        for entry in files:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValidationError("each upload must contain a path and bytes")
+            relative_path, raw = entry
+            if not isinstance(relative_path, str) or not isinstance(raw, bytes):
+                raise ValidationError("each upload must contain a path and bytes")
+            uploads.append((relative_path, raw))
+
+        manifest = [] if attachment_manifest is None else attachment_manifest
+        if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
+            raise ValidationError("attachment_manifest is invalid")
+        from engraphis.core.obsidian import normalize_obsidian_path
+
+        attachments: list[dict] = []
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise ValidationError("attachment_manifest is invalid")
+            raw_path = entry.get("path")
+            if not isinstance(raw_path, str):
+                raise ValidationError("attachment_manifest contains an invalid path")
+            try:
+                path = normalize_obsidian_path(raw_path)
+            except ValueError:
+                raise ValidationError("attachment_manifest contains an invalid path") from None
+            size = entry.get("size")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise ValidationError("attachment_manifest contains an invalid size")
+            attachments.append({"path": path, "size": size})
+        return uploads, attachments
+
+    def preview_obsidian_vault(self, path: str, *, workspace: str,
+                               repo: Optional[str] = None,
+                               session_id: Optional[str] = None,
+                               scope: Optional[str] = None,
+                               memory_type: str = "semantic",
+                               vault_id: Optional[str] = None,
+                               vault_label: str = "",
+                               on_conflict: str = "error") -> dict:
+        """Read and plan one local vault without mutating the Store."""
+        from engraphis.core.obsidian import scan_obsidian_vault
+        from engraphis.obsidian_import import ObsidianImporter
+
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        policy = self._obsidian_conflict_policy(on_conflict)
+        scan = scan_obsidian_vault(path)
+        label = self._obsidian_label(vault_label or Path(path).name)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        report = ObsidianImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def import_obsidian_vault(self, path: str, *, workspace: str,
+                              repo: Optional[str] = None,
+                              session_id: Optional[str] = None,
+                              scope: Optional[str] = None,
+                              memory_type: str = "semantic",
+                              vault_id: Optional[str] = None,
+                              vault_label: str = "",
+                              on_conflict: str = "error",
+                              confirmed: bool = False,
+                              actor: str = "local_cli_operator",
+                              cancel_check=None, progress=None,
+                              _scan=None) -> dict:
+        """Import one filesystem vault synchronously and atomically per note."""
+        from engraphis.core.obsidian import scan_obsidian_vault
+        from engraphis.obsidian_import import ObsidianImporter
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        # The local CLI passes its already-previewed immutable scan so operator
+        # confirmation applies to exactly those bytes. Other callers are scanned
+        # here immediately before target creation.
+        scan = _scan or scan_obsidian_vault(path)
+        label = self._obsidian_label(vault_label or Path(path).name)
+        clean_actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS)
+        _reject_secret_capture((("actor", clean_actor),))
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        report = ObsidianImporter(self).import_scan(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            confirmed=True, actor=clean_actor, strict_root=True,
+            cancel_check=cancel_check, progress=progress,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def preview_obsidian_upload(self, *, files: list[tuple[str, bytes]],
+                                attachment_manifest: Optional[list[dict]],
+                                workspace: str, repo: Optional[str] = None,
+                                session_id: Optional[str] = None,
+                                scope: Optional[str] = None,
+                                memory_type: str = "semantic",
+                                vault_id: Optional[str] = None,
+                                vault_label: str = "",
+                                on_conflict: str = "error",
+                                confirmed: bool = False) -> dict:
+        """Preview browser-selected bytes; ``confirmed`` is intentionally ignored."""
+        del confirmed
+        from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
+
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
+        label = self._obsidian_label(vault_label, vault_id=vault_id)
+        scan = scan_obsidian_upload(uploads, vault_label=label)
+        report = ObsidianImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            strict_root=False, attachment_manifest=attachments,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def import_obsidian_upload(self, *, files: list[tuple[str, bytes]],
+                               attachment_manifest: Optional[list[dict]],
+                               workspace: str, repo: Optional[str] = None,
+                               session_id: Optional[str] = None,
+                               scope: Optional[str] = None,
+                               memory_type: str = "semantic",
+                               vault_id: Optional[str] = None,
+                               vault_label: str = "",
+                               on_conflict: str = "error",
+                               confirmed: bool = False) -> dict:
+        """Import owner-confirmed browser bytes without creating an upload copy."""
+        from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
+        label = self._obsidian_label(vault_label, vault_id=vault_id)
+        scan = scan_obsidian_upload(uploads, vault_label=label)
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        importer = ObsidianImporter(self)
+        prepared = importer.prepare_import(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            confirmed=True, strict_root=False,
+        )
+        job_id = str(prepared["job_id"])
+
+        def run() -> None:
+            try:
+                importer.import_scan(
+                    scan, workspace_id=wid, repo_id=rid, session_id=sid,
+                    scope=sc, memory_type=mt, vault_id=vault_id,
+                    vault_label=label, on_conflict=policy,
+                    confirmed=True, actor="dashboard_browser_session",
+                    strict_root=False, attachment_manifest=attachments,
+                    prepared=prepared,
+                )
+            except BaseException:
+                logger.exception("Obsidian import worker failed before final reporting")
+                try:
+                    self.store.conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? WHERE id=?",
+                        (time.time(), time.time(), job_id),
+                    )
+                    self.store.conn.commit()
+                except Exception:
+                    logger.exception("Obsidian import worker finalization failed")
+            finally:
+                with self._graph_job_lock:
+                    self._obsidian_job_threads.pop(job_id, None)
+
+        worker = threading.Thread(
+            target=run, name=f"engraphis-obsidian-import-{job_id[-8:]}", daemon=True,
+        )
+        with self._graph_job_lock:
+            self._obsidian_job_threads[job_id] = worker
+        worker.start()
+        return {
+            "job_id": job_id, "id": job_id, "state": "running", "status": "running",
+            "vault_id": prepared["vault_id"], "workspace": ws, "repo": repo,
+            "total_items": len(scan.notes) + len(scan.rejected) + len(scan.skipped),
+        }
+
+    def list_obsidian_vaults(self, workspace: str) -> list[dict]:
+        """Return registered identities/defaults without exposing local root digests."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            return []
+        result = []
+        for row in self.store.list_source_vaults(workspace_id=wid, kind="obsidian"):
+            repo_name = None
+            if row.get("repo_id"):
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (row["repo_id"],),
+                ).fetchone()
+                repo_name = str(repo_row["name"]) if repo_row else None
+            result.append({
+                "id": row["id"], "label": row.get("display_name") or "Obsidian vault",
+                "workspace": ws, "repo": repo_name, "session_id": row.get("session_id"),
+                "scope": row.get("scope"), "memory_type": row.get("memory_type"),
+                "importer_version": row.get("importer_version"),
+            })
+        return result
+
+    def get_obsidian_import_job(self, job_id: str, *, workspace: str) -> dict:
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='obsidian_import'",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise KeyError(clean_id)
+        items = self.store.list_source_import_job_items(job_id=clean_id)
+        files = [{
+            "relative_path": item["relative_path"],
+            "status": item["result_state"],
+            "action": item["planned_action"],
+            "reason": item.get("error_code") or "",
+            "warning_count": int(item.get("warning_count") or 0),
+            "format": item.get("source_format") or "",
+        } for item in items]
+        return {
+            "id": clean_id, "job_id": clean_id, "workspace": ws,
+            "state": row["state"], "status": row["state"],
+            "total_items": int(row["total_items"]),
+            "processed_items": int(row["processed_items"]),
+            "counts": _loads(row["counts"], {}), "files": files,
+            "report": {"state": row["state"], "counts": _loads(row["counts"], {}),
+                       "files": files},
+        }
+
+    def cancel_obsidian_import_job(self, job_id: str, *, workspace: str) -> dict:
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        changed = self.store.conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=? AND workspace_id=? "
+            "AND kind='obsidian_import' AND state IN ('queued','running')",
+            (clean_id, wid),
+        ).rowcount
+        self.store.conn.commit()
+        if not changed:
+            row = self.store.conn.execute(
+                "SELECT state FROM jobs WHERE id=? AND workspace_id=? "
+                "AND kind='obsidian_import'", (clean_id, wid),
+            ).fetchone()
+            if row is None:
+                raise KeyError(clean_id)
+            return {"id": clean_id, "state": row["state"], "cancel_requested": False}
+        return {"id": clean_id, "state": "running", "cancel_requested": True}
 
     def import_postgres_schema(self, dsn: str, *, workspace: str,
                                repo: Optional[str] = None,
@@ -4614,7 +5393,8 @@ class MemoryService:
         return result
 
     def _publish_memory_index_action(
-            self, action: tuple[str, str, Optional[np.ndarray], str]) -> None:
+        self, action: tuple[str, str, Optional[np.ndarray], str],
+    ) -> None:
         """Publish one committed title edit to a separately-backed vector index.
 
         The Store row/vector/FTS state is canonical and has already committed when this
@@ -4648,7 +5428,6 @@ class MemoryService:
                     "could not audit title-update vector-index failure (%s)",
                     type(audit_exc).__name__,
                 )
-
 
     @_rollback_service_transaction
     def _update_memory_transactional(

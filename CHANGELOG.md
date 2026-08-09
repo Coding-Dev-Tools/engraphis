@@ -7,8 +7,26 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [1.6] - 2026-08-08
 
-Minor release advancing the v2 engine through schema 13 with deterministic sync state, tighter
-trust boundaries, synchronized agent guidance, and stronger release and evaluation evidence.
+Minor release advancing the v2 engine through schema 15 with deterministic sync state, trusted
+local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
+stronger release and evaluation evidence.
+
+### Added
+
+- A dependency-free, source-neutral local document importer for Markdown, plain text,
+  reStructuredText, HTML, JSON/JSONL, CSV/TSV, configuration/XML text, and stdlib-readable
+  source code, RTF, DOCX/ODT, XLSX/ODS, PPTX/ODP, and EPUB documents, with existing local
+  adapters for PDF text, image OCR, and explicitly local-model audio/video transcription.
+  `engraphis import documents` and the
+  dashboard’s **Import local documents** flow
+  provide strict previews, safe per-file reporting, resumable source manifests, temporal
+  re-import history, and explicit conflict choices. Obsidian remains the rich Markdown adapter.
+- Offline, repeatable Obsidian-vault import with strict dry-run previews, source
+  safety exclusions, resumable per-note progress, temporal re-import history, and
+  a trusted-owner dashboard wizard that uploads only `.md` note bytes plus content-free
+  attachment manifests. It ships through
+  `engraphis import obsidian`, the `engraphis-import` console alias, and a deprecated
+  v1 seed-script wrapper that maps legacy namespaces to v2 workspaces.
 
 ### Security
 
@@ -21,10 +39,18 @@ trust boundaries, synchronized agent guidance, and stronger release and evaluati
 - Clarify Cloud Sync credential-origin binding, secret-manager-only unattended credentials,
   version-3 rollback evidence, and the deliberately incomplete first-contact state without
   claiming an untrusted relay can prove a complete device set.
-- Advance through schema 13: schema 12 classifies content-free erasure markers so local-only
+- Advance through schema 15: schema 12 classifies content-free erasure markers so local-only
   `never_export` markers remain private and only validated `remote_erasure` markers may cross
   sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
-  descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary.
+  descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary;
+  schema 14 adds Obsidian collection and import manifests; schema 15 generalizes them to
+  source-neutral `documents` and `obsidian` adapters, preserves temporal source lineage, enforces
+  adapter/job and target-scope integrity, and retains only bounded, content-free per-job
+  format/result metadata.
+- Bind each trusted-owner dashboard document or Obsidian run to an expiring, owner-session-bound,
+  one-time preview token over the exact note/document bytes, attachment manifest, target, source,
+  and conflict policy; invalidate changed client previews and keep job polling and cancellation
+  bound to the workspace where the job started.
 - Make read-only Store inspection write-free for SQLite and injected/SQLCipher connectors:
   require injected connectors to expose `open_read_only(path)`, open existing checkpointed files
   with `mode=ro&immutable=1` plus `PRAGMA query_only=ON`, and reject missing paths or active
