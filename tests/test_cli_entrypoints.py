@@ -444,6 +444,35 @@ def test_polling_watcher_detects_same_size_rewrite_with_preserved_mtime(tmp_path
 
     assert watcher.poll() == [str(source)]
 
+def test_polling_watcher_untrack_causes_reappearance_on_next_poll(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+
+    # Baseline poll
+    assert watcher.poll() == []
+
+    # Modify the file
+    source.write_text("x = 2\n", encoding="utf-8")
+    changed = watcher.poll()
+    assert len(changed) == 1
+
+    # Without untrack, next poll sees no change
+    assert watcher.poll() == []
+
+    # After untrack, the file reappears as changed
+    watcher.untrack([str(source)])
+    retry = watcher.poll()
+    assert len(retry) == 1
+    assert retry[0] == str(source)
+
+def test_polling_watcher_untrack_ignores_unknown_paths(tmp_path):
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    watcher.poll()
+    # Should not raise
+    watcher.untrack(["/nonexistent/path.py"])
+    assert watcher.poll() == []
+
 
 def test_delete_namespace_is_atomic_and_records_one_batch_receipt(
     monkeypatch, capsys

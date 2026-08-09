@@ -101,6 +101,16 @@ class _PollingWatcher:
         self._signatures = current
         return changed
 
+    def untrack(self, paths: list[str]) -> None:
+        """Remove *paths* from the signature cache.
+
+        After a failed reindex the caller can ask the watcher to forget these
+        files so the next :meth:`poll` reports them as new/changed again and
+        the indexer gets another chance instead of silently dropping them.
+        """
+        for path in paths:
+            self._signatures.pop(path, None)
+
 
 def _try_watchdog_watcher(root: Path, callback, stop_event):
     """Attempt watchdog-based watching.  Returns True if started, False if unavailable."""
@@ -110,12 +120,28 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
     except ImportError:
         return False
 
+    _MAX_RETRIES = 3
+
     class _Handler(FileSystemEventHandler):
+        def _dispatch(self, paths: list[str]) -> None:
+            for attempt in range(1, _MAX_RETRIES + 1):
+                if callback(paths):
+                    return
+                logger.warning(
+                    "watchdog reindex failed (attempt %d/%d) for %d file(s)",
+                    attempt, _MAX_RETRIES, len(paths),
+                )
+                stop_event.wait(timeout=min(2 ** attempt, 8))
+            logger.error(
+                "watchdog reindex permanently failed after %d attempts for %s",
+                _MAX_RETRIES, paths,
+            )
+
         def on_modified(self, event):
             if not event.is_directory:
                 ext = os.path.splitext(event.src_path)[1].lower()
                 if ext in _WATCHED_EXTENSIONS:
-                    callback([event.src_path])
+                    self._dispatch([event.src_path])
 
         def on_created(self, event):
             self.on_modified(event)
@@ -132,7 +158,7 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
                 if os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
             ]
             if paths:
-                callback(paths)
+                self._dispatch(paths)
 
     observer = Observer()
     observer.schedule(_Handler(), str(root), recursive=True)
@@ -233,7 +259,13 @@ def _run(args, engine) -> int:
             break
         changed = watcher.poll()
         if changed:
-            reindex(changed)
+            if not reindex(changed):
+                logger.warning(
+                    "incremental reindex failed for %d file(s); "
+                    "will retry on next poll cycle",
+                    len(changed),
+                )
+                watcher.untrack(changed)
 
     print("Stopped.")
     return 0
