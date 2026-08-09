@@ -349,43 +349,22 @@ def import_folder(req: FolderImportReq):
     import os
     import re
 
-    home = os.path.realpath(str(Path.home().expanduser()))
+    home = os.path.normcase(os.path.realpath(str(Path.home().expanduser())))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
     if env_roots:
         allowed_roots.extend(
-            os.path.realpath(os.path.expanduser(root))
+            os.path.normcase(os.path.realpath(os.path.expanduser(root)))
             for root in env_roots.split(os.pathsep)
             if root
         )
-    real_path = os.path.realpath(os.path.expanduser(req.path))
-    comparable_path = os.path.normcase(real_path)
-    folder: Optional[Path] = None
-    for root in allowed_roots:
-        comparable_root = os.path.normcase(root)
-        if (
-            comparable_path == comparable_root
-            or comparable_path.startswith(comparable_root.rstrip(os.sep) + os.sep)
-        ):
-            # Bind the traversal root only inside the normalized containment
-            # guard. On Windows, normcase() lowercases the comparison while the
-            # canonical Path preserves the caller's on-disk casing in metadata.
-            try:
-                # The canonical path is checked against every allowlisted root
-                # again below before any traversal or file access.
-                # codeql[py/path-injection]
-                folder = Path(real_path).resolve(strict=True)
-            except (OSError, RuntimeError):
-                raise HTTPException(404, f"Path not found: {req.path}") from None
-            break
-    if folder is None:
-        raise HTTPException(
-            403,
-            "Import path must be under an allowed root "
-            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
-        )
+    # Keep the normalized, symlink-resolved value in the same variable that is
+    # passed to filesystem APIs. CodeQL recognizes this direct containment guard;
+    # the second canonical check below closes a directory-link swap after it.
+    real_path = os.path.normcase(os.path.realpath(os.path.expanduser(req.path)))
     if not any(
-        folder == Path(root) or folder.is_relative_to(Path(root))
+        real_path == root
+        or real_path.startswith(root.rstrip(os.sep) + os.sep)
         for root in allowed_roots
     ):
         raise HTTPException(
@@ -393,14 +372,23 @@ def import_folder(req: FolderImportReq):
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    # The canonical folder path is already proven to be inside an allowlisted
-    # root before these existence checks run.
-    # codeql[py/path-injection]
+    try:
+        folder = Path(real_path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(404, f"Path not found: {req.path}") from None
+    canonical_path = os.path.normcase(os.path.realpath(str(folder)))
+    if not any(
+        canonical_path == root
+        or canonical_path.startswith(root.rstrip(os.sep) + os.sep)
+        for root in allowed_roots
+    ):
+        raise HTTPException(
+            403,
+            "Import path must be under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
-    # The canonical folder path is already proven to be inside an allowlisted
-    # root before the directory check runs.
-    # codeql[py/path-injection]
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
 
