@@ -151,14 +151,23 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
 
     startup_done = threading.Event()
     pending_paths: list[str] = []
+    retry_paths: list[str] = []
     pending_lock = threading.Lock()
+    retry_lock = threading.Lock()
     callback_lock = threading.Lock()
+
+    def queue_retry(paths):
+        with retry_lock:
+            for path in paths:
+                if path not in retry_paths:
+                    retry_paths.append(path)
 
     def dispatch(paths):
         unique = list(dict.fromkeys(paths))
         if unique:
             with callback_lock:
-                callback(unique)
+                if not callback(unique):
+                    queue_retry(unique)
 
     def enqueue(paths):
         with pending_lock:
@@ -204,6 +213,11 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
             pending_paths.clear()
         dispatch(startup_paths)
         while not stop_event.is_set():
+            with retry_lock:
+                retry = list(retry_paths)
+                retry_paths.clear()
+            if retry:
+                dispatch(retry)
             stop_event.wait(timeout=1.0)
     finally:
         observer.stop()

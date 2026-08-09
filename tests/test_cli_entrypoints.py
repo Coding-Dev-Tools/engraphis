@@ -4,6 +4,8 @@ import builtins
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -443,6 +445,55 @@ def test_polling_watcher_detects_same_size_rewrite_with_preserved_mtime(tmp_path
     os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
 
     assert watcher.poll() == [str(source)]
+
+
+def test_watchdog_retries_failed_reindex(monkeypatch, tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    calls = []
+    stop_event = threading.Event()
+
+    class Event:
+        is_directory = False
+        src_path = str(source)
+
+    class Observer:
+        def schedule(self, handler, _root, recursive):
+            assert recursive is True
+            self.handler = handler
+
+        def start(self):
+            def emit():
+                time.sleep(0.05)
+                self.handler.on_modified(Event())
+
+            self.thread = threading.Thread(target=emit)
+            self.thread.start()
+
+        def stop(self):
+            stop_event.set()
+
+        def join(self):
+            self.thread.join()
+
+    monkeypatch.setitem(sys.modules, "watchdog", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "watchdog.observers", SimpleNamespace(Observer=Observer))
+    monkeypatch.setitem(
+        sys.modules, "watchdog.events",
+        SimpleNamespace(FileSystemEventHandler=object),
+    )
+
+    def reindex(paths):
+        calls.append(paths)
+        if len(calls) == 1:
+            return False
+        stop_event.set()
+        return True
+
+    assert watch_repo._try_watchdog_watcher(
+        tmp_path, reindex, stop_event, lambda: True,
+    ) == 0
+    assert calls == [[str(source)], [str(source)]]
 
 
 def test_polling_watcher_retries_failed_changes_until_acknowledged(tmp_path):
