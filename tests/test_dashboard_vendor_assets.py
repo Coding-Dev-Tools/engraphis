@@ -29,6 +29,16 @@ def test_dashboard_vendor_manifest_pins_every_bundle_and_license():
     assert package_lock["packages"]["node_modules/force-graph"]["version"] == force_graph_version
 
 
+def test_csp_safe_d3_bundle_is_identical_on_every_public_surface():
+    canonical = (VENDOR / "d3.min.js").read_bytes()
+
+    for relative in (
+        Path("engraphis/classic_assets/vendor/d3.min.js"),
+        Path("engraphis/static/vendor/d3.min.js"),
+    ):
+        assert (ROOT / relative).read_bytes() == canonical
+
+
 def test_design_linter_dependency_is_exactly_pinned():
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))

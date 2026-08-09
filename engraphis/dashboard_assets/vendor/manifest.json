@@ -8,8 +8,10 @@
       "source": "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js",
       "license": "ISC",
       "license_file": "d3.LICENSE",
-      "sha256": "f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539",
-      "local_modifications": []
+      "sha256": "ee642a75d6c8f3e2cecb2253a44cdb3d4be336adead191376cb272810ad44522",
+      "local_modifications": [
+        "Replaced d3-dsv's Function-constructor CSV row converter with an equivalent closure for the production CSP."
+      ]
     },
     {
       "path": "force-graph.min.js",
