@@ -1587,10 +1587,26 @@
       if (fg.warmupTicks) fg.warmupTicks(simulate ? (large ? 18 : 40) : 0);
     }
 
+    function setDragSimulationBudget(active) {
+      if (active) {
+        if (fg.cooldownTime) fg.cooldownTime(Infinity);
+        if (fg.cooldownTicks) fg.cooldownTicks(Infinity);
+        if (fg.warmupTicks) fg.warmupTicks(0);
+        if (fg.d3AlphaDecay) fg.d3AlphaDecay(0.08);
+        if (!dragFollowForce) dragFollowForce = makeDragFollowForce();
+        fg.d3Force('dragFollow', dragFollowForce);
+        return;
+      }
+      if (!state.settings.frozen && !staticFullLayout) {
+        setSimulationBudget(true);
+        if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
+      }
+    }
+
     function prepareReheat() {
       const nodes = fg.graphData().nodes || [];
       nodes.forEach(node => {
-        if (node.fx !== undefined || node.fy !== undefined) {
+        if (node === activeDragNode || node.fx !== undefined || node.fy !== undefined) {
           node.vx = 0;
           node.vy = 0;
           return;
@@ -1614,7 +1630,7 @@
       fg.resetCountdown();
     }
 
-    function softReheat() {
+    function softReheat(dragging = false) {
       if (!supportsSoftAlpha()) {
         /* Keep the dependency-light Node harness and older vendor bundles working. The real
            browser bundle takes the bounded alpha-target path above. */
@@ -1623,7 +1639,7 @@
       }
       clearTimeout(softAlphaTimer);
       softAlphaTimer = 0;
-      fg.d3AlphaTarget(SETTINGS_ALPHA_TARGET);
+      fg.d3AlphaTarget(dragging || activeDragNode ? DRAG_ALPHA_TARGET : SETTINGS_ALPHA_TARGET);
       fg.resetCountdown();
       softAlphaTimer = setTimeout(() => {
         softAlphaTimer = 0;
@@ -1650,10 +1666,12 @@
       });
     }
 
-    function render(fit, reheat) {
+    function render(fit, reheat, dragging = false) {
       if (destroyed) return;
       if (suspended) {
-        pendingRender = pendingRender ? [pendingRender[0] || fit, pendingRender[1] || reheat] : [fit, reheat];
+        pendingRender = pendingRender
+          ? [pendingRender[0] || fit, pendingRender[1] || reheat, pendingRender[2] || dragging]
+          : [fit, reheat, dragging];
         return;
       }
       const motion = !state.settings.frozen;
@@ -1727,7 +1745,7 @@
       }
       if (reheat && motion && !staticFullLayout && !state.settings.frozen) {
         prepareReheat();
-        softReheat();
+        softReheat(dragging);
       }
       if ((staticFullLayout || state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
       /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
@@ -1755,6 +1773,29 @@
         return;
       }
       if (opts.onNodeClick) opts.onNodeClick(node);
+    }
+
+    function reheatLiveLayout(dragging = false) {
+      if (destroyed || state.settings.frozen || staticFullLayout) return;
+      cancelAutoFit();
+      setDragSimulationBudget(dragging);
+      prepareReheat();
+      if (fg.d3AlphaDecay) fg.d3AlphaDecay(dragging ? 0.08 : alphaDecay());
+      softReheat(dragging);
+    }
+
+    function finishNodeDrag(node) {
+      if (!node) return;
+      const retainAnchor = state.settings.frozen || staticFullLayout;
+      if (!retainAnchor) {
+        node.fx = undefined;
+        node.fy = undefined;
+      }
+      setActiveDragNode(null);
+      setDragSimulationBudget(false);
+      node.vx = 0;
+      node.vy = 0;
+      if (!retainAnchor) reheatLiveLayout(false);
     }
 
     /* A drag uses fx/fy only while the pointer is down. Pointer-up releases the anchor and gives
@@ -1804,6 +1845,11 @@
         invalidate();
       })
       .onNodeClick(handleNodeClick)
+      .onNodeDragStart(node => {
+        setActiveDragNode(node);
+        reheatLiveLayout(true);
+      })
+      .onNodeDragEnd(node => finishNodeDrag(node))
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
         zoom = z.k || 1;
@@ -1843,15 +1889,7 @@
         window.removeEventListener('pointerup', endManualDrag, true);
         window.removeEventListener('pointercancel', endManualDrag, true);
         if (current.dragged) {
-          current.node.fx = undefined;
-          current.node.fy = undefined;
-          setActiveDragNode(null);
-          current.node.vx = 0;
-          current.node.vy = 0;
-          if (!state.settings.frozen && !staticFullLayout) {
-            prepareReheat();
-            softReheat();
-          }
+          finishNodeDrag(current.node);
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
           // Our capture listener owns the direct click. Suppress force-graph's
@@ -1866,6 +1904,7 @@
         if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
         const dx = event.clientX - manualDrag.startClientX;
         const dy = event.clientY - manualDrag.startClientY;
+        let started = false;
         if (!manualDrag.dragged) {
           if (Math.hypot(dx, dy) < 3) {
             event.preventDefault();
@@ -1873,6 +1912,9 @@
             return;
           }
           manualDrag.dragged = true;
+          started = true;
+        }
+        if (started) {
           setActiveDragNode(manualDrag.node);
           reheatLiveLayout(true);
         }
@@ -2304,6 +2346,8 @@
       physicsFrame = 0;
       physicsReheatPending = false;
       pendingRender = null;
+      setActiveDragNode(null);
+      dragFollowForce = null;
       try {
         if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }
         if (api._ro) { api._ro.disconnect(); api._ro = null; }
