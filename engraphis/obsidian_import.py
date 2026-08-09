@@ -956,6 +956,25 @@ class ObsidianImporter:
             batch_open = False
             writes_in_batch = 0
 
+        def retire_ambiguous_links(source_id: str, target_ids: list[str]) -> None:
+            nonlocal batch_open, writes_in_batch
+            if not target_ids:
+                return
+            if not batch_open:
+                self.store.conn.execute("BEGIN IMMEDIATE")
+                batch_open = True
+            marks = ",".join("?" for _ in target_ids)
+            stamp = time.time()
+            cursor = self.store.conn.execute(
+                "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE reason=? AND valid_to IS NULL AND expired_at IS NULL "
+                "AND ((a=? AND b IN (" + marks + ")) "
+                "OR (b=? AND a IN (" + marks + ")))",
+                (stamp, stamp, self.LINK_REASON, source_id, *target_ids,
+                 source_id, *target_ids),
+            )
+            writes_in_batch += max(int(cursor.rowcount), 0)
+
         try:
             for source_path, note in note_by_path.items():
                 check_cancel()
@@ -981,6 +1000,15 @@ class ObsidianImporter:
                             names.get(PurePosixPath(paths[-1]).stem.casefold(), [])
                         ))
                     if len(candidates) != 1:
+                        if candidates:
+                            retire_ambiguous_links(
+                                source_id,
+                                [
+                                    memory_by_path[path]
+                                    for path in candidates
+                                    if memory_by_path.get(path)
+                                ],
+                            )
                         warnings.append(self._outcome(
                             note, "warning",
                             "ambiguous_wikilink" if candidates else "unresolved_wikilink",

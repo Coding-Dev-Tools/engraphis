@@ -258,6 +258,59 @@ def test_cancelled_import_resumes_without_duplicates(tmp_path: Path):
         service.close()
 
 
+def test_ambiguous_wikilink_retires_previous_derived_edge(tmp_path: Path):
+    vault = _vault(tmp_path)
+    home = vault / "Home.md"
+    home.write_text(
+        home.read_text(encoding="utf-8").replace("projects/Plan|the plan", "Plan"),
+        encoding="utf-8",
+    )
+    service = _service(tmp_path / "memory.db")
+    try:
+        service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        home_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1",
+            ("Home base",),
+        ).fetchone()[0]
+        plan_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1",
+            ("Plan",),
+        ).fetchone()[0]
+        initial_links = service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links "
+            "WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0]
+        assert initial_links >= 1
+
+        archive = vault / "archive"
+        archive.mkdir()
+        (archive / "Plan.md").write_text("# Another Plan\n", encoding="utf-8")
+
+        second = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        assert any(
+            row["reason"] == "ambiguous_wikilink" for row in second["files"]
+        )
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links "
+            "WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0] == 0
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links "
+            "WHERE reason=? AND a=? AND b=? AND valid_to IS NOT NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0] == initial_links
+    finally:
+        service.close()
+
+
 def test_link_reconciliation_cancels_and_rolls_back_only_the_open_batch(tmp_path: Path):
     vault = _vault(tmp_path)
     service = _service(tmp_path / "memory.db")
