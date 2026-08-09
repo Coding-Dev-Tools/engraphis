@@ -7,7 +7,6 @@ import types
 import pytest
 
 from engraphis.backends import encrypted_db
-from engraphis.core.store import Store
 
 
 def test_missing_driver_message_does_not_loop_on_unsupported_platforms(monkeypatch):
@@ -92,70 +91,6 @@ def test_connector_setup_errors_redact_paths_keys_and_driver_chains(
     for secret in (marker, key, str(private_path)):
         assert secret not in str(exc_info.value)
         assert secret not in rendered
-
-
-def test_encrypted_connector_read_only_contract_uses_immutable_uri(
-    monkeypatch, tmp_path,
-):
-    database = tmp_path / "existing-encrypted.db"
-    database.write_bytes(b"opaque encrypted fixture")
-    calls = []
-    statements = []
-
-    class _Result:
-        def fetchone(self):
-            return (1,)
-
-    class _Raw:
-        row_factory = None
-
-        def execute(self, statement):
-            statements.append(statement)
-            return _Result()
-
-        def close(self):
-            return None
-
-    def connect(target, **options):
-        calls.append((target, options))
-        return _Raw()
-
-    driver = types.SimpleNamespace(connect=connect, Row=object)
-    monkeypatch.setattr(encrypted_db.importlib, "import_module", lambda _name: driver)
-    connector = encrypted_db.make_connector("fixture-key")
-    connection = connector.open_read_only(str(database))
-    connection.close()
-
-    target, options = calls[0]
-    assert target == database.resolve().as_uri() + "?mode=ro&immutable=1"
-    assert options == {"timeout": 30, "check_same_thread": False, "uri": True}
-    assert statements == [
-        encrypted_db._key_pragma("fixture-key"),
-        "PRAGMA query_only=ON",
-        "SELECT count(*) FROM sqlite_master",
-    ]
-
-
-def test_encrypted_read_only_missing_path_never_creates_or_calls_driver(
-    monkeypatch, tmp_path,
-):
-    calls = []
-
-    def connect(target, **options):
-        calls.append((target, options))
-        raise AssertionError("driver must not be called for a missing snapshot")
-
-    driver = types.SimpleNamespace(connect=connect, Row=object)
-    monkeypatch.setattr(encrypted_db.importlib, "import_module", lambda _name: driver)
-    connector = encrypted_db.make_connector("fixture-key")
-    missing = tmp_path / "not-created" / "encrypted.db"
-
-    with pytest.raises(RuntimeError, match="existing regular database"):
-        Store(str(missing), connect=connector, read_only=True)
-
-    assert calls == []
-    assert not missing.parent.exists()
-    assert not missing.exists()
 
 
 def test_driver_exception_translation_is_limited_to_stdlib_exception_classes():

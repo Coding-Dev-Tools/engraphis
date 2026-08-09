@@ -476,14 +476,14 @@ def build_evidence_report(
         )
         for row in private_rows
     ]
-    if expected_limits and len({
+    if expected_limits and len(expected_limits) > 1 and len({
         mtype
         for record in records
         for mtype, count in record["inserted_memory_type_counts"].items()
         if count > 0
     }) < 2:
         raise ValueError(
-            "memory-type cap evidence requires at least two populated memory types"
+            "memory-type cap evidence requires at least two populated memory types when multiple types are capped"
         )
 
     report = report_envelope(

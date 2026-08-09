@@ -2119,8 +2119,8 @@ def test_the_dashboard_never_offers_a_trial_it_was_not_told_is_available() -> No
     assert "licTrialAvailable()" in window, marker
 
 
-def test_the_dashboard_explains_a_locked_state_instead_of_badging_it() -> None:
-    """A PRO badge over rows of locks with no reason given is the defect itself."""
+def test_the_dashboard_explains_a_locked_state_without_a_header_badge() -> None:
+    """The side-menu header must not render a plan or upgrade badge."""
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
     banner = script[script.index("function licStateBanner("):]
@@ -2132,12 +2132,12 @@ def test_the_dashboard_explains_a_locked_state_instead_of_badging_it() -> None:
     assert "free trial has ended" in banner
     assert "no longer active" in banner
     assert "local database" in banner
-    # And the badge itself follows the access state, not the plan name alone.
+    # The updater remains as a compatibility hook, but it must not render a badge.
     assert "function updateLicBadge()" in script
     badge = script[script.index("function updateLicBadge()"):]
     badge = badge[:badge.index("\n")]
-    assert "licAccessState()" in badge
-    assert "GET PRO" in badge and "BILLING" in badge
+    assert "licAccessState()" not in badge
+    assert "GET PRO" not in badge and "BILLING" not in badge
 
 
 def test_both_persisted_answers_read_every_trial_field_the_server_sends() -> None:

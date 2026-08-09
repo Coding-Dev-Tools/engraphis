@@ -435,7 +435,7 @@ def test_apply_bundle_rejection_continues_round_and_marks_incomplete(tmp_path):
 
     assert result["complete"] is False
     assert any(e.get("error") == "bundle rejected" for e in result["errors"])
-    assert result["peers_applied"] >= 1
+    assert result["peers_applied"] == 1
     assert store.get_memory("mem_good") is not None
     store.close()
 

@@ -1997,6 +1997,31 @@ class Store:
                 "trg_source_import_job_update",
             ):
                 self.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        # A partially upgraded v2 database can be missing one of the temporal
+        # columns that SCHEMA_SQL indexes.  Repair those columns before running
+        # the script; SQLite parses CREATE INDEX before the additive ALTER loop
+        # below gets a chance to run.  Keep ``valid_from`` out of this repair so
+        # the v4 code-link migration can still recognize and rebuild its legacy
+        # table-level uniqueness shape.
+        existing_tables = {
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table in (
+            "memories", "memory_entities", "edges", "edge_supports",
+            "code_file_history", "code_memory_links",
+        ):
+            if table not in existing_tables:
+                continue
+            columns = {
+                str(row[1])
+                for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for column in ("valid_to", "expired_at"):
+                if column not in columns:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} REAL")
         self._execute_script_transactional(SCHEMA_SQL)
         if restore_source_manifest:
             self._restore_source_manifest_v15()
@@ -7010,26 +7035,28 @@ class Store:
     def link_memory_symbol(self, *, repo_id: str, symbol_id: str, memory_id: str,
                            relation: str = "mentions", confidence: float = 1.0,
                            commit: bool = True) -> str:
-        existing = self.conn.execute(
-            "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
-            "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
-            (repo_id, symbol_id, memory_id, relation),
-        ).fetchone()
-        if existing is not None:
-            return existing["id"]
-        link_id = ids.new_id("edge")
-        stamp = now_ts()
-        self.conn.execute(
-            "INSERT OR IGNORE INTO code_memory_links("
-            "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
-            "valid_from, ingested_at"
-            ") VALUES (?,?,?,?,?,?,?,?,?)",
-            (link_id, repo_id, symbol_id, memory_id, relation,
-             max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
-        )
-        if commit:
-            self.conn.commit()
-        return link_id
+        # Keep the existence check and insert in one serialized write operation.
+        # Separate statements otherwise allow two threads to observe no live link
+        # before either INSERT runs, defeating the idempotent API contract.
+        with self._write_operation("link_memory_symbol", commit=commit):
+            existing = self.conn.execute(
+                "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+                "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
+                (repo_id, symbol_id, memory_id, relation),
+            ).fetchone()
+            if existing is not None:
+                return existing["id"]
+            link_id = ids.new_id("edge")
+            stamp = now_ts()
+            self.conn.execute(
+                "INSERT OR IGNORE INTO code_memory_links("
+                "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
+                "valid_from, ingested_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (link_id, repo_id, symbol_id, memory_id, relation,
+                 max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
+            )
+            return link_id
 
     def clear_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
         stamp = now_ts()

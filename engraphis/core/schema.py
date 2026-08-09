@@ -457,7 +457,9 @@ CREATE INDEX IF NOT EXISTS idx_code_mem_symbol
     ON code_memory_links(repo_id, symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_mem_memory
     ON code_memory_links(repo_id, memory_id);
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_mem_live_unique
+    ON code_memory_links(repo_id, symbol_id, memory_id, relation)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
 -- ── Event ledger & audit ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
     id               TEXT PRIMARY KEY,
@@ -622,9 +624,6 @@ CREATE TABLE IF NOT EXISTS source_vaults (
 );
 CREATE INDEX IF NOT EXISTS idx_source_vaults_root
     ON source_vaults(kind, root_digest);
--- SQLite treats each NULL as distinct in a table UNIQUE constraint.  The
--- expression index makes the vault identity genuinely unique for workspace,
--- repo, and session scopes and therefore closes concurrent registration races.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_source_vaults_identity
     ON source_vaults(
         kind, root_digest, workspace_id,
@@ -706,10 +705,10 @@ CREATE TABLE IF NOT EXISTS source_import_items (
 CREATE INDEX IF NOT EXISTS idx_source_import_items_job_result
     ON source_import_items(job_id, result_state, relative_path);
 
--- SQLite cannot express these composite scope relationships as ordinary foreign
--- keys without adding redundant public identifiers to the parent tables.  Keep
--- the durable checks beside the schema so direct SQL writers cannot create a
--- cross-workspace/repo/session importer lineage.
+-- Scope-security triggers for the source-import manifest.  These enforce that
+-- vaults, imports, and job items never cross workspace/repo/session boundaries,
+-- even when written by direct SQL.  The v15 shape does not reference
+-- jobs.session_id (added in v16); keep these compatible with both.
 CREATE TRIGGER IF NOT EXISTS trg_source_vault_scope_insert
 BEFORE INSERT ON source_vaults BEGIN
     SELECT CASE WHEN NEW.repo_id IS NOT NULL AND NOT EXISTS (
@@ -761,8 +760,6 @@ BEFORE INSERT ON source_imports WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
-          AND ((v.kind='documents' AND j.kind='document_import')
-               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
@@ -774,8 +771,6 @@ WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
-          AND ((v.kind='documents' AND j.kind='document_import')
-               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
@@ -793,8 +788,6 @@ BEFORE INSERT ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
-          AND ((v.kind='documents' AND j.kind='document_import')
-               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL
@@ -812,8 +805,6 @@ BEFORE UPDATE OF job_id, source_id ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
-          AND ((v.kind='documents' AND j.kind='document_import')
-               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL

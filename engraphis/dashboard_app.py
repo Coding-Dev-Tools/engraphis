@@ -53,6 +53,7 @@ _STATIC = Path(__file__).resolve().parent / "static"
 _CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _V2_ASSETS / "index.html"
+_DOCUMENT_SUFFIXES = frozenset(supported_document_extensions())
 
 _DASHBOARD_JSON_REQUEST_BYTES = 8 * 1024 * 1024
 _DASHBOARD_UPLOAD_REQUEST_BYTES = (
@@ -61,17 +62,7 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    "/api/workspaces/import-obsidian/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    "/api/workspaces/import-obsidian/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    "/api/workspaces/import-documents/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    "/api/workspaces/import-documents/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
 }
-
-# The dashboard accepts only documents it can hand straight to the local importer.
-# It deliberately does not upload arbitrary binary files.  Obsidian is the one
-# exception: its attachments are represented as a content-free manifest, so note
-# links can be reported without keeping a second copy of attachment bytes.
-_DOCUMENT_SUFFIXES = frozenset(supported_document_extensions())
 
 
 class _RequestBodyTooLarge(Exception):

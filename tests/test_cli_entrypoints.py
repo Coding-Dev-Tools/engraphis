@@ -446,6 +446,56 @@ def test_polling_watcher_detects_same_size_rewrite_with_preserved_mtime(tmp_path
 
     assert watcher.poll() == [str(source)]
 
+def test_polling_watcher_untrack_causes_reappearance_on_next_poll(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+
+    # Baseline poll
+    assert watcher.poll() == []
+
+    # Modify the file
+    source.write_text("x = 2\n", encoding="utf-8")
+    changed = watcher.poll()
+    assert len(changed) == 1
+
+    # Until the caller acknowledges a successful reindex, the change remains
+    # visible so a transient indexing failure can be retried.
+    assert watcher.poll() == [str(source)]
+
+    # After untrack, the file reappears as changed
+    watcher.untrack([str(source)])
+    retry = watcher.poll()
+    assert len(retry) == 1
+    assert retry[0] == str(source)
+
+def test_polling_watcher_untrack_ignores_unknown_paths(tmp_path):
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    watcher.poll()
+    # Should not raise
+    watcher.untrack(["/nonexistent/path.py"])
+    assert watcher.poll() == []
+
+
+def test_polling_watcher_retries_failed_deletions(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    assert watcher.poll() == []
+
+    source.unlink()
+    deleted = watcher.poll()
+    assert deleted == [str(source)]
+
+    watcher.untrack(deleted, deletions=True)
+    assert watcher.poll() == [str(source)]
+
+    source.write_text("x = 2\n", encoding="utf-8")
+    assert watcher.poll() == [str(source)]
+    assert watcher.poll() == [str(source)]
+    watcher.acknowledge()
+    assert watcher.poll() == []
+
 
 def test_watchdog_retries_failed_reindex(monkeypatch, tmp_path):
     source = tmp_path / "module.py"

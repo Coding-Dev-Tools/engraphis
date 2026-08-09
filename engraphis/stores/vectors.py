@@ -11,7 +11,6 @@ import numpy as np
 from engraphis.stores import blob_to_vector, get_conn, now_ts
 from engraphis.core.retention_policy import (
     MIN_STABILITY_DAYS,
-    effective_access_count,
     effective_stability,
 )
 
@@ -379,17 +378,11 @@ def touch_memory(
             finite_surprise = 1.0
         if not math.isfinite(finite_surprise):
             finite_surprise = 1.0
-        row = conn.execute(
-            "SELECT access_count FROM memories WHERE id=?", (mem_id,)
-        ).fetchone()
-        count = (
-            min(effective_access_count(row["access_count"]) + 1, 1_000_000_000)
-            if row else 0
-        )
         conn.execute(
-            "UPDATE memories SET last_access=?, access_count=?, "
+            "UPDATE memories SET last_access=?, "
+            "access_count=MIN(access_count+1, 1000000000), "
             "stability=?, surprise=? WHERE id=?",
-            (now, count, effective_stability(stability), finite_surprise, mem_id),
+            (now, effective_stability(stability), finite_surprise, mem_id),
         )
     else:
         conn.execute(

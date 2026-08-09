@@ -99,7 +99,7 @@ def _expected_native_vector(
     if not isinstance(value, (bytes, bytearray, memoryview)):
         return False, None
     try:
-        vector = np.frombuffer(value, dtype=np.float32)
+        vector = np.frombuffer(bytes(value), dtype=np.float32)
     except (TypeError, ValueError, BufferError):
         return False, None
     if vector.shape != (dimension,) or not np.isfinite(vector).all():

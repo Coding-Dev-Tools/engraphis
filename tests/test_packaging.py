@@ -63,6 +63,9 @@ def test_http_mcp_cli_rejects_non_loopback_host():
 
 
 def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
+    pytest.importorskip(
+        "mcp", reason="MCP packaging transport requires the optional mcp dependency"
+    )
     from engraphis import mcp_http_cli
 
     calls = []
@@ -234,8 +237,6 @@ def test_distribution_configuration_includes_public_evidence_tools():
     ):
         assert rule in manifest
     assert "docker-compose.lan.yml" in REQUIRED_SDIST
-    assert "docs/DOCUMENT_IMPORT.md" in REQUIRED_SDIST
-    assert "docs/OBSIDIAN_IMPORT.md" in REQUIRED_SDIST
     assert "deploy/force-graph-1.51.4.licenses.json" in REQUIRED_SDIST
     assert "deploy/force-graph-1.51.4.yarn.lock" in REQUIRED_SDIST
     assert '"deploy/force-graph-1.51.4.licenses.json"' in pyproject

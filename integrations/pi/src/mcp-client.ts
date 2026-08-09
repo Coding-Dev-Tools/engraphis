@@ -176,7 +176,7 @@ export class EngraphisMcpClient {
 			const missing = CORE_DIRECT_TOOLS.filter((name) => !available.has(name));
 			if (missing.length) {
 				throw new EngraphisCompatibilityError(
-					`Engraphis Smart MCP >=1.5,<2 is required; the server is missing: ${missing.join(", ")}.`,
+					`Engraphis 1.5.x Smart MCP is required; the server is missing: ${missing.join(", ")}.`,
 				);
 			}
 			return client;

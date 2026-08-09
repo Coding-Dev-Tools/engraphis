@@ -1628,6 +1628,34 @@ def test_complete_incremental_scan_removes_deleted_files(tmp_path):
     assert {row["name"] for row in eng.store.list_symbols(rid)} == {"alpha"}
 
 
+def test_complete_scan_retires_oversized_indexed_files(tmp_path):
+    source = tmp_path / "a.py"
+    source.write_text("def alpha():\n    pass\n", encoding="utf-8")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+
+    initial = eng.index_repo(rid, str(tmp_path), prefer="regex", max_file_bytes=64)
+    assert initial["scan_complete"] is True
+    assert initial["files_indexed"] == 1
+    assert eng.store.get_code_file(rid, "a.py") is not None
+    assert eng.store.count_symbols(rid) == 1
+    assert eng.store.count_code_edges(rid) == 1
+
+    source.write_text(
+        "def alpha():\n    pass\n" + "\n".join("# filler" for _ in range(20)) + "\n",
+        encoding="utf-8",
+    )
+    report = eng.index_repo(rid, str(tmp_path), prefer="regex", max_file_bytes=64)
+
+    assert report["scan_complete"] is False
+    assert report["files_removed"] == 1
+    assert report["files_skipped"] == 1
+    assert eng.store.get_code_file(rid, "a.py") is None
+    assert eng.store.list_symbols(rid) == []
+    assert eng.store.count_code_edges(rid) == 0
+
+
 def test_incremental_scan_preserves_last_good_index_for_unreadable_file(
         tmp_path, monkeypatch):
     source = tmp_path / "a.py"

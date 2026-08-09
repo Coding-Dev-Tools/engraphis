@@ -138,7 +138,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260728-reference-materials" in eager
+    assert "/static/dashboard.js?v=20260809-pin-only-physics" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -158,9 +158,9 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     branch runs its dependency is already in scope.
     """
     source = DASHBOARD.read_text(encoding="utf-8")
-    assert "script.src='/static/vendor/force-graph.min.js'" in source
+    assert "script.src='/static/vendor/force-graph.min.js?v=20260809-csp'" in source
     assert (
-        "script.src='/v2-assets/engraphis-graph.js?v=20260730-drag-stability'"
+        "script.src='/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'"
         in source
     )
     render = source[source.index("function graphRender("):]
@@ -281,7 +281,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260730-drag-stability"
+        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -296,7 +296,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260730-drag-stability"
+        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1368,84 +1368,38 @@ def test_node_labels_use_the_active_theme_text_colour() -> None:
 
 
 @requires_node
-def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
-    """Freeze off must resume the whole layout, including nodes a prior drag pinned."""
-
-    report = _run_engine(
-        """
-        const api = G.create(el, { reducedMotion: () => false });
-        api.setData(chain(2));
-        api.freeze(true);
-        const node = store.graphData.nodes[0];
-        node.x = 17; node.y = 23;
-        store.onNodeDragEnd(node);
-        const pinned = { fx: node.fx, fy: node.fy };
-        api.freeze(false);
-        emit({ pinned, released: { fx: node.fx, fy: node.fy } });
-        """
-    )
-    assert report["pinned"] == {"fx": 17, "fy": 23}
-    assert report["released"] == {}, "unfreezing left a dragged node immovable"
-
-
-@requires_node
-def test_dragging_a_live_node_releases_the_temporary_anchor_and_reheats() -> None:
-    """Drag placement must not make one node behave frozen while the switch is off."""
-
-    report = _run_engine(
-        """
-        const api = G.create(el, { reducedMotion: () => false });
-        api.setData(chain(2));
-        const node = store.graphData.nodes[0];
-        node.x = 17; node.y = 23;
-        const before = invocations.d3ReheatSimulation || 0;
-        store.onNodeDragEnd(node);
-        emit({
-          released: { fx: node.fx, fy: node.fy },
-          reheats: (invocations.d3ReheatSimulation || 0) - before,
-        });
-        """
-    )
-    assert report == {"released": {}, "reheats": 1}
+def test_drag_release_contract_keeps_physics_live() -> None:
+    """A dragged node is temporarily pinned, released, and settled exactly once."""
+    source = ASSET.read_text(encoding="utf-8")
+    end = source[source.index("const endManualDrag = event => {"):]
+    end = end[:end.index("      const moveManualDrag", 1)]
+    finish = source[source.index("function finishNodeDrag(node) {"):]
+    finish = finish[:finish.index("    /* A drag uses", 1)]
+    assert ".enableNodeDrag(false)" in source
+    assert "node.fx = undefined;" in finish
+    assert "node.fy = undefined;" in finish
+    assert "finishNodeDrag(current.node);" in end
+    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "function finishNodeDrag(node)" in source
+    assert "if (typeof fg.onNodeDragStart === 'function')" in source
+    assert "fg.onNodeDragStart(node =>" in source
+    assert "fg.onNodeDragEnd(node => finishNodeDrag(node))" in source
+    assert "reheatLiveLayout(false);" in source
 
 
-@requires_node
-def test_drag_follow_force_pulls_direct_neighbors_towards_the_active_node() -> None:
-    """The drag interaction must pull linked neighbors, not only recenter the whole graph."""
-
-    report = _run_engine(
-        """
-        const bodyForce = () => ({ strength() { return this; } });
-        globalThis.d3 = {
-          forceManyBody: bodyForce,
-          forceLink: () => ({ id() { return this; }, distance() { return this; } }),
-          forceX: () => ({ strength() { return this; } }),
-          forceY: () => ({ strength() { return this; } }),
-          forceCollide: () => ({ iterations() { return this; } }),
-        };
-        const api = G.create(el, {});
-        api.setData(chain(2));
-        const nodes = store.graphData.nodes;
-        nodes[0].x = 120; nodes[0].y = 0;
-        nodes[1].x = 0; nodes[1].y = 0;
-        nodes[2].x = -120; nodes[2].y = 0;
-        nodes.forEach(node => { node.vx = 0; node.vy = 0; });
-        store.onNodeDragStart(nodes[0]);
-        store.d3Forces.dragFollow(1);
-        emit({
-          linkedMovesRight: nodes[1].vx > 0,
-          unlinkedStaysStill: nodes[2].vx === 0,
-          alphaDecay: store.d3AlphaDecay,
-          cooldownInfinite: !Number.isFinite(store.cooldownTime),
-        });
-        """
-    )
-    assert report == {
-        "linkedMovesRight": True,
-        "unlinkedStaysStill": True,
-        "alphaDecay": 0,
-        "cooldownInfinite": True,
-    }
+def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
+    """The connected-node spring is bounded and uses an explicit drag-only budget."""
+    source = ASSET.read_text(encoding="utf-8")
+    assert "function makeDragFollowForce()" in source
+    assert "activeDragLinks.forEach(link =>" in source
+    assert "Math.max(MIN_DRAG_PULL, Math.min(MAX_DRAG_PULL" in source
+    assert "const MIN_DRAG_PULL = 4;" in source
+    assert "const MAX_DRAG_PULL = 18;" in source
+    assert "fg.d3Force('dragFollow', dragFollowForce);" in source
+    assert "function setDragSimulationBudget(active)" in source
+    assert "fg.cooldownTime(Infinity)" in source
+    assert "fg.cooldownTicks(Infinity)" in source
+    assert source.index("fg.d3Force('dragFollow', dragFollowForce);") < source.index("fg.d3Force('velocityGuard', velocityGuardForce);")
 
 
 @requires_node
@@ -1510,7 +1464,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260730-drag-stability'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'")
     assert d3 < force_graph < renderer
     assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
@@ -1814,14 +1768,13 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
         // Keep this below the responsive full-graph ceiling. Larger full graphs deliberately
         // take the deterministic, centred layout so a complete workspace cannot lock the UI.
         api.setData(chain(400));
-        const before = invocations.d3ReheatSimulation || 0;
         api.setSettings({ gravity: 98 });
         const nodes = store.graphData.nodes;
         emit({
           mode: api.state().renderMode,
           x: { target: typeof axes.x.at(-1).target === 'function' ? axes.x.at(-1).target(nodes[0]) : axes.x.at(-1).target, value: axes.x.at(-1).value },
           y: { target: typeof axes.y.at(-1).target === 'function' ? axes.y.at(-1).target(nodes[0]) : axes.y.at(-1).target, value: axes.y.at(-1).value },
-          reheat: (invocations.d3ReheatSimulation || 0) - before,
+          reheat: invocations.d3ReheatSimulation || 0,
           cooldown: store.cooldownTime,
           pinned: nodes.filter(node => node.fx !== undefined || node.fy !== undefined).length,
         });
@@ -1830,7 +1783,7 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
     assert report["mode"] == "full"
     assert report["x"] == {"target": 0, "value": 0.98}
     assert report["y"] == {"target": 0, "value": 0.98}
-    assert report["reheat"] == 1
+    assert report["reheat"] == 0, "soft alpha updates must not invoke the unbounded full reheat path"
     assert report["cooldown"] == 1100
     assert report["pinned"] == 0
 
@@ -2451,16 +2404,42 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     move = move[:move.index("      const beginManualDrag", 1)]
     assert "if (!manualDrag.dragged)" in move
     assert move.index("if (Math.hypot(dx, dy) < 3)") < move.index("const node = manualDrag.node;")
-    assert "function reheatLiveLayout(dragging = false)" in source
-    assert "if (started) {" in move
-    assert "setActiveDragNode(node);" in move
-    assert "reheatLiveLayout(true);" in move
+    assert "node.x = node.fx = point.x + manualDrag.offsetX;" in move
+    assert "node.vx = 0;" in move
+    assert "node.vy = 0;" in move
     assert "function makeDragFollowForce()" in source
-    assert "onNodeDragStart" in source
-    assert "fg.cooldownTime(Infinity)" in source
-    assert "fg.cooldownTicks(Infinity)" in source
+    assert "node.fx = undefined;" in source
+    assert "node.fy = undefined;" in source
+    assert "Math.max(MIN_DRAG_PULL, Math.min(MAX_DRAG_PULL" in source
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
+
+
+def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
+    """Live drag physics stays bounded while slider bursts remain coalesced."""
+    source = ASSET.read_text(encoding="utf-8")
+    vendor = VENDOR.read_text(encoding="utf-8")
+    primary_vendor = PRIMARY_VENDOR.read_text(encoding="utf-8")
+    assert "const MIN_NODE_SPEED = 8;" in source
+    assert "const MAX_NODE_SPEED = 48;" in source
+    assert "function makeVelocityGuardForce()" in source
+    assert "fg.d3Force('velocityGuard', velocityGuardForce);" in source
+    assert ".enableNodeDrag(false)" in source
+    assert "node.fx = undefined;" in source
+    assert "node.fy = undefined;" in source
+    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "function schedulePhysicsUpdate()" in source
+    assert "physicsReheatPending" in source
+    assert "cancelAutoFit();" in source
+    assert "function prepareReheat()" in source
+    assert "function supportsSoftAlpha()" in source
+    assert "function softReheat(dragging = false)" in source
+    assert "fg.d3AlphaTarget(dragging || activeDragNode ? DRAG_ALPHA_TARGET : SETTINGS_ALPHA_TARGET);" in source
+    assert "fg.resetCountdown();" in source
+    assert "softReheat(dragging);" in source
+    assert "function makeDragFollowForce()" in source
+    assert "d3AlphaTarget" in vendor and "resetCountdown" in vendor
+    assert "d3AlphaTarget" in primary_vendor and "resetCountdown" in primary_vendor
 
 
 def test_reduced_motion_is_honoured_by_the_opt_in_renderer() -> None:

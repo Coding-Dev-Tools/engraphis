@@ -1350,11 +1350,9 @@ class SyncEngine:
         if existing is not None and provenance_is_approved(existing.provenance):
             content_changed = rec.content != existing.content
             self._rehome_external_record(rec, src_device=src_device)
-            conflict_action = self._preserve_hlc_conflict(
+            self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
-            if conflict_action is not None:
-                pending_index_actions.append(conflict_action)
             if not dry_run and content_changed:
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
@@ -1414,11 +1412,9 @@ class SyncEngine:
             rec.valid_to_recorded_at = now_ts()
             rec.embedding = None
         if existing is not None:
-            conflict_action = self._preserve_hlc_conflict(
+            self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
-            if conflict_action is not None:
-                pending_index_actions.append(conflict_action)
         if existing is None:
             if not dry_run:
                 index_action = self._write(rec, commit=False)
@@ -1747,11 +1743,11 @@ class SyncEngine:
         report: dict,
         known: dict,
         dry_run: bool,
-    ) -> Optional[_VectorIndexAction]:
+    ) -> None:
         """Keep the losing concurrent edit as one deterministic untrusted successor."""
         conflict = self._hlc_conflict(existing, incoming)
         if conflict is None:
-            return None
+            return
         physical, logical, existing_hash, incoming_hash = conflict
         winner = (
             existing
@@ -1776,8 +1772,14 @@ class SyncEngine:
         if already_preserved is None and not dry_run:
             already_preserved = self.store.get_memory(conflict_id)
         metadata = dict(loser.metadata or {})
+        # Preserve quarantine before stripping local fields — conflict successors
+        # derived from quarantined payloads must remain quarantined so _write
+        # skips embedding poisoned content into the vector index.
+        _preserved_quarantine = metadata.get("quarantine")
         for key in _LOCAL_METADATA_FIELDS:
             metadata.pop(key, None)
+        if _preserved_quarantine is not None:
+            metadata["quarantine"] = _preserved_quarantine
         conflict_provenance = {
             "source": "sync_conflict",
             "trusted": False,
@@ -1842,10 +1844,9 @@ class SyncEngine:
                 or not _same_sync_payload(already_preserved, preserved)
             ):
                 raise SyncError("sync conflict identity collision")
-            return None
-        index_action = None
+            return
         if not dry_run:
-            index_action = self._write(preserved, commit=False)
+            self._write(preserved, commit=False)
             self.store.audit(
                 "sync",
                 "sync_conflict_preserved",
@@ -1859,11 +1860,8 @@ class SyncEngine:
             )
         known[conflict_id] = preserved
         report["conflicts_preserved"] += 1
-        return index_action
 
-    def _write(
-        self, rec: MemoryRecord, *, commit: bool = True,
-    ) -> Optional[_VectorIndexAction]:
+    def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
         derived state coherent: re-embed for the vector arm when an embedder is wired.
 

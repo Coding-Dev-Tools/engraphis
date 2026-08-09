@@ -87,7 +87,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260730-drag-stability" in classic_js.text
+        assert "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics" in classic_js.text
         assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
@@ -600,10 +600,10 @@ def test_obsidian_dashboard_endpoints_require_browser_owner_csrf_and_preserve_re
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
-            "/v2-assets/engraphis-graph.js?v=20260730-drag-stability",
+            "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics",
             "/v2-assets/ledger.js?v=20260728-connected-memories",
             "/v2-assets/ledger.css?v=20260728-connected-memories",
-            "/classic-assets/dashboard.js?v=20260728-reference-materials",
+            "/classic-assets/dashboard.js?v=20260809-pin-only-physics",
         ):
             response = client.get(path)
             assert response.status_code == 200

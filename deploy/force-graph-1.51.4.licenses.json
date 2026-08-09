@@ -20,7 +20,7 @@
     "name": "force-graph",
     "npm_integrity": "sha512-TdJ2KbkoiDQ7NIRx8IPGD0mAXXpLhamS7c+b7W98b0MHG7lphnda1VOQX/98UDTsttIAdH4TcP0l0MauSnLK8w==",
     "path": "engraphis/static/vendor/force-graph.min.js",
-    "sha256": "1008539bb9e171a0dc343453366451a1b3a6ded06028ef4f978608b658ba2d0a",
+    "sha256": "5b71387a1ebbe99a2e8c845cd6ac40f776e363dbcb6a4dd200001b70e7b7271e",
     "upstream_commit": "baa20a92bbe5628034d771abaf33a2dbb65d22eb",
     "version": "1.51.4"
   },

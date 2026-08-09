@@ -359,6 +359,7 @@ the same call returns the existing link without duplication.
 - `repo (str)`: indexed repo containing the symbol.
 - `relation (str, "mentions")`: relationship type (e.g. `mentions`, `implements`, `fixes`).
 - `confidence (float, 1.0)`: link confidence `0..1`.
+- `reason (str, "")`: optional reason or context for this link.
 
 Returns `{link_id, symbol_id, memory_id, relation, workspace, repo}`.
 

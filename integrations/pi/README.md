@@ -27,8 +27,8 @@ runs it.
 
 ## Install
 
-Install Engraphis 1.6 with Python 3.10 or later. The extension supports
-Engraphis 1.5 or later (below 2.0) and requires the nine-tool Smart MCP contract:
+Install Engraphis 1.5.x with Python 3.10 or later. Version 1.5 introduced the
+nine-tool Smart MCP contract required by this extension:
 
 ```bash
 python -m pip install --upgrade "engraphis[mcp]>=1.5,<2"
@@ -40,8 +40,8 @@ When published, install the Pi package:
 pi install npm:@engraphis/pi
 ```
 
-The extension is tested with Pi 0.84.x, Node 22.19 or later, and Engraphis
-1.6. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
+The extension is tested with Pi 0.83.x, Node 22.19 or later, and Engraphis
+1.5.x. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
 contract; the extension checks the required Smart MCP tool names when it opens
 the local server and reports an actionable compatibility error if they are absent.
 

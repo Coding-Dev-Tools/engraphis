@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import math
 
@@ -47,7 +48,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
 
@@ -119,10 +120,13 @@ def _ok(payload: dict) -> str:
 
 
 def _err(exc: Exception) -> str:
-    """Actionable, safe error string (never leaks internals)."""
+    """Actionable, safe error string (never leaks internals or credentials)."""
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
-    logger.error("MCP tool operation failed (%s)", type(exc).__name__)
+    exc_type = type(exc).__name__
+    # Redact exception messages to prevent credential/path/memory leakage.
+    # Log only a safe class marker and never attach exc_info/tracebacks.
+    logger.error("MCP tool operation failed", extra={"error_class": exc_type})
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
@@ -160,7 +164,13 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     if current_tokens <= max_response_tokens:
         return payload
 
-    def fit_text(container: dict, key: str) -> None:
+    def citation_number(value: object) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def fit_text(container: dict, key: str, *, citation_safe: bool = False) -> None:
         """Keep the longest prefix that fits, always reducing a non-empty value."""
         nonlocal current_tokens
         original = str(container.get(key) or "")
@@ -170,7 +180,36 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         # Empty first so a one-character value cannot get stuck at len == 1.
         container[key] = ""
         current_tokens = measure()
-        if current_tokens > max_response_tokens:
+        if current_tokens > max_response_tokens and not citation_safe:
+            return
+
+        if citation_safe:
+            cited_numbers = set()
+            for citation in payload.get("citations") or []:
+                number = citation_number(citation.get("n"))
+                if number is not None:
+                    cited_numbers.add(number)
+            candidates = {""}
+            if cited_numbers:
+                for match in re.finditer(r"\[(\d+)\]", original):
+                    number = citation_number(match.group(1))
+                    if number in cited_numbers:
+                        candidates.add(original[:match.end()].rstrip())
+            best = ""
+            for candidate in sorted(candidates, key=len, reverse=True):
+                container[key] = candidate
+                if measure() <= max_response_tokens:
+                    best = candidate
+                    break
+            container[key] = best
+            current_tokens = measure()
+            if not best:
+                # A grounded answer without a complete citation is no longer a
+                # grounded answer. The empty response is an explicit abstention.
+                payload["grounded"] = False
+                payload["abstained"] = True
+                container[key] = ""
+                current_tokens = measure()
             return
 
         best = ""
@@ -198,8 +237,9 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         payload["context"] = "\n\n".join(context_parts)
         current_tokens = measure()
 
-    # 2. Reduce full-mode memory bodies, then grounded answers and citation
-    # bodies.  Each fit is bounded and makes progress for one-character strings.
+    # 2. Reduce full-mode memory bodies. Grounded answers are handled after their
+    # citation bodies so the answer can be fitted against the actual evidence
+    # envelope rather than being emptied just because a citation body was large.
     if current_tokens > max_response_tokens:
         memories = payload.get("memories", [])
         for mem in reversed(memories):
@@ -208,18 +248,58 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
             fit_text(mem, "content")
 
     if current_tokens > max_response_tokens:
-        fit_text(payload, "answer")
-
-    if current_tokens > max_response_tokens:
         citations = payload.get("citations", [])
         for citation in reversed(citations):
             if current_tokens <= max_response_tokens:
                 break
             fit_text(citation, "content")
 
+    if current_tokens > max_response_tokens:
+        fit_text(
+            payload, "answer", citation_safe=payload.get("grounded") is True
+        )
+
+    # Post-processing: ensure grounded answers always end with a citation marker
+    if payload.get("grounded") is True and current_tokens <= max_response_tokens:
+        answer = str(payload.get("answer") or "")
+        if answer and not re.search(r"\[\d+\]$", answer.rstrip()):
+            # Answer doesn't end with citation - truncate to last complete citation
+            matches = list(re.finditer(r"\[\d+\]", answer))
+            if matches:
+                last_match = matches[-1]
+                payload["answer"] = answer[:last_match.end()].rstrip()
+                current_tokens = measure()
+            else:
+                # No citations - grounded answer without citations is an abstention
+                payload["grounded"] = False
+                payload["abstained"] = True
+                payload["answer"] = ""
+                current_tokens = measure()
+
     # Source records can themselves exceed a very small response budget even
     # after their bodies are empty. Remove only whole trailing records so IDs and
     # citation metadata are never partially serialized.
+    def remove_trailing_record(records: list, key: str) -> bool:
+        if payload.get("grounded") is not True or key not in {
+            "citations", "sources", "packed_sources"
+        }:
+            records.pop()
+            return True
+        cited_numbers = set()
+        for number in re.findall(r"\[(\d+)\]", str(payload.get("answer") or "")):
+            parsed = citation_number(number)
+            if parsed is not None:
+                cited_numbers.add(parsed)
+        for index in range(len(records) - 1, -1, -1):
+            try:
+                number = int(records[index].get("n"))
+            except (AttributeError, TypeError, ValueError):
+                number = None
+            if number not in cited_numbers:
+                records.pop(index)
+                return True
+        return False
+
     for key in ("memories", "citations", "sources", "packed_sources"):
         records = payload.get(key)
         while (
@@ -227,7 +307,8 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
             and isinstance(records, list)
             and records
         ):
-            records.pop()
+            if not remove_trailing_record(records, key):
+                break
             current_tokens = measure()
 
     if current_tokens > max_response_tokens:
@@ -1375,6 +1456,8 @@ def engraphis_link_symbol(
                                    max_length=100)] = "mentions",
     confidence: Annotated[float, Field(description="Link confidence 0..1.",
                           ge=0.0, le=1.0)] = 1.0,
+    reason: Annotated[str, Field(description="Optional reason or context for this link.",
+                                 max_length=500)] = "",
 ) -> str:
     """Manually create a link between a code symbol and a memory.
 
@@ -1384,12 +1467,12 @@ def engraphis_link_symbol(
     the same call returns the existing link without duplication.
 
     Returns:
-        str: JSON ``{"link_id","symbol_id","memory_id","relation","workspace","repo"}``.
+        str: JSON ``{"link_id","symbol_id","memory_id","relation","workspace","repo","receipt"}``.
     """
     try:
         return _ok(service().link_symbol(
             symbol_id, memory_id, workspace=workspace, repo=repo,
-            relation=relation, confidence=confidence,
+            relation=relation, confidence=confidence, reason=reason,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -2662,7 +2745,10 @@ def engraphis_update_memory(
                                           max_length=50)] = None,
     importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
                                                  le=1.0)] = None,
-    actor: Annotated[str, Field(description="Optional actor label.", max_length=200)] = "user",
+    actor: Annotated[str, Field(
+        description="Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        max_length=200,
+    )] = "user",
 ) -> str:
     """Edit a memory's metadata fields (title/type/importance). An identical retry is an
     atomic no-op. Content edits must go through the governed correction path so bi-temporal
@@ -2671,9 +2757,11 @@ def engraphis_update_memory(
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
+        principal = _authenticated_principal()
+        effective_actor = principal["id"] if principal is not None else actor
         return _ok(service().update_memory(
             memory_id, workspace=workspace, repo=repo,
-            title=title, mtype=mtype, importance=importance, actor=actor,
+            title=title, mtype=mtype, importance=importance, actor=effective_actor,
         ))
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)

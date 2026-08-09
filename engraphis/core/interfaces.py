@@ -216,6 +216,13 @@ class MemoryRecord:
         self.modified_hlc = normalize_modified_hlc(
             self.modified_hlc, allow_empty=True
         )
+        try:
+            c = float(self.confidence)
+        except (TypeError, ValueError, OverflowError):
+            c = 1.0
+        if not math.isfinite(c):
+            c = 1.0
+        self.confidence = max(0.0, min(1.0, c))
 
 
 @dataclass

@@ -132,16 +132,21 @@ function setWS(name){
 async function loadWorkspaceList(){const d=await api('/workspaces');WORKSPACES=d.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}}
 
 /* overview */
-async function loadOverview(){try{const st=await api('/stats?workspace='+encodeURIComponent(WS||''));setViewDesc('overview',(st.memories||0)+' memories · '+(st.workspaces||0)+' workspaces');const cards=[['Memories',st.memories],['Live rows',st.total_rows],['Workspaces',st.workspaces],['Sessions',st.sessions]];document.getElementById('stat-grid').innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]!=null?c[1]:'—'}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');document.getElementById('nav-mem-count').textContent=st.memories||'';const bt=st.by_type||{};const tot=Object.values(bt).reduce((a,b)=>a+b,0)||1;document.getElementById('ov-types').innerHTML=Object.keys(bt).length?Object.entries(bt).map(([k,v])=>`<div data-csp-style="s62"><div data-csp-style="s63">${esc(k)}</div><progress class="overview-type-bar" max="${tot}" value="${Math.max(Number(v)||0,0)}" aria-label="${esc(k)}: ${v}"></progress><div data-csp-style="s66">${v}</div></div>`).join(''):'<div class="empty" data-csp-style="s67">No memories</div>';loadOverviewAnalytics()}catch(e){const msg='Overview unavailable: '+e.message;setViewDesc('overview',msg);document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Memory types could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Analytics could not be loaded.</div>';toast(msg,'err')}}
 function formatTokenCount(value){return Math.max(0,Math.round(Number(value)||0)).toLocaleString()}
+function savingsPercent(value){return Math.max(0,Math.min(100,Number(value)*100||0))}
+function savingsCount(value){return Math.max(0,Math.round(Number(value)||0))}
+function savingsNode(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n}
 function renderOverviewSavings(data,error){
  const el=document.getElementById('ov-savings');
  if(!el)return;
- if(error){el.innerHTML='<div class="empty">Savings estimate unavailable.</div>';return}
- const e=(data&&data.estimated)||{},eligible=Number(e.eligible_receipt_count)||0,excluded=(Number(e.excluded_receipt_count)||0)+(Number(e.unclassified_receipt_count)||0)+(Number(e.invalid_estimate_count)||0),saved=Number(e.saved_tokens)||0,ratio=Number(e.savings_ratio)||0,counters=e.by_token_counter||[];
- if(!eligible){el.innerHTML='<div class="empty">No receipt-backed context savings yet.</div><div class="field-hint">Eligible deliveries will appear after adaptive context or context-delivery calls. '+excluded+' call(s) are currently excluded or unclassified.</div><div class="field-hint">Measures estimated prompt-context reduction; it does not measure provider billing.</div>';return}
- const counter=counters.length===1?'Counter: '+(counters[0].token_counter||'unknown'):counters.length?counters.length+' token counters (kept separate)':'Counter: unknown';
- el.innerHTML='<div class="stat-val">'+formatTokenCount(saved)+' tokens</div><div data-csp-style="s90">Across '+eligible+' eligible context deliveries · '+(ratio*100).toFixed(0)+'% estimated reduction</div><div class="field-hint">Baseline '+formatTokenCount(e.baseline_tokens)+' → emitted '+formatTokenCount(e.emitted_tokens)+' · confidence: '+esc(e.confidence||'unknown')+'</div><div class="field-hint">'+esc(counter)+(excluded?' · '+excluded+' excluded/unclassified':'')+'</div><div class="field-hint">Measures estimated prompt-context reduction; it does not measure provider billing.</div>';
+ el.replaceChildren();
+ if(error){el.append(savingsNode('div','empty','Savings estimate unavailable.'));return}
+ const e=(data&&data.estimated)||{},eligible=savingsCount(e.eligible_receipt_count),excluded=savingsCount(e.excluded_receipt_count)+savingsCount(e.unclassified_receipt_count)+savingsCount(e.invalid_estimate_count),saved=Number(e.saved_tokens)||0,ratio=Number(e.savings_ratio)||0,counters=Array.isArray(e.by_token_counter)?e.by_token_counter:[];
+ if(!eligible){el.append(savingsNode('div','empty','No receipt-backed context savings yet.'),savingsNode('div','field-hint','Eligible deliveries will appear after adaptive context or context-delivery calls. '+excluded+' excluded or unclassified '+(excluded===1?'delivery':'deliveries')+'.'),savingsNode('div','field-hint','Measures estimated prompt-context reduction; it does not measure provider billing.'));return}
+ const counter=counters.length===1?'Counter: '+(counters[0].token_counter||'unknown'):counters.length?counters.length+' token counters (kept separate)':'Counter: unknown',pct=savingsPercent(ratio),pctLabel=pct.toFixed(1);
+ const hero=savingsNode('div','savings-hero'),total=savingsNode('div'),rate=savingsNode('div','savings-rate'),progress=document.createElement('progress');
+ total.append(savingsNode('div','stat-val savings-number',formatTokenCount(saved)),savingsNode('div','savings-unit','tokens avoided'));rate.append(savingsNode('strong','',pctLabel+'%'),savingsNode('span','','estimated reduction'));hero.append(total,rate);progress.className='savings-progress';progress.max=100;progress.value=pct;progress.setAttribute('aria-label',pctLabel+'% estimated context reduction');
+ el.append(hero,progress,savingsNode('div','savings-summary','Across '+eligible+' eligible context deliveries'),savingsNode('div','field-hint','Baseline '+formatTokenCount(e.baseline_tokens)+' → emitted '+formatTokenCount(e.emitted_tokens)+' · confidence: '+(e.confidence||'unknown')),savingsNode('div','field-hint',counter+(excluded?' · '+excluded+' excluded/unclassified':'')),savingsNode('div','field-hint','Measures estimated prompt-context reduction; it does not measure provider billing.'));
 }
 async function loadOverview(){try{const st=await api('/stats?workspace='+encodeURIComponent(WS||''));setViewDesc('overview',(st.memories||0)+' memories · '+(st.workspaces||0)+' workspaces');const cards=[['Memories',st.memories],['Live rows',st.total_rows],['Workspaces',st.workspaces],['Sessions',st.sessions]];document.getElementById('stat-grid').innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]!=null?c[1]:'—'}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');document.getElementById('nav-mem-count').textContent=st.memories||'';const bt=st.by_type||{};const tot=Object.values(bt).reduce((a,b)=>a+b,0)||1;document.getElementById('ov-types').innerHTML=Object.keys(bt).length?Object.entries(bt).map(([k,v])=>`<div data-csp-style="s62"><div data-csp-style="s63">${esc(k)}</div><progress class="overview-type-bar" max="${tot}" value="${Math.max(Number(v)||0,0)}" aria-label="${esc(k)}: ${v}"></progress><div data-csp-style="s66">${v}</div></div>`).join(''):'<div class="empty" data-csp-style="s67">No memories</div>';try{renderOverviewSavings(await api('/context-savings?workspace='+encodeURIComponent(WS||'')))}catch(_err){renderOverviewSavings(null,true)}loadOverviewAnalytics()}catch(e){const msg='Overview unavailable: '+e.message;setViewDesc('overview',msg);document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Memory types could not be loaded.</div>';document.getElementById('ov-savings').innerHTML='<div class="empty" data-csp-style="s10">Savings estimate could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Analytics could not be loaded.</div>';toast(msg,'err')}}
 async function loadOverviewAnalytics(){
@@ -236,7 +241,7 @@ function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
 /* The badge follows the access state, not the plan name. A plan name alone told a trialist
    they were a subscriber, and told a lapsed or expired customer nothing was wrong. */
-function updateLicBadge(){const bd=document.getElementById('lic-badge');if(!bd||!LIC)return;const st=licAccessState(),plan=licPlanName(),trial=licTrialAvailable(),label=st==='trial'?'TRIAL':st==='trial_expired'?'GET PRO':st==='lapsed'?'BILLING':st==='active'?plan:trial?'TRY PRO':'GET PRO',aria=st==='active'?'Open Engraphis Cloud account':st==='lapsed'?'Update billing in hosted plan settings':trial?'Start the 3-day Pro trial in hosted plan settings':'Subscribe to Pro in hosted plan settings';bd.textContent=label;bd.className='pill '+(licAccessLive()?'pill-accent':'pill-muted');bd.setAttribute('aria-label',aria);bd.title=aria}
+function updateLicBadge(){/* The side-menu header intentionally has no plan or upgrade badge. */}
 function updateFeatureLocks(){
  const has=f=>LIC&&(LIC.features||[]).includes(f);
  const apply=(id,feature,label,plan)=>{
@@ -1177,7 +1182,7 @@ function loadForceGraph(){
  if(FORCE_GRAPH_LOADING)return FORCE_GRAPH_LOADING;
  FORCE_GRAPH_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/static/vendor/force-graph.min.js';
+  script.src='/static/vendor/force-graph.min.js?v=20260809-csp';
   /* A successful fetch is not a usable renderer unless the vendor asset registered its
      global. Treat a truncated/captive-portal 200 exactly like any other load failure. */
   script.onload=()=>{typeof ForceGraph==='undefined'?reject(new Error('Force graph asset loaded without registering ForceGraph')):resolve()};
@@ -1192,7 +1197,7 @@ function loadGraphEngine(){
  if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
  GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js?v=20260730-drag-stability';
+  script.src='/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics';
   /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
      resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
   script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
@@ -1264,8 +1269,9 @@ function graphRender(fit=true,reheat=true){
    .onRenderFramePre((ctx,scale)=>{try{graphStyleBackground(ctx,scale)}catch(e){}})
    .onNodeClick(node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.id)})
    .onNodeHover(node=>{graphSetHighlight(node&&node.id);element.classList.toggle('cursor-pointer',!!node);element.classList.toggle('cursor-grab',!node)})
+   .onNodeDragEnd(node=>{node.vx=0;node.vy=0})
    .onEngineStop(()=>graphSetSimulationStatus('Layout settled',false));
- }
+  }
  FG.width(element.clientWidth).height(element.clientHeight)
   .cooldownTime(GPERF.large?1100:2200)
   .cooldownTicks(GPERF.large?80:160)
@@ -1554,14 +1560,19 @@ function loadConsolidateView(){
  clearWorkspaceRequired('consolidate-body','Run a dry preview before committing consolidation.');
 }
 async function loadHealthView(){
+ setWorkspaceControls('view-health',!!WS);
+ if(!WS)return workspaceRequired('health-stat-grid','review memory health');
+ clearWorkspaceRequired('health-stat-grid','Loading memory health…');
  const grid=document.getElementById('health-stat-grid'),decay=document.getElementById('health-decay-chart'),trends=document.getElementById('health-trends');
  if(grid)grid.innerHTML='<div class="spinner" data-csp-style="s86"></div>';
  try{
-  const h=await api('/memory/health/overview?namespace='+encodeURIComponent(WS||''));
-  const cards=[['Total memories',h.total||0],['Avg age (days)',h.avg_age_days||0],['Decay rate',h.decay_rate||0],['Stale',h.stale_count||0]];
+  const h=await api('/analytics/health?workspace='+encodeURIComponent(WS));
+  const distribution=Array.isArray(h.decay_distribution)?h.decay_distribution:[],conflicts=h.conflict_frequency||{};
+  const total=distribution.reduce((sum,item)=>sum+(Number(item.count)||0),0);
+  const cards=[['Total memories',total],['Orphan memories',Number(h.orphan_count)||0],['Conflicts (7d)',Number(conflicts.last_7d)||0],['Conflicts (total)',Number(conflicts.total)||0]];
   if(grid)grid.innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');
-  if(decay)decay.innerHTML='<div class="empty" data-csp-style="s12">Decay distribution chart not yet implemented.</div>';
-  if(trends)trends.innerHTML='<div class="empty" data-csp-style="s12">Trend analysis not yet implemented.</div>';
+  if(decay)decay.innerHTML=distribution.length?distribution.map(item=>`<div class="health-distribution-row"><span>${esc(String(item.label||item.bucket||''))}</span><strong>${Number(item.count)||0}</strong></div>`).join(''):'<div class="empty" data-csp-style="s12">No decay data yet.</div>';
+  if(trends)trends.innerHTML=`<div class="health-trend-list"><div>Memories without entity links: <strong>${Number(h.orphan_count)||0}</strong></div><div>Conflict events in the last 7 days: <strong>${Number(conflicts.last_7d)||0}</strong></div><div>Conflict events recorded: <strong>${Number(conflicts.total)||0}</strong></div></div>`;
  }catch(e){
   if(grid)grid.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>';
   if(decay)decay.innerHTML='';

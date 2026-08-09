@@ -25,15 +25,14 @@ import signal
 import sys
 from pathlib import Path
 
+from engraphis.backends.codegraph import LANG_BY_EXT, _DEFAULT_EXCLUDE_DIRS, load_ignore_patterns
+
 logger = logging.getLogger("engraphis.watch_repo")
 
-# File extensions worth reindexing.  Tree-sitter covers more, but these are the
-# high-signal set that catches most code changes without thrashing on config/docs.
-_WATCHED_EXTENSIONS = frozenset({
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
-    ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
-    ".kt", ".scala", ".lua", ".sh", ".bash", ".zsh",
-})
+# File extensions worth reindexing. Keep this aligned with the codegraph indexer's
+# supported extensions so the watcher follows the same language coverage as
+# indexing, instead of drifting to a stale hand-maintained subset.
+_WATCHED_EXTENSIONS = frozenset(LANG_BY_EXT)
 
 
 def _watched_files(root: Path):
@@ -83,6 +82,24 @@ class _PollingWatcher:
         self._signatures: dict[str, tuple[int, int, bytes]] = {}
         self._pending_signatures: dict[str, tuple[int, int, bytes]] | None = None
         self._initial_scan_done = False
+        # Paths whose last reindex failed and are absent from the current scan.
+        # Without this set, a failed deletion reindex would never retry because
+        # the path is gone from both _signatures and the new scan on next poll.
+        self._pending_deletions: set[str] = set()
+        # Paths detected as deletions in the most recent poll() call.
+        # Used by untrack() to distinguish deletion retries from other failures.
+        self._last_deletions: set[str] = set()
+        # Apply the same directory/name pruning the code indexer uses so the
+        # watcher does not repeatedly hash every file under node_modules,
+        # vendor, or build-output trees that will never be indexed anyway.
+        # ``.engraphisignore`` at the repo root adds project-specific rules.
+        self._exclude_dirs: set[str] = set(_DEFAULT_EXCLUDE_DIRS)
+        try:
+            ignore_names, _ignore_globs, unignore = load_ignore_patterns(str(root))
+        except Exception:  # noqa: BLE001 — a broken ignore file must not abort scanning
+            ignore_names, unignore = set(), set()
+        self._exclude_dirs |= ignore_names
+        self._exclude_dirs -= unignore
 
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
@@ -115,6 +132,7 @@ class _PollingWatcher:
         if not self._initial_scan_done:
             self._signatures = current
             self._initial_scan_done = True
+            self._last_deletions = set()
             return []
 
         changed: list[str] = []
@@ -123,14 +141,48 @@ class _PollingWatcher:
             if self._signatures.get(path) != signature:
                 changed.append(path)
         # Detect deleted files (trigger reindex to clean stale symbols).
+        deletions: set[str] = set()
         for path in self._signatures:
             if path not in current:
                 changed.append(path)
+                deletions.add(path)
+        self._last_deletions = deletions
+
+        # Re-emit paths from prior failed deletions that are still absent.
+        # These were removed from _signatures by untrack() after the previous
+        # failed reindex, so they would otherwise be invisible to this poll.
+        still_missing = {
+            p for p in self._pending_deletions if p not in current
+        }
+        changed.extend(still_missing)
+        # Clear entries that have reappeared (file recreated between polls).
+        self._pending_deletions -= set(current.keys())
 
         # Keep the candidate separate until the caller confirms that incremental
         # indexing succeeded. A transient read/parse failure must be retried.
         self._pending_signatures = current
         return changed
+
+    def untrack(self, paths: list[str], *, deletions: bool = False) -> None:
+        """Remove *paths* from the signature cache.
+
+        After a failed reindex the caller can ask the watcher to forget these
+        files so the next :meth:`poll` reports them as new/changed again and
+        the indexer gets another chance instead of silently dropping them.
+
+        When *deletions* is True, paths that are already absent from
+        ``_signatures`` are added to a pending-deletion set so they remain
+        visible to future polls even though they no longer exist on disk.
+        Without this flag (the default for created/modified file retries),
+        absent paths are silently ignored.
+        """
+        for path in paths:
+            was_tracked = self._signatures.pop(path, None) is not None
+            if deletions and path in self._last_deletions:
+                self._pending_deletions.add(path)
+                continue
+            if was_tracked:
+                continue
 
     def acknowledge(self) -> None:
         """Accept the most recent poll after its changes were indexed successfully."""
@@ -176,7 +228,23 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
                 return
         dispatch(paths)
 
+    _MAX_RETRIES = 3
+
     class _Handler(FileSystemEventHandler):
+        def _dispatch(self, paths: list[str]) -> None:
+            for attempt in range(1, _MAX_RETRIES + 1):
+                if callback(paths):
+                    return
+                logger.warning(
+                    "watchdog reindex failed (attempt %d/%d) for %d file(s)",
+                    attempt, _MAX_RETRIES, len(paths),
+                )
+                stop_event.wait(timeout=min(2 ** attempt, 8))
+            logger.error(
+                "watchdog reindex permanently failed after %d attempts for %s",
+                _MAX_RETRIES, paths,
+            )
+
         def on_modified(self, event):
             if not event.is_directory:
                 ext = os.path.splitext(event.src_path)[1].lower()
@@ -324,6 +392,13 @@ def _run(args, engine) -> int:
         if changed:
             if reindex(changed):
                 watcher.acknowledge()
+            else:
+                logger.warning(
+                    "incremental reindex failed for %d file(s); "
+                    "will retry on next poll cycle",
+                    len(changed),
+                )
+                watcher.untrack(changed, deletions=True)
         else:
             watcher.acknowledge()
 

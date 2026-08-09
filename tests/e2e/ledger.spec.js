@@ -179,41 +179,29 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/health') return ok({ status: 'ok' });
-    if (path === '/workspaces/import-documents/sources') return ok({ sources: [] });
-    if (path === '/workspaces/import-documents/formats') {
-      return ok({ extensions: ['.md', '.txt'] });
-    }
-    if (path === '/workspaces/import-documents/preview') {
-      requests.documentImports.push({
-        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
-      });
-      return ok({
-        review_token: `review-${requests.documentImports.length}`,
-        review_expires_in: 300,
-        counts: { documents: 1 },
-        files: [{ path: 'Welcome.md', status: 'import' }],
-      });
-    }
-    if (path === '/workspaces/import-documents/run') {
-      requests.documentImports.push({
-        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
-      });
-      return ok({ job_id: 'job_document_e2e', state: 'queued' });
-    }
-    if (path === '/workspaces/import-documents/jobs/job_document_e2e/cancel') {
-      requests.documentImports.push({
-        path, url: request.url(), body: (request.postDataBuffer() || Buffer.alloc(0)).toString(),
-      });
-      return ok({ id: 'job_document_e2e', state: 'queued', cancel_requested: true });
-    }
-    if (path === '/workspaces/import-documents/jobs/job_document_e2e') {
-      documentPolls += 1;
-      requests.documentImports.push({ path, url: request.url(), body: '' });
-      return ok({
-        id: 'job_document_e2e',
-        state: documentPolls === 1 ? 'queued' : 'completed',
-      });
-    }
+    if (path === '/context-savings') return ok({
+      format: 'engraphis-context-savings/1',
+      scope: { workspace },
+      period: { from_ts: null, to_ts: null },
+      release_version: null,
+      estimated: {
+        eligible_receipt_count: 2,
+        baseline_tokens: 4096,
+        emitted_tokens: 2048,
+        saved_tokens: 2048,
+        savings_ratio: 0.5,
+        confidence: 'high',
+        by_basis: [{
+          basis: 'adaptive_history',
+          confidence: 'high',
+          baseline_tokens: 4096,
+          emitted_tokens: 2048,
+          saved_tokens: 2048,
+          receipt_count: 2,
+        }],
+        by_token_counter: [{ token_counter: 'test-counter', receipt_count: 2, saved_tokens: 2048 }],
+      },
+    });
     if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
       return ok({
@@ -316,6 +304,11 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   expect(response.headers()['content-security-policy']).not.toContain("'unsafe-inline'");
   await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  await expect(page.locator('#context-savings-summary-body .savings-number')).toHaveText('2,048');
+  await expect(page.locator('#context-savings-summary-body .savings-unit')).toHaveText('tokens avoided');
+  await expect(page.locator('#context-savings-summary-body .savings-rate-value')).toHaveText('50.0%');
+  await expect(page.locator('#context-savings-summary-body .savings-progress'))
+    .toHaveAttribute('aria-label', '50.0% estimated context reduction');
   await expect(page.locator('#decision-list').getByText('Postgres 16 is the main database.'))
     .toBeVisible();
   await expect(page.locator('#proactive-list').getByText(/<img src=x onerror=/)).toBeVisible();
@@ -352,78 +345,6 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   expect(accessibility.violations).toEqual([]);
   expect(await page.evaluate(() => window.__ledgerCspViolations)).toEqual([]);
   expect(errors).toEqual([]);
-});
-
-test('document import invalidates previews and freezes the reviewed job workspace', async ({ page }) => {
-  await page.route('**/dashboard/review/csrf', route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ review_csrf_token: 'csrf-document-e2e' }),
-  }));
-  const requests = await mockApi(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Library' }).click();
-
-  const open = page.locator('#obsidian-import-button');
-  const dialog = page.locator('#obsidian-import-dialog');
-  const files = page.locator('#obsidian-import-files');
-  const preview = page.locator('#obsidian-preview');
-  const run = page.locator('#obsidian-run');
-  const confirmed = page.locator('#obsidian-confirmed');
-  const workspaceInput = page.locator('#obsidian-workspace');
-
-  await open.click();
-  await expect(dialog).toBeVisible();
-  await page.locator('#obsidian-vault-label').fill('Notes');
-  await files.setInputFiles({
-    name: 'Welcome.md', mimeType: 'text/markdown', buffer: Buffer.from('# Welcome'),
-  });
-  await preview.click();
-  await expect(run).toBeEnabled();
-  await confirmed.check();
-
-  await page.locator('#obsidian-repo').fill('changed-after-preview');
-  await expect(confirmed).not.toBeChecked();
-  await expect(run).toBeDisabled();
-  await expect(page.locator('#obsidian-import-progress')).toContainText('Preview again');
-
-  await preview.click();
-  await expect(run).toBeEnabled();
-  await confirmed.check();
-  await page.locator('#obsidian-import-close').click();
-  await open.click();
-  await expect(confirmed).not.toBeChecked();
-  await expect(run).toBeDisabled();
-
-  await page.locator('#obsidian-vault-label').fill('Notes');
-  await workspaceInput.fill('started-workspace');
-  await files.setInputFiles({
-    name: 'Welcome.md', mimeType: 'text/markdown', buffer: Buffer.from('# Welcome'),
-  });
-  await preview.click();
-  await expect(run).toBeEnabled();
-  await confirmed.check();
-  await run.click();
-
-  const cancel = page.locator('#obsidian-cancel');
-  await expect(cancel).toBeVisible();
-  await workspaceInput.fill('mutated-workspace');
-  await cancel.click();
-  await expect.poll(() => requests.documentImports.some(item => item.path.endsWith('/cancel')))
-    .toBe(true);
-
-  const runRequest = requests.documentImports.find(item => item.path.endsWith('/run'));
-  const pollRequest = requests.documentImports.find(item => (
-    item.path === '/workspaces/import-documents/jobs/job_document_e2e'
-  ));
-  const cancelRequest = requests.documentImports.find(item => item.path.endsWith('/cancel'));
-  expect(runRequest.body).toContain('started-workspace');
-  expect(runRequest.body).toContain('review-');
-  expect(runRequest.body).not.toContain('mutated-workspace');
-  expect(new URL(pollRequest.url).searchParams.get('workspace')).toBe('started-workspace');
-  expect(cancelRequest.body).toContain('started-workspace');
-  expect(cancelRequest.body).not.toContain('mutated-workspace');
-  await expect(preview).toBeEnabled();
 });
 
 test('Ledger retries a failed lazy graph load and opens search evidence by keyboard', async ({ page }) => {
@@ -762,7 +683,29 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
             id: `receipt_${selected}`, operation: `${selected} receipt`,
             created_at: Date.now() / 1000, verified: true,
           }] }
-          : { estimate: { excluded_or_unclassified_delivery: 0 } };
+          : {
+            format: 'engraphis-context-savings/1',
+            scope: { workspace: selected },
+            period: { from_ts: null, to_ts: null },
+            release_version: null,
+            estimated: {
+              eligible_receipt_count: 2,
+              baseline_tokens: 4096,
+              emitted_tokens: 2048,
+              saved_tokens: 2048,
+              savings_ratio: 0.5,
+              confidence: 'high',
+              by_basis: [{
+                basis: 'adaptive_history',
+                confidence: 'high',
+                baseline_tokens: 4096,
+                emitted_tokens: 2048,
+                saved_tokens: 2048,
+                receipt_count: 2,
+              }],
+              by_token_counter: [{ token_counter: 'test-counter', receipt_count: 2, saved_tokens: 2048 }],
+            },
+          };
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -1378,6 +1321,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   });
   await page.goto('/');
 
+  await expect(page.locator('#plan-badge')).toHaveCount(0);
   await expect(page.locator('#sidebar-pro-cta')).toHaveText('Open Engraphis Cloud');
   await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
     'href',
@@ -1428,6 +1372,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
 test('billing cadence selects the exact Pro and Team checkout target', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
+  await expect(page.locator('#plan-badge')).toHaveCount(0);
   await expect(page.locator('#sidebar-pro-cta')).toHaveText('Start 3-day Pro trial');
   await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
     'href',

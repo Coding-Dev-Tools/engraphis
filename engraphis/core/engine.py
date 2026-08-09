@@ -3224,6 +3224,7 @@ class MemoryEngine:
         present: set[str] = set()
         lang_counts: dict[str, int] = defaultdict(int)
         files_scanned = files_indexed = files_unchanged = files_failed = files_skipped = 0
+        files_removed = 0
         symbols_indexed = edges_indexed = 0
         backend_name = type(indexer).__name__
         scan_complete = True
@@ -3259,6 +3260,11 @@ class MemoryEngine:
                 try:
                     stat = source_file.stat()
                     if stat.st_size > max_file_bytes:
+                        previous = existing.get(rel)
+                        if previous is not None:
+                            self.store.remove_code_file(repo_id, rel, commit=False)
+                            files_removed += 1
+                        scan_complete = False
                         files_skipped += 1
                         continue
                     raw = source_file.read_bytes()
@@ -3302,7 +3308,7 @@ class MemoryEngine:
         except self._code_walk_limit_error:
             scan_complete = False
 
-        removed = 0
+        removed = files_removed
         if scan_complete:
             for rel in sorted(set(existing) - present):
                 self.store.remove_code_file(repo_id, rel, commit=False)
@@ -3393,6 +3399,7 @@ class MemoryEngine:
         lang_counts: dict[str, int] = defaultdict(int)
         backend_name = type(indexer).__name__
         seen_relative: set[str] = set()
+        scan_complete = True
 
         for supplied_path in paths:
             # This predicate performs containment, symlink, excluded-directory, ignore
@@ -3435,6 +3442,14 @@ class MemoryEngine:
             try:
                 stat = safe_candidate.stat()
                 if stat.st_size > max_file_bytes:
+                    if relative in existing:
+                        # Incremental indexing has now observed the file exceed the
+                        # accepted size budget, so retire the previous live code-file
+                        # snapshot and its symbol/edge rows instead of leaving a stale
+                        # indexed view behind.  The history tables keep the audit trail.
+                        self.store.remove_code_file(repo_id, relative, commit=False)
+                        files_removed += 1
+                    scan_complete = False
                     files_skipped += 1
                     continue
                 raw = safe_candidate.read_bytes()
@@ -3495,6 +3510,7 @@ class MemoryEngine:
                     "files_unchanged": files_unchanged,
                     "files_removed": files_removed,
                     "incremental": True,
+                    "scan_complete": scan_complete,
                 },
             },
         )
@@ -3513,7 +3529,7 @@ class MemoryEngine:
             "languages": dict(sorted(lang_counts.items())),
             "backend": backend_name,
             "incremental": True,
-            "scan_complete": True,
+            "scan_complete": scan_complete,
             "code_memory_links": code_memory_links,
         }
 
@@ -3771,7 +3787,7 @@ class MemoryEngine:
             bridge = {
                 "source_id": memory_id,
                 "target_id": symbol_id,
-                "relation": "memory_mentions",
+                "relation": link.get("relation") or "memory_mentions",
                 "layer": "memory",
                 "file": link.get("file") or "",
                 "line": 0,

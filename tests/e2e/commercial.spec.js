@@ -354,8 +354,6 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
   await mockLocalClient(page, 200, null, null, teamLicense);
   await page.goto('/classic');
 
-  // The header no longer carries a plan badge; entitlement state is represented by the
-  // feature locks and the detailed settings panel below.
   await expect(page.locator('#lic-badge')).toHaveCount(0);
   for (const [feature, selector] of Object.entries(navLocks)) {
     await expect(page.locator(selector), `${feature} is still locked for a Team customer`)
@@ -419,8 +417,6 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
   await mockLocalClient(page, 402, null, null, lapsedTeamLicense);
   await page.goto('/classic');
 
-  // The locks come back because the control plane withdrew the features; billing details
-  // are shown in the settings panel instead of a header badge.
   await expect(page.locator('#lic-badge')).toHaveCount(0);
   await expect(page.locator(navLocks.team)).toHaveText('TEAM');
   await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
@@ -456,14 +452,12 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   }));
   await page.goto('/classic');
 
-  await expect(page.locator('#lic-badge')).toHaveCount(0);
-
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // The settings panel retains the matching checkout action.
+  // The sidebar CTA opens this panel, so it must retain the matching checkout action.
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))

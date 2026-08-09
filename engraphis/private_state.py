@@ -116,6 +116,7 @@ def read_private_text(
     max_bytes: int,
     allow_missing: bool = False,
     owner_only: bool = False,
+    expected_version=None,
 ) -> Optional[str]:
     """Read bounded UTF-8 from a stable, non-linked regular file.
 
@@ -130,6 +131,8 @@ def read_private_text(
     )
     if before is None:
         return None
+    if expected_version is not None and not _same_version(expected_version, before):
+        raise _unsafe(path, "file changed before it was opened")
     if before.st_size > max_bytes:
         raise _unsafe(path, "file exceeds %d bytes" % max_bytes)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -141,7 +144,11 @@ def read_private_text(
         raise
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not _same_version(before, opened):
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not _same_file(before, opened)
+            or expected_version is not None and not _same_version(expected_version, opened)
+        ):
             raise _unsafe(path, "path changed while it was opened")
         if getattr(opened, "st_nlink", 1) != 1:
             raise _unsafe(path, "hard-linked files are not accepted")

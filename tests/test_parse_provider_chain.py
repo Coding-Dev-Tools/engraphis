@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("httpx", reason="LLM provider client extra not installed")
+pytest.importorskip("httpx", reason="provider-chain tests require the optional HTTP dependency")
 
 from engraphis.llm.client import LLMProviderChain, parse_provider_chain
 

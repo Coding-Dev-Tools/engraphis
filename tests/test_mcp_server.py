@@ -1,5 +1,6 @@
 """Smoke test for the MCP binding. Skips cleanly when the optional 'mcp' package
 is not installed, so the offline CI gate is unaffected."""
+import logging
 import json
 import re
 import subprocess
@@ -57,6 +58,7 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
 
     base = {
         "grounded": True,
+        "abstained": False,
         "answer": "",
         "citations": [{"n": 1, "id": "mem_1", "content": ""}],
     }
@@ -64,6 +66,7 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
     result = _apply_response_budget(
         {
             "grounded": True,
+            "abstained": False,
             "answer": "A deliberately oversized grounded answer. [1] " * 20,
             "citations": [{
                 "n": 1,
@@ -78,6 +81,77 @@ def test_response_budget_reduces_grounded_answer_and_citation_bodies():
     assert result["citations"] == [{"n": 1, "id": "mem_1", "content": ""}]
     assert _response_tokens(result) <= budget
     assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
+def test_response_budget_keeps_grounded_answer_at_a_complete_citation():
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    budget = _response_tokens(_apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1]",
+            "citations": [citation.copy()],
+        },
+        1_000_000,
+    ))
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1] and additional detail that will not fit.",
+            "citations": [{**citation, "content": "supporting citation body " * 20}],
+        },
+        budget,
+    )
+
+    assert result["grounded"] is True
+    assert result["answer"] == "First supported fact [1]"
+    assert "[1]" in result["answer"]
+    assert _response_tokens(result) <= budget
+
+
+def test_response_budget_truncates_to_last_citation_not_arbitrary_prefix():
+    """Grounded answers must end with a citation marker, not arbitrary text."""
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    # Answer with text after the last citation
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First fact [1] and trailing text without citation marker",
+            "citations": [{**citation, "content": "supporting body " * 50}],
+        },
+        150,  # Tight budget forces truncation
+    )
+
+    # Answer must either end with [n] or be empty (abstention)
+    if result["answer"]:
+        assert result["answer"].rstrip().endswith("[1]"), \
+            f"Answer '{result['answer']}' must end with citation marker"
+    else:
+        assert result["grounded"] is False
+        assert result["abstained"] is True
+
+
+def test_response_budget_ignores_unbounded_citation_numbers():
+    from engraphis.mcp_server import _apply_response_budget
+
+    huge_number = "9" * 5_000
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": f"Untrusted text [{huge_number}]",
+            "citations": [{"n": 1, "id": "mem_1", "content": "support"}],
+        },
+        2,
+    )
+
+    assert _response_tokens(result) <= 2
 
 
 
@@ -162,6 +236,23 @@ def test_unexpected_tool_failure_does_not_leak_exception_text():
     assert "SECRET" not in output and "private" not in output
 
 
+def test_unexpected_tool_failure_log_stays_redacted(caplog):
+    from engraphis.mcp_server import _err
+
+    with caplog.at_level(logging.ERROR, logger="engraphis.mcp"):
+        output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
+
+    assert output.startswith("Error:")
+    assert "SECRET" not in caplog.text
+    assert "private" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert caplog.records
+    record = caplog.records[0]
+    assert record.getMessage() == "MCP tool operation failed"
+    assert getattr(record, "error_class", None) == "RuntimeError"
+    assert record.exc_info is None
+
+
 def _module_with_memory_db(monkeypatch):
     import engraphis.mcp_server as srv
     from engraphis.service import MemoryService
@@ -197,7 +288,9 @@ def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
         workspace="acme",
         repo="api",
     ))
-    after_first = tuple(service.store.conn.iterdump())
+    after_first = service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone()
     second = json.loads(srv.engraphis_link_symbol(
         symbol_id=symbol_id,
         memory_id=memory["id"],
@@ -209,10 +302,16 @@ def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
     assert service.store.conn.execute(
         "SELECT COUNT(*) AS n FROM code_memory_links"
     ).fetchone()["n"] == 1
-    assert tuple(service.store.conn.iterdump()) == after_first
+    assert service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone() == after_first
     assert service.store.conn.execute(
         "SELECT COUNT(*) AS n FROM operation_receipts WHERE operation='link'"
-    ).fetchone()["n"] == 0
+    ).fetchone()["n"] == 2
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE action='link_symbol' AND target=?",
+        (first["link_id"],),
+    ).fetchone()["n"] == 2
     tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
     annotations = tools["engraphis_link_symbol"].annotations
     assert annotations.readOnlyHint is False

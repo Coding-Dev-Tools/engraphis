@@ -1116,12 +1116,12 @@ async def _import_uploaded_files(
 @router.post("/workspaces/import-files", openapi_extra=_IMPORT_FILES_OPENAPI)
 async def workspaces_import_files(request: Request):
     """Parse uploads under transport-level part/file ceilings before service work."""
-    from engraphis.service import MAX_IMPORT_FILES, MAX_NAME_CHARS
+    from engraphis.service import MAX_IMPORT_FILES, MAX_IMPORT_RESOURCE_BYTES
 
     async with request.form(
         max_files=MAX_IMPORT_FILES,
         max_fields=3,
-        max_part_size=MAX_NAME_CHARS * 4,
+        max_part_size=MAX_IMPORT_RESOURCE_BYTES,
     ) as form:
         workspace = form.get("workspace")
         memory_type = form.get("memory_type", "semantic")

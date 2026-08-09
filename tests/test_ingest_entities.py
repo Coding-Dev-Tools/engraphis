@@ -17,9 +17,7 @@ import time
 import numpy as np
 import pytest
 
-pytest.importorskip(
-    "pydantic", minversion="2.0", reason="legacy v1 stack extra not installed"
-)
+pytest.importorskip("pydantic", reason="v1 ingest tests require the optional full-stack dependencies")
 
 from engraphis import stores
 from engraphis.config import settings

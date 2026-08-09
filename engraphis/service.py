@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import json
 import hashlib
 import contextvars
@@ -885,6 +886,71 @@ def _title_from_content(content: str, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
+def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
+    """Warn, without blocking startup, when a sibling database holds the data."""
+    import sqlite3
+
+    configured = Path(db_path)
+    if not configured.is_file():
+        return
+    try:
+        probe = sqlite3.connect(str(configured))
+        try:
+            row = probe.execute("SELECT COUNT(*) FROM memories").fetchone()
+            configured_count = int(row[0]) if row else 0
+        except sqlite3.Error:
+            return
+        finally:
+            probe.close()
+    except sqlite3.Error:
+        return
+    if configured_count > 0:
+        return
+
+    home = Path.home()
+    candidates: list[Path] = [home / ".engraphis" / "engraphis.db"]
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(Path(local_appdata) / "engraphis" / "engraphis.db")
+    elif sys.platform == "darwin":
+        candidates.append(home / "Library" / "Application Support" / "engraphis" / "engraphis.db")
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME", str(home / ".local" / "share"))
+        candidates.append(Path(xdg) / "engraphis" / "engraphis.db")
+
+    configured_resolved = configured.resolve()
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = str(candidate.resolve())
+        except OSError:
+            continue
+        if resolved == str(configured_resolved) or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            probe = sqlite3.connect(str(candidate))
+            try:
+                row = probe.execute("SELECT COUNT(*) FROM memories").fetchone()
+                count = int(row[0]) if row else 0
+            finally:
+                probe.close()
+        except sqlite3.Error:
+            continue
+        if count > 0:
+            print(
+                "[engraphis] WARNING: configured database %s has 0 memories, but "
+                "%s has %d memories. If this is unintentional, update "
+                "ENGRAPHIS_DB_PATH in ~/.engraphis/config.env to point to the "
+                "populated database." % (configured, candidate, count),
+                file=sys.stderr,
+            )
+            return
+
+
 def _auto_migrate_v1_if_needed(db_path: str) -> None:
     """If *db_path* is an existing v1-shaped SQLite file, migrate it to the v2 schema
     in place before :class:`~engraphis.core.engine.MemoryEngine` (via ``Store``) ever
@@ -916,6 +982,41 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
     original file exactly as it was; ``Store`` then raises its normal (now unmasked)
     error instead of silently losing data."""
     p = Path(db_path)
+    # Recover a crash from the legacy two-step Windows swap before inspecting the
+    # database. A completed migration output is preferred to the stale v1 backup.
+    staging = p.with_suffix(".v2_swap")
+    if not p.exists() and staging.exists():
+        migrating = sorted(
+            p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if migrating:
+            os.replace(str(migrating[0]), str(p))
+            for leftover in migrating[1:]:
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
+        else:
+            os.replace(str(staging), str(p))
+    elif not p.exists():
+        migrating = sorted(
+            p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if migrating:
+            os.replace(str(migrating[0]), str(p))
+            for leftover in migrating[1:]:
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
     if not p.exists() or not p.is_file():
         return  # fresh install, ":memory:", or nothing there yet — Store() creates v2 cleanly
     import sqlite3
@@ -1133,6 +1234,11 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
         )
+        if db_path != ":memory:" and not read_only:
+            try:
+                _warn_if_db_empty_with_populated_sibling(db_path)
+            except Exception:  # noqa: BLE001 — diagnostics never block startup
+                pass
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
     # ── name → id resolution ───────────────────────────────────────────────────
@@ -4410,7 +4516,8 @@ class MemoryService:
         }
 
     def link_symbol(self, symbol_id: str, memory_id: str, *, workspace: str, repo: str,
-                    relation: str = "mentions", confidence: float = 1.0) -> dict:
+                    relation: str = "mentions", confidence: float = 1.0,
+                    reason: str = "") -> dict:
         """Create or reinforce a manual link between a code symbol and a memory.
 
         Validates that both the symbol and the memory exist within the given
@@ -4422,6 +4529,8 @@ class MemoryService:
         symbol_id = _clean_text(symbol_id, field="symbol_id", max_chars=500)
         memory_id = _clean_text(memory_id, field="memory_id", max_chars=500)
         relation = _clean_name(relation, field="relation") or "mentions"
+        reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
+        _reject_secret_capture((("link_symbol reason", reason),))
         try:
             confidence = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
@@ -4431,15 +4540,37 @@ class MemoryService:
         symbols = self.store.list_symbols(rid, identifiers=[symbol_id])
         if not symbols:
             raise ValidationError(f"no symbol '{symbol_id}' in repo '{repo}'")
+        if len(symbols) > 1:
+            raise ValidationError(
+                f"symbol '{symbol_id}' is ambiguous; use the symbol ID or fully-qualified name"
+            )
         # Validate memory exists and belongs to this workspace/repo.
         self._check_owns(memory_id, wid, rid)
+        symbol = symbols[0]
         link_id = self.store.link_memory_symbol(
-            repo_id=rid, symbol_id=symbols[0]["id"], memory_id=memory_id,
+            repo_id=rid, symbol_id=symbol["id"], memory_id=memory_id,
             relation=relation, confidence=confidence,
         )
-        return {"link_id": link_id, "symbol_id": symbols[0]["id"],
+        principal = _authenticated_principal()
+        actor = principal["id"] if principal is not None else "agent"
+        receipt = self.store.record_receipt(
+            "link", workspace_id=wid, repo_id=rid, actor=actor,
+            target_count=1, status="ok",
+            metadata={
+                "relation": relation, "result_count": 1,
+                "reason": reason[:200] if reason else "",
+                "symbol_id": symbol["id"], "memory_id": memory_id,
+            },
+        )
+        self.store.audit(
+            actor, "link_symbol", link_id,
+            f"symbol_id={symbol['id']}; memory_id={memory_id}; "
+            f"relation={relation}; confidence={confidence:.6f}; reason={reason}",
+        )
+        return {"link_id": link_id, "symbol_id": symbol["id"],
                 "memory_id": memory_id, "relation": relation,
-                "workspace": workspace, "repo": repo}
+                "reason": reason, "workspace": workspace, "repo": repo,
+                "receipt": receipt}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
@@ -6902,7 +7033,8 @@ class MemoryService:
                     (wid,),
                 ).fetchone()
                 if active is not None:
-                    self.store.conn.commit()
+                    if owns_graph_txn:
+                        self.store.conn.commit()
                     return self._graph_job_dict(active, reused=True)
                 global_active = int(self.store.conn.execute(
                     "SELECT COUNT(*) AS n FROM jobs WHERE kind='graph_index' "

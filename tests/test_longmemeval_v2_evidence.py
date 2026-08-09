@@ -334,14 +334,25 @@ def test_memory_type_cap_evidence_requires_two_populated_types(tmp_path):
         "inserted_memory_type_counts"
     ] == {"episodic": 1, "semantic": 1}
 
-    rejected = _fixture(
-        tmp_path / "rejected",
+    # Single-type cap does not require cross-type evidence
+    single_type = _fixture(
+        tmp_path / "single_type",
         ablation="episodic_cap_2",
         mtype_limits={"episodic": 2},
         inserted_counts={"episodic": 1},
     )
+    report = build_evidence_report(**single_type)
+    assert report["records"][0]["inserted_memory_type_counts"] == {"episodic": 1}
+
+    # Multi-type cap still requires at least two populated types
+    multi_type_rejected = _fixture(
+        tmp_path / "multi_type_rejected",
+        ablation="multi_cap",
+        mtype_limits={"episodic": 2, "semantic": 3},
+        inserted_counts={"episodic": 1},
+    )
     with pytest.raises(ValueError, match="at least two populated memory types"):
-        build_evidence_report(**rejected)
+        build_evidence_report(**multi_type_rejected)
 
 
 def test_memory_type_cap_evidence_rejects_observed_cap_breaches(tmp_path):
