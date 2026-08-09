@@ -170,7 +170,9 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             return await call_next(request)
         except ValueError as exc:
             if str(exc) == "request body too large":
-                return JSONResponse({"detail": str(exc)}, status_code=413)
+                return JSONResponse(
+                    {"detail": "request body too large"}, status_code=413
+                )
             raise
 
     def run(fn, *args, **kwargs):
