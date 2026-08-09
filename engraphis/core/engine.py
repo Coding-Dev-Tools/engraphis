@@ -3778,7 +3778,7 @@ class MemoryEngine:
             bridge = {
                 "source_id": memory_id,
                 "target_id": symbol_id,
-                "relation": "memory_mentions",
+                "relation": link.get("relation") or "memory_mentions",
                 "layer": "memory",
                 "file": link.get("file") or "",
                 "line": 0,
