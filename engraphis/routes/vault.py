@@ -357,10 +357,8 @@ def import_folder(req: FolderImportReq):
         folder = Path(safe_path).resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(404, f"Path not found: {req.path}") from None
-    canonical_folder = os.path.normcase(str(folder))
     if not any(
-        canonical_folder == os.path.normcase(root)
-        or canonical_folder.startswith(os.path.normcase(root).rstrip(os.sep) + os.sep)
+        folder == Path(root) or folder.is_relative_to(Path(root))
         for root in allowed_roots
     ):
         raise HTTPException(
