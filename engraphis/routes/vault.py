@@ -317,6 +317,20 @@ def import_folder(req: FolderImportReq):
     # filesystem operations.  Keeping the validated value distinct from ``req.path``
     # makes the trust boundary explicit to readers and static taint analysis alike.
     folder = Path(safe_path)
+    if folder.is_symlink():
+        raise HTTPException(403, "Import path must not be a symbolic link")
+    resolved_folder = folder.resolve()
+    resolved_comparable = os.path.normcase(str(resolved_folder))
+    if not any(
+        resolved_comparable == os.path.normcase(root)
+        or resolved_comparable.startswith(os.path.normcase(root).rstrip(os.sep) + os.sep)
+        for root in allowed_roots
+    ):
+        raise HTTPException(
+            403,
+            "Import path must resolve under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
     if not folder.is_dir():
@@ -339,13 +353,15 @@ def import_folder(req: FolderImportReq):
     files: list[tuple[Path, Path]] = []
     total_bytes = 0
     for candidate in folder.rglob("*"):
+        if candidate.is_symlink():
+            continue
         if not candidate.is_file() or not fnmatch.fnmatch(
             candidate.name, req.file_pattern
         ):
             continue
         try:
             resolved = candidate.resolve(strict=True)
-            relative = resolved.relative_to(folder)
+            relative = resolved.relative_to(resolved_folder)
             size = resolved.stat().st_size
         except (OSError, ValueError):
             continue
