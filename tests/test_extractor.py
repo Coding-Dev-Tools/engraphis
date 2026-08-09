@@ -99,6 +99,9 @@ def test_get_extractor_defaults_offline():
 
 @pytest.mark.parametrize("kind", ["llm", "llm_structured"])
 def test_llm_factory_reports_client_construction_fallback(monkeypatch, kind):
+    pytest.importorskip(
+        "httpx", reason="LLM factory tests require the optional HTTP dependency"
+    )
     import engraphis.llm.client as llm_client
 
     def unavailable_client(*_args, **_kwargs):
@@ -117,6 +120,9 @@ def test_llm_factory_reports_client_construction_fallback(monkeypatch, kind):
 
 @pytest.mark.parametrize("kind", ["llm", "llm_structured"])
 def test_engine_create_preserves_factory_time_llm_fallback(monkeypatch, kind):
+    pytest.importorskip(
+        "httpx", reason="LLM factory tests require the optional HTTP dependency"
+    )
     import engraphis.llm.client as llm_client
     from engraphis.core.engine import MemoryEngine
 

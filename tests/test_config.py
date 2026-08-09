@@ -267,6 +267,9 @@ def test_arbitrary_working_directory_dotenv_is_not_loaded(tmp_path) -> None:
 def test_explicit_owner_private_env_file_loads_without_overriding_process_env(
     tmp_path,
 ) -> None:
+    pytest.importorskip(
+        "dotenv", reason="explicit env-file config tests require python-dotenv"
+    )
     trusted = tmp_path / "trusted.env"
     trusted.write_text(
         "ENGRAPHIS_CLOUD_CONTROL_URL=https://trusted.example.test\n",

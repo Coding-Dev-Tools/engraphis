@@ -63,6 +63,9 @@ def test_http_mcp_cli_rejects_non_loopback_host():
 
 
 def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
+    pytest.importorskip(
+        "mcp", reason="MCP packaging transport requires the optional mcp dependency"
+    )
     from engraphis import mcp_http_cli
 
     calls = []
