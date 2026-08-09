@@ -141,7 +141,7 @@ def read_private_text(
         raise
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not _same_file(before, opened):
+        if not stat.S_ISREG(opened.st_mode) or not _same_version(before, opened):
             raise _unsafe(path, "path changed while it was opened")
         if getattr(opened, "st_nlink", 1) != 1:
             raise _unsafe(path, "hard-linked files are not accepted")

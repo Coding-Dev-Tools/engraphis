@@ -17,6 +17,10 @@ import time
 import numpy as np
 import pytest
 
+pytest.importorskip(
+    "pydantic", minversion="2.0", reason="legacy v1 stack extra not installed"
+)
+
 from engraphis import stores
 from engraphis.config import settings
 from engraphis.engines import ingest as ingest_engine

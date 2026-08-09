@@ -14,6 +14,11 @@ import threading
 import numpy as np
 import pytest
 
+pytest.importorskip(
+    "pydantic", minversion="2.0", reason="legacy v1 stack extra not installed"
+)
+pytest.importorskip("httpx", reason="legacy LLM client extra not installed")
+
 from engraphis.engines import ingest as ingest_engine
 from engraphis.engines import recall as recall_engine
 from engraphis.engines import reweight, thoughts as thoughts_engine

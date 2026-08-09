@@ -153,6 +153,105 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "embed_model", "")
     from engraphis.app import create_legacy_reference_app
     return TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem-v1.db"))
+
+
+def test_legacy_folder_import_contains_path_before_filesystem_access(
+    monkeypatch,
+    tmp_path,
+):
+    import os
+
+    from engraphis.routes import vault as vault_routes
+
+    client = _client(monkeypatch, tmp_path)
+    home = tmp_path / "decoy-home"
+    allowed = tmp_path / "allowed"
+    sibling = tmp_path / "allowed-sibling"
+    home.mkdir()
+    allowed.mkdir()
+    sibling.mkdir()
+    (allowed / "safe.md").write_text("# Safe\nAllowed content.\n", encoding="utf-8")
+    (sibling / "secret.md").write_text("must not be read", encoding="utf-8")
+
+    monkeypatch.setattr(vault_routes.Path, "home", lambda: home)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+
+    original_exists = vault_routes.Path.exists
+    original_is_dir = vault_routes.Path.is_dir
+    original_rglob = vault_routes.Path.rglob
+    forbidden = os.path.normcase(str(sibling))
+
+    def reject_forbidden(path):
+        if os.path.normcase(str(path)) == forbidden:
+            pytest.fail("rejected import path reached the filesystem")
+
+    def guarded_exists(path):
+        reject_forbidden(path)
+        return original_exists(path)
+
+    def guarded_is_dir(path):
+        reject_forbidden(path)
+        return original_is_dir(path)
+
+    def guarded_rglob(path, pattern):
+        reject_forbidden(path)
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(vault_routes.Path, "exists", guarded_exists)
+    monkeypatch.setattr(vault_routes.Path, "is_dir", guarded_is_dir)
+    monkeypatch.setattr(vault_routes.Path, "rglob", guarded_rglob)
+    monkeypatch.setattr(
+        vault_routes.ingest_engine,
+        "ingest_document",
+        lambda **_kwargs: "doc",
+    )
+
+    with client:
+        rejected = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(sibling), "namespace": "ns"},
+        )
+        assert rejected.status_code == 403
+
+        accepted = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(allowed), "namespace": "ns"},
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["data"]["folder"] == str(allowed)
+        assert accepted.json()["data"]["imported"] == 1
+
+
+def test_legacy_folder_import_skips_symlink_escape(monkeypatch, tmp_path):
+    from engraphis.routes import vault as vault_routes
+
+    client = _client(monkeypatch, tmp_path)
+    home = tmp_path / "decoy-home"
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    allowed.mkdir()
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("must not be imported", encoding="utf-8")
+    try:
+        (allowed / "escape.md").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+
+    monkeypatch.setattr(vault_routes.Path, "home", lambda: home)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+
+    with client:
+        response = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(allowed), "namespace": "ns"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["imported"] == 0
+
+
 def test_safe_call_classifies_and_sanitizes_legacy_failures():
     from fastapi import HTTPException
     from engraphis.core.secrets import SecretDetectedError

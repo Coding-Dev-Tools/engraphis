@@ -319,7 +319,10 @@ class PrivateHostedLedger:
     def _load(self) -> None:
         try:
             payload = read_private_text(
-                self.path, max_bytes=MAX_PRIVATE_LEDGER_BYTES, allow_missing=True
+                self.path,
+                max_bytes=MAX_PRIVATE_LEDGER_BYTES,
+                allow_missing=True,
+                owner_only=True,
             )
         except (OSError, UnsafeStateFile) as exc:
             raise HostedLedgerError(

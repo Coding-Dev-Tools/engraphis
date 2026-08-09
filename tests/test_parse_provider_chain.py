@@ -6,6 +6,8 @@ from unittest import mock
 
 import pytest
 
+pytest.importorskip("httpx", reason="LLM provider client extra not installed")
+
 from engraphis.llm.client import LLMProviderChain, parse_provider_chain
 
 

@@ -290,22 +290,26 @@ def import_folder(req: FolderImportReq):
         )
     real_path = os.path.realpath(os.path.expanduser(req.path))
     comparable_path = os.path.normcase(real_path)
-    allowed = False
+    safe_path = None
     for root in allowed_roots:
         comparable_root = os.path.normcase(root)
-        if (
-            comparable_path == comparable_root
-            or comparable_path.startswith(comparable_root.rstrip(os.sep) + os.sep)
-        ):
-            allowed = True
+        if comparable_path == comparable_root:
+            safe_path = comparable_root
             break
-    if not allowed:
+        root_prefix = comparable_root.rstrip(os.sep) + os.sep
+        if comparable_path.startswith(root_prefix):
+            safe_path = comparable_path
+            break
+    if safe_path is None:
         raise HTTPException(
             403,
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    folder = Path(real_path)
+    # Carry only the path value produced by the successful containment branch into
+    # filesystem operations.  Keeping the validated value distinct from ``req.path``
+    # makes the trust boundary explicit to readers and static taint analysis alike.
+    folder = Path(safe_path)
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
     if not folder.is_dir():

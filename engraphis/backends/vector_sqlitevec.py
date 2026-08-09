@@ -96,6 +96,8 @@ def _expected_native_vector(
     candidate as contributing no cosine hit. Every other canonical vector is normalized
     exactly as :meth:`SqliteVecVectorIndex.upsert` normalizes it before comparison.
     """
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        return False, None
     try:
         vector = np.frombuffer(value, dtype=np.float32)
     except (TypeError, ValueError, BufferError):
