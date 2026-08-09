@@ -1559,10 +1559,13 @@ class MemoryService:
                     title=mem.get("title", ""),
                     importance=mem.get("importance", 0.0),
                     keywords=mem.get("keywords"),
+                    metadata=mem.get("metadata"),
                     source=mem.get("source", "agent"),
                     trusted=mem.get("trusted", False),
                     kind=mem.get("kind"),
-                    resolve_conflicts=mem.get("dedupe", True),
+                    resolve_conflicts=mem.get("resolve_conflicts", mem.get("dedupe", True)),
+                    retention_class=mem.get("retention_class"),
+                    retention_reason=mem.get("retention_reason", ""),
                     valid_from=mem.get("valid_from"),
                     subject_key=mem.get("subject_key", ""),
                     claim_kind=mem.get("claim_kind", ""),
@@ -5611,6 +5614,7 @@ class MemoryService:
         if not sets and title is None:
             return {"id": mid, "updated": []}, None
         if sets:
+            self.store.advance_memory_modified_hlc(mid, commit=False)
             params.append(mid)
             self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
         if title is not None:

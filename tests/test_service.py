@@ -73,6 +73,27 @@ def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
     assert "trust_downgraded" not in record.provenance
 
 
+def test_remember_batch_forwards_metadata_retention_and_conflict_policy():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+
+    result = service.remember_batch(
+        [{
+            "content": "A critical batch fact.",
+            "metadata": {"origin": "batch"},
+            "retention_class": "critical",
+            "retention_reason": "release policy",
+            "resolve_conflicts": False,
+        }],
+        workspace="acme",
+    )
+
+    record = service.store.get_memory(result["results"][0]["id"])
+    assert record is not None
+    assert record.metadata["origin"] == "batch"
+    assert record.metadata["retention_supervision"]["label"] == "critical"
+    assert record.metadata["retention_supervision"]["reason"] == "release policy"
+
+
 def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace():
     service = MemoryService.create(":memory:", graph_extractor="none")
     alpha = service.remember(
@@ -488,6 +509,7 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     replacement = s.correct(
         original["id"], "The revised deployment runbook.", workspace="acme",
     )
+    before_hlc = s.store.get_memory(replacement["id"]).modified_hlc
 
     out = s.update_memory(
         replacement["id"], workspace="acme", title="Deployment runbook",
@@ -499,6 +521,7 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     assert (saved.title, saved.mtype.value, saved.importance) == (
         "Deployment runbook", "procedural", 0.9,
     )
+    assert saved.modified_hlc != before_hlc
 
 
 def test_update_memory_reembeds_changed_title_in_both_vector_mirrors(monkeypatch):

@@ -21,9 +21,8 @@ from engraphis.core.interfaces import (
 PLANNING_MODES = {
     "off": 1,      # No planning, single query only
     "auto": 3,     # Bounded planning with up to 3 routes
-    "deep": 4,     # Extended planning with up to 4 routes
 }
-MAX_PLANNED_QUERIES = 3  # Default for backward compatibility
+MAX_PLANNED_QUERIES = 3  # Matches max(PLANNING_MODES.values())
 MAX_PLANNED_PRIORITY = 100  # upper bound on planned-query priority (recall.py clamps to this)
 
 _QUOTED_RE = re.compile(r'"([^"\r\n]{1,160})"|\'([^\'\r\n]{1,160})\'')
