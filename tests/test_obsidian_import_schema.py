@@ -566,7 +566,18 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
         "CHECK(kind IN ('documents','obsidian'))", "CHECK(kind IN ('obsidian'))",
     )
     conn.executescript(legacy_sql)
+    # A v14 database predates the exact-session source-job triggers that are
+    # installed during this upgrade; leave the legacy rows insertable so the
+    # migration itself exercises the backfill path.
+    for trigger in (
+        "trg_source_import_seen_job_insert",
+        "trg_source_import_seen_job_update",
+        "trg_source_import_job_insert",
+        "trg_source_import_job_update",
+    ):
+        conn.execute(f"DROP TRIGGER {trigger}")
     workspace_id = ids.new_id("workspace")
+    session_id = ids.new_id("session")
     job_id = ids.new_id("job")
     vault_id = ids.new_id("vault")
     source_id = ids.new_id("source")
@@ -578,15 +589,20 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
         (workspace_id, "v14-owner"),
     )
     conn.execute(
+        "INSERT INTO sessions(id,workspace_id,repo_id,agent,status,started_at) "
+        "VALUES (?,?,NULL,'legacy','active',0)",
+        (session_id, workspace_id),
+    )
+    conn.execute(
         "INSERT INTO jobs(id,workspace_id,kind,state,created_at) "
         "VALUES (?,?,'obsidian_import','completed',0)",
         (job_id, workspace_id),
     )
     conn.execute(
         "INSERT INTO source_vaults(id,kind,root_digest,display_name,workspace_id,"
-        "scope,memory_type,importer_version,created_at,updated_at) "
-        "VALUES (?,'obsidian',?,'Legacy',?,'workspace','semantic','1',0,0)",
-        (vault_id, "a" * 64, workspace_id),
+        "session_id,scope,memory_type,importer_version,created_at,updated_at) "
+        "VALUES (?,'obsidian',?,'Legacy',?,?, 'session','semantic','1',0,0)",
+        (vault_id, "a" * 64, workspace_id, session_id),
     )
     conn.execute(
         "INSERT INTO source_imports(id,vault_id,source_key,relative_path,"
@@ -605,6 +621,9 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
     upgraded = Store(str(db))
     try:
         assert upgraded.schema_version == 16
+        assert upgraded.conn.execute(
+            "SELECT session_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()["session_id"] == session_id
         assert upgraded.get_source_vault(vault_id)["kind"] == "obsidian"
         assert upgraded.get_source_import(source_id)["relative_path"] == "Legacy.md"
         assert upgraded.list_source_import_job_items(job_id=job_id)[0]["source_id"] == source_id

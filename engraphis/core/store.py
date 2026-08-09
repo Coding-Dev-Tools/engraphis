@@ -1848,7 +1848,10 @@ class Store:
         ``CREATE TABLE IF NOT EXISTS`` cannot add the column to an existing v15
         jobs table, while the current source-manifest triggers reference it.  Do
         the additive, idempotent repair inside the surrounding migration
-        transaction before executing :data:`SCHEMA_SQL`.
+        transaction before executing :data:`SCHEMA_SQL`.  When v14 source
+        manifests are staged, also recover the session target for their jobs:
+        those legacy jobs predate ``jobs.session_id`` but their source vaults
+        already carry the authoritative session scope.
         """
         row = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
@@ -1864,6 +1867,65 @@ class Store:
                 "ALTER TABLE jobs ADD COLUMN session_id TEXT "
                 "REFERENCES sessions(id) ON DELETE SET NULL"
             )
+        staged_tables = {
+            str(item["name"])
+            for item in self.conn.execute(
+                "SELECT name FROM temp.sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required_staged_tables = {
+            "_source_vaults_v15", "_source_imports_v15", "_source_import_items_v15",
+        }
+        if not required_staged_tables.issubset(staged_tables):
+            return
+
+        # A legacy import job can be referenced by either the source manifest's
+        # last-seen pointer or an item row.  UNION makes duplicate references
+        # harmless while retaining a deterministic conflict check if corrupted
+        # data points one job at more than one session vault.
+        candidates = self.conn.execute(
+            "SELECT job_id, session_id FROM ("
+            "SELECT i.last_seen_job_id AS job_id, v.session_id "
+            "FROM temp._source_imports_v15 i "
+            "JOIN temp._source_vaults_v15 v ON v.id=i.vault_id "
+            "WHERE i.last_seen_job_id IS NOT NULL AND v.session_id IS NOT NULL "
+            "UNION "
+            "SELECT item.job_id, v.session_id "
+            "FROM temp._source_import_items_v15 item "
+            "JOIN temp._source_imports_v15 i ON i.id=item.source_id "
+            "JOIN temp._source_vaults_v15 v ON v.id=i.vault_id "
+            "WHERE item.job_id IS NOT NULL AND v.session_id IS NOT NULL"
+            ") ORDER BY job_id, session_id"
+        ).fetchall()
+        by_job: dict[str, str] = {}
+        for row in candidates:
+            job_id = str(row["job_id"])
+            session_id = str(row["session_id"])
+            prior = by_job.get(job_id)
+            if prior is not None and prior != session_id:
+                raise RuntimeError(
+                    "cannot backfill job session scope: staged job maps to "
+                    "multiple source sessions"
+                )
+            by_job[job_id] = session_id
+
+        for job_id, session_id in by_job.items():
+            current = self.conn.execute(
+                "SELECT session_id FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if current is None:
+                continue
+            current_session = current["session_id"]
+            if current_session is not None and str(current_session) != session_id:
+                raise RuntimeError(
+                    "cannot backfill job session scope: existing job session "
+                    "conflicts with its source vault"
+                )
+            if current_session is None:
+                self.conn.execute(
+                    "UPDATE jobs SET session_id=? WHERE id=?",
+                    (session_id, job_id),
+                )
 
     def _restore_source_manifest_v15(self) -> None:
         """Restore source identities staged by :meth:`_prepare_source_manifest_v15`."""
