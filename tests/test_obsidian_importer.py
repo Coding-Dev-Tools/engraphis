@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from engraphis.core.interfaces import Scope, SearchFilter
-from engraphis.core.obsidian import ObsidianNote, ObsidianVaultScan, scan_obsidian_vault
+from engraphis.core.obsidian import (
+    ObsidianFileIssue, ObsidianNote, ObsidianVaultScan, scan_obsidian_vault,
+)
 from engraphis.obsidian_import import ObsidianImportCancelled, ObsidianImporter
 from engraphis.service import MemoryService
 from scripts import importer as importer_cli
@@ -450,6 +452,73 @@ def test_missing_wikilink_retires_previous_derived_edge(tmp_path: Path):
             "WHERE reason=? AND a=? AND b=? AND valid_to IS NOT NULL",
             (ObsidianImporter.LINK_REASON, home_id, plan_id),
         ).fetchone()[0] >= 1
+    finally:
+        service.close()
+
+
+def test_incomplete_scan_preserves_derived_links(tmp_path: Path):
+    vault = _vault(tmp_path)
+    service = _service(tmp_path / "memory.db")
+    try:
+        first = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        home_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Home base",)
+        ).fetchone()[0]
+        plan_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Plan",)
+        ).fetchone()[0]
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0] >= 1
+
+        complete = scan_obsidian_vault(str(vault))
+        partial = ObsidianVaultScan(
+            vault_path=complete.vault_path, vault_id=complete.vault_id,
+            notes=[note for note in complete.notes if note.relative_path == "Home.md"],
+            skipped=[ObsidianFileIssue("projects", "unreadable directory")],
+            complete=False,
+        )
+        second = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True, _scan=partial,
+        )
+        assert second["state"] == "partial"
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0] == 1
+        assert service.get_obsidian_import_job(
+            second["job_id"], workspace="acme",
+        )["counts"].get("warning", 0) == 0
+        assert first["state"] == "completed"
+    finally:
+        service.close()
+
+
+def test_link_warnings_are_visible_in_durable_job_rows(tmp_path: Path):
+    vault = _vault(tmp_path)
+    home = vault / "Home.md"
+    home.write_text(
+        home.read_text(encoding="utf-8").replace("projects/Plan|the plan", "Plan"),
+        encoding="utf-8",
+    )
+    service = _service(tmp_path / "memory.db")
+    try:
+        service.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+        archive = vault / "archive"
+        archive.mkdir()
+        (archive / "Plan.md").write_text("# Another Plan\n", encoding="utf-8")
+        report = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        job = service.get_obsidian_import_job(report["job_id"], workspace="acme")
+        home_row = next(row for row in job["files"] if row["relative_path"] == "Home.md")
+        assert home_row["warning_count"] == 1
+        assert home_row["reason"] == "ambiguous_wikilink"
     finally:
         service.close()
 

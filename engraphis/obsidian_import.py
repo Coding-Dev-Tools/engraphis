@@ -377,10 +377,15 @@ class ObsidianImporter:
                     )
                 finalized_missing = missing
                 pending_missing = []
-            # Link reconciliation happens after every note has a durable current id.
-            link_warnings = self._reconcile_links(
-                scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
-            )
+            # Link reconciliation is safe only for a complete view of the source.
+            # An incomplete scan must not retire a valid edge merely because its target
+            # was hidden by a transient filesystem or scan-budget failure.
+            link_warnings: list[dict] = []
+            if can_finalize_missing:
+                link_warnings = self._reconcile_links(
+                    scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
+                )
+                self._persist_link_warnings(job_id, link_warnings)
             outcomes.extend(link_warnings)
             if scan.rejected or not scan.complete or unreadable_directories or any(
                 row["status"] in {"error", "conflict", "rejected"} for row in outcomes
@@ -1101,6 +1106,44 @@ class ObsidianImporter:
             raise
         flush()
         return warnings
+
+    def _persist_link_warnings(self, job_id: str, warnings: list[dict]) -> None:
+        """Attach reconciliation warnings to the durable polling rows."""
+        if not warnings:
+            return
+        items = {
+            str(item.get("relative_path")): item
+            for item in self.store.list_source_import_job_items(job_id=job_id)
+        }
+        for warning in warnings:
+            relative_path = str(warning.get("relative_path") or "")
+            if not relative_path:
+                continue
+            item = items.get(relative_path)
+            reason = str(warning.get("reason") or "link_reconciliation_warning")[:100]
+            if item is None:
+                planned_action = "warning"
+                result_state = "warning"
+                source_id = None
+                source_format = str(warning.get("format") or "")[:64]
+                warning_count = 1
+            else:
+                planned_action = str(item.get("planned_action") or "warning")
+                result_state = str(item.get("result_state") or "warning")
+                source_id = item.get("source_id")
+                source_format = str(item.get("source_format") or "")[:64]
+                warning_count = int(item.get("warning_count") or 0) + 1
+            self.store.record_source_import_job_item(
+                job_id=job_id, source_id=source_id, relative_path=relative_path,
+                planned_action=planned_action, result_state=result_state,
+                warning_count=warning_count, error_code=reason,
+                source_format=source_format,
+            )
+            items[relative_path] = {
+                "source_id": source_id, "planned_action": planned_action,
+                "result_state": result_state, "warning_count": warning_count,
+                "source_format": source_format,
+            }
 
     def _note_references(self, note: _ImportNote) -> list[tuple[str, bool]]:
         """Return source references while preserving Obsidian attachment semantics."""
