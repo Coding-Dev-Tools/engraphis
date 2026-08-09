@@ -340,6 +340,9 @@ class ObsidianImporter:
                 planned_action="missing", result_state="pending",
             )
         outcomes: list[dict] = []
+        finalized_missing: list[dict] = []
+        pending_missing = list(missing)
+        unreadable_directories = self._unreadable_directories(scan)
         terminal_state = "completed"
         try:
             for index, plan in enumerate(plans, 1):
@@ -355,22 +358,25 @@ class ObsidianImporter:
                 if progress is not None:
                     progress(dict(outcome))
             self._check_cancel(job_id, cancel_check)
-            self.store.mark_source_import_items_missing(
-                vault_id=vault_id, seen_before=run_started,
-                preserve_paths=self._rejected_paths(scan),
-            )
-            for item in missing:
-                self.store.record_source_import_job_item(
-                    job_id=job_id, source_id=item.get("id"),
-                    relative_path=str(item.get("relative_path") or "(missing)"),
-                    planned_action="missing", result_state="missing",
+            if not unreadable_directories:
+                self.store.mark_source_import_items_missing(
+                    vault_id=vault_id, seen_before=run_started,
+                    preserve_paths=self._rejected_paths(scan),
                 )
+                for item in missing:
+                    self.store.record_source_import_job_item(
+                        job_id=job_id, source_id=item.get("id"),
+                        relative_path=str(item.get("relative_path") or "(missing)"),
+                        planned_action="missing", result_state="missing",
+                    )
+                finalized_missing = missing
+                pending_missing = []
             # Link reconciliation happens after every note has a durable current id.
             link_warnings = self._reconcile_links(
                 scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
             )
             outcomes.extend(link_warnings)
-            if scan.rejected or any(
+            if scan.rejected or unreadable_directories or any(
                 row["status"] in {"error", "conflict", "rejected"} for row in outcomes
             ):
                 terminal_state = "partial"
@@ -379,7 +385,8 @@ class ObsidianImporter:
         except Exception:
             terminal_state = "failed"
         report = self._final_report(
-            plans, outcomes, missing, scan, state=terminal_state,
+            plans, outcomes, finalized_missing, scan, state=terminal_state,
+            pending_missing=pending_missing,
             vault_id=vault_id, job_id=job_id, import_id=import_id,
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
@@ -527,9 +534,13 @@ class ObsidianImporter:
         scan_paths = {
             note.relative_path for note in scan.notes
         } | self._rejected_paths(scan)
+        unreadable_directories = self._unreadable_directories(scan)
         by_path: dict[str, list[dict]] = {}
         for item in items:
-            by_path.setdefault(str(item.get("relative_path") or ""), []).append(item)
+            relative_path = str(item.get("relative_path") or "")
+            by_path.setdefault(relative_path, []).append(item)
+            if self._under_directory(relative_path, unreadable_directories):
+                scan_paths.add(relative_path)
         # Exact-content rename detection stays conservative but must remain
         # linear for a full 10k-file source. Index eligible historical paths once.
         renames_by_hash: dict[str, list[dict]] = {}
@@ -596,6 +607,21 @@ class ObsidianImporter:
     def _rejected_paths(scan: _ImportScan) -> set[str]:
         """Keep durable rows for files seen but rejected by the parser."""
         return {str(issue.relative_path) for issue in scan.rejected}
+
+    @staticmethod
+    def _unreadable_directories(scan: _ImportScan) -> set[str]:
+        return {
+            str(issue.relative_path).rstrip("/")
+            for issue in scan.skipped
+            if str(issue.reason) == "unreadable directory"
+        }
+
+    @staticmethod
+    def _under_directory(relative_path: str, directories: set[str]) -> bool:
+        return any(
+            relative_path == directory or relative_path.startswith(directory + "/")
+            for directory in directories
+        )
 
     @staticmethod
     def _newest(items: list[dict]) -> Optional[dict]:
@@ -1070,7 +1096,8 @@ class ObsidianImporter:
 
     def _final_report(
         self, plans: list[_Plan], outcomes: list[dict], missing: list[dict],
-        scan: _ImportScan, *, state: str, vault_id: str, job_id: str,
+        scan: _ImportScan, *, pending_missing: list[dict], state: str,
+        vault_id: str, job_id: str,
         import_id: str, workspace_id: str, repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
@@ -1088,6 +1115,10 @@ class ObsidianImporter:
             "relative_path": str(item.get("relative_path") or ""), "status": "missing",
             "action": "missing", "reason": "source_not_seen", "warnings": [],
         } for item in missing)
+        files.extend({
+            "relative_path": str(item.get("relative_path") or ""), "status": "pending",
+            "action": "pending", "reason": "missing_check_deferred", "warnings": [],
+        } for item in pending_missing)
         report = self._report_payload(
             files, scan, state=state, vault_id=vault_id,
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,

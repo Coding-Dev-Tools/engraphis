@@ -265,6 +265,64 @@ def test_failed_document_revision_stays_seen_and_resumes(monkeypatch):
         service.close()
 
 
+def test_cancelled_import_reports_planned_missing_rows_as_pending():
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("cancel-missing")
+        importer = DocumentImporter(service)
+        first = importer.import_scan(
+            _scan(("keep.txt", b"Keep me."), ("gone.txt", b"Gone later.")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            confirmed=True,
+        )
+        cancelled = importer.import_scan(
+            _scan(("keep.txt", b"Keep me.")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_id=first["source_id"], confirmed=True,
+            cancel_check=lambda: True,
+        )
+        assert cancelled["state"] == "cancelled"
+        assert cancelled["counts"].get("missing", 0) == 0
+        assert cancelled["counts"]["pending"] == 1
+        item = service.store.conn.execute(
+            "SELECT state FROM source_imports WHERE relative_path='gone.txt'"
+        ).fetchone()
+        assert item["state"] == "imported"
+    finally:
+        service.close()
+
+
+def test_unreadable_directory_does_not_finalize_descendants_as_missing():
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("unreadable-dir")
+        importer = DocumentImporter(service)
+        first = importer.import_scan(
+            _scan(("blocked/gone.txt", b"Keep me.")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            confirmed=True,
+        )
+        scan = DocumentScan(root_path="", source_id="d" * 64)
+        scan.skipped.append(DocumentFileIssue("blocked", "unreadable directory"))
+        report = importer.import_scan(
+            scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_id=first["source_id"], confirmed=True,
+        )
+        assert report["state"] == "partial"
+        assert report["counts"].get("missing", 0) == 0
+        assert report["counts"]["skipped"] == 1
+        item = service.store.conn.execute(
+            "SELECT state FROM source_imports WHERE relative_path='blocked/gone.txt'"
+        ).fetchone()
+        assert item["state"] == "imported"
+    finally:
+        service.close()
+
+
 def test_document_importer_rejects_an_obsidian_source_identity():
     service = _service()
     try:

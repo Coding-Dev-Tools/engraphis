@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import zipfile
 from typing import Union
 
@@ -359,6 +360,25 @@ def test_deep_json_is_preserved_without_unbounded_pretty_printing():
     record = parse_document(raw, "deep.json")
     assert record.body == raw.decode("ascii")
     assert any("nesting exceeds" in warning for warning in record.warnings)
+
+
+def test_unreadable_directory_is_reported(monkeypatch, tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "note.txt").write_text("durable", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fail_blocked(path):
+        if path == blocked:
+            raise OSError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_blocked)
+    scan = scan_document_tree(tmp_path)
+    assert any(
+        issue.relative_path == "blocked" and issue.reason == "unreadable directory"
+        for issue in scan.skipped
+    )
 
 
 def test_normalized_paths_are_bounded_and_portable(tmp_path):

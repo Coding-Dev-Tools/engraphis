@@ -1259,6 +1259,7 @@ def _walk_tree(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str
             ),
         )
     except OSError:
+        yield directory, "unreadable directory"
         return
     for entry in entries:
         try:
