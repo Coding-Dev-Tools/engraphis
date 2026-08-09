@@ -2531,6 +2531,10 @@ class MemoryService:
                 rid = session.get("repo_id")
             if sc == Scope.REPO and rid is None:
                 raise ValidationError("repo scope requires a repo-backed session_id")
+            if sc == Scope.REPO:
+                # The session is used only to infer and validate its parent repo;
+                # repo-scoped source manifests must not retain a session target.
+                session_id = None
         if sc == Scope.REPO and rid is None:
             raise ValidationError("repo scope requires repo")
         return ws, wid, rid, session_id, sc, mt

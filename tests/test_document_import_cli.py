@@ -247,6 +247,34 @@ def test_session_id_defaults_to_session_scope_and_repo_must_match_help():
     assert "must match --session" in " ".join(help_text.split())
 
 
+def test_manifest_matching_infers_repo_from_session_when_repo_is_omitted():
+    snapshot = {
+        "vaults": [{
+            "id": "vlt_existing",
+            "kind": "documents",
+            "root_digest": "d" * 64,
+            "workspace_name": "acme",
+            "repo_name": "product",
+            "session_id": "ses_product",
+            "workspace_id": "ws_acme",
+            "repo_id": "repo_product",
+        }],
+    }
+
+    effective_repo = importer._effective_manifest_repo(
+        snapshot, repo=None, session_id="ses_product",
+    )
+    selected, workspace_id, repo_id = importer._snapshot_target(
+        snapshot, root_digest="d" * 64, workspace="acme",
+        repo=effective_repo, session_id="ses_product", vault_id=None,
+        source_kind="documents",
+    )
+
+    assert effective_repo == "product"
+    assert selected["id"] == "vlt_existing"
+    assert (workspace_id, repo_id) == ("ws_acme", "repo_product")
+
+
 @pytest.mark.parametrize(
     "extra", [["--repo", "api"], ["--session", "ses_example"]],
 )

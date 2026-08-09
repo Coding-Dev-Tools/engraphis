@@ -176,6 +176,11 @@ def test_config_xml_and_source_formats_are_safe_and_readable(name, raw, expected
 def test_rtf_and_additional_office_containers_are_dependency_free():
     rtf = parse_document(b"{\\rtf1\\ansi Hello\\par world}", "notes.rtf")
     assert "Hello" in rtf.body and "world" in rtf.body
+    unicode_rtf = parse_document(
+        b"{\\rtf1\\ansi\\uc1 Caf\\u233? {\\uc0\\u945} \\u233? Smile \\u-10179?\\u-8704?}",
+        "unicode.rtf",
+    )
+    assert unicode_rtf.body == "Café α é Smile 😀"
 
     xlsx = _zip({
         "xl/sharedStrings.xml": "<sst><si><t>Revenue</t></si></sst>",

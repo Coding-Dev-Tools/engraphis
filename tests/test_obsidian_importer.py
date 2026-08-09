@@ -355,6 +355,27 @@ def test_repo_and_session_scope_mapping(tmp_path: Path):
         ))
         assert record.scope == Scope.SESSION
         assert record.session_id == sid
+
+        repo_from_session_vault = tmp_path / "RepoFromSession"
+        repo_from_session_vault.mkdir()
+        (repo_from_session_vault / "Repo.md").write_text(
+            "# Repo\nRepo-scoped memory.\n", encoding="utf-8",
+        )
+        repo_from_session_report = service.import_obsidian_vault(
+            str(repo_from_session_vault), workspace="acme", session_id=sid,
+            scope="repo", confirmed=True,
+        )
+        assert repo_from_session_report["target"]["workspace"] == "acme"
+        assert repo_from_session_report["target"]["scope"] == Scope.REPO.value
+        assert repo_from_session_report["target"]["session_id"] is None
+        assert repo_from_session_report["target"]["repo_id"] == rid
+        repo_record = service.store.get_memory(next(
+            row["memory_id"] for row in service.store.list_source_import_items(
+                vault_id=repo_from_session_report["vault_id"]
+            )
+        ))
+        assert repo_record.scope == Scope.REPO
+        assert repo_record.session_id is None
     finally:
         service.close()
 

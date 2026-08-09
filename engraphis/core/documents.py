@@ -570,7 +570,37 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
         raise DocumentParseError("invalid RTF document")
     output: List[str] = []
     suppressed = [False]
+    unicode_fallback = [1]
+    pending_high_surrogate: Optional[int] = None
     destinations = {"colortbl", "datastore", "fonttbl", "info", "object", "pict", "stylesheet"}
+
+    def append_text(value: str) -> None:
+        nonlocal pending_high_surrogate
+        if pending_high_surrogate is not None:
+            output.append("\ufffd")
+            pending_high_surrogate = None
+        output.append(value)
+
+    def append_unicode_unit(unit: int) -> None:
+        nonlocal pending_high_surrogate
+        if pending_high_surrogate is not None:
+            if 0xDC00 <= unit <= 0xDFFF:
+                output.append(chr(
+                    0x10000
+                    + ((pending_high_surrogate - 0xD800) << 10)
+                    + (unit - 0xDC00)
+                ))
+                pending_high_surrogate = None
+                return
+            output.append("\ufffd")
+            pending_high_surrogate = None
+        if 0xD800 <= unit <= 0xDBFF:
+            pending_high_surrogate = unit
+        elif 0xDC00 <= unit <= 0xDFFF:
+            output.append("\ufffd")
+        else:
+            output.append(chr(unit))
+
     index = 0
     while index < len(content):
         char = content[index]
@@ -578,15 +608,17 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
             if len(suppressed) >= 256:
                 raise DocumentParseError("RTF nesting exceeds safety limit")
             suppressed.append(suppressed[-1])
+            unicode_fallback.append(unicode_fallback[-1])
             index += 1
         elif char == "}":
             if len(suppressed) == 1:
                 raise DocumentParseError("invalid RTF document")
             suppressed.pop()
+            unicode_fallback.pop()
             index += 1
         elif char != "\\":
             if not suppressed[-1]:
-                output.append(char)
+                append_text(char)
             index += 1
         elif index + 1 >= len(content):
             raise DocumentParseError("invalid RTF document")
@@ -601,32 +633,66 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                 except ValueError:
                     raise DocumentParseError("invalid RTF document") from None
                 if not suppressed[-1]:
-                    output.append(decoded)
+                    append_text(decoded)
                 index += 4
             elif marker.isalpha():
                 end = index + 1
                 while end < len(content) and content[end].isalpha():
                     end += 1
                 word = content[index + 1:end].casefold()
+                number_start = end
                 if word in destinations:
                     suppressed[-1] = True
                 while end < len(content) and content[end] in "-0123456789":
                     end += 1
+                number_text = content[number_start:end]
+                try:
+                    number = int(number_text) if number_text else None
+                except ValueError:
+                    number = None
                 if end < len(content) and content[end] == " ":
                     end += 1
+                if word == "uc" and number is not None:
+                    unicode_fallback[-1] = max(0, min(number, MAX_DOCUMENT_CHARS))
+                elif word == "u" and number is not None:
+                    codepoint = number if number >= 0 else number + 0x10000
+                    if 0 <= codepoint <= 0x10FFFF and not suppressed[-1]:
+                        append_unicode_unit(codepoint)
+                    remaining = unicode_fallback[-1]
+                    while remaining and end < len(content):
+                        # A fallback control symbol/word represents one character;
+                        # never consume a group delimiter while skipping it.
+                        if content[end] in "{}":
+                            break
+                        if content[end] == "\\":
+                            end += 1
+                            if end < len(content) and content[end].isalpha():
+                                while end < len(content) and content[end].isalpha():
+                                    end += 1
+                                while end < len(content) and content[end] in "-0123456789":
+                                    end += 1
+                                if end < len(content) and content[end] == " ":
+                                    end += 1
+                        else:
+                            end += 1
+                        remaining -= 1
+                    index = end
+                    continue
                 if not suppressed[-1] and word in {"line", "par"}:
-                    output.append("\n")
+                    append_text("\n")
                 elif not suppressed[-1] and word == "tab":
-                    output.append("\t")
+                    append_text("\t")
                 index = end
             else:
                 if not suppressed[-1] and marker in {"~", "-", "_"}:
-                    output.append(" " if marker != "_" else "-")
+                    append_text(" " if marker != "_" else "-")
                 elif not suppressed[-1] and marker in {"\\", "{", "}"}:
-                    output.append(marker)
+                    append_text(marker)
                 index += 2
     if len(suppressed) != 1:
         raise DocumentParseError("invalid RTF document")
+    if pending_high_surrogate is not None:
+        output.append("\ufffd")
     body = _canonical("".join(output)).strip()
     if not body:
         raise DocumentParseError("document produced no readable text")

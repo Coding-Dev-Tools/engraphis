@@ -173,11 +173,30 @@ def _snapshot_target(
     )
 
 
+def _effective_manifest_repo(
+    snapshot: dict, *, repo: Optional[str], session_id: Optional[str],
+) -> Optional[str]:
+    """Use a session-backed manifest repository when the CLI omitted ``--repo``."""
+    if repo is not None or session_id is None:
+        return repo
+    session_repos = {
+        str(row["repo_name"])
+        for row in snapshot.get("vaults") or []
+        if row.get("session_id") == session_id and row.get("repo_name")
+    }
+    if len(session_repos) > 1:
+        raise ValueError("session maps to multiple repositories in the import manifest")
+    return next(iter(session_repos), None)
+
+
 def _preview(args: argparse.Namespace, scan, workspace: str) -> dict:
     snapshot = _manifest_snapshot(args.db)
+    effective_repo = _effective_manifest_repo(
+        snapshot, repo=args.repo, session_id=args.session_id,
+    )
     selected, workspace_id, repo_id = _snapshot_target(
         snapshot, root_digest=scan.vault_id, workspace=workspace,
-        repo=args.repo, session_id=args.session_id, vault_id=args.vault_id,
+        repo=effective_repo, session_id=args.session_id, vault_id=args.vault_id,
         source_kind="obsidian",
     )
     report = ObsidianImporter().preview(
@@ -192,15 +211,18 @@ def _preview(args: argparse.Namespace, scan, workspace: str) -> dict:
             else {"vaults": [], "items": []}
         ),
     )
-    report["target"].update({"workspace": workspace, "repo": args.repo})
+    report["target"].update({"workspace": workspace, "repo": effective_repo})
     return report
 
 
 def _preview_documents(args: argparse.Namespace, scan, workspace: str) -> dict:
     snapshot = _manifest_snapshot(args.db)
+    effective_repo = _effective_manifest_repo(
+        snapshot, repo=args.repo, session_id=args.session_id,
+    )
     selected, workspace_id, repo_id = _snapshot_target(
         snapshot, root_digest=scan.source_id, workspace=workspace,
-        repo=args.repo, session_id=args.session_id, vault_id=args.source_id,
+        repo=effective_repo, session_id=args.session_id, vault_id=args.source_id,
         source_kind="documents",
     )
     report = DocumentImporter().preview(
@@ -217,7 +239,7 @@ def _preview_documents(args: argparse.Namespace, scan, workspace: str) -> dict:
     )
     report.setdefault("adapter", "documents")
     report.setdefault("source_adapter", "documents")
-    report["target"].update({"workspace": workspace, "repo": args.repo})
+    report["target"].update({"workspace": workspace, "repo": effective_repo})
     return report
 
 
