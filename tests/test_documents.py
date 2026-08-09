@@ -181,6 +181,11 @@ def test_rtf_and_additional_office_containers_are_dependency_free():
         "unicode.rtf",
     )
     assert unicode_rtf.body == "Café α é Smile 😀"
+    cyrillic_rtf = parse_document(
+        b"{\\rtf1\\ansi\\ansicpg1251 \\'cf\\'f0\\'e8\\'ec\\'e5\\'f0}",
+        "cyrillic.rtf",
+    )
+    assert cyrillic_rtf.body == "Пример"
 
     xlsx = _zip({
         "xl/sharedStrings.xml": "<sst><si><t>Revenue</t></si></sst>",
@@ -347,6 +352,13 @@ def test_text_and_container_bounds_apply_before_unbounded_materialization(monkey
     })
     with pytest.raises(DocumentParseError, match="100000 character"):
         parse_document(xlsx, "huge.xlsx")
+
+
+def test_deep_json_is_preserved_without_unbounded_pretty_printing():
+    raw = (b"[" * 256) + b"0" + (b"]" * 256)
+    record = parse_document(raw, "deep.json")
+    assert record.body == raw.decode("ascii")
+    assert any("nesting exceeds" in warning for warning in record.warnings)
 
 
 def test_normalized_paths_are_bounded_and_portable(tmp_path):

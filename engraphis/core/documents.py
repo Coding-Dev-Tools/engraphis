@@ -13,6 +13,7 @@ semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import codecs
 import csv
 import configparser
 import hashlib
@@ -41,6 +42,7 @@ MAX_CONTAINER_MEMBERS = 2_000
 MAX_CONTAINER_XML_BYTES = 20_000_000
 MAX_SOURCE_PATH_CHARS = 4_096
 MAX_CONTAINER_TEXT_CHARS = MAX_DOCUMENT_CHARS
+MAX_JSON_NESTING = 128
 SENSITIVE_FILENAMES = {
     ".env", "credentials", "credentials.json", "id_rsa", "id_dsa",
     "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
@@ -571,6 +573,7 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
     output: List[str] = []
     suppressed = [False]
     unicode_fallback = [1]
+    ansi_code_page = ["cp1252"]
     pending_high_surrogate: Optional[int] = None
     destinations = {"colortbl", "datastore", "fonttbl", "info", "object", "pict", "stylesheet"}
 
@@ -609,12 +612,14 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                 raise DocumentParseError("RTF nesting exceeds safety limit")
             suppressed.append(suppressed[-1])
             unicode_fallback.append(unicode_fallback[-1])
+            ansi_code_page.append(ansi_code_page[-1])
             index += 1
         elif char == "}":
             if len(suppressed) == 1:
                 raise DocumentParseError("invalid RTF document")
             suppressed.pop()
             unicode_fallback.pop()
+            ansi_code_page.pop()
             index += 1
         elif char != "\\":
             if not suppressed[-1]:
@@ -629,8 +634,10 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                 index += 2
             elif marker == "'" and index + 3 < len(content):
                 try:
-                    decoded = bytes.fromhex(content[index + 2:index + 4]).decode("cp1252")
-                except ValueError:
+                    decoded = bytes.fromhex(content[index + 2:index + 4]).decode(
+                        ansi_code_page[-1],
+                    )
+                except (LookupError, UnicodeDecodeError, ValueError):
                     raise DocumentParseError("invalid RTF document") from None
                 if not suppressed[-1]:
                     append_text(decoded)
@@ -654,6 +661,13 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                     end += 1
                 if word == "uc" and number is not None:
                     unicode_fallback[-1] = max(0, min(number, MAX_DOCUMENT_CHARS))
+                elif word == "ansicpg" and number is not None:
+                    try:
+                        code_page = f"cp{number}"
+                        codecs.lookup(code_page)
+                    except LookupError:
+                        raise DocumentParseError("invalid RTF document") from None
+                    ansi_code_page[-1] = code_page
                 elif word == "u" and number is not None:
                     codepoint = number if number >= 0 else number + 0x10000
                     if 0 <= codepoint <= 0x10FFFF and not suppressed[-1]:
@@ -703,20 +717,76 @@ def _json_body(
     content: str, fallback: str, *, line_delimited: bool = False,
 ) -> Tuple[str, str, Dict[str, Any], List[str]]:
     warnings: List[str] = []
+    if _json_nesting_exceeds(content, MAX_JSON_NESTING):
+        return content, fallback, {}, [
+            "JSON nesting exceeds safety limit; preserved as text",
+        ]
     try:
         if not line_delimited:
             value = json.loads(content)
-            structured = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+            structured = _bounded_json_dump(value)
+            if structured is None:
+                return content, fallback, {}, [
+                    "JSON output exceeds safety limit; preserved as text",
+                ]
             title = str(value.get("title") or value.get("name") or fallback) if isinstance(value, dict) else fallback
             meta: Dict[str, Any] = {"json_kind": type(value).__name__}
             if isinstance(value, dict):
                 meta["keys"] = sorted(str(key) for key in value)[:100]
             return structured, title, meta, warnings
         rows = [json.loads(line) for line in content.splitlines() if line.strip()]
-        return json.dumps(rows, ensure_ascii=False, indent=2), fallback, {"json_kind": "jsonl", "records": len(rows)}, warnings
-    except (json.JSONDecodeError, TypeError, ValueError):
+        structured = _bounded_json_dump(rows)
+        if structured is None:
+            return content, fallback, {}, [
+                "JSON output exceeds safety limit; preserved as text",
+            ]
+        return structured, fallback, {"json_kind": "jsonl", "records": len(rows)}, warnings
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
         warnings.append("JSON could not be parsed; preserved as text")
         return content, fallback, {}, warnings
+
+
+def _json_nesting_exceeds(content: str, limit: int) -> bool:
+    """Bound JSON structure depth without parsing attacker-controlled objects."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "]}":
+            depth = max(0, depth - 1)
+    return False
+
+
+def _bounded_json_dump(value: Any) -> Optional[str]:
+    """Pretty-print JSON without materializing output beyond the text budget."""
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, indent=2, sort_keys=True,
+    )
+    chunks: List[str] = []
+    length = 0
+    try:
+        for chunk in encoder.iterencode(value):
+            length += len(chunk)
+            if length > MAX_DOCUMENT_CHARS:
+                return None
+            chunks.append(chunk)
+    except (RecursionError, TypeError, ValueError):
+        return None
+    return "".join(chunks)
 
 
 def _tabular_body(content: str, fallback: str, delimiter: Optional[str]) -> Tuple[str, str, Dict[str, Any], List[str]]:

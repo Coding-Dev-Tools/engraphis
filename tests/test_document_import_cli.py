@@ -421,6 +421,34 @@ def test_extensionless_document_links_remain_ambiguous(tmp_path):
         service.close()
 
 
+def test_rejected_existing_document_is_not_reported_as_missing(tmp_path):
+    root = tmp_path / "Documents"
+    root.mkdir()
+    path = root / "note.txt"
+    path.write_text("Safe local note.", encoding="utf-8")
+    service = MemoryService.create(
+        str(tmp_path / "memory.db"), embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    try:
+        first = service.import_document_tree(
+            str(root), workspace="acme", confirmed=True,
+        )
+        path.write_text("api_key: very-secret-value", encoding="utf-8")
+        report = service.import_document_tree(
+            str(root), workspace="acme", source_id=first["source_id"],
+            confirmed=True,
+        )
+        assert report["counts"]["rejected"] == 1
+        assert report["counts"].get("missing", 0) == 0
+        item = service.store.conn.execute(
+            "SELECT state FROM source_imports WHERE relative_path='note.txt'"
+        ).fetchone()
+        assert item["state"] == "imported"
+    finally:
+        service.close()
+
+
 def test_universal_upload_job_reports_adapter_and_registered_source(tmp_path):
     service = MemoryService.create(
         str(tmp_path / "memory.db"), embed_dim=64, extractor="none",

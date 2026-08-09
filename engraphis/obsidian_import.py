@@ -357,6 +357,7 @@ class ObsidianImporter:
             self._check_cancel(job_id, cancel_check)
             self.store.mark_source_import_items_missing(
                 vault_id=vault_id, seen_before=run_started,
+                preserve_paths=self._rejected_paths(scan),
             )
             for item in missing:
                 self.store.record_source_import_job_item(
@@ -523,7 +524,9 @@ class ObsidianImporter:
         self, scan: _ImportScan, vault_identity: str, items: list[dict], *,
         inspect_memories: bool,
     ) -> tuple[list[_Plan], list[dict]]:
-        scan_paths = {note.relative_path for note in scan.notes}
+        scan_paths = {
+            note.relative_path for note in scan.notes
+        } | self._rejected_paths(scan)
         by_path: dict[str, list[dict]] = {}
         for item in items:
             by_path.setdefault(str(item.get("relative_path") or ""), []).append(item)
@@ -588,6 +591,11 @@ class ObsidianImporter:
             and row.get("state") not in {"missing", "conflict"}
         ]
         return plans, missing
+
+    @staticmethod
+    def _rejected_paths(scan: _ImportScan) -> set[str]:
+        """Keep durable rows for files seen but rejected by the parser."""
+        return {str(issue.relative_path) for issue in scan.rejected}
 
     @staticmethod
     def _newest(items: list[dict]) -> Optional[dict]:
