@@ -373,23 +373,15 @@ def import_folder(req: FolderImportReq):
     files: list[tuple[Path, Path]] = []
     total_bytes = 0
     for candidate in folder.rglob("*"):
-        if not candidate.is_file() or not fnmatch.fnmatch(
+        # The folder itself is already canonicalized and allowlisted. Reject links
+        # explicitly, then operate only on lexical descendants of that trusted root.
+        if candidate.is_symlink() or not candidate.is_file() or not fnmatch.fnmatch(
             candidate.name, req.file_pattern
         ):
             continue
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved_comparable = os.path.normcase(str(resolved))
-            folder_comparable = os.path.normcase(str(folder))
-            if not (
-                resolved_comparable == folder_comparable
-                or resolved_comparable.startswith(
-                    folder_comparable.rstrip(os.sep) + os.sep
-                )
-            ):
-                continue
-            relative = resolved.relative_to(folder)
-            size = resolved.stat().st_size
+            relative = candidate.relative_to(folder)
+            size = candidate.stat().st_size
         except (OSError, ValueError):
             continue
         if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
@@ -399,7 +391,7 @@ def import_folder(req: FolderImportReq):
                 413,
                 f"Import resource exceeds {MAX_IMPORT_RESOURCE_BYTES} bytes",
             )
-        files.append((resolved, relative))
+        files.append((candidate, relative))
         if len(files) > MAX_IMPORT_FILES:
             raise HTTPException(
                 413,
