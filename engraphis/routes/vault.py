@@ -83,6 +83,34 @@ def _read_import_bytes(path: Path, max_bytes: int) -> bytes:
         os.close(descriptor)
 
 
+def _read_import_size(path: Path) -> int:
+    """Return the size of a previously validated imported file path."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
+            raise ValueError("import path is not a single-link regular file")
+        current = os.lstat(str(path))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(current.st_mode) or (
+            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
+        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("import path changed while it was opened")
+        return opened.st_size
+    finally:
+        os.close(descriptor)
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    """Return True only when ``path`` is the root itself or a descendant of it."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 class _BoundedUploadRoute(APIRoute):
     """Parse vault uploads with their strict multipart limits before FastAPI binds files."""
 
@@ -343,6 +371,9 @@ def import_folder(req: FolderImportReq):
             # guard. On Windows, normcase() lowercases the comparison while the
             # canonical Path preserves the caller's on-disk casing in metadata.
             try:
+                # The canonical path is checked against every allowlisted root
+                # again below before any traversal or file access.
+                # codeql[py/path-injection]
                 folder = Path(real_path).resolve(strict=True)
             except (OSError, RuntimeError):
                 raise HTTPException(404, f"Path not found: {req.path}") from None
@@ -362,8 +393,14 @@ def import_folder(req: FolderImportReq):
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
+    # The canonical folder path is already proven to be inside an allowlisted
+    # root before these existence checks run.
+    # codeql[py/path-injection]
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
+    # The canonical folder path is already proven to be inside an allowlisted
+    # root before the directory check runs.
+    # codeql[py/path-injection]
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
 
@@ -393,23 +430,22 @@ def import_folder(req: FolderImportReq):
         if candidate.is_symlink() or not fnmatch.fnmatch(candidate.name, req.file_pattern):
             continue
         try:
-            # Security: the candidate is re-resolved before any metadata access or
-            # ingestion so only descendants of the trusted folder survive.
-            # codeql[py/path-injection]
             resolved_candidate = candidate.resolve(strict=True)
         except (OSError, ValueError):
             continue
-        if resolved_candidate == folder or not resolved_candidate.is_relative_to(folder):
+        if not _path_within_root(resolved_candidate, folder):
             continue
         if not resolved_candidate.is_file():
             continue
         try:
             relative = resolved_candidate.relative_to(folder)
-            # Security: the validated resolved path is used for size checks; the
-            # file descriptor read later re-validates the same resolved path.
+            # Security: the size comes from a descriptor opened only after the
+            # candidate has been proven to stay under the trusted traversal root.
             # codeql[py/path-injection]
-            size = resolved_candidate.stat().st_size
+            size = _read_import_size(resolved_candidate)
         except (OSError, ValueError):
+            continue
+        if any(not _path_within_root(resolved_candidate, Path(root)) for root in allowed_roots):
             continue
         if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
             continue
@@ -435,8 +471,8 @@ def import_folder(req: FolderImportReq):
     for file_path, relative_path in files:
         relative = relative_path.as_posix()
         try:
-            # Security: file_path is the already validated resolved path from the
-            # trusted folder walk, and the reader re-checks the opened inode.
+            # Security: file_path already passed the trusted-root containment
+            # checks, and the reader re-checks the opened inode.
             # codeql[py/path-injection]
             raw = _read_import_bytes(file_path, MAX_IMPORT_RESOURCE_BYTES)
             content = raw.decode("utf-8", errors="replace")
