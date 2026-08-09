@@ -1,5 +1,6 @@
 """Smoke test for the MCP binding. Skips cleanly when the optional 'mcp' package
 is not installed, so the offline CI gate is unaffected."""
+import logging
 import json
 import re
 import subprocess
@@ -233,6 +234,23 @@ def test_unexpected_tool_failure_does_not_leak_exception_text():
     output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
     assert output.startswith("Error:")
     assert "SECRET" not in output and "private" not in output
+
+
+def test_unexpected_tool_failure_log_stays_redacted(caplog):
+    from engraphis.mcp_server import _err
+
+    with caplog.at_level(logging.ERROR, logger="engraphis.mcp"):
+        output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
+
+    assert output.startswith("Error:")
+    assert "SECRET" not in caplog.text
+    assert "private" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert caplog.records
+    record = caplog.records[0]
+    assert record.getMessage() == "MCP tool operation failed"
+    assert getattr(record, "error_class", None) == "RuntimeError"
+    assert record.exc_info is None
 
 
 def _module_with_memory_db(monkeypatch):

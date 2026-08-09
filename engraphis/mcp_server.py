@@ -125,8 +125,8 @@ def _err(exc: Exception) -> str:
         return f"Error: {exc}"
     exc_type = type(exc).__name__
     # Redact exception messages to prevent credential/path/memory leakage.
-    # Log only the exception type; the full traceback stays server-side.
-    logger.error("MCP tool operation failed: %s", exc_type)
+    # Log only a safe class marker and never attach exc_info/tracebacks.
+    logger.error("MCP tool operation failed", extra={"error_class": exc_type})
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
