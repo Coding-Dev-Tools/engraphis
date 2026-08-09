@@ -26,11 +26,10 @@ def test_dashboard_shells_share_the_pro_cta_contract():
         assert "utm_source" in shell
         assert "utm_campaign" in shell
         assert all(label in shell for label in CTA_LABELS)
-    # The primary Ledger keeps the plan name dynamic so the same CTA serves Team
-    # and Pro. The compatibility dashboard retains the final Pro phrase in its
-    # account/status copy while sharing the same dynamic CTA implementation.
-    assert "Subscribe to ${name}" in ledger
-    assert "Subscribe to Pro" in classic
+    # The dashboard shells share the dynamic CTA implementation, while the
+    # compatibility shell still matches the generated source exactly.
+    for shell in (ledger, classic):
+        assert "Subscribe to ${name}" in shell
     assert "Start 3-day ${name} trial" in ledger
     assert "Start ${TRIAL_DAYS}-day ${name} trial" in classic
 
