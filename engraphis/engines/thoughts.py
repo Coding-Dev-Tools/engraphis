@@ -36,7 +36,14 @@ def synthesize_thoughts(
         return {"thought": None, "source_count": 0, "persisted": False, "reason": "no_memories"}
 
     context_text = ctx.get("llmContextMessage", "")
-    source_ids = [c.get("documentId") for c in chunks]
+    source_ids = [
+        {
+            "namespace": str(chunk.get("namespace") or namespace or ""),
+            "document_id": str(chunk.get("documentId") or ""),
+        }
+        for chunk in chunks
+        if chunk.get("documentId")
+    ]
 
     try:
         with LLMClient() as llm:
@@ -64,6 +71,7 @@ def synthesize_thoughts(
         persisted_id = ledger_store.save_thought(
             namespace=namespace or "_global",
             content=content,
+            source_memory_ids=source_ids,
         )
 
     return {

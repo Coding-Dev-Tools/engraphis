@@ -18,6 +18,7 @@ from engraphis.backends.codegraph import (
     get_code_indexer,
     iter_source_files,
     normalize_language,
+    source_path_allowed,
     supported_languages,
 )
 
@@ -220,7 +221,7 @@ def test_iter_source_files_skips_build_output_dirs(tmp_path):
     assert not any("/bin/" in f or "/obj/" in f or "/target/" in f for f in found)
 
 
-# ── .engraphisignore: names, globs, and negation of a default ───────────────────
+# ── .engraphisignore: names, globs, and project-level negations ────────────────
 
 def test_engraphisignore_names_and_globs(tmp_path):
     (tmp_path / "src").mkdir()
@@ -242,10 +243,33 @@ def test_engraphisignore_names_and_globs(tmp_path):
 def test_engraphisignore_negation_cancels_own_pattern(tmp_path):
     # `!name` re-includes a name the ignore file itself excluded (gitignore-style).
     (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "keep.py").write_text("def k(): pass\n")
-    (tmp_path / ".engraphisignore").write_text("logs\n!logs\n")
-    found = [f.replace(os.sep, "/") for f in iter_source_files(str(tmp_path))]
-    assert any(f.endswith("logs/keep.py") for f in found)
+    (tmp_path / "logs" / "nested.py").write_text("def nested(): pass\n")
+    (tmp_path / "keep.py").write_text("def keep(): pass\n")
+    (tmp_path / ".engraphisignore").write_text(
+        "logs\n!logs\nkeep.py\n!keep.py\n"
+    )
+
+    found = {
+        os.path.relpath(path, tmp_path).replace(os.sep, "/")
+        for path in iter_source_files(str(tmp_path))
+    }
+
+    assert found == {"keep.py", "logs/nested.py"}
+    assert source_path_allowed(str(tmp_path), str(tmp_path / "keep.py"))
+
+
+def test_engraphisignore_bare_negation_overrides_matching_glob(tmp_path):
+    keep = tmp_path / "keep.py"
+    drop = tmp_path / "drop.py"
+    keep.write_text("def keep(): pass\n")
+    drop.write_text("def drop(): pass\n")
+    (tmp_path / ".engraphisignore").write_text("*.py\n!keep.py\n")
+
+    found = {os.path.basename(path) for path in iter_source_files(str(tmp_path))}
+
+    assert found == {"keep.py"}
+    assert source_path_allowed(str(tmp_path), str(keep))
+    assert not source_path_allowed(str(tmp_path), str(drop))
 
 
 def test_engraphisignore_cannot_re_expose_hardcoded_default(tmp_path):
@@ -360,6 +384,30 @@ def test_tree_sitter_indexer_extracts_qualified_names_and_edges():
     assert "Calculator.add" in fqnames        # method, qualified by its class
     assert any(e.relation == "calls" and e.dst == "add" for e in fi.edges)
     assert any(e.relation == "imports" and e.dst == "os" for e in fi.edges)
+
+
+@_needs_tree_sitter
+def test_tree_sitter_indexer_extracts_every_grouped_import_module():
+    from engraphis.backends.codegraph import TreeSitterSymbolIndexer
+
+    indexer = TreeSitterSymbolIndexer()
+    python = indexer.index_file(
+        "imports.py",
+        "import os, sys as system\nfrom pkg import alpha, beta as bee\n",
+        "python",
+    )
+    go = indexer.index_file(
+        "imports.go",
+        'package imports\nimport (\n    "fmt"\n    http "net/http"\n)\n',
+        "go",
+    )
+
+    assert [
+        edge.dst for edge in python.edges if edge.relation == "imports"
+    ] == ["os", "sys", "pkg"]
+    assert [
+        edge.dst for edge in go.edges if edge.relation == "imports"
+    ] == ["fmt", "net/http"]
 
 
 @_needs_tree_sitter

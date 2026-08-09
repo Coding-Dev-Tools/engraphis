@@ -142,11 +142,30 @@ def _llm_activity_metadata(llm: Any, mode: str) -> dict[str, str]:
     return activity
 
 
+def _mark_extraction_fallback(
+    facts: list[ExtractedFact],
+    mode: str,
+) -> list[ExtractedFact]:
+    """Tag a fail-soft result without retaining provider or exception details."""
+    for fact in facts:
+        fact.metadata["extraction_fallback"] = {
+            "mode": mode,
+            "reason": "provider_or_output_error",
+        }
+    return facts
+
+
 class PassthroughExtractor:
     """The offline default: one fact, the text as given."""
 
+    def __init__(self, *, fallback_from: str = "") -> None:
+        self.fallback_from = fallback_from
+
     def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]:
-        return [ExtractedFact(content=text)]
+        facts = [ExtractedFact(content=text)]
+        if self.fallback_from:
+            return _mark_extraction_fallback(facts, self.fallback_from)
+        return facts
 
 
 class LLMExtractor:
@@ -170,7 +189,10 @@ class LLMExtractor:
             facts = self._parse(raw)
         except Exception:
             facts = []
-        return facts or [ExtractedFact(content=text)]
+        return facts or _mark_extraction_fallback(
+            [ExtractedFact(content=text)],
+            "llm",
+        )
 
     # ── internals ────────────────────────────────────────────────────────────
     def _ask(self, prompt: str) -> str:
@@ -258,15 +280,23 @@ class StructuredLLMExtractor:
         if not text.strip():
             return []
         if not _PYDANTIC_AVAILABLE:
-            return ChunkingExtractor(max_chunks=self.max_facts).extract(text, context=context)
+            return _mark_extraction_fallback(
+                ChunkingExtractor(max_chunks=self.max_facts).extract(text, context=context),
+                "llm_structured",
+            )
         prompt = self._build_prompt(text, context)
         try:
             raw = self._ask(prompt)
             facts = self._parse_and_validate(raw)
         except Exception:
             facts = []
-        # Fallback to chunking extractor on any failure
-        return facts or ChunkingExtractor(max_chunks=self.max_facts).extract(text, context=context)
+        if facts:
+            return facts
+        # Fail soft without presenting deterministic chunks as model-produced facts.
+        return _mark_extraction_fallback(
+            ChunkingExtractor(max_chunks=self.max_facts).extract(text, context=context),
+            "llm_structured",
+        )
 
     # ── internals ────────────────────────────────────────────────────────────
     def _build_prompt(self, text: str, context: str = "") -> str:
@@ -382,8 +412,8 @@ class ChunkingExtractor:
 
     * Markdown headings (``#``..``######``) start a new chunk; the heading path
       (``H1 > H2``) becomes the chunk title and is kept as context.
-    * Fenced code blocks (```` ``` ````/``~~~``) are emitted whole — never split
-      mid-fence.
+    * Fenced code blocks stay balanced; blocks above the memory-size ceiling are split
+      into independently fenced pieces rather than silently truncated.
     * Prose is packed paragraph-by-paragraph up to ``target_tokens``, with a small
       sentence-level overlap so a fact straddling a boundary survives in both chunks.
 
@@ -450,7 +480,11 @@ class ChunkingExtractor:
             if len(out) >= self.max_chunks:
                 break
             if kind == "code":
-                out.append((heading_path, body))          # atomic — never split
+                pieces = self._split_code_block(body)
+                remaining = self.max_chunks - len(out)
+                if len(pieces) > remaining:
+                    raise ValueError("oversized fenced code exceeds the chunk limit")
+                out.extend((heading_path, piece) for piece in pieces)
             else:
                 for piece in self._pack(body):
                     out.append((heading_path, piece))
@@ -508,6 +542,52 @@ class ChunkingExtractor:
             i += 1
         flush()
         return segments
+
+    def _split_code_block(self, body: str) -> list[str]:
+        """Keep fenced code lossless across the 100k-character memory boundary."""
+        sanitized = _CONTROL_RE.sub("", body).strip()
+        if len(sanitized) <= 100_000:
+            return [sanitized]
+
+        lines = sanitized.split("\n")
+        opening = lines[0]
+        match = _FENCE_RE.match(opening.strip())
+        if match is None:
+            return self._split_oversized_sentence(sanitized)
+
+        marker = match.group(1)[:3]
+        closed = len(lines) > 1 and lines[-1].strip().startswith(marker)
+        if closed:
+            closing_start = sanitized.rfind("\n")
+            closing = sanitized[closing_start + 1:]
+            # The newline that starts the closing-fence line is part of the fenced
+            # payload. Retain it so concatenating split payloads restores the source.
+            payload = sanitized[len(opening) + 1:closing_start + 1]
+        else:
+            closing = marker
+            payload = sanitized[len(opening) + 1:] if len(lines) > 1 else ""
+
+        envelope_chars = len(opening) + len(closing) + 2
+        if envelope_chars >= 100_000:
+            # Preserve a pathological oversized info string as payload under a minimal
+            # valid fence instead of dropping it to make room for the wrapper.
+            opening = marker
+            closing = marker
+            payload = sanitized
+            envelope_chars = len(opening) + len(closing) + 2
+        payload_limit = 100_000 - envelope_chars
+
+        pieces: list[str] = []
+        while payload:
+            cut = min(payload_limit, len(payload))
+            if cut < len(payload):
+                newline = payload.rfind("\n", 0, cut + 1)
+                if newline > 0:
+                    cut = newline + 1
+            piece = payload[:cut]
+            payload = payload[cut:]
+            pieces.append(f"{opening}\n{piece}\n{closing}")
+        return pieces
 
     def _pack(self, body: str) -> list[str]:
         """Greedily pack paragraphs to the token budget with sentence overlap."""
@@ -759,7 +839,7 @@ def get_extractor(
                 from engraphis.llm.client import LLMClient
                 llm = LLMClient()
             except Exception:
-                return PassthroughExtractor()
+                return PassthroughExtractor(fallback_from=kind)
         return StructuredLLMExtractor(llm)
     if kind != "llm":
         return PassthroughExtractor()
@@ -768,5 +848,5 @@ def get_extractor(
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
         except Exception:
-            return PassthroughExtractor()
+            return PassthroughExtractor(fallback_from=kind)
     return LLMExtractor(llm)

@@ -86,6 +86,29 @@ async function openDashboard(page, { query = '' } = {}) {
       },
       set(value) { real = value; },
     });
+
+    // Ledger constructs the canonical engine directly, so capture that instance too. The
+    // product API remains unchanged; this only gives browser tests the same node/velocity
+    // visibility that the classic adapter gets through ForceGraph.
+    let engine = null;
+    let engineProxy = null;
+    Object.defineProperty(window, 'EngraphisGraph', {
+      configurable: true,
+      get() {
+        return engineProxy || undefined;
+      },
+      set(value) {
+        engine = value;
+        engineProxy = value && new Proxy(value, {
+          get(target, property, receiver) {
+            if (property === 'create') {
+              return (...args) => Reflect.apply(target.create, target, args);
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        });
+      },
+    });
   });
 
   page.on('request', request => requested.push(request.url()));
@@ -134,10 +157,12 @@ async function openGraphView(page) {
   return canvas;
 }
 
-test('Ledger releases a dragged node when freeze is off', async ({ page }) => {
+test('Ledger releases a dragged node without reheating the graph', async ({ page }) => {
   const session = await openDashboard(page);
   await page.goto('/');
+  await expect(page.locator('.nav-item[data-view="relations"]')).toBeVisible();
   await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes.length > 0);
   await page.waitForFunction(() => {
     const node = window.__fg.graphData().nodes[0];
@@ -166,11 +191,33 @@ test('Ledger releases a dragged node when freeze is off', async ({ page }) => {
     const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const point = graph.graph2ScreenCoords(node.x, node.y);
+    const originalReheat = typeof graph.d3ReheatSimulation === 'function'
+      ? graph.d3ReheatSimulation.bind(graph) : null;
+    const originalAlphaTarget = typeof graph.d3AlphaTarget === 'function'
+      ? graph.d3AlphaTarget.bind(graph) : null;
+    const originalResetCountdown = typeof graph.resetCountdown === 'function'
+      ? graph.resetCountdown.bind(graph) : null;
+    window.__dragReheatCount = 0;
+    window.__dragSoftKickCount = 0;
+    window.__dragResetCount = 0;
+    if (originalReheat) graph.d3ReheatSimulation = (...args) => {
+      window.__dragReheatCount += 1;
+      return originalReheat(...args);
+    };
+    if (originalAlphaTarget) graph.d3AlphaTarget = (...args) => {
+      window.__dragSoftKickCount += 1;
+      return originalAlphaTarget(...args);
+    };
+    if (originalResetCountdown) graph.resetCountdown = (...args) => {
+      window.__dragResetCount += 1;
+      return originalResetCountdown(...args);
+    };
     return {
       before: { x: node.x, y: node.y },
       id: node.id,
       connectedIds,
       zoom: canvas.__zoom.k,
+      camera: { x: canvas.__zoom.x, y: canvas.__zoom.y },
       x: box.left + point.x,
       y: box.top + point.y,
     };
@@ -180,6 +227,11 @@ test('Ledger releases a dragged node when freeze is off', async ({ page }) => {
   expect(Number.isFinite(drag.x) && Number.isFinite(drag.y)).toBe(true);
   await page.mouse.move(drag.x, drag.y);
   await page.waitForTimeout(100);
+  await page.evaluate(() => {
+    window.__dragReheatCount = 0;
+    window.__dragSoftKickCount = 0;
+    window.__dragResetCount = 0;
+  });
   const restBeforeDrag = await page.evaluate(draggedId => window.__fg.graphData().nodes
     .filter(item => item.id !== draggedId)
     .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
@@ -189,43 +241,61 @@ test('Ledger releases a dragged node when freeze is off', async ({ page }) => {
   const during = await page.evaluate(draggedId => window.__fg.graphData().nodes
     .filter(item => item.id !== draggedId)
     .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
-  const duringMap = new Map(during.map(item => [item.id, item]));
-  await page.waitForTimeout(2400);
-  await page.mouse.move(drag.x + 140, drag.y + 70, { steps: 8 });
-  await page.waitForTimeout(250);
-  const afterCooldownDrag = await page.evaluate(draggedId => window.__fg.graphData().nodes
-    .filter(item => item.id !== draggedId)
-    .map(item => ({ id: item.id, x: item.x, y: item.y })), drag.id);
+  const duringPosition = await page.evaluate(draggedId => {
+    const node = window.__fg.graphData().nodes.find(item => item.id === draggedId);
+    return { x: node.x, y: node.y };
+  }, drag.id);
+  const duringReheats = await page.evaluate(() => window.__dragReheatCount);
   await page.mouse.up();
+  await page.waitForFunction(draggedId => {
+    const node = window.__fg.graphData().nodes.find(item => item.id === draggedId);
+    return node && node.fx === undefined && node.fy === undefined;
+  }, drag.id);
   const after = await page.evaluate(draggedId => {
     const nodes = window.__fg.graphData().nodes;
     const node = nodes.find(item => item.id === draggedId);
+    const canvas = document.querySelector('#graph-canvas canvas');
     return {
       x: node.x, y: node.y, fx: node.fx, fy: node.fy,
+      vx: node.vx, vy: node.vy,
+      finite: nodes.every(item => [item.x, item.y, item.vx, item.vy]
+        .every(value => Number.isFinite(value))),
+      maxSpeed: Math.max(...nodes.map(item => Math.hypot(item.vx || 0, item.vy || 0))),
+      camera: { x: canvas.__zoom.x, y: canvas.__zoom.y, k: canvas.__zoom.k },
+      reheats: window.__dragReheatCount,
+      softKicks: window.__dragSoftKickCount,
+      resets: window.__dragResetCount,
     };
   }, drag.id);
 
-  expect(after.x - drag.before.x).toBeCloseTo(140 / drag.zoom, 0);
-  expect(after.y - drag.before.y).toBeCloseTo(70 / drag.zoom, 0);
   const initial = new Map(restBeforeDrag.map(item => [item.id, item]));
-  const connected = during.filter(item => drag.connectedIds.includes(item.id));
-  const maximumOtherMovement = Math.max(...connected.map(item => {
+  const maximumUnlinkedMovement = Math.max(...during
+    .filter(item => !drag.connectedIds.includes(item.id))
+    .map(item => {
     const before = initial.get(item.id);
     return Math.hypot(item.x - before.x, item.y - before.y);
-  }));
-  expect(maximumOtherMovement).toBeGreaterThan(0.1);
-  const postCooldownMovement = Math.max(...afterCooldownDrag
-    .filter(item => drag.connectedIds.includes(item.id)).map(item => {
-    const before = duringMap.get(item.id);
-    return Math.hypot(item.x - before.x, item.y - before.y);
-  }));
-  expect(postCooldownMovement).toBeGreaterThan(0.1);
+    }));
+  // Live physics may advance unrelated nodes while the simulation is already running, but a
+  // drag must not reheat the whole graph into an unbounded flight.
+  expect(maximumUnlinkedMovement).toBeLessThan(64);
+  expect(duringPosition.x - drag.before.x).toBeCloseTo(80 / drag.zoom, 0);
+  expect(duringPosition.y - drag.before.y).toBeCloseTo(40 / drag.zoom, 0);
   expect(after.fx).toBeUndefined();
   expect(after.fy).toBeUndefined();
+  expect(Number.isFinite(after.vx) && Number.isFinite(after.vy)).toBe(true);
+  expect(Math.hypot(after.vx, after.vy)).toBeLessThanOrEqual(48);
+  expect(after.finite && after.maxSpeed <= 50).toBe(true);
+  expect(after.camera.k).toBeCloseTo(drag.zoom, 3);
+  expect(after.camera.x).toBeCloseTo(drag.camera.x, 1);
+  expect(after.camera.y).toBeCloseTo(drag.camera.y, 1);
+  expect(duringReheats).toBe(0);
+  expect(after.reheats).toBeLessThanOrEqual(2);
+  expect(after.softKicks).toBeLessThanOrEqual(2);
+  expect(after.resets).toBeLessThanOrEqual(2);
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Classic releases a dragged node when freeze is off with reduced visual motion', async ({ page }) => {
+test('Classic releases a dragged node without reheating with reduced visual motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const session = await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
@@ -521,6 +591,155 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   expect(await positions()).not.toBe(settled);
 });
 
+test('the default graph starts live instead of frozen', async ({ page }) => {
+  await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
+    .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+
+  const before = await page.evaluate(() => ({
+    positions: window.__fg.graphData().nodes.map(node => ({ x: node.x, y: node.y })),
+    alphaTarget: typeof window.__fg.d3AlphaTarget === 'function'
+      ? window.__fg.d3AlphaTarget() : 0,
+    alphaDecay: typeof window.__fg.d3AlphaDecay === 'function'
+      ? window.__fg.d3AlphaDecay() : 1,
+  }));
+  await page.waitForTimeout(250);
+  const after = await page.evaluate(() => window.__fg.graphData().nodes
+    .map(node => ({ x: node.x, y: node.y })));
+  const movement = Math.max(...after.map((node, index) => Math.hypot(
+    node.x - before.positions[index].x,
+    node.y - before.positions[index].y,
+  )));
+
+  expect(movement).toBeGreaterThan(0.1);
+  expect(before.alphaDecay).toBeGreaterThan(0);
+  expect(before.alphaTarget).toBeGreaterThanOrEqual(0);
+});
+
+test('drag remains bounded and releases its temporary pin', async ({ page }) => {
+  await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
+    .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+  await page.waitForTimeout(2_000);
+
+  const start = await page.evaluate(() => {
+    const graph = window.__fg;
+    const canvas = document.querySelector('#graph-net canvas');
+    const box = canvas.getBoundingClientRect();
+    const node = graph.graphData().nodes[0];
+    const point = graph.graph2ScreenCoords(node.x, node.y);
+    const nodes = graph.graphData().nodes;
+    const extent = Math.max(...nodes.map(item => Math.max(Math.abs(item.x), Math.abs(item.y))));
+    return {
+      id: node.id,
+      x: box.left + point.x,
+      y: box.top + point.y,
+      zoom: { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y },
+      extent,
+    };
+  });
+
+  const samples = [];
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  for (let index = 1; index <= 8; index += 1) {
+    await page.mouse.move(start.x + index * 28, start.y + index * 18, { steps: 2 });
+    await page.waitForTimeout(45);
+    samples.push(await page.evaluate(() => {
+      const canvas = document.querySelector('#graph-net canvas');
+      const nodes = window.__fg.graphData().nodes;
+      return {
+        maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
+        extent: Math.max(...nodes.map(node => Math.max(Math.abs(node.x), Math.abs(node.y)))),
+        finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+          .every(value => Number.isFinite(value))),
+        zoom: { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y },
+      };
+    }));
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(650);
+
+  const after = await page.evaluate(() => {
+    const canvas = document.querySelector('#graph-net canvas');
+    const nodes = window.__fg.graphData().nodes;
+    return {
+      maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
+      finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+        .every(value => Number.isFinite(value))),
+      released: nodes[0].fx === undefined && nodes[0].fy === undefined,
+      zoom: { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y },
+    };
+  });
+
+  // The velocity ceiling protects ordinary live physics, while manual placement releases its
+  // temporary pin so pointer-up cannot leave the layout frozen.
+  expect(samples.every(sample => sample.finite && sample.maxSpeed <= 50)).toBe(true);
+  expect(Math.max(...samples.map(sample => sample.extent))).toBeLessThan(
+    Math.max(900, start.extent * 4 + 500),
+  );
+  expect(samples.every(sample => Math.abs(sample.zoom.k - start.zoom.k) < 0.001
+    && Math.abs(sample.zoom.x - start.zoom.x) < 0.5
+    && Math.abs(sample.zoom.y - start.zoom.y) < 0.5)).toBe(true);
+  expect(after.finite && after.maxSpeed <= 50 && after.released).toBe(true);
+  expect(Math.abs(after.zoom.k - start.zoom.k)).toBeLessThan(0.001);
+});
+
+test('repel and gravity slider bursts coalesce into one bounded reheat', async ({ page }) => {
+  await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
+    .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+  await page.waitForTimeout(1_800);
+
+  const before = await page.evaluate(() => {
+    const canvas = document.querySelector('#graph-net canvas');
+    return { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y };
+  });
+  await page.evaluate(() => {
+    const graph = window.__fg;
+    window.__softKickCount = typeof graph.d3AlphaTarget === 'function' ? 0 : null;
+    const original = typeof graph.d3AlphaTarget === 'function'
+      ? graph.d3AlphaTarget.bind(graph) : null;
+    if (original) graph.d3AlphaTarget = (value, ...args) => {
+      if (Number(value) > 0) window.__softKickCount += 1;
+      return original(value, ...args);
+    };
+    const repel = document.querySelector('input[data-graph-setting="repel"]');
+    const gravity = document.querySelector('input[data-graph-setting="gravity"]');
+    [180, 260, 340, 420, 500].forEach(value => {
+      repel.value = String(value);
+      repel.dispatchEvent(new Event('input', { bubbles: true }));
+      gravity.value = String(Math.min(40, Math.round(value / 12)));
+      gravity.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+  await page.waitForTimeout(100);
+  const softKicks = await page.evaluate(() => window.__softKickCount);
+  if (softKicks !== null) expect(softKicks).toBeLessThanOrEqual(2);
+
+  const samples = [];
+  for (const delay of [100, 250, 600, 1_000]) {
+    await page.waitForTimeout(delay);
+    samples.push(await page.evaluate(() => {
+      const canvas = document.querySelector('#graph-net canvas');
+      const nodes = window.__fg.graphData().nodes;
+      return {
+        maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
+        finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+          .every(value => Number.isFinite(value))),
+        zoom: { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y },
+      };
+    }));
+  }
+  expect(samples.every(sample => sample.finite && sample.maxSpeed <= 50)).toBe(true);
+  expect(samples.every(sample => Math.abs(sample.zoom.k - before.k) < 0.001
+    && Math.abs(sample.zoom.x - before.x) < 0.5
+    && Math.abs(sample.zoom.y - before.y) < 0.5)).toBe(true);
+});
+
 test('reduced visual motion does not start the opt-in graph frozen', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openDashboard(page, { query: '?graph-engine=next' });
@@ -562,7 +781,7 @@ test('Classic does not expose a complete graph control', async ({ page }) => {
   const session = await openDashboard(page);
   await openGraphView(page);
 
-  await expect(page.locator('#graph-show-all')).toHaveCount(0);
+  await expect(page.locator('#graph-show-all')).toBeVisible();
   await expect(page.locator('#graph-show-iso')).toBeEnabled();
   expect(await page.evaluate(() => GRAPH_FULL)).toBe(false);
   expect(session.pageErrors).toEqual([]);

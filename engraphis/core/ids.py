@@ -14,6 +14,8 @@ import time
 from typing import Optional
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # excludes I, L, O, U
+_MAX_TIMESTAMP_MS = 1 << 48
+
 
 # Canonical prefixes for each entity kind.
 PREFIXES = {
@@ -42,7 +44,14 @@ def _encode(value: int, length: int) -> str:
 
 def ulid(timestamp_ms: Optional[int] = None) -> str:
     """Return a 26-char, lexicographically sortable ULID."""
-    ts = int(time.time() * 1000) if timestamp_ms is None else int(timestamp_ms)
+    if timestamp_ms is None:
+        ts = int(time.time() * 1000)
+    elif isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int):
+        raise ValueError("timestamp_ms must be an integer in range [0, 2**48)")
+    else:
+        ts = timestamp_ms
+    if not 0 <= ts < _MAX_TIMESTAMP_MS:
+        raise ValueError("timestamp_ms must be an integer in range [0, 2**48)")
     rand = secrets.randbits(80)
     return _encode(ts, 10) + _encode(rand, 16)
 

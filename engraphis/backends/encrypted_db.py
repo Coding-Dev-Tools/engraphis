@@ -51,11 +51,12 @@ def _resolve_key() -> Optional[str]:
             key = (read_private_text(
                 Path(path), max_bytes=_MAX_DB_KEY_FILE_BYTES
             ) or "").strip()
-        except OSError as exc:
+        except OSError:
             raise EncryptionError(
-                "ENGRAPHIS_DB_KEY_FILE=%s could not be read safely: %s" % (path, exc)) from exc
+                "ENGRAPHIS_DB_KEY_FILE could not be read safely"
+            ) from None
         if not key:
-            raise EncryptionError("ENGRAPHIS_DB_KEY_FILE=%s is empty" % path)
+            raise EncryptionError("ENGRAPHIS_DB_KEY_FILE is empty")
         return key
     return None
 
@@ -94,9 +95,7 @@ def _guard(fn, *args, **kwargs):
 
 
 class _TranslatingCursor:
-    """A cursor whose statement methods translate sqlcipher3 exceptions. Returned by
-    :meth:`_TranslatingConnection.cursor` so error handling holds even for code that drives
-    a cursor directly (the core doesn't today, but this closes the gap for future callers)."""
+    """Cursor adapter that translates the complete SQLCipher result lifecycle."""
 
     def __init__(self, raw) -> None:
         object.__setattr__(self, "_raw", raw)
@@ -108,7 +107,10 @@ class _TranslatingCursor:
         setattr(self._raw, name, value)
 
     def __iter__(self):
-        return iter(self._raw)
+        return self
+
+    def __next__(self):
+        return _guard(next, self._raw)
 
     def execute(self, *a, **k):
         _guard(self._raw.execute, *a, **k)
@@ -122,13 +124,28 @@ class _TranslatingCursor:
         _guard(self._raw.executescript, *a, **k)
         return self
 
+    def fetchone(self, *a, **k):
+        return _guard(self._raw.fetchone, *a, **k)
+
+    def fetchmany(self, *a, **k):
+        return _guard(self._raw.fetchmany, *a, **k)
+
+    def fetchall(self, *a, **k):
+        return _guard(self._raw.fetchall, *a, **k)
+
+    def close(self):
+        return _guard(self._raw.close)
+
+    def __enter__(self):
+        _guard(self._raw.__enter__)
+        return self
+
+    def __exit__(self, *exc):
+        return _guard(self._raw.__exit__, *exc)
+
 
 class _TranslatingConnection:
-    """Adapts a sqlcipher3 connection so it raises stdlib ``sqlite3`` exceptions.
-
-    The stdlib-only core catches ``sqlite3.OperationalError``/``IntegrityError``; sqlcipher3
-    raises unrelated classes of the same name. We translate on the statement-executing
-    methods (and cursors) and pass everything else through."""
+    """Connection adapter that exposes only stdlib ``sqlite3`` exception classes."""
 
     def __init__(self, raw) -> None:
         object.__setattr__(self, "_raw", raw)
@@ -140,26 +157,32 @@ class _TranslatingConnection:
         setattr(self._raw, name, value)
 
     def execute(self, *a, **k):
-        return _guard(self._raw.execute, *a, **k)
+        return _TranslatingCursor(_guard(self._raw.execute, *a, **k))
 
     def executescript(self, *a, **k):
-        return _guard(self._raw.executescript, *a, **k)
+        return _TranslatingCursor(_guard(self._raw.executescript, *a, **k))
 
     def executemany(self, *a, **k):
-        return _guard(self._raw.executemany, *a, **k)
+        return _TranslatingCursor(_guard(self._raw.executemany, *a, **k))
 
     def commit(self):
         return _guard(self._raw.commit)
 
+    def rollback(self):
+        return _guard(self._raw.rollback)
+
+    def close(self):
+        return _guard(self._raw.close)
+
     def cursor(self, *a, **k):
-        return _TranslatingCursor(self._raw.cursor(*a, **k))
+        return _TranslatingCursor(_guard(self._raw.cursor, *a, **k))
 
     def __enter__(self):
-        self._raw.__enter__()
+        _guard(self._raw.__enter__)
         return self
 
     def __exit__(self, *exc):
-        return self._raw.__exit__(*exc)
+        return _guard(self._raw.__exit__, *exc)
 
 
 def make_connector(key: str) -> Callable[[str], object]:
@@ -168,25 +191,33 @@ def make_connector(key: str) -> Callable[[str], object]:
     message if the driver is missing or the key does not unlock an existing file."""
     try:
         sqlcipher3 = importlib.import_module("sqlcipher3")
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         raise EncryptionError(
             "ENGRAPHIS_DB_KEY is set but no compatible SQLCipher driver is importable. "
             "On CPython manylinux x86-64, install it with: pip install "
             "\"engraphis[encryption]\". On macOS, Windows, Linux ARM, or musl, "
             "provision a compatible sqlcipher3 driver separately. Engraphis will not "
             "fall back to plaintext."
-        ) from exc
+        ) from None
 
     pragma = _key_pragma(key)
 
     def _connect(path: str):
-        if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        raw = sqlcipher3.connect(path, timeout=30, check_same_thread=False)
+        try:
+            if path != ":memory:":
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            raw = sqlcipher3.connect(path, timeout=30, check_same_thread=False)
+        except Exception:  # noqa: BLE001
+            raise EncryptionError(
+                "could not initialize the encrypted database connection"
+            ) from None
         try:
             raw.execute(pragma)                   # MUST be the first statement
         except Exception:  # noqa: BLE001
-            raw.close()
+            try:
+                raw.close()
+            except Exception:  # noqa: BLE001
+                pass
             # Suppress the driver message (`from None`): a PRAGMA syntax error can echo the
             # statement text, which contains the key. Never surface key material.
             raise EncryptionError(
@@ -195,12 +226,16 @@ def make_connector(key: str) -> Callable[[str], object]:
             # Touch the header so a wrong key / plaintext-vs-encrypted mismatch fails now,
             # with a clear message, instead of deep inside an unrelated query later.
             raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except Exception as exc:  # noqa: BLE001
-            raw.close()
+        except Exception:  # noqa: BLE001
+            try:
+                raw.close()
+            except Exception:  # noqa: BLE001
+                pass
             raise EncryptionError(
-                "could not open the encrypted database at %s — wrong ENGRAPHIS_DB_KEY, or "
+                "could not open the encrypted database — wrong ENGRAPHIS_DB_KEY, or "
                 "the file is not SQLCipher-encrypted (an existing plaintext DB cannot be "
-                "opened with a key; migrate it first)." % path) from exc
+                "opened with a key; migrate it first)."
+            ) from None
         raw.row_factory = sqlcipher3.Row
         return _TranslatingConnection(raw)
 

@@ -113,7 +113,7 @@ export class EngraphisMcpClient {
 			return "The Engraphis MCP server requires Python 3.10 or later.";
 		}
 		if (/no module named ["']?mcp/i.test(this.diagnostic)) {
-			return "The Engraphis MCP dependency is missing. Install `engraphis[mcp]>=1.4.0,<2`.";
+			return "The Engraphis MCP dependency is missing. Install `engraphis[mcp]>=1.5,<2`.";
 		}
 		if (/no module named ["']?engraphis/i.test(this.diagnostic)) {
 			return "Engraphis is not installed for the configured MCP command.";
@@ -176,7 +176,7 @@ export class EngraphisMcpClient {
 			const missing = CORE_DIRECT_TOOLS.filter((name) => !available.has(name));
 			if (missing.length) {
 				throw new EngraphisCompatibilityError(
-					`Engraphis 1.4.x Smart MCP is required; the server is missing: ${missing.join(", ")}.`,
+					`Engraphis 1.5.x Smart MCP is required; the server is missing: ${missing.join(", ")}.`,
 				);
 			}
 			return client;
@@ -288,7 +288,7 @@ export function safeErrorMessage(error: unknown): string {
 	if (error instanceof EngraphisCompatibilityError) return error.publicMessage;
 	if (error instanceof EngraphisMcpToolError) return error.publicMessage;
 	if (error instanceof Error) {
-		if (error.name === "AbortError") return error.message;
+		if (error.name === "AbortError") return "Engraphis request was cancelled.";
 		if (
 			error.message.startsWith("Specify a tool name") ||
 			error.message.startsWith("Specify `tool`") ||
@@ -298,5 +298,5 @@ export function safeErrorMessage(error: unknown): string {
 			return error.message;
 		}
 	}
-	return "Engraphis is unavailable. Verify `pip install \"engraphis[mcp]>=1.4.0,<2\"` and ENGRAPHIS_MCP_COMMAND.";
+	return "Engraphis is unavailable. Verify `pip install \"engraphis[mcp]>=1.5,<2\"` and ENGRAPHIS_MCP_COMMAND.";
 }

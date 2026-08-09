@@ -462,14 +462,19 @@ def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_pa
             ).fetchall()
         ]
         row = upgraded.conn.execute(
-            "SELECT memory_id, repo_id FROM memory_tombstones WHERE memory_id='legacy-erased'"
+            "SELECT memory_id, repo_id, export_class FROM memory_tombstones "
+            "WHERE memory_id='legacy-erased'"
         ).fetchone()
         assert upgraded.schema_version == SCHEMA_VERSION
         assert "repo_id" in columns
+        assert "export_class" in columns
         assert index_columns == ["workspace_id", "repo_id", "memory_id"]
         assert row["memory_id"] == "legacy-erased"
         assert row["repo_id"] is None
+        assert row["export_class"] == "never_export"
         assert Path(f"{db}.pre-migration-v9.bak").is_file()
+
+
     finally:
         upgraded.close()
 
@@ -482,6 +487,53 @@ def test_v8_tombstone_shape_rebuilds_repo_index_and_preserves_legacy_rows(tmp_pa
         ] == ["workspace_id", "repo_id", "memory_id"]
     finally:
         reopened.close()
+
+
+def test_v11_upgrade_classifies_legacy_tombstones_as_never_export(tmp_path):
+    db = tmp_path / "v11-tombstones.db"
+    store = Store(str(db))
+    store.add_memory_tombstone(
+        "mem_legacy_tombstone",
+        deleted_at=10.0,
+        device_id="legacy-device",
+    )
+    store.conn.execute("DROP INDEX idx_memory_tombstones_workspace")
+    store.conn.execute(
+        "ALTER TABLE memory_tombstones RENAME TO memory_tombstones_current"
+    )
+    store.conn.execute(
+        "CREATE TABLE memory_tombstones ("
+        "memory_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, "
+        "device_id TEXT NOT NULL, workspace_id TEXT, repo_id TEXT, "
+        "created_at REAL NOT NULL)"
+    )
+    store.conn.execute(
+        "INSERT INTO memory_tombstones "
+        "(memory_id, deleted_at, device_id, workspace_id, repo_id, created_at) "
+        "SELECT memory_id, deleted_at, device_id, workspace_id, repo_id, created_at "
+        "FROM memory_tombstones_current"
+    )
+    store.conn.execute("DROP TABLE memory_tombstones_current")
+    store.conn.execute(
+        "CREATE INDEX idx_memory_tombstones_workspace "
+        "ON memory_tombstones(workspace_id, repo_id, memory_id)"
+    )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (11, 0)"
+    )
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        marker = upgraded.list_memory_tombstones()[0]
+        assert upgraded.schema_version == SCHEMA_VERSION
+        assert marker["id"] == "mem_legacy_tombstone"
+        assert marker["export_class"] == "never_export"
+        assert Path(f"{db}.pre-migration-v12.bak").is_file()
+    finally:
+        upgraded.close()
 
 
 def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypatch):
@@ -706,5 +758,131 @@ def test_v9_upgrade_repairs_unsafe_retention_state(tmp_path):
             0, 0, 4, MAX_ACCESS_COUNT, 5,
         ]
         assert Path(f"{db}.pre-migration-v10.bak").is_file()
+    finally:
+        upgraded.close()
+
+
+def test_v11_schema_repairs_missing_session_handoff_without_losing_rows(tmp_path):
+    db = tmp_path / "v11-without-handoff.db"
+    initial = Store(str(db))
+    wid = initial.get_or_create_workspace("handoff")
+    rid = initial.get_or_create_repo(wid, "repo")
+    sid = initial.start_session(wid, rid, agent="agent", goal="preserve")
+    initial.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE sessions DROP COLUMN handoff")
+    conn.execute("DELETE FROM schema_migrations")
+    conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (11, 0)")
+    conn.commit()
+    conn.close()
+
+    repaired = Store(str(db))
+    try:
+        columns = {
+            row["name"] for row in repaired.conn.execute(
+                "PRAGMA table_info(sessions)"
+            ).fetchall()
+        }
+        assert "handoff" in columns
+        preserved = repaired.conn.execute(
+            "SELECT id, handoff FROM sessions WHERE id=?", (sid,)
+        ).fetchone()
+        assert preserved is not None
+        assert preserved["id"] == sid
+        assert preserved["handoff"] == "{}"
+        assert repaired.end_session(
+            sid,
+            summary="done",
+            open_threads=["verify continuity"],
+        ) == "ended"
+        ended = repaired.get_last_session(wid, rid)
+        assert ended is not None and ended["id"] == sid
+    finally:
+        repaired.close()
+
+    reopened = Store(str(db))
+    try:
+        assert reopened.schema_version == SCHEMA_VERSION
+        session = reopened.get_session(sid)
+        assert session is not None
+        assert session["status"] == "summarized"
+        assert session["summary"] == "done"
+        assert session["open_threads"] == ["verify continuity"]
+        handoff_row = reopened.conn.execute(
+            "SELECT handoff FROM sessions WHERE id=?", (sid,)
+        ).fetchone()
+        assert handoff_row is not None
+        assert handoff_row["handoff"] == "{}"
+    finally:
+        reopened.close()
+
+
+def test_v12_upgrade_adds_descriptive_hlc_and_sync_export_proof(tmp_path):
+    db = tmp_path / "v12-without-descriptive-hlc.db"
+    initial = Store(str(db))
+    wid = initial.get_or_create_workspace("descriptive-hlc")
+    memory_id = initial.add_memory(MemoryRecord(
+        id="mem_pre_hlc",
+        content="legacy descriptive state",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    repair_provenance = {
+        "source": "agent",
+        "trusted": True,
+        "review_state": "approved",
+        "trust_origin": "local_mcp_agent",
+    }
+    repair_id = initial.add_memory(MemoryRecord(
+        id="mem_pre_hlc_repair",
+        content="legacy model-authored state",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        provenance=repair_provenance,
+        metadata={
+            "provenance": repair_provenance,
+            "llm_extraction": {"mode": "llm_structured", "provider": "test"},
+        },
+    ))
+    initial.conn.execute(
+        "DELETE FROM sync_state "
+        "WHERE key='__schema_v12_llm_extraction_trust_repair'"
+    )
+    initial.conn.commit()
+    initial.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE memories DROP COLUMN modified_hlc")
+    conn.execute("DROP TABLE memory_sync_exports")
+    conn.execute("DELETE FROM schema_migrations")
+    conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (12, 0)")
+    conn.commit()
+    conn.close()
+
+    upgraded = Store(str(db))
+    try:
+        assert upgraded.schema_version == SCHEMA_VERSION
+        memory_columns = {
+            row["name"] for row in upgraded.conn.execute(
+                "PRAGMA table_info(memories)"
+            ).fetchall()
+        }
+        assert "modified_hlc" in memory_columns
+        assert upgraded.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='memory_sync_exports'"
+        ).fetchone() is not None
+        legacy = upgraded.get_memory(memory_id)
+        assert legacy is not None and legacy.modified_hlc == ""
+        repaired = upgraded.get_memory(repair_id)
+        assert repaired is not None
+        assert repaired.modified_hlc
+        assert repaired.provenance["review_state"] == "pending"
+        advanced = upgraded.advance_memory_modified_hlc(memory_id)
+        assert advanced
+        persisted = upgraded.get_memory(memory_id)
+        assert persisted is not None and persisted.modified_hlc == advanced
+        assert Path(f"{db}.pre-migration-v13.bak").is_file()
     finally:
         upgraded.close()

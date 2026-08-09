@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from engraphis.core.interfaces import MemoryType, Scope
 from eval.longmemeval_v2 import (
     EngraphisLongMemEvalV2Memory,
     _context_items_with_budget,
@@ -19,6 +21,7 @@ from eval.run_longmemeval_v2 import (
     PINNED_READER_REVISION,
     pin_official_reader_processor,
     verify_official_checkout,
+    write_execution_manifest,
 )
 
 
@@ -147,6 +150,60 @@ def test_v2_adapter_enforces_injected_reader_token_budget_and_exposes_metadata()
         "vector_backend": "numpy",
         "response_mode": "compact",
     }
+
+
+def test_v2_adapter_populates_distinct_episodic_and_procedural_types():
+    memory = EngraphisLongMemEvalV2Memory(context_k=3)
+    memory.insert({
+        "trajectory_id": "t-typed",
+        "states": [{
+            "observation": "The billing page is visible.",
+            "action": "click export",
+        }],
+    })
+
+    metadata = memory.post_query_hook(
+        query="where is export?",
+        query_image=None,
+        memory_context=memory.query("where is export?"),
+    )
+
+    assert metadata["inserted_memory_type_counts"] == {
+        "episodic": 1,
+        "procedural": 1,
+    }
+
+
+def test_v2_adapter_type_counts_exclude_other_workspaces_and_repos():
+    memory = EngraphisLongMemEvalV2Memory(context_k=3)
+    memory.insert({"trajectory_id": "target", "text": "The export button is blue."})
+
+    store = memory.service.store
+    unrelated_workspace = store.get_or_create_workspace("unrelated-eval")
+    unrelated_repo = store.get_or_create_repo(unrelated_workspace, memory.repo)
+    same_workspace = store.get_or_create_workspace(memory.workspace)
+    unrelated_same_workspace_repo = store.get_or_create_repo(same_workspace, "other-repo")
+    for workspace_id, repo_id in (
+        (unrelated_workspace, unrelated_repo),
+        (same_workspace, unrelated_same_workspace_repo),
+    ):
+        memory.service.engine.remember(
+            "Unrelated semantic benchmark record.",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            mtype=MemoryType.SEMANTIC,
+            scope=Scope.REPO,
+            resolve_conflicts=False,
+        )
+
+    context = memory.query("What color is the export button?")
+    metadata = memory.post_query_hook(
+        query="What color is the export button?",
+        query_image=None,
+        memory_context=context,
+    )
+
+    assert metadata["inserted_memory_type_counts"] == {"episodic": 1}
 
 
 def test_v2_adapter_reports_only_sources_in_reader_budgeted_items(monkeypatch):
@@ -364,6 +421,8 @@ def test_official_runner_requires_the_exact_pinned_checkout(monkeypatch, tmp_pat
         commands.append(command)
         if command[-1] == "--show-toplevel":
             return str(tmp_path) + "\n"
+        if "status" in command:
+            return ""
         return PINNED_LONGMEMEVAL_V2_REVISION + "\n"
 
     monkeypatch.setattr("eval.run_longmemeval_v2.subprocess.check_output", pinned_check_output)
@@ -373,10 +432,26 @@ def test_official_runner_requires_the_exact_pinned_checkout(monkeypatch, tmp_pat
     def mismatched_check_output(command, **kwargs):
         if command[-1] == "--show-toplevel":
             return str(tmp_path) + "\n"
+        if "status" in command:
+            return ""
         return "a" * 40 + "\n"
 
     monkeypatch.setattr("eval.run_longmemeval_v2.subprocess.check_output", mismatched_check_output)
     with pytest.raises(SystemExit, match="revision mismatch"):
+        verify_official_checkout(module)
+
+    def dirty_check_output(command, **kwargs):
+        if command[-1] == "--show-toplevel":
+            return str(tmp_path) + "\n"
+        if "status" in command:
+            return " M evaluation/harness.py\n"
+        return PINNED_LONGMEMEVAL_V2_REVISION + "\n"
+
+    monkeypatch.setattr(
+        "eval.run_longmemeval_v2.subprocess.check_output",
+        dirty_check_output,
+    )
+    with pytest.raises(SystemExit, match="must be clean"):
         verify_official_checkout(module)
 
 
@@ -405,7 +480,7 @@ def test_official_runner_verifies_checkout_before_registering_or_delegating(monk
         lambda: (lambda: calls.append(("restore_reader",))),
     )
 
-    run_longmemeval_v2.main()
+    run_longmemeval_v2.main([])
 
     assert calls == [
         ("import", "memory_modules.memory"),
@@ -414,6 +489,77 @@ def test_official_runner_verifies_checkout_before_registering_or_delegating(monk
         ("run", "evaluation.harness", "__main__"),
         ("restore_reader",),
     ]
+
+
+def test_official_runner_writes_an_immutable_complete_execution_receipt(tmp_path):
+    def write_json(name, value):
+        path = tmp_path / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    questions = write_json("questions.json", [{"question_id": "q1"}])
+    per_question = tmp_path / "per_question.jsonl"
+    per_question.write_text(json.dumps({"question_id": "q1"}) + "\n", encoding="utf-8")
+    paths = {
+        "haystack": write_json("haystack.json", {}),
+        "trajectories": write_json("trajectories.json", []),
+        "memory_config": write_json("memory.json", {}),
+        "matrix_manifest": write_json("matrix.json", {}),
+    }
+    output = tmp_path / "execution.json"
+    checkout = {
+        "revision": PINNED_LONGMEMEVAL_V2_REVISION,
+        "dirty": False,
+        "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+    }
+
+    receipt = write_execution_manifest(
+        output,
+        checkout=checkout,
+        per_question=per_question,
+        questions=questions,
+        seed=42,
+        delegated_argv=["--memory-type", "engraphis"],
+        **paths,
+    )
+
+    assert receipt["status"] == "complete"
+    assert receipt["source_question_count"] == receipt["output_row_count"] == 1
+    assert receipt["official_checkout"] == checkout
+    assert receipt["environment"]["python"]
+    assert receipt["environment"]["platform"]
+    with pytest.raises(ValueError, match="refusing to replace"):
+        write_execution_manifest(
+            output,
+            checkout=checkout,
+            per_question=per_question,
+            questions=questions,
+            seed=43,
+            delegated_argv=["--memory-type", "engraphis"],
+            **paths,
+        )
+    with pytest.raises(ValueError, match="exact clean official revision"):
+        write_execution_manifest(
+            tmp_path / "dirty.json",
+            checkout={**checkout, "dirty": True},
+            per_question=per_question,
+            questions=questions,
+            seed=42,
+            delegated_argv=[],
+            **paths,
+        )
+
+    per_question.write_text(json.dumps({"question_id": "q2"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly cover"):
+        write_execution_manifest(
+            tmp_path / "partial.json",
+            checkout=checkout,
+            per_question=per_question,
+            questions=questions,
+            seed=42,
+            delegated_argv=[],
+            **paths,
+        )
 
 
 def test_official_runner_forces_the_reader_processor_to_the_pinned_revision(monkeypatch):

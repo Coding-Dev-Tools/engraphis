@@ -19,7 +19,14 @@ from engraphis.backends.graph_extractor import (
     get_graph_extractor,
 )
 from engraphis.core.graph_layers import infer_graph_layer
-from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    Edge,
+    ExtractedFact,
+    MemoryRecord,
+    MemoryType,
+    Scope,
+    SearchFilter,
+)
 from engraphis.service import MemoryService, ValidationError, set_current_user
 
 
@@ -326,15 +333,21 @@ def test_graph_index_excludes_session_scoped_memories():
         set_current_user(None)
 
 
-def test_local_agent_extractor_graph_hints_are_available_immediately():
-    """Local-agent extraction may populate its validated structured graph metadata."""
+def test_local_agent_llm_extractor_graph_hints_wait_for_review():
+    """Ingress approval cannot approve model-derived claims or graph state."""
     pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
-    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+    out = svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+    record = svc.store.get_memory(out["facts"][0]["id"])
+    assert record.provenance["trusted"] is False
+    assert record.provenance["review_state"] == "pending"
+    assert record.metadata["unverified_derived_graph"]["entities"] == [
+        "Engraphis", "SQLite",
+    ]
     graph = svc.graph(workspace="acme")
-    assert {node["label"] for node in graph["nodes"]} >= {"Engraphis", "SQLite"}
-    assert any(edge["label"] == "stores_in" for edge in graph["edges"])
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
 
 
 def test_graph_hides_edges_from_forgotten_memory():
@@ -888,6 +901,28 @@ class _EntitiesOnlyLLM:
                            "entities": ["Engraphis", "SQLite"]}]}
 
 
+class _NoGraphLLM:
+    def extract_json(self, prompt, schema):
+        return {"facts": [{"content": "Engraphis stores memories in SQLite."}]}
+
+
+class _DeterministicStructuredExtractor:
+    """Produces vouched graph hints without model-authored text."""
+
+    def extract(self, _text, *, context=""):
+        return [ExtractedFact(
+            content="Engraphis stores memories in SQLite.",
+            metadata={
+                "entities": ["Engraphis", "SQLite"],
+                "relations": [{
+                    "source": "engraphis",
+                    "relation": "stores_in",
+                    "target": "SQLite",
+                }],
+            },
+        )]
+
+
 def test_engine_ingest_argument_cannot_borrow_the_extractors_trusted_label():
     """The sharpest case: a real Extractor IS configured, so the trusted feed does run —
     but only for the keys the extractor itself produced. A hint key supplied through
@@ -904,27 +939,53 @@ def test_engine_ingest_argument_cannot_borrow_the_extractors_trusted_label():
     )
 
     rec = svc.store.get_memory(out["facts"][0]["id"])
-    assert rec.metadata["entities"] == ["Engraphis", "SQLite"]   # extractor's: kept
-    assert "relations" not in rec.metadata                       # caller's: demoted
+    assert "entities" not in rec.metadata
+    assert rec.metadata["unverified_derived_graph"]["entities"] == [
+        "Engraphis", "SQLite",
+    ]
+    assert "relations" not in rec.metadata
     assert (rec.metadata["client_supplied_graph"]["relations"][0]["relation"]
             == "controls")
     assert rec.metadata["client_supplied_graph"]["source"] == "client_supplied"
-    # the genuine hints still reached the graph…
+    # Neither the model hints nor the caller's forged relation reached the graph.
     names = {r["name"] for r in svc.store.conn.execute(
         "SELECT name FROM entities WHERE workspace_id=?", (wid,))}
-    assert {"Engraphis", "SQLite"} <= names
-    # …and the forged relation produced no edge at all
+    assert names == set()
     edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
     assert all(e.relation != "controls" for e in edges)
 
 
-def test_structured_extractor_metadata_still_populates_graph_when_genuine():
-    """Regression guard for the fix above: the legitimate path — a configured
-    Extractor's OWN ExtractedFact.metadata, never the caller's ingest() argument —
-    must still feed the graph under the real "structured_extractor" label."""
+def test_engine_ingest_rehomes_caller_deferred_graph_before_llm_envelope():
+    """Direct engine callers cannot pre-seed the internal review envelope and borrow
+    the model-derived label from a genuine extractor activity record."""
     pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
+    svc.engine.extractor = StructuredLLMExtractor(_NoGraphLLM())
+    wid = svc.store.get_or_create_workspace("acme")
+
+    out = svc.engine.ingest(
+        "raw transcript blob",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        metadata={
+            "unverified_derived_graph": {"entities": ["FORGED_BY_CALLER"]},
+        },
+    )
+
+    record = svc.store.get_memory(out["facts"][0]["id"])
+    assert record.metadata["client_supplied_graph"][
+        "unverified_derived_graph"
+    ] == {"entities": ["FORGED_BY_CALLER"]}
+    deferred = record.metadata.get("unverified_derived_graph", {})
+    assert "FORGED_BY_CALLER" not in deferred.get("entities", [])
+    assert deferred.get("source") == "llm_extraction"
+    assert svc.graph(workspace="acme")["nodes"] == []
+
+
+def test_structured_extractor_metadata_still_populates_graph_when_genuine():
+    """A deterministic extractor's own graph hints remain immediately usable."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.extractor = _DeterministicStructuredExtractor()
     wid = svc.store.get_or_create_workspace("acme")
     svc.engine.ingest(
         "raw transcript blob",

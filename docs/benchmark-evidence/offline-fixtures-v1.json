@@ -1,0 +1,91 @@
+{
+  "schema": "engraphis-public-offline-fixtures/v1",
+  "generated_on": "2026-08-08",
+  "privacy": {
+    "contains_raw_questions": false,
+    "contains_answers": false,
+    "contains_prompts": false,
+    "contains_customer_data": false,
+    "contains_per_record_fingerprints": false
+  },
+  "suite": {
+    "digest": "4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537",
+    "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
+    "files": {
+      "eval/chunking_eval.py": "a16544353940c0a8c40cea3b9932d3399b35ea5994b809b78f5dbe4a952c467f",
+      "eval/datasets/codemem.jsonl": "341313023c22850a2e14f02742b571ad1deca824f886a1654a59541304c01f3c",
+      "eval/datasets/longdoc.jsonl": "7f5ade95e1f283d0db8cf78e53ed8995d3534f847e616d2c0005fd8da37ac790",
+      "eval/grounded.py": "a5dd62d10c079b0098917a4640315254c65a4f1d7d71d8c3a669f290a29277e5",
+      "eval/performance.py": "e17ea78095e4e592717bc5d9d8e34d55fd98c3fd28d1a8104a20c227d4d619c9"
+    }
+  },
+  "runs": [
+    {
+      "id": "offline-chunking",
+      "command": "python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5",
+      "config_digest": "c1c8196aa7e1568ef3844a9fb2d76b87f342c39108e32d6ad144b885a76143b8",
+      "config_digest_method": "sha256(UTF-8 exact command)",
+      "boundary": "Deterministic offline retrieval fixture; normalized-character token estimator; not external QA or provider billing.",
+      "result": {
+        "documents": 6,
+        "questions": 18,
+        "k": 5,
+        "token_counter": "engraphis.chars4.v1",
+        "whole": {
+          "memories": 6,
+          "recall_at_k": 1.0,
+          "mean_context_tokens": 740.3,
+          "mean_evidence_tokens": 162.2,
+          "max_stored_tokens": 213
+        },
+        "chunked": {
+          "memories": 24,
+          "recall_at_k": 1.0,
+          "mean_context_tokens": 214.3,
+          "mean_evidence_tokens": 42.4,
+          "max_stored_tokens": 59
+        },
+        "context_reduction_pct": 71.1
+      }
+    },
+    {
+      "id": "offline-performance",
+      "command": "python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json",
+      "config_digest": "bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7",
+      "config_digest_method": "sha256(UTF-8 exact command)",
+      "boundary": "Deterministic offline CodeMem fixture; serialized JSON-shape payload proxies, not MCP transport responses, provider billing, or latency claims.",
+      "result": {
+        "dataset_cases": 14,
+        "memories": 44,
+        "questions": 26,
+        "timed_recalls": 260,
+        "k": 5,
+        "token_budget": 1500,
+        "token_counter": "engraphis.regex.v1",
+        "recall_at_k": 1.0,
+        "hit_at_k": 1.0,
+        "answer_token_recall": 1.0,
+        "mean_context_tokens": 85.38,
+        "max_context_tokens": 108,
+        "full_serialized_payload_tokens": 23810,
+        "compact_serialized_payload_tokens": 10202,
+        "saved_serialized_payload_tokens": 13608,
+        "serialized_payload_savings_ratio": 0.5715
+      }
+    },
+    {
+      "id": "offline-grounded",
+      "command": "python -m eval.grounded",
+      "config_digest": "590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f",
+      "config_digest_method": "sha256(UTF-8 exact command)",
+      "boundary": "Deterministic offline support/abstention fixture; not a frontier-model answer-quality score.",
+      "result": {
+        "answerable": 5,
+        "grounded": 5,
+        "off_topic": 5,
+        "abstained": 5,
+        "decision_accuracy": 1.0
+      }
+    }
+  ]
+}

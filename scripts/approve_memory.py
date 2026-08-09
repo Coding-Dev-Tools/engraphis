@@ -42,7 +42,7 @@ def main() -> None:
             args.memory_id, reviewer=args.reviewer, reason=args.reason,
         )
     finally:
-        service.store.close()
+        service.close()
     print(result["id"])
 
 

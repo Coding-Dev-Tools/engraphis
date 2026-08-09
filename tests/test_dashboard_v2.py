@@ -54,6 +54,8 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         page = client.get("/")
         assert page.status_code == 200
         assert "<title>Engraphis Ledger</title>" in page.text
+        assert "Visible memories" in page.text
+        assert "Live rows" not in page.text
         assert 'class="sidebar"' in page.text
         for area in ("Today", "Ask", "Library", "Graph &amp; Relationships", "Provenance", "Manage"):
             assert f">{area}<" in page.text
@@ -64,7 +66,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'href="/classic">Classic<' in page.text
         assert 'Ledger (primary)' not in page.text
         assert 'Classic (alternate)' not in page.text
-        assert '/v2-assets/vendor/d3.min.js' in page.text
+        assert '/v2-assets/vendor/d3.min.js' not in page.text
         assert '/v2-assets/vendor/force-graph.min.js' not in page.text
         assert '/v2-assets/engraphis-graph.js' not in page.text
         classic = client.get("/classic")
@@ -74,18 +76,18 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'href="/"' in classic.text
         assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
         assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
-        assert 'id="graph-show-all"' not in classic.text
         assert client.get("/v2-assets/ledger.css").status_code == 200
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
+        assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260730-drag-stability'" in ledger_js.text
-        assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
-        assert "/v2-assets/ledger.js?v=20260728-connected-memories" in page.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'" in ledger_js.text
+        assert "/v2-assets/ledger.css?v=20260809-pin-only-physics" in page.text
+        assert "/v2-assets/ledger.js?v=20260809-pin-only-physics" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
-        assert "/static/vendor/force-graph.min.js" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260730-drag-stability" in classic_js.text
+        assert "/static/vendor/force-graph.min.js?v=20260809-csp" in classic_js.text
+        assert "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics" in classic_js.text
         assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
@@ -102,15 +104,21 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert filtered.status_code == 200
         assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
         assert "Estimated context saved" in page.text
+        ledger_css = client.get("/v2-assets/ledger.css")
+        assert ledger_css.status_code == 200
+        assert ".savings-hero" in ledger_css.text
+        assert ".savings-progress" in ledger_css.text
+        assert "function savingsMetric(estimate)" in ledger_js.text
+        assert "tokens avoided" in ledger_js.text
 
 
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
-            "/v2-assets/engraphis-graph.js?v=20260730-drag-stability",
-            "/v2-assets/ledger.js?v=20260728-connected-memories",
-            "/v2-assets/ledger.css?v=20260728-connected-memories",
-            "/classic-assets/dashboard.js?v=20260728-reference-materials",
+            "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics",
+            "/v2-assets/ledger.js?v=20260809-pin-only-physics",
+            "/v2-assets/ledger.css?v=20260809-pin-only-physics",
+            "/classic-assets/dashboard.js?v=20260809-pin-only-physics",
         ):
             response = client.get(path)
             assert response.status_code == 200
@@ -122,6 +130,16 @@ def test_classic_dashboard_script_mirrors_the_static_compatibility_asset():
     assert (root / "classic_assets" / "dashboard.js").read_bytes() == (
         root / "static" / "dashboard.js"
     ).read_bytes()
+
+
+def test_memory_health_dashboard_uses_the_v2_analytics_contract():
+    root = Path(__file__).parents[1] / "engraphis"
+    for relative in ("classic_assets/dashboard.js", "static/dashboard.js"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "/analytics/health?workspace=" in source
+        assert "decay_distribution" in source
+        assert "conflict_frequency" in source
+        assert "/memory/health/overview" not in source
 
 
 def test_dashboard_and_mcp_recall_share_the_v2_service(monkeypatch, tmp_path):
@@ -628,6 +646,8 @@ def test_manual_consolidation_stays_local_but_dreaming_is_cloud_only(
     monkeypatch, tmp_path
 ):
     with _client(monkeypatch, tmp_path) as client:
+        assert "Close superseded source validity" not in client.get("/").text
+        assert "supersede_sources" not in client.get("/v2-assets/ledger.js").text
         manual = client.post(
             "/api/consolidate",
             json={"workspace": "demo", "dry_run": True, "infer": False},
@@ -716,10 +736,10 @@ def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path)
         assert saved["dream_enabled"] is True
 
 
-def test_first_hosted_automation_view_bootstraps_the_recommended_policy(
+def test_first_hosted_automation_view_waits_for_explicit_bootstrap(
     monkeypatch, tmp_path
 ):
-    """A connected Pro/Team workspace starts maintaining itself without a toggle."""
+    """Observation-only GET must not upload memory content or write a hosted policy."""
 
     uploaded = []
     saved = []
@@ -727,9 +747,11 @@ def test_first_hosted_automation_view_bootstraps_the_recommended_policy(
     class _Cloud:
         organization_id = "org_test"
 
+        def __init__(self):
+            self.policy = {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
         def get_policy(self, workspace_id):
-            # Version zero is the private Cloud's documented no-policy sentinel.
-            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+            return dict(self.policy)
 
         def upload_snapshot(self, workspace_id, snapshot):
             uploaded.append((workspace_id, snapshot))
@@ -737,37 +759,51 @@ def test_first_hosted_automation_view_bootstraps_the_recommended_policy(
 
         def save_policy(self, workspace_id, policy):
             saved.append((workspace_id, policy))
+            self.policy = {**policy, "version": 1}
             return {"version": 1}
 
         def list_jobs(self, workspace_id, *, limit=10):
             return {"jobs": []}
 
+    cloud = _Cloud()
     monkeypatch.setattr(
         "engraphis.cloud_features.build_managed_snapshot",
-        lambda service, workspace: ("ws_cloud", {"generation": 7}),
+        lambda service, workspace: (
+            service._lookup_workspace(workspace),
+            {"generation": 7},
+        ),
     )
     monkeypatch.setattr(
         "engraphis.cloud_features.CloudFeatureClient.from_environment",
-        lambda workspace_id=None: _Cloud(),
+        lambda workspace_id=None: cloud,
     )
     with _client(monkeypatch, tmp_path) as client:
-        response = client.get("/api/automation")
+        observed = client.get("/api/automation")
+        assert observed.status_code == 200
+        assert observed.json()["bootstrap_required"] is True
+        assert observed.json()["enabled"] is False
+        assert uploaded == []
+        assert saved == []
 
-    assert response.status_code == 200
-    assert response.json()["enabled"] is True
-    assert response.json()["dream"] is True
-    assert uploaded == [("ws_cloud", {"generation": 7})]
-    assert saved == [("ws_cloud", {
+        initialized = client.post("/api/automation/bootstrap")
+
+    assert initialized.status_code == 200
+    assert initialized.json()["bootstrap_required"] is False
+    assert initialized.json()["enabled"] is True
+    assert len(uploaded) == 1
+    assert len(saved) == 1
+    assert uploaded[0] == (saved[0][0], {"generation": 7})
+    assert saved[0][1] == {
         "enabled": True,
         "cadence_minutes": 1440,
         "dream_enabled": True,
         "dream_min_new": 25,
         "dream_idle_minutes": 15,
         "infer": False,
-    })]
+    }
 
 
-def test_first_automation_policy_retry_does_not_upload_the_snapshot_twice(
+def test_explicit_automation_bootstrap_retry_does_not_upload_twice(
     monkeypatch, tmp_path
 ):
     """A failed policy write resumes after the already successful private upload."""
@@ -781,8 +817,11 @@ def test_first_automation_policy_retry_does_not_upload_the_snapshot_twice(
     class _Cloud:
         organization_id = "org_test"
 
+        def __init__(self):
+            self.policy = {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
         def get_policy(self, workspace_id):
-            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+            return dict(self.policy)
 
         def upload_snapshot(self, workspace_id, snapshot):
             uploaded.append((workspace_id, snapshot))
@@ -796,6 +835,7 @@ def test_first_automation_policy_retry_does_not_upload_the_snapshot_twice(
                     status=503,
                     transient=True,
                 )
+            self.policy = {**policy, "version": 1}
             return {"version": 1}
 
         def list_jobs(self, workspace_id, *, limit=10):
@@ -803,26 +843,31 @@ def test_first_automation_policy_retry_does_not_upload_the_snapshot_twice(
 
     def _snapshot(service, workspace):
         builds.append(workspace)
-        return "ws_cloud", {"generation": 7}
+        return service._lookup_workspace(workspace), {"generation": 7}
 
+    cloud = _Cloud()
     monkeypatch.setattr("engraphis.cloud_features.build_managed_snapshot", _snapshot)
     monkeypatch.setattr(
         "engraphis.cloud_features.CloudFeatureClient.from_environment",
-        lambda workspace_id=None: _Cloud(),
+        lambda workspace_id=None: cloud,
     )
     with _client(monkeypatch, tmp_path) as client:
-        first = client.get("/api/automation")
-        second = client.get("/api/automation")
+        first = client.post("/api/automation/bootstrap")
+        second = client.post("/api/automation/bootstrap")
 
     assert first.status_code == 503
     assert second.status_code == 200
+    assert second.json()["enabled"] is True
     assert len(builds) == 1
-    assert uploaded == [("ws_cloud", {"generation": 7})]
+    assert len(uploaded) == 1
+    assert uploaded[0] == (saved[0][0], {"generation": 7})
     assert len(saved) == 2
 
 
-def test_concurrent_first_automation_views_upload_one_snapshot(monkeypatch, tmp_path):
-    """Parallel dashboard reads serialize the sensitive first-bootstrap upload."""
+def test_concurrent_explicit_automation_bootstraps_upload_one_snapshot(
+    monkeypatch, tmp_path
+):
+    """Parallel opt-in actions serialize the sensitive first-bootstrap upload."""
 
     uploaded = []
     saved = []
@@ -832,8 +877,11 @@ def test_concurrent_first_automation_views_upload_one_snapshot(monkeypatch, tmp_
     class _Cloud:
         organization_id = "org_concurrent"
 
+        def __init__(self):
+            self.policy = {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
         def get_policy(self, workspace_id):
-            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+            return dict(self.policy)
 
         def upload_snapshot(self, workspace_id, snapshot):
             uploaded.append((workspace_id, snapshot))
@@ -843,31 +891,37 @@ def test_concurrent_first_automation_views_upload_one_snapshot(monkeypatch, tmp_
 
         def save_policy(self, workspace_id, policy):
             saved.append((workspace_id, policy))
+            self.policy = {**policy, "version": 1}
             return {"version": 1}
 
         def list_jobs(self, workspace_id, *, limit=10):
             return {"jobs": []}
 
+    cloud = _Cloud()
     monkeypatch.setattr(
         "engraphis.cloud_features.build_managed_snapshot",
-        lambda service, workspace: ("ws_cloud", {"generation": 7}),
+        lambda service, workspace: (
+            service._lookup_workspace(workspace),
+            {"generation": 7},
+        ),
     )
     monkeypatch.setattr(
         "engraphis.cloud_features.CloudFeatureClient.from_environment",
-        lambda workspace_id=None: _Cloud(),
+        lambda workspace_id=None: cloud,
     )
     with _client(monkeypatch, tmp_path):
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(v2_api.automation_get)
+            first = pool.submit(v2_api.automation_bootstrap)
             assert started.wait(timeout=5)
-            second = pool.submit(v2_api.automation_get)
+            second = pool.submit(v2_api.automation_bootstrap)
             release_upload.set()
             assert first.result(timeout=5)["enabled"] is True
             follower = second.result(timeout=5)
             assert follower["enabled"] is True
             assert follower["version"] == 1
 
-    assert uploaded == [("ws_cloud", {"generation": 7})]
+    assert len(uploaded) == 1
+    assert uploaded[0] == (saved[0][0], {"generation": 7})
     assert len(saved) == 1
 
 

@@ -5,12 +5,21 @@ scope isolation, session lifecycle, input validation, and untrusted-content sani
 (the memory-poisoning guard), plus conflict resolution, governance, and the bi-temporal
 why/timeline/proactive tools.
 """
+import sqlite3
+import threading
+import time
 import numpy as np
 import pytest
 
-from engraphis.core.interfaces import MemoryRecord, Scope
+import engraphis.service as service_module
+from engraphis.core.interfaces import MemoryRecord, SchemaSnapshot, Scope
 from engraphis.core.poisoning import source_is_external
-from engraphis.service import MemoryService, ValidationError, set_current_user
+from engraphis.service import (
+    MemoryService,
+    ValidationError,
+    _warn_if_db_empty_with_populated_sibling,
+    set_current_user,
+)
 
 
 class _ReviewedLocalService:
@@ -52,6 +61,93 @@ class _ReviewedLocalService:
 
 def _svc() -> _ReviewedLocalService:
     return _ReviewedLocalService(MemoryService.create(":memory:"))
+
+
+def test_empty_configured_db_warns_about_populated_owner_db(tmp_path, monkeypatch, capsys):
+    """A stale ENGRAPHIS_DB_PATH must not look like lost local memories."""
+    configured = tmp_path / "stale" / "engraphis.db"
+    configured.parent.mkdir()
+    owner_db = tmp_path / ".engraphis" / "engraphis.db"
+    owner_db.parent.mkdir()
+    for path in (configured, owner_db):
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE memories (id TEXT)")
+    with sqlite3.connect(owner_db) as conn:
+        conn.execute("INSERT INTO memories (id) VALUES ('mem_present')")
+
+    monkeypatch.setattr(service_module.Path, "home", classmethod(lambda cls: tmp_path))
+    _warn_if_db_empty_with_populated_sibling(str(configured))
+
+    warning = capsys.readouterr().err
+    assert str(configured) in warning
+    assert str(owner_db) in warning
+    assert "1 memories" in warning
+
+
+def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+
+    result = service.remember_batch(
+        [{"content": "Imported evidence awaiting review.",
+          "source": "web", "scope": "workspace"}],
+        workspace="acme",
+    )
+
+    assert result["succeeded"] == 1
+    record = service.store.get_memory(result["results"][0]["id"])
+    assert record is not None
+    assert record.provenance["trusted"] is False
+    assert record.provenance["review_state"] == "pending"
+    assert "trust_downgraded" not in record.provenance
+
+
+def test_remember_batch_forwards_write_options():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    calls = []
+    original = service.remember
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    service.remember = capture
+    result = service.remember_batch(
+        [{
+            "content": "Critical batch evidence.",
+            "metadata": {"ticket": "OPS-123"},
+            "retention_class": "critical",
+            "retention_reason": "incident runbook",
+            "resolve_conflicts": False,
+        }],
+        workspace="acme",
+    )
+
+    assert result["succeeded"] == 1
+    assert calls[0]["metadata"] == {"ticket": "OPS-123"}
+    assert calls[0]["resolve_conflicts"] is False
+    assert calls[0]["retention_class"] == "critical"
+    assert calls[0]["retention_reason"] == "incident runbook"
+    record = service.store.get_memory(result["results"][0]["id"])
+    assert record.metadata["retention_supervision"]["label"] == "critical"
+
+
+def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    alpha = service.remember(
+        "Alpha workspace health marker.", workspace="alpha", scope="workspace"
+    )
+    beta = service.remember(
+        "Beta workspace health marker.", workspace="beta", scope="workspace"
+    )
+    service.store.audit("test", "conflict_detected", alpha["id"])
+    service.store.audit("test", "sync_trust_conflict", beta["id"])
+    alpha_reader = MemoryService(service.engine, allowed_workspaces=["alpha"])
+
+    health = alpha_reader.memory_health(workspace="alpha")
+
+    assert sum(bucket["count"] for bucket in health["decay_distribution"]) == 1
+    assert health["orphan_count"] == 1
+    assert health["conflict_frequency"] == {"total": 1, "last_7d": 1}
 
 
 def test_remember_then_recall_roundtrip():
@@ -299,6 +395,86 @@ def test_write_scope_defaults_and_parent_validation():
         s.remember("broken", workspace="acme", repo="web", scope="workspace")
 
 
+def test_merge_requires_explicit_wider_scope_for_different_sessions():
+    service = _svc()
+    first_session = service.start_session(
+        "acme", repo="web", goal="first", force_new=True
+    )
+    second_session = service.start_session(
+        "acme", repo="web", goal="second", force_new=True
+    )
+    first = service.remember(
+        "First session deployment evidence.",
+        workspace="acme",
+        repo="web",
+        session_id=first_session["session_id"],
+        scope="session",
+    )
+    second = service.remember(
+        "Second session deployment evidence.",
+        workspace="acme",
+        repo="web",
+        session_id=second_session["session_id"],
+        scope="session",
+    )
+
+    with pytest.raises(ValidationError, match="one session"):
+        service.merge(
+            [first["id"], second["id"]],
+            "Combined deployment evidence.",
+            workspace="acme",
+        )
+
+    assert service.store.get_memory(first["id"]).valid_to is None
+    assert service.store.get_memory(second["id"]).valid_to is None
+    merged = service.merge(
+        [first["id"], second["id"]],
+        "Combined deployment evidence.",
+        workspace="acme",
+        scope="repo",
+    )
+    assert service.store.get_memory(merged["id"]).scope == Scope.REPO
+
+
+def test_postgres_schema_successful_retry_reuses_stable_chunk(monkeypatch):
+    from engraphis.backends import postgres_schema
+
+    snapshot = SchemaSnapshot(
+        title="PostgreSQL schema: app",
+        text="Table public.accounts has column account_id.",
+        metadata={
+            "database": "app",
+            "schemas": ["public"],
+            "source_digest": "0123456789abcdef01234567",
+            "tables": 1,
+        },
+    )
+
+    class _Introspector:
+        def inspect(self, dsn, *, schemas=None):
+            del dsn, schemas
+            return snapshot
+
+    monkeypatch.setattr(
+        postgres_schema, "get_postgres_introspector", lambda: _Introspector()
+    )
+    service = _svc()
+
+    first = service.import_postgres_schema(
+        "postgresql://user:password@localhost/app",
+        workspace="acme",
+        schemas=["public"],
+    )
+    second = service.import_postgres_schema(
+        "postgresql://user:password@localhost/app",
+        workspace="acme",
+        schemas=["public"],
+    )
+
+    assert second["memory_ids"] == first["memory_ids"]
+    assert service.store.get_memory(first["id"]).valid_to is None
+
+
 def test_recall_unknown_workspace_is_empty_not_error():
     s = _svc()
     r = s.recall("anything", workspace="does-not-exist")
@@ -381,6 +557,21 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
     assert (saved.title, saved.mtype.value, saved.importance) == (
         "Deployment runbook", "procedural", 0.9,
     )
+
+
+def test_update_memory_advances_descriptive_hlc():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    created = service.remember("A synced deployment note.", workspace="acme", title="Old")
+    before = service.store.get_memory(created["id"]).modified_hlc
+
+    result = service.update_memory(
+        created["id"], workspace="acme", title="New", importance=0.8,
+    )
+
+    after = service.store.get_memory(created["id"]).modified_hlc
+    assert result["updated"] == ["title", "importance"]
+    assert after != before
+    assert service.store.conn.in_transaction is False
 
 
 def test_update_memory_reembeds_changed_title_in_both_vector_mirrors(monkeypatch):
@@ -945,6 +1136,70 @@ def test_index_repo_and_search_code(tmp_path):
     assert any(sym["name"] == "add" for sym in out["symbols"])
 
 
+def test_link_symbol_rejects_ambiguous_short_name_but_accepts_qualified_name():
+    s = _svc()
+    workspace_id = s.store.get_or_create_workspace("acme")
+    repo_id = s.store.get_or_create_repo(workspace_id, "api")
+    first = s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="api.deploy",
+        file="api.py", span="1-1",
+    )
+    s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="worker.deploy",
+        file="worker.py", span="1-1",
+    )
+    memory = s.remember("Deploy uses the release runbook.", workspace="acme", repo="api")
+
+    with pytest.raises(ValidationError, match="ambiguous"):
+        s.link_symbol("deploy", memory["id"], workspace="acme", repo="api")
+
+    linked = s.link_symbol("api.deploy", memory["id"], workspace="acme", repo="api")
+    assert linked["symbol_id"] == first
+    assert linked["receipt"]["operation"] == "link"
+    assert s.store.conn.execute(
+        "SELECT action FROM audit WHERE action='link_symbol' AND target=?", (linked["link_id"],)
+    ).fetchone() is not None
+
+    repeated = s.link_symbol("api.deploy", memory["id"], workspace="acme", repo="api")
+    assert repeated["link_id"] == linked["link_id"]
+    assert s.store.conn.execute(
+        "SELECT COUNT(*) FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+        "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
+        (repo_id, first, memory["id"], "mentions"),
+    ).fetchone()[0] == 1
+
+
+def test_link_symbol_concurrent_creation_is_idempotent():
+    """Multiple threads racing to create the same symbol-memory link must produce exactly one row."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    s = _svc()
+    workspace_id = s.store.get_or_create_workspace("acme")
+    repo_id = s.store.get_or_create_repo(workspace_id, "api")
+    symbol_id = s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="race_target", fqname="race_target",
+        file="race.py", span="1-1",
+    )
+    memory = s.remember("Race condition test", workspace="acme", repo="api")
+
+    def link_concurrently():
+        return s.link_symbol("race_target", memory["id"], workspace="acme", repo="api")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(link_concurrently) for _ in range(20)]
+        results = [f.result() for f in futures]
+
+    link_ids = {r["link_id"] for r in results}
+    assert len(link_ids) == 1, f"expected 1 unique link_id, got {len(link_ids)}: {link_ids}"
+
+    count = s.store.conn.execute(
+        "SELECT COUNT(*) FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+        "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
+        (repo_id, symbol_id, memory["id"], "mentions"),
+    ).fetchone()[0]
+    assert count == 1, f"expected 1 row in code_memory_links, got {count}"
+
+
 def test_search_code_requires_repo():
     s = _svc()
     s.remember("x", workspace="acme")
@@ -1219,3 +1474,105 @@ def test_import_files_failure_preserves_caller_owned_transaction(monkeypatch):
         "SELECT COUNT(*) FROM memories WHERE workspace_id=?", (created["id"],)
     ).fetchone()[0] == 0
     conn.rollback()
+
+
+class _CloseStore:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.closed = False
+        self.allowed_workspaces = None
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+def _service_with_close_store():
+    store = _CloseStore()
+    engine = type("_Engine", (), {"store": store})()
+    return MemoryService(engine), store
+
+
+def test_service_close_waits_for_owned_workers_before_store_close():
+    service, store = _service_with_close_store()
+    worker_observation = []
+
+    def worker():
+        while not service._closing:
+            time.sleep(0.001)
+        worker_observation.append(store.closed)
+
+    thread = threading.Thread(target=worker)
+    service._graph_job_threads["job_1"] = thread
+    thread.start()
+
+    service.close(timeout=1)
+
+    assert worker_observation == [False]
+    assert not thread.is_alive()
+    assert store.close_calls == 1
+    service.close(timeout=1)
+    assert store.close_calls == 1
+
+
+def test_service_close_keeps_store_open_when_worker_misses_deadline():
+    service, store = _service_with_close_store()
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait)
+    service._graph_job_threads["job_1"] = thread
+    thread.start()
+
+    with pytest.raises(RuntimeError, match="did not stop before shutdown"):
+        service.close(timeout=0)
+
+    assert store.close_calls == 0
+    release.set()
+    thread.join(1)
+    service.close(timeout=1)
+    assert store.close_calls == 1
+
+
+def test_graph_index_job_rejects_new_work_during_shutdown():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.create_workspace("acme")
+    service._closing = True
+
+    with pytest.raises(ValidationError, match="shutting down"):
+        service.start_graph_index_job(workspace="acme")
+
+    service._closing = False
+    service.close()
+
+
+def test_graph_index_job_reuse_preserves_caller_owned_transaction(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.create_workspace("acme")
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_worker(_job_id):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(service, "_run_graph_index_job", hold_worker)
+    try:
+        service.start_graph_index_job(workspace="acme")
+        assert started.wait(2)
+
+        conn = service.store.conn
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE workspaces SET settings=? WHERE name=?",
+            ('{"outer":"preserved"}', "acme"),
+        )
+        reused = service.start_graph_index_job(workspace="acme")
+
+        assert reused["reused"] is True
+        assert conn.transaction_owned_by_current_thread() is True
+        assert conn.execute(
+            "SELECT settings FROM workspaces WHERE name=?", ("acme",)
+        ).fetchone()["settings"] == '{"outer":"preserved"}'
+        conn.rollback()
+    finally:
+        release.set()
+        service.close()

@@ -17,6 +17,8 @@ import time
 import numpy as np
 import pytest
 
+pytest.importorskip("pydantic", reason="v1 ingest tests require the optional full-stack dependencies")
+
 from engraphis import stores
 from engraphis.config import settings
 from engraphis.engines import ingest as ingest_engine

@@ -1,9 +1,10 @@
 """Vault management, file editing, folder import, memory health, bulk ops, and context preview routes."""
 from __future__ import annotations
 
-import asyncio
 import heapq
 import logging
+import os
+import stat
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -12,11 +13,23 @@ from typing import Any, Optional
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.routing import APIRoute
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from engraphis.engines import embedder, ingest as ingest_engine, recall as recall_engine, reweight
 from engraphis.service import MAX_IMPORT_FILES, MAX_IMPORT_RESOURCE_BYTES, MAX_IMPORT_TOTAL_BYTES
+from engraphis.models import (
+    Content,
+    MAX_CONTENT_CHARS,
+    Name,
+    NameList,
+    OptContent,
+    OptMetadata,
+    OptName,
+    OptTitle,
+    Title,
+)
+from engraphis.core.secrets import SecretDetectedError
 from engraphis.engines.intelligence import auto_categorize, check_conflicts
 from engraphis.engines.reweight import retention_score
 from engraphis.stores import blob_to_vector, get_conn, now_ts
@@ -30,10 +43,72 @@ logger = logging.getLogger("engraphis.routes.vault")
 VAULT_UPLOAD_REQUEST_BYTES = (
     MAX_IMPORT_TOTAL_BYTES + MAX_IMPORT_FILES * 16_384 + 1024 * 1024
 )
+SINGLE_UPLOAD_REQUEST_BYTES = MAX_CONTENT_CHARS + 256 * 1024
 _UPLOAD_FORM_FIELDS = 8
 _DUPLICATE_CANDIDATE_LIMIT = 500
 _DUPLICATE_RESULT_LIMIT = 200
 _DUPLICATE_BLOCK_SIZE = 256
+
+
+def _read_import_bytes(path: Path, max_bytes: int) -> bytes:
+    """Read one imported file without following a swapped leaf or reparse point."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
+            raise ValueError("import path is not a single-link regular file")
+        current = os.lstat(str(path))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(current.st_mode) or (
+            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
+        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("import path changed while it was opened")
+        data = bytearray()
+        while len(data) <= max_bytes:
+            chunk = os.read(descriptor, min(65_536, max_bytes + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("file grew beyond the import resource limit")
+        after = os.fstat(descriptor)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise ValueError("import file changed while it was read")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
+
+
+def _read_import_size(path: Path) -> int:
+    """Return the size of a previously validated imported file path."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
+            raise ValueError("import path is not a single-link regular file")
+        current = os.lstat(str(path))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(current.st_mode) or (
+            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
+        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("import path changed while it was opened")
+        return opened.st_size
+    finally:
+        os.close(descriptor)
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    """Return True only when ``path`` is the root itself or a descendant of it."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 class _BoundedUploadRoute(APIRoute):
@@ -72,6 +147,13 @@ def _ok(data: Any) -> dict[str, Any]:
     return {"data": data}
 
 
+def _filename_stem(filename: Optional[str]) -> str:
+    """Return a client filename's display stem without constructing a filesystem path."""
+    leaf = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem, separator, _suffix = leaf.rpartition(".")
+    return stem if separator and stem else leaf
+
+
 async def _bounded_upload_form(request: Request) -> None:
     """Parse multipart once with a strict file-count ceiling.
 
@@ -97,27 +179,27 @@ async def _bounded_upload_form(request: Request) -> None:
 # ═══ VAULT MANAGEMENT ═══════════════════════════════════════════════════════
 
 class VaultCreateReq(BaseModel):
-    namespace: str
-    name: str
-    description: str = ""
-    color: str = "#9d7cf6"
-    memory_type: str = "semantic"
+    namespace: Name
+    name: Name
+    description: Content = ""
+    color: Name = "#9d7cf6"
+    memory_type: Name = "semantic"
 
 
 class VaultUpdateReq(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    color: Optional[str] = None
-    memory_type: Optional[str] = None
+    name: OptName = None
+    description: OptContent = None
+    color: OptName = None
+    memory_type: OptName = None
 
 
 @router.get("/vaults")
-async def list_vaults():
+def list_vaults():
     return _ok(vault_store.list_vaults())
 
 
 @router.post("/vaults")
-async def create_vault(req: VaultCreateReq):
+def create_vault(req: VaultCreateReq):
     if vault_store.get_vault(req.namespace):
         raise HTTPException(409, f"Vault '{req.namespace}' already exists")
     return _ok(vault_store.create_vault(
@@ -127,7 +209,7 @@ async def create_vault(req: VaultCreateReq):
 
 
 @router.put("/vaults/{namespace}")
-async def update_vault(namespace: str, req: VaultUpdateReq):
+def update_vault(namespace: Name, req: VaultUpdateReq):
     vault = vault_store.update_vault(
         namespace, name=req.name, description=req.description,
         color=req.color, memory_type=req.memory_type,
@@ -138,7 +220,7 @@ async def update_vault(namespace: str, req: VaultUpdateReq):
 
 
 @router.post("/vaults/{namespace}/activate")
-async def activate_vault(namespace: str):
+def activate_vault(namespace: Name):
     if not vault_store.get_vault(namespace):
         raise HTTPException(404, f"Vault '{namespace}' not found")
     vault_store.set_active_vault(namespace)
@@ -146,14 +228,14 @@ async def activate_vault(namespace: str):
 
 
 @router.delete("/vaults/{namespace}")
-async def delete_vault(namespace: str, delete_memories: bool = True):
+def delete_vault(namespace: Name, delete_memories: bool = True):
     if not vault_store.get_vault(namespace):
         raise HTTPException(404, f"Vault '{namespace}' not found")
     return _ok(vault_store.delete_vault(namespace, delete_memories=delete_memories))
 
 
 @router.get("/vaults/active")
-async def get_active_vault():
+def get_active_vault():
     vault = vault_store.get_active_vault()
     if not vault:
         vault_store.ensure_default_vault()
@@ -162,7 +244,7 @@ async def get_active_vault():
 
 
 @router.get("/vaults/{namespace}/types")
-async def vault_type_breakdown(namespace: str):
+def vault_type_breakdown(namespace: Name):
     """GET /memory/vaults/{namespace}/types — memory type breakdown for a vault."""
     conn = get_conn()
     rows = conn.execute(
@@ -175,51 +257,57 @@ async def vault_type_breakdown(namespace: str):
 # ═══ FILE EDITING ═══════════════════════════════════════════════════════════
 
 class EditMemoryReq(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    metadata: Optional[dict] = None
-    memory_type: Optional[str] = None
+    title: OptTitle = None
+    content: OptContent = None
+    metadata: OptMetadata = None
+    memory_type: OptName = None
 
 
 @router.put("/documents/{document_id}")
-async def edit_memory(document_id: str, req: EditMemoryReq,
-                      namespace: str = Query(...)):
-    """PUT /memory/documents/{id}?namespace=... — edit a memory, re-embeds on content change."""
-    existing = mem_store.get_memory(namespace, document_id)
-    if not existing:
-        raise HTTPException(404, f"Memory '{document_id}' not found in '{namespace}'")
-
-    vec = None
-    if req.content is not None and req.content != existing["content"]:
-        full_text = f"{req.title or existing['title']}\n\n{req.content}"
-        vec = embedder.embed(full_text)
-
-    updated = mem_store.update_memory_content(
-        namespace, document_id,
-        title=req.title, content=req.content,
-        metadata=req.metadata, vector=vec,
-        memory_type=req.memory_type,
-    )
+def edit_memory(
+    document_id: Name,
+    req: EditMemoryReq,
+    namespace: Name = Query(...),
+):
+    """Edit one memory through the same validation and graph lifecycle as ingestion."""
+    try:
+        updated = ingest_engine.update_document(
+            namespace=namespace,
+            document_id=document_id,
+            title=req.title,
+            content=req.content,
+            metadata=req.metadata,
+            memory_type=req.memory_type,
+        )
+    except SecretDetectedError:
+        raise HTTPException(400, "Memory content rejected") from None
+    except ValueError as exc:
+        if str(exc) == "memory not found":
+            raise HTTPException(404, f"Memory '{document_id}' not found") from None
+        raise HTTPException(400, "Invalid memory edit") from None
     return _ok(updated)
 
 
 class CreateMemoryReq(BaseModel):
-    title: str
-    content: str
-    namespace: Optional[str] = None
-    document_id: Optional[str] = None
-    source_type: str = "manual"
-    metadata: Optional[dict] = None
-    memory_type: str = "semantic"
+    title: Title
+    content: Content
+    namespace: OptName = None
+    document_id: OptName = None
+    source_type: Name = "manual"
+    metadata: OptMetadata = None
+    memory_type: Name = "semantic"
 
 
 @router.post("/files/create")
-async def create_memory_file(req: CreateMemoryReq):
+def create_memory_file(req: CreateMemoryReq):
     """POST /memory/files/create — create a new memory file in the active or specified vault."""
     ns = req.namespace
-    if not ns:
+    if ns is None:
+        vault_store.ensure_default_vault()
         active = vault_store.get_active_vault()
-        ns = active["namespace"] if active else "default"
+        if active is None:
+            raise HTTPException(500, "No active vault is available")
+        ns = active["namespace"]
     doc_id = req.document_id or f"doc-{int(time.time()*1000)}"
     result = ingest_engine.ingest_document(
         namespace=ns, document_id=doc_id, title=req.title,
@@ -230,13 +318,13 @@ async def create_memory_file(req: CreateMemoryReq):
 
 
 class MoveMemoryReq(BaseModel):
-    from_namespace: str
-    to_namespace: str
-    document_id: str
+    from_namespace: Name
+    to_namespace: Name
+    document_id: Name
 
 
 @router.post("/files/move")
-async def move_memory(req: MoveMemoryReq):
+def move_memory(req: MoveMemoryReq):
     """POST /memory/files/move — move a memory between vaults."""
     success = mem_store.move_memory(req.document_id, req.from_namespace, req.to_namespace)
     if not success:
@@ -248,115 +336,210 @@ async def move_memory(req: MoveMemoryReq):
 # ═══ FOLDER IMPORT ══════════════════════════════════════════════════════════
 
 class FolderImportReq(BaseModel):
-    path: str
-    namespace: Optional[str] = None
-    file_pattern: str = "*.md"
-    memory_type: str = "semantic"
+    path: Content
+    namespace: OptName = None
+    file_pattern: Name = "*.md"
+    memory_type: Name = "semantic"
 
 
 @router.post("/vaults/import-folder")
-async def import_folder(req: FolderImportReq):
-    """POST /memory/vaults/import-folder — import all .md files from a disk path."""
-    # Guard against path traversal: only allow import from directories that are
-    # explicitly configured or under the user's home directory.
+def import_folder(req: FolderImportReq):
+    """Import an allowlisted folder with the same finite ceilings as uploads."""
+    import fnmatch
     import os
-    home = os.path.realpath(str(Path.home().expanduser()))
+    import re
+
+    home = os.path.normcase(os.path.realpath(str(Path.home().expanduser())))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
     if env_roots:
         allowed_roots.extend(
-            os.path.realpath(os.path.expanduser(root))
+            os.path.normcase(os.path.realpath(os.path.expanduser(root)))
             for root in env_roots.split(os.pathsep)
             if root
         )
-    real_path = os.path.realpath(os.path.expanduser(req.path))
-    comparable_path = os.path.normcase(real_path)
-    safe_path = None
+    requested_path = os.path.normcase(os.path.realpath(os.path.expanduser(req.path)))
+    if not any(
+        requested_path == root
+        or requested_path.startswith(root.rstrip(os.sep) + os.sep)
+        for root in allowed_roots
+    ):
+        raise HTTPException(
+            403,
+            "Import path must be under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
+    # Resolve the user-selected folder by walking from an allowlisted root. The
+    # filesystem APIs below receive only paths returned by that trusted walk;
+    # request text is used only for component comparisons, never as a path root.
+    folder: Optional[Path] = None
     for root in allowed_roots:
-        comparable_root = os.path.normcase(root)
-        if comparable_path == comparable_root:
-            safe_path = comparable_root
+        relative = os.path.relpath(requested_path, root)
+        components = tuple(part for part in Path(relative).parts if part not in ("", "."))
+        if any(part == ".." for part in components):
+            continue
+        try:
+            current = Path(root).resolve(strict=True)
+            for component in components:
+                with os.scandir(current) as entries:
+                    match = next(
+                        (
+                            entry for entry in entries
+                            if os.path.normcase(entry.name) == component
+                        ),
+                        None,
+                    )
+                if match is None or match.is_symlink() or not match.is_dir(follow_symlinks=False):
+                    current = None
+                    break
+                current = Path(match.path)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if current is not None:
+            folder = current
             break
-        root_prefix = comparable_root.rstrip(os.sep) + os.sep
-        if comparable_path.startswith(root_prefix):
-            safe_path = comparable_path
-            break
-    if safe_path is None:
-        raise HTTPException(403, "Import path must be under an allowed root (home directory or ENGRAPHIS_IMPORT_ROOTS)")
-    folder = Path(safe_path)
+    if folder is None:
+        raise HTTPException(404, f"Path not found: {req.path}") from None
+    canonical_path = os.path.normcase(os.path.realpath(str(folder)))
+    if not any(
+        canonical_path == root
+        or canonical_path.startswith(root.rstrip(os.sep) + os.sep)
+        for root in allowed_roots
+    ):
+        raise HTTPException(
+            403,
+            "Import path must be under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
 
-    ns = req.namespace
-    if not ns:
+    namespace = req.namespace
+    if namespace is None:
+        vault_store.ensure_default_vault()
         active = vault_store.get_active_vault()
-        ns = active["namespace"] if active else "default"
+        if active is None:
+            raise HTTPException(500, "No active vault is available")
+        namespace = active["namespace"]
+    if not vault_store.get_vault(namespace):
+        vault_store.create_vault(
+            namespace=namespace,
+            name=namespace,
+            memory_type=req.memory_type,
+        )
 
-    # Ensure vault exists
-    if not vault_store.get_vault(ns):
-        vault_store.create_vault(namespace=ns, name=ns, memory_type="semantic")
-
-    import fnmatch
-    files = []
-    for f in folder.rglob("*"):
-        if not f.is_file() or not fnmatch.fnmatch(f.name, req.file_pattern):
+    files: list[tuple[Path, Path]] = []
+    total_bytes = 0
+    # Security: traversal begins only from the canonical trusted folder and each
+    # yielded path is re-resolved and re-contained before use.
+    # codeql[py/path-injection]
+    for candidate in folder.rglob("*"):
+        # Resolve each candidate before trusting its location. This rejects
+        # symlink/reparse escapes and ensures the path used for stat/read is the
+        # same resolved path that was validated against the trusted folder.
+        if candidate.is_symlink() or not fnmatch.fnmatch(candidate.name, req.file_pattern):
             continue
         try:
-            # Read only the resolved, allowlisted file.  In particular, do not let a
-            # symlink inside an import root redirect this legacy route outside it.
-            real = f.resolve(strict=True)
-            rel = real.relative_to(folder)
+            resolved_candidate = candidate.resolve(strict=True)
         except (OSError, ValueError):
             continue
-        if any(part in {"node_modules", ".git"} for part in rel.parts[:-1]):
+        if not _path_within_root(resolved_candidate, folder):
             continue
-        files.append((real, rel))
+        if not resolved_candidate.is_file():
+            continue
+        try:
+            relative = resolved_candidate.relative_to(folder)
+            # Security: the size comes from a descriptor opened only after the
+            # candidate has been proven to stay under the trusted traversal root.
+            # codeql[py/path-injection]
+            size = _read_import_size(resolved_candidate)
+        except (OSError, ValueError):
+            continue
+        if not any(
+            _path_within_root(resolved_candidate, Path(root))
+            for root in allowed_roots
+        ):
+            continue
+        if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
+            continue
+        if size > MAX_IMPORT_RESOURCE_BYTES:
+            raise HTTPException(
+                413,
+                f"Import resource exceeds {MAX_IMPORT_RESOURCE_BYTES} bytes",
+            )
+        files.append((resolved_candidate, relative))
+        if len(files) > MAX_IMPORT_FILES:
+            raise HTTPException(
+                413,
+                f"Import contains more than {MAX_IMPORT_FILES} files",
+            )
+        total_bytes += size
+        if total_bytes > MAX_IMPORT_TOTAL_BYTES:
+            raise HTTPException(
+                413,
+                f"Import exceeds {MAX_IMPORT_TOTAL_BYTES} bytes",
+            )
 
     results = {"imported": 0, "errors": 0, "skipped": 0, "files": []}
-    for f, rel_path in files:
+    for file_path, relative_path in files:
+        relative = relative_path.as_posix()
         try:
-            content = f.read_text(encoding="utf-8", errors="replace")
+            # Security: file_path already passed the trusted-root containment
+            # checks, and the reader re-checks the opened inode.
+            # codeql[py/path-injection]
+            raw = _read_import_bytes(file_path, MAX_IMPORT_RESOURCE_BYTES)
+            content = raw.decode("utf-8", errors="replace")
             if not content.strip():
                 results["skipped"] += 1
                 continue
-            rel = rel_path.as_posix()
-            doc_id = rel.replace("/", "__").replace(".md", "").replace(".", "-")
-            # Extract title from first H1
-            import re
+            document_id = (
+                relative.replace("/", "__").replace(".md", "").replace(".", "-")
+            )
             title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else f.stem
-
+            title = (
+                title_match.group(1).strip()
+                if title_match
+                else _filename_stem(relative)
+            )
             ingest_engine.ingest_document(
-                namespace=ns, document_id=doc_id, title=title,
-                content=content, source_type="folder_import",
-                metadata={"original_path": rel, "filename": f.name},
+                namespace=namespace,
+                document_id=document_id,
+                title=title,
+                content=content,
+                source_type="folder_import",
+                metadata={"original_path": relative, "filename": file_path.name},
                 memory_type=req.memory_type,
                 trusted=False,
             )
             results["imported"] += 1
-            results["files"].append({"path": rel, "title": title, "status": "ok"})
+            results["files"].append(
+                {"path": relative, "title": title, "status": "ok"}
+            )
         except Exception as exc:
             logger.warning("Folder import file failed (%s)", type(exc).__name__)
             results["errors"] += 1
-            results["files"].append({"path": rel_path.as_posix(), "title": "", "status": "error"})
-
-    return _ok({"namespace": ns, "folder": req.path, **results})
+            results["files"].append(
+                {"path": relative, "title": "", "status": "error"}
+            )
+    return _ok({"namespace": namespace, "folder": req.path, **results})
 
 
 @router.post("/vaults/upload-folder")
-async def upload_folder(
+def upload_folder(
     files: list[UploadFile] = File(...),
-    namespace: str = Form(...),
-    memory_type: str = Form("semantic"),
+    namespace: Name = Form(...),
+    memory_type: Name = Form("semantic"),
 ):
     """POST /memory/vaults/upload-folder — upload multiple files as a folder (multipart).
     Use webkitdirectory in the frontend to send an entire folder."""
     if len(files) > MAX_IMPORT_FILES:
         raise HTTPException(status_code=413, detail={"error": f"too many files (max {MAX_IMPORT_FILES})"})
     if not vault_store.get_vault(namespace):
-        vault_store.create_vault(namespace=namespace, name=namespace)
+        vault_store.create_vault(
+            namespace=namespace, name=namespace, memory_type=memory_type
+        )
 
     results = {"imported": 0, "errors": 0, "files": []}
     total_bytes = 0
@@ -375,7 +558,7 @@ async def upload_folder(
                 continue
             import re
             title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else Path(f.filename).stem
+            title = title_match.group(1).strip() if title_match else _filename_stem(f.filename)
             doc_id = f.filename.replace("/", "__").replace("\\", "__").replace(".md", "").replace(".", "-")
 
             ingest_engine.ingest_document(
@@ -400,11 +583,13 @@ async def upload_folder(
 # ═══ SMART IMPORT (batch embedding + auto-categorize) ═══════════════════════
 
 @router.post("/vaults/upload-folder-smart")
-async def upload_folder_smart(
+def upload_folder_smart(
     files: list[UploadFile] = File(...),
-    namespace: str = Form(...),
-    memory_type: str = Form("semantic"),
-    auto_categorize_flag: str = Form("false"),
+    namespace: Name = Form(...),
+    memory_type: Name = Form("semantic"),
+    auto_categorize_flag: Name = Form("false"),
+    relative_paths: Optional[list[Name]] = Form(None),
+    ignore_patterns: Optional[list[Name]] = Form(None),
 ):
     """POST /memory/vaults/upload-folder-smart — batch import with fast embedding.
 
@@ -413,39 +598,94 @@ async def upload_folder_smart(
     import re as _re
     if len(files) > MAX_IMPORT_FILES:
         raise HTTPException(status_code=413, detail={"error": f"too many files (max {MAX_IMPORT_FILES})"})
+    if relative_paths is not None and len(relative_paths) != len(files):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "relative_paths must align with files"},
+        )
     if not vault_store.get_vault(namespace):
-        vault_store.create_vault(namespace=namespace, name=namespace)
+        vault_store.create_vault(
+            namespace=namespace, name=namespace, memory_type=memory_type
+        )
 
     do_auto = auto_categorize_flag.lower() in ("true", "1", "yes")
     results = {"imported": 0, "errors": 0, "skipped": 0, "categorized": 0, "split": 0, "files": []}
 
-    # Phase 1: Read all files and prepare content
+    # Phase 1: read a bounded set of resources and preserve caller-supplied paths.
+    import fnmatch
     file_data = []
     total_bytes = 0
-    for f in files:
+    for index, uploaded in enumerate(files):
+        relative_path = (
+            relative_paths[index]
+            if relative_paths is not None
+            else (uploaded.filename or f"file-{index}")
+        )
+        if ignore_patterns and any(
+            fnmatch.fnmatch(relative_path, pattern) for pattern in ignore_patterns
+        ):
+            results["skipped"] += 1
+            continue
         try:
-            raw = f.file.read(MAX_IMPORT_RESOURCE_BYTES + 1)
+            raw = uploaded.file.read(MAX_IMPORT_RESOURCE_BYTES + 1)
             if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
                 results["errors"] += 1
-                results["files"].append({"path": f.filename, "title": "", "status": "error", "error": "file too large"})
+                results["files"].append(
+                    {
+                        "path": relative_path,
+                        "title": "",
+                        "status": "error",
+                        "error": "file too large",
+                    }
+                )
                 continue
             total_bytes += len(raw)
             if total_bytes > MAX_IMPORT_TOTAL_BYTES:
-                raise HTTPException(status_code=413, detail={"error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"})
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "error": (
+                            f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
+                        )
+                    },
+                )
             content = raw.decode("utf-8", errors="replace")
             if not content.strip():
                 results["skipped"] += 1
                 continue
             title_match = _re.search(r"^#\s+(.+)$", content, _re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else Path(f.filename).stem
-            doc_id = f.filename.replace("/", "__").replace("\\", "__").replace(".md", "").replace(".", "-")
-            file_data.append({"filename": f.filename, "doc_id": doc_id, "title": title, "content": content})
+            title = (
+                title_match.group(1).strip()
+                if title_match
+                else _filename_stem(relative_path)
+            )
+            document_id = (
+                relative_path.replace("/", "__")
+                .replace("\\", "__")
+                .replace(".md", "")
+                .replace(".", "-")
+            )
+            file_data.append(
+                {
+                    "filename": relative_path,
+                    "doc_id": document_id,
+                    "title": title,
+                    "content": content,
+                }
+            )
         except HTTPException:
             raise
         except Exception as exc:
             results["errors"] += 1
             logger.warning("Smart import file read failed (%s)", type(exc).__name__)
-            results["files"].append({"path": f.filename, "title": "", "status": "error", "error": "processing failed"})
+            results["files"].append(
+                {
+                    "path": relative_path,
+                    "title": "",
+                    "status": "error",
+                    "error": "processing failed",
+                }
+            )
 
     # Phase 2: Batch embed all files at once (10x faster than individual)
     if file_data:
@@ -476,9 +716,17 @@ async def upload_folder_smart(
                         split_content = split.get("content", fd["content"])
                         split_type = split.get("memory_type", mem_type)
                         split_vec = embedder.embed(f"{split_title}\n\n{split_content}")
+                        import hashlib
+                        # Use a hash suffix of the full doc_id to prevent collisions
+                        # when two source files share the same first 160 characters.
+                        id_hash = hashlib.sha256(fd['doc_id'].encode('utf-8')).hexdigest()[:8]
+                        split_doc_id = (
+                            f"{fd['doc_id'][:150]}__{id_hash}__"
+                            f"{split_title[:20].replace(' ', '-')}"
+                        )
                         ingest_engine.ingest_document(
                             namespace=namespace,
-                            document_id=f"{fd['doc_id']}__{split_title[:20].replace(' ', '-')}",
+                            document_id=split_doc_id,
                             title=split_title,
                             content=split_content,
                             source_type="smart_import_split",
@@ -527,12 +775,12 @@ async def upload_folder_smart(
 # ═══ AUTO-CATEGORIZE EXISTING ══════════════════════════════════════════════
 
 class AutoCategorizeReq(BaseModel):
-    namespace: Optional[str] = None
-    document_ids: Optional[list[str]] = None
+    namespace: OptName = None
+    document_ids: Optional[NameList] = None
 
 
 @router.post("/auto-categorize")
-async def auto_categorize_memories(req: AutoCategorizeReq):
+def auto_categorize_memories(req: AutoCategorizeReq):
     """POST /memory/auto-categorize — use LLM to categorize existing memories."""
     if req.document_ids and req.namespace:
         docs = [mem_store.get_memory(req.namespace, d) for d in req.document_ids]
@@ -568,13 +816,13 @@ async def auto_categorize_memories(req: AutoCategorizeReq):
 # ═══ CONFLICT CHECK ═════════════════════════════════════════════════════════
 
 class ConflictCheckReq(BaseModel):
-    content: str
-    namespace: str
-    title: str = ""
+    content: Content
+    namespace: Name
+    title: Title = ""
 
 
 @router.post("/conflict-check")
-async def conflict_check(req: ConflictCheckReq):
+def conflict_check(req: ConflictCheckReq):
     """POST /memory/conflict-check — check if content conflicts with existing memories."""
     existing = mem_store.list_documents(namespace=req.namespace, limit=10)
     result = check_conflicts(req.content, req.namespace, existing)
@@ -659,7 +907,7 @@ def _duplicate_pairs(
     return duplicates, match_count
 
 
-def _duplicate_candidate_query(namespace: Optional[str]) -> tuple[str, list[Any]]:
+def _duplicate_candidate_query(namespace: OptName) -> tuple[str, list[Any]]:
     """Build the bounded duplicate-candidate query without SQLite temporary sorting.
 
     A namespaced scan is ordered by newest update through ``idx_mem_updated``. A global
@@ -681,8 +929,8 @@ def _duplicate_candidate_query(namespace: Optional[str]) -> tuple[str, list[Any]
 
 
 @router.get("/health/duplicates")
-async def find_duplicates(
-    namespace: Optional[str] = None,
+def find_duplicates(
+    namespace: OptName = None,
     threshold: float = Query(0.85, ge=-1.0, le=1.0),
 ):
     """Find a bounded set of strongest near-duplicates without blocking the event loop."""
@@ -700,8 +948,8 @@ async def find_duplicates(
         )
         for row in rows[:_DUPLICATE_CANDIDATE_LIMIT]
     ]
-    duplicates, match_count = await asyncio.to_thread(
-        _duplicate_pairs, candidates, threshold
+    duplicates, match_count = _duplicate_pairs(
+        candidates, threshold
     )
     return _ok({
         "duplicates": duplicates,
@@ -717,11 +965,14 @@ async def find_duplicates(
 
 
 @router.get("/health/stale")
-async def find_stale(namespace: Optional[str] = None, min_age_days: int = 30,
-                     max_retention: float = 0.1):
+def find_stale(
+    namespace: OptName = None,
+    min_age_days: int = Query(30, ge=0, le=365_000),
+    max_retention: float = Query(0.1, ge=0.0, le=1.0),
+):
     """GET /memory/health/stale — find memories with low retention and old age."""
-    all_mems = mem_store.list_documents(namespace=namespace, limit=10000)
     now = now_ts()
+    all_mems = mem_store.list_documents(namespace=namespace, limit=10000)
     stale = []
     for m in all_mems:
         age_days = (now - m.get("updated_at", now)) / 86400
@@ -742,7 +993,7 @@ async def find_stale(namespace: Optional[str] = None, min_age_days: int = 30,
 
 
 @router.get("/health/overview")
-async def health_overview(namespace: Optional[str] = None):
+def health_overview(namespace: OptName = None):
     """GET /memory/health/overview — aggregate health metrics."""
     all_mems = mem_store.list_documents(namespace=namespace, limit=10000)
     retentions = [retention_score(m) for m in all_mems]
@@ -767,30 +1018,30 @@ async def health_overview(namespace: Optional[str] = None):
 # ═══ BULK OPERATIONS ═══════════════════════════════════════════════════════
 
 class BulkDeleteReq(BaseModel):
-    namespace: str
-    document_ids: list[str]
+    namespace: Name
+    document_ids: NameList
 
 
 @router.post("/bulk/delete")
-async def bulk_delete(req: BulkDeleteReq):
+def bulk_delete(req: BulkDeleteReq):
     """POST /memory/bulk/delete — delete multiple memories."""
     count = mem_store.bulk_delete(req.namespace, req.document_ids)
     return _ok({"deleted": count})
 
 
 class BulkReembedReq(BaseModel):
-    namespace: str
-    document_ids: Optional[list[str]] = None
+    namespace: Name
+    document_ids: Optional[NameList] = None
 
 
 @router.post("/bulk/reembed")
-async def bulk_reembed(req: BulkReembedReq):
+def bulk_reembed(req: BulkReembedReq):
     """POST /memory/bulk/reembed — re-embed all (or selected) memories in a vault."""
     if req.document_ids:
         docs = [mem_store.get_memory(req.namespace, d) for d in req.document_ids]
         docs = [d for d in docs if d]
     else:
-        docs = mem_store.list_documents(namespace=req.namespace, limit=10000)
+        docs = mem_store.list_documents(namespace=req.namespace, limit=None)
 
     count = 0
     for doc in docs:
@@ -802,7 +1053,7 @@ async def bulk_reembed(req: BulkReembedReq):
 
 
 @router.post("/bulk/decay")
-async def force_decay(namespace: Optional[str] = None):
+def force_decay(namespace: OptName = None):
     """POST /memory/bulk/decay — force an Ebbinghaus decay pass."""
     from engraphis.config import settings
     touched = reweight.decay_pass(namespace)
@@ -812,13 +1063,13 @@ async def force_decay(namespace: Optional[str] = None):
 # ═══ CONTEXT PREVIEW ════════════════════════════════════════════════════════
 
 class ContextPreviewReq(BaseModel):
-    query: str
-    namespace: Optional[str] = None
-    max_chunks: int = 10
+    query: Content
+    namespace: OptName = None
+    max_chunks: int = Field(default=10, ge=0, le=100)
 
 
 @router.post("/context-preview")
-async def context_preview(req: ContextPreviewReq):
+def context_preview(req: ContextPreviewReq):
     """POST /memory/context-preview — preview exactly what the LLM will see for a query."""
     result = recall_engine.recall(
         namespace=req.namespace, prompt=req.query,
@@ -843,9 +1094,9 @@ async def context_preview(req: ContextPreviewReq):
 # ═══ EXPORT ════════════════════════════════════════════════════════════════
 
 @router.get("/vaults/{namespace}/export")
-async def export_vault(namespace: str):
+def export_vault(namespace: Name):
     """GET /memory/vaults/{namespace}/export — export all memories in a vault as JSON."""
-    docs = mem_store.list_documents(namespace=namespace, limit=10000)
+    docs = mem_store.list_documents(namespace=namespace, limit=None)
     export_data = {
         "namespace": namespace,
         "exported_at": now_ts(),

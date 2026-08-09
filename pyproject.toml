@@ -14,7 +14,12 @@ version = "1.5"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license-files = [
+    "LICENSE",
+    "NOTICE",
+    "deploy/force-graph-1.51.4.licenses.json",
+    "deploy/force-graph-1.51.4.yarn.lock",
+]
 requires-python = ">=3.9"
 authors = [{ name = "The Engraphis Authors" }]
 keywords = ["ai", "agents", "memory", "mcp", "rag", "vector-search", "llm", "retrieval"]

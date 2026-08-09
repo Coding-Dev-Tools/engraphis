@@ -37,7 +37,8 @@ def test_import_files_chunks_when_chunker_configured():
     out = svc.import_files(workspace="ws", files=[{"name": "doc.md", "content": DOC}])
     # still counts as ONE imported file...
     assert out["imported"] == 1
-    assert out["details"] == [] or True
+    assert out["details"] == []
+    assert out["errors"] == 0
     mems = _mems(svc, "ws")
     # ...but produced several chunk memories
     assert len(mems) >= 3
@@ -49,6 +50,32 @@ def test_import_files_chunks_when_chunker_configured():
     # the section headings survived as titles
     titles = {m.title for m in mems}
     assert {"Auth", "Storage", "Deploy"} & titles
+
+
+def test_import_preserves_oversized_fenced_code_across_memories():
+    payload = "".join(
+        f"value_{index:05d} = {index}\n"
+        for index in range(10_000)
+    )
+    document = f"```python\n{payload}```"
+    svc = MemoryService.create(":memory:", extractor="chunk")
+
+    out = svc.import_files(
+        workspace="ws",
+        files=[{"name": "large.py.md", "content": document}],
+    )
+    memories = sorted(
+        _mems(svc, "ws"),
+        key=lambda memory: memory.metadata["chunk"]["index"],
+    )
+
+    assert out["imported"] == 1
+    assert len(memories) > 1
+    recovered = "".join(
+        memory.content.split("\n", 1)[1].rsplit("\n```", 1)[0]
+        for memory in memories
+    )
+    assert recovered == payload
 
 
 def test_derive_facts_does_not_duplicate_chunk_imports():

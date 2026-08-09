@@ -14,6 +14,7 @@ personalization can be layered on top instead of replacing it.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional, Union
 
@@ -58,7 +59,7 @@ class UserModel:
         background job. Returns ``self`` for convenient chaining.
         """
         fb = _feedback(feedback)
-        signal = _clamp(float(fb.rating), -1.0, 1.0)
+        signal = _clamp(_float(fb.rating, 1.0), -1.0, 1.0)
         memories = list(selected_memories or [])
         if not query and not memories:
             return self
@@ -104,7 +105,7 @@ class UserModel:
         * ``score`` — adjusted score used for sorting
         """
         q_tokens = tokenize(query)
-        strength = _clamp(float(strength), 0.0, 1.0)
+        strength = _clamp(_float(strength, _DEFAULT_STRENGTH), 0.0, 1.0)
         out: list[dict[str, Any]] = []
         for idx, item in enumerate(base_results or []):
             row = _as_dict(item)
@@ -126,29 +127,58 @@ class UserModel:
     def from_dict(cls, data: Optional[dict[str, Any]]) -> "UserModel":
         data = data or {}
         return cls(
-            topics={str(k): float(v) for k, v in (data.get("topics") or {}).items()},
-            mtypes={str(k): float(v) for k, v in (data.get("mtypes") or {}).items()},
-            sources={str(k): float(v) for k, v in (data.get("sources") or {}).items()},
+            topics={
+                str(k): _clamp(_float(v, 0.0), -_MAX_WEIGHT, _MAX_WEIGHT)
+                for k, v in (data.get("topics") or {}).items()
+            },
+            mtypes={
+                str(k): _clamp(_float(v, 0.0), -_MAX_WEIGHT, _MAX_WEIGHT)
+                for k, v in (data.get("mtypes") or {}).items()
+            },
+            sources={
+                str(k): _clamp(_float(v, 0.0), -_MAX_WEIGHT, _MAX_WEIGHT)
+                for k, v in (data.get("sources") or {}).items()
+            },
             detail_level=_clamp(_float(data.get("detail_level"), 0.5), 0.0, 1.0),
-            interactions=max(0, int(data.get("interactions") or 0)),
+            interactions=max(0, _int(data.get("interactions"), 0)),
         )
 
-    def _preference_score(self, row: dict[str, Any], q_tokens: set[str]) -> tuple[float, dict]:
+    def _preference_score(
+        self, row: dict[str, Any], q_tokens: set[str]
+    ) -> tuple[float, dict]:
         mem_tokens = tokenize(_memory_text(row))
-        # Query tokens get a small boost so personalization favors preferred topics that
-        # are also relevant to the current task, not only globally popular topics.
-        token_pool = mem_tokens | (q_tokens & mem_tokens)
-        topic_hits = {t: self.topics[t] for t in token_pool if t in self.topics}
-        topic_score = _avg(topic_hits.values())
+        memory_topic_hits = {
+            token: self.topics[token]
+            for token in mem_tokens
+            if token in self.topics
+        }
+        query_topic_hits = {
+            token: memory_topic_hits[token]
+            for token in q_tokens
+            if token in memory_topic_hits
+        }
+        memory_topic_score = _avg(memory_topic_hits.values())
+        query_topic_score = _avg(query_topic_hits.values())
+        # For an explicit query, only learned topics that overlap both the query and
+        # candidate may adjust relevance. Queryless callers retain the global prior.
+        # This prevents an unrelated favorite topic from overwhelming retrieval.
+        topic_score = query_topic_score if q_tokens else memory_topic_score
         mtype = str(row.get("mtype") or "")
         source = _source(row)
         mtype_score = _norm(self.mtypes.get(mtype, 0.0)) if mtype else 0.0
         source_score = _norm(self.sources.get(source, 0.0)) if source else 0.0
         detail_score = self._detail_match(row)
-        combined = _clamp(0.62 * topic_score + 0.18 * mtype_score
-                          + 0.12 * source_score + 0.08 * detail_score, -1.0, 1.0)
+        combined = _clamp(
+            0.62 * topic_score
+            + 0.18 * mtype_score
+            + 0.12 * source_score
+            + 0.08 * detail_score,
+            -1.0,
+            1.0,
+        )
         return combined, {
-            "topic_hits": sorted(topic_hits)[:12],
+            "topic_hits": sorted(memory_topic_hits)[:12],
+            "query_topic_hits": sorted(query_topic_hits)[:12],
             "topic_score": round(topic_score, 6),
             "mtype_score": round(mtype_score, 6),
             "source_score": round(source_score, 6),
@@ -218,9 +248,10 @@ def _source(value: Any) -> str:
 
 def _float(value: Any, default: float) -> float:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 def _avg(values: Iterable[float]) -> float:
@@ -228,12 +259,19 @@ def _avg(values: Iterable[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
+
+def _int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 def _norm(value: float) -> float:
     return _clamp(float(value) / _MAX_WEIGHT, -1.0, 1.0)
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+    return max(lo, min(hi, value)) if math.isfinite(value) else 0.0
 
 
 def _lerp(current: float, target: float, alpha: float) -> float:

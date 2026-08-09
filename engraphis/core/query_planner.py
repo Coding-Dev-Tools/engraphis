@@ -18,9 +18,12 @@ from engraphis.core.interfaces import (
 )
 
 
-PLANNING_MODES = frozenset({"off", "auto"})
-MAX_PLANNED_QUERIES = 3
-MAX_PLANNED_PRIORITY = 1000
+PLANNING_MODES = {
+    "off": 1,      # No planning, single query only
+    "auto": 3,     # Bounded planning with up to 3 routes
+}
+MAX_PLANNED_QUERIES = 3  # Matches max(PLANNING_MODES.values())
+MAX_PLANNED_PRIORITY = 100  # upper bound on planned-query priority (recall.py clamps to this)
 
 _QUOTED_RE = re.compile(r'"([^"\r\n]{1,160})"|\'([^\'\r\n]{1,160})\'')
 _IDENTIFIER_RE = re.compile(
@@ -61,8 +64,10 @@ class DeterministicQueryPlanner:
         *,
         filter: Optional[SearchFilter] = None,
         timeout_s: Optional[float] = None,
+        mode: str = "auto",
     ) -> RetrievalPlan:
         del filter, timeout_s
+        max_routes = PLANNING_MODES.get(mode, MAX_PLANNED_QUERIES)
         text = " ".join(str(query or "").split())
         mtypes, type_reason = _intent_mtypes(text)
         # The original query remains broad. Type intent narrows only an additional
@@ -88,7 +93,7 @@ class DeterministicQueryPlanner:
             ))
             reasons.append("exact_term")
 
-        if _GRAPH_RE.search(text) and len(planned) < MAX_PLANNED_QUERIES:
+        if _GRAPH_RE.search(text) and len(planned) < max_routes:
             graph_text = _graph_query(text)
             if graph_text.casefold() != text.casefold():
                 planned.append(PlannedQuery(
@@ -99,7 +104,7 @@ class DeterministicQueryPlanner:
                 ))
                 reasons.append("relationship_intent")
 
-        if mtypes and len(planned) < MAX_PLANNED_QUERIES:
+        if mtypes and len(planned) < max_routes:
             suffix = {
                 "current_session_intent": "current session",
                 "procedural_intent": "procedure steps",
@@ -113,7 +118,7 @@ class DeterministicQueryPlanner:
             ))
 
         return RetrievalPlan(
-            queries=tuple(planned[:MAX_PLANNED_QUERIES]),
+            queries=tuple(planned[:max_routes]),
             reason_codes=tuple(reasons),
         )
 

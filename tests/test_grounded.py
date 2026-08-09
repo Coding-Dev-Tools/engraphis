@@ -70,6 +70,24 @@ def test_grounded_abstains_when_distractor_shares_only_a_topic_keyword():
     assert ans.support < GROUNDED_SUPPORT_FLOOR
 
 
+def test_grounded_abstains_when_two_term_claim_shares_only_one_word():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember(
+        "The owner is Alice.",
+        workspace_id=wid,
+        repo_id=rid,
+    )
+
+    ans = eng.grounded_recall(
+        "owner Bob", workspace_id=wid, repo_id=rid,
+    )
+
+    assert ans.abstained and not ans.grounded
+    assert ans.support < GROUNDED_SUPPORT_FLOOR
+
+
 def test_grounded_abstains_on_empty_store():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -102,6 +120,26 @@ def test_grounded_support_uses_a_declared_semantic_adapter():
     support_scores("package manager", ["package manager"], embedder)
 
     assert embedder.calls == 1
+
+
+def test_grounded_semantic_outage_falls_back_to_lexical_support_and_is_redacted(caplog):
+    class FailingSemanticAdapter(DeterministicEmbedder):
+        supports_semantic_search = True
+        embedding_mode = "semantic"
+
+        def embed(self, texts, **kwargs):
+            raise RuntimeError("grounding-provider-secret")
+
+    with caplog.at_level("WARNING", logger="engraphis.core.grounded"):
+        scores = support_scores(
+            "package manager",
+            ["pnpm is the package manager."],
+            FailingSemanticAdapter(),
+        )
+
+    assert scores[0] >= GROUNDED_SUPPORT_FLOOR
+    assert "RuntimeError" in caplog.text
+    assert "grounding-provider-secret" not in caplog.text
 
 
 def test_grounded_cites_only_supporting_sources():

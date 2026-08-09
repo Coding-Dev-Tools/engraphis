@@ -86,8 +86,8 @@ to an audit trail. Nothing here hard-deletes.
 - `engraphis_link(a, b, relation=…)`: connect memories a plain recall wouldn't associate, e.g. a
   bug report `fixed_by` the memory describing its fix. Use meaningful relations (`caused_by`,
   `fixed_by`, `related`).
-- `engraphis_record_event(kind, content, …)`: cheap episodic logging for raw happenings. Repeats
-  of the same event are your cue to promote it into a durable fact.
+- `engraphis_record_event(kind, content, …)`: append a raw occurrence to the event ledger. Event
+  rows are not memories: they are not recalled, deduplicated, reinforced, or consolidated.
 
 ## Anti-patterns
 
@@ -100,6 +100,9 @@ to an audit trail. Nothing here hard-deletes.
 - **Everything `semantic` + `importance=1`**: flattens the signal the engine relies on. Type and
   weight honestly.
 - **Re-asking the user**: if you're about to ask something, `engraphis_recall` first.
+- **Mixing the event ledger with memory types**: `engraphis_record_event` has no `mtype`,
+  `importance`, or dedupe contract. Use `engraphis_remember(mtype="episodic", …)` when an outcome
+  must enter recall or consolidation.
 
 ## Minimal good write
 
@@ -116,27 +119,27 @@ engraphis_remember(
 Scoped, typed, self-justifying, deduped by default. That is the whole discipline.
 
 
-## Recurring operational events: deterministic type rule
+## Recurring operational outcomes: choose ledger or memory
 
-Fleet/cron jobs kept flipping types on identical recurring events ("Orchestrator tick",
-"Pre-PR blocked-noop") because such events fit both "a happening → episodic" and "a right-now →
-working". The rule is now deterministic:
+First choose the required contract:
 
-**Routine scheduled-run outcomes (ticks, no-ops, health checks, watchdog passes) are ALWAYS
-episodic**: use `engraphis_record_event` with a *stable* `kind` string (e.g. `orchestrator-tick`,
-`pre-pr-blocked-noop`) and low importance (≤0.2). Dedup/reinforcement handles repeats.
+- Need an append-only record of **every raw occurrence** → `engraphis_record_event` with a stable
+  `kind`, such as `orchestrator-tick` or `pre-pr-blocked-noop`. Every call creates a separate event
+  row. The tool has no `mtype`, importance, or dedupe/reinforcement behavior.
+- Need the outcome to be recalled, deduplicated/reinforced, or consolidated → `engraphis_remember`
+  with `mtype="episodic"`, low importance (≤0.2), and normal dedupe. Consolidation scans these
+  episodic **memories**, not the append-only event ledger.
 
-- Never `working`: a run's outcome outlives the run. `working` is reserved for state meaningful
-  only inside the *current* session ("currently bisecting on branch fix/auth").
-- Never `semantic` at write time: a single occurrence is not a durable fact. Promoting a
-  recurring pattern into a `semantic` digest is the consolidation sweep's job
-  (`engraphis_consolidate`), not the writer's.
+Never write one occurrence as `semantic`: a single run is not a durable fact. A recurring pattern
+can become a semantic digest through `engraphis_consolidate`. Use `working` only for state that is
+meaningful until the current session ends ("currently bisecting on branch fix/auth").
 
-Decision test: apply **in order**, first match wins:
+For memory records, apply this decision test **in order**, first match wins:
 
 1. Steps to redo something? → `procedural`
 2. True regardless of when you look? → `semantic`
-3. Happened at a point in time (including every scheduled run)? → `episodic`
+3. Happened at a point in time (including a scheduled-run outcome)? → `episodic`
 4. Meaningful only until this session ends? → `working`
 
-Applied in order, identical recurring events land on `episodic` every time.
+The append-only event ledger is outside this type system. Choose it only when each raw occurrence,
+rather than future memory recall, is the required contract.

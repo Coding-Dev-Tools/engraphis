@@ -59,7 +59,7 @@ def build_payload() -> dict:
         session_id=session["session_id"],
         title="Where to build",
         importance=0.95,
-        source="demo-seed",
+        source="agent",
         kind="demo_fixture",
     )
 
@@ -70,8 +70,10 @@ def build_payload() -> dict:
         session_id=session["session_id"],
         title="Demo configuration",
         importance=0.80,
-        source="demo-seed",
+        source="agent",
         kind="demo_fixture",
+        subject_key="screen-demo-recorder",
+        claim_kind="port",
     )
     current_endpoint = svc.remember(
         (
@@ -83,8 +85,10 @@ def build_payload() -> dict:
         session_id=session["session_id"],
         title="Demo configuration",
         importance=0.90,
-        source="demo-seed",
+        source="agent",
         kind="demo_fixture",
+        subject_key="screen-demo-recorder",
+        claim_kind="port",
     )
     assert current_endpoint["op"] == "invalidate", current_endpoint
 

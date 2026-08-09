@@ -131,3 +131,29 @@ def test_auth_metadata_points_team_to_cloud(monkeypatch, tmp_path):
             "cloud_url": state["cloud_url"],
         }
         assert client.post("/api/auth/setup", json={}).status_code == 404
+
+
+
+def test_sdk_compat_demo_uses_current_api_and_recalls_its_write(
+        monkeypatch, tmp_path, capsys):
+    import httpx
+
+    from scripts import sdk_compat
+
+    with TestClient(
+        _app(monkeypatch, tmp_path), client=("127.0.0.1", 50000)
+    ) as dashboard_client:
+        class _ClientProxy:
+            def __enter__(self):
+                return dashboard_client
+
+            def __exit__(self, *_args):
+                return None
+
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _ClientProxy())
+        sdk_compat.demo()
+
+    output = capsys.readouterr().out
+    assert "Health: ok" in output
+    assert "Stored: mem_" in output
+    assert "Recall: The user prefers dark mode." in output

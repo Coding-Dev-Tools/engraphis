@@ -14,7 +14,6 @@ from typing import Optional, Union
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
 from engraphis.local_auth import bearer_ok
@@ -24,7 +23,11 @@ from engraphis.engines.embedder import warmup as _warmup_embedder
 from engraphis.logging_setup import configure_logging
 from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
-from engraphis.routes.vault import VAULT_UPLOAD_REQUEST_BYTES, router as vault_router
+from engraphis.routes.vault import (
+    SINGLE_UPLOAD_REQUEST_BYTES,
+    VAULT_UPLOAD_REQUEST_BYTES,
+    router as vault_router,
+)
 from engraphis.stores import get_conn, init_db
 from engraphis.core.interfaces import SearchFilter
 
@@ -32,14 +35,29 @@ logger = logging.getLogger("engraphis")
 
 
 _background_task: Optional[asyncio.Task] = None
-_STATIC_DIR = Path(__file__).resolve().parent / "static"
-# Readiness cache: only a *successful* embedder init is cached, so a transient
-# failure is re-checked on the next probe instead of wedging the pod NotReady.
+# Readiness records startup state and re-checks the same legacy warmup on every probe,
+# so a transient failure can recover without mixing in the v2 fallback backend.
 _embedder_ok: bool = False
 _UPLOAD_LIMIT_PATHS = frozenset({
     "/api/workspaces/import-files",
     "/memory/vaults/upload-folder",
     "/memory/vaults/upload-folder-smart",
+    "/memory/documents/upload",
+})
+_JSON_REQUEST_BYTES = 8 * 1024 * 1024
+_REQUIRED_LEGACY_TABLES = frozenset({
+    "memories",
+    "chunks",
+    "entities",
+    "edges",
+    "graph_documents",
+    "document_entities",
+    "document_edges",
+    "events",
+    "interactions",
+    "thoughts",
+    "jobs",
+    "vaults",
 })
 
 
@@ -100,12 +118,10 @@ class _RequestBodyTooLarge(Exception):
 
 
 class _VaultUploadLimitMiddleware:
-    """Reject oversized file imports before multipart parsing/spooling.
+    """Reject oversized multipart and JSON requests before body binding.
 
-    ``Content-Length`` provides an immediate fast-fail. The receive wrapper is still
-    required because clients can omit or lie about that header, including HTTP/1.1
-    chunked uploads. A fronting proxy should configure an equal or lower request-body
-    ceiling; this in-process guard remains the last line of defense for direct access.
+    The legacy name is retained for import compatibility. Each upload path selects its
+    own finite transport limit; other JSON write requests use a separate envelope cap.
     """
 
     def __init__(self, app, max_bytes: int):
@@ -113,11 +129,29 @@ class _VaultUploadLimitMiddleware:
         self.max_bytes = max_bytes
 
     async def __call__(self, scope, receive, send):
-        if (
-            scope["type"] != "http"
-            or scope["method"] != "POST"
-            or scope["path"].rstrip("/") not in _UPLOAD_LIMIT_PATHS
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"].rstrip("/")
+        headers = scope.get("headers", [])
+        content_type = next(
+            (
+                value.decode("latin-1").split(";", 1)[0].strip().lower()
+                for name, value in headers
+                if name.lower() == b"content-type"
+            ),
+            "",
+        )
+        if path in _UPLOAD_LIMIT_PATHS:
+            max_bytes = self.max_bytes
+            if path == "/memory/documents/upload":
+                max_bytes = min(max_bytes, SINGLE_UPLOAD_REQUEST_BYTES)
+        elif (
+            scope["method"] in {"POST", "PUT", "PATCH", "DELETE"}
+            and (content_type == "application/json" or content_type.endswith("+json"))
         ):
+            max_bytes = min(self.max_bytes, _JSON_REQUEST_BYTES)
+        else:
             await self.app(scope, receive, send)
             return
 
@@ -142,8 +176,8 @@ class _VaultUploadLimitMiddleware:
                     status_code=400,
                 )(scope, receive, send)
                 return
-            if declared_length > self.max_bytes:
-                await self._too_large(scope, receive, send)
+            if declared_length > max_bytes:
+                await self._too_large(scope, receive, send, max_bytes)
                 return
 
         received = 0
@@ -154,7 +188,7 @@ class _VaultUploadLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     limit_exceeded = True
                     raise _RequestBodyTooLarge
             return message
@@ -172,33 +206,34 @@ class _VaultUploadLimitMiddleware:
         except _RequestBodyTooLarge:
             pass
         if limit_exceeded:
-            await self._too_large(scope, receive, send)
+            await self._too_large(scope, receive, send, max_bytes)
 
-    async def _too_large(self, scope, receive, send):
+    async def _too_large(self, scope, receive, send, max_bytes):
         await JSONResponse(
             {
                 "error": "request body too large",
-                "max_bytes": self.max_bytes,
+                "max_bytes": max_bytes,
             },
             status_code=413,
         )(scope, receive, send)
 
 
+def _legacy_schema_ready() -> bool:
+    """Return whether the configured database contains the complete v1 schema."""
+    rows = get_conn().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    present = {row["name"] for row in rows}
+    return _REQUIRED_LEGACY_TABLES.issubset(present)
+
+
 def _embedder_ready() -> bool:
+    """Probe the exact legacy embedder used by v1 recall."""
     global _embedder_ok
     try:
-        from engraphis.backends.embedder_st import get_embedder
-        emb = get_embedder(
-            settings.embed_model or None,
-            settings.embed_dim or 384,
-            revision=settings.embed_revision or None,
-            require_immutable_models=settings.require_immutable_models,
-        )
-        _embedder_ok = emb is not None and int(emb.dim) > 0
-    except Exception as exc:  # pragma: no cover - defensive; get_embedder falls back itself
-        # Provider/backend exceptions can contain credentialed URLs or local paths.
-        # Readiness logs need the failure class, not the exception payload.
-        logger.warning("Readiness: embedder init failed (%s)", type(exc).__name__)
+        _embedder_ok = bool(_warmup_embedder())
+    except Exception as exc:
+        logger.warning("Readiness: legacy embedder failed (%s)", type(exc).__name__)
         _embedder_ok = False
     return _embedder_ok
 
@@ -207,17 +242,14 @@ def _embedder_ready() -> bool:
 async def _lifespan(app: FastAPI):
     """Startup/shutdown for the app (replaces the deprecated @app.on_event hooks).
 
-    Startup: initialize the DB (deferred to here so the CLI can set ENGRAPHIS_DB_PATH
-    first), then start the background consolidation loop unless it's disabled. Shutdown:
-    cancel and await the loop."""
-    global _background_task
+    Startup: initialize the DB in a worker (deferred so the CLI can set
+    ENGRAPHIS_DB_PATH first), then start the background consolidation loop unless
+    it's disabled. Shutdown: cancel and await the loop."""
+    global _background_task, _embedder_ok
     _background_task = None
     background_task: Optional[asyncio.Task] = None
-    init_db()
-    # Warm the embedding model eagerly so the first recall call isn't paid
-    # under request pressure (a cold load + concurrent call used to wedge
-    # the forked PM2 worker and time out every recall).
-    await asyncio.get_running_loop().run_in_executor(None, _warmup_embedder)
+    await asyncio.to_thread(init_db)
+    _embedder_ok = await asyncio.to_thread(_warmup_embedder)
     if settings.loop_interval > 0:
         background_task = asyncio.create_task(
             _consciousness_loop(
@@ -397,30 +429,31 @@ def _build_legacy_reference_app() -> FastAPI:
 
     @app.get("/api/ready")
     async def api_ready():
-        """Readiness: DB answers a trivial SELECT and the embedder backend
+        """Readiness: the complete legacy schema exists and the exact v1 embedder
         initializes. 503 until both hold, so orchestrators hold traffic."""
         checks = {"db": False, "embedder": False}
         try:
-            get_conn().execute("SELECT 1").fetchone()
-            checks["db"] = True
+            checks["db"] = await asyncio.to_thread(_legacy_schema_ready)
         except Exception as exc:
             logger.warning("Readiness: db check failed (%s)", type(exc).__name__)
-        checks["embedder"] = _embedder_ready()
+        checks["embedder"] = await asyncio.to_thread(_embedder_ready)
         ready = all(checks.values())
         return JSONResponse({"ready": ready, "checks": checks, "version": __version__},
                             status_code=200 if ready else 503)
 
     @app.get("/", response_class=HTMLResponse)
-    async def dashboard():
-        """Serve the visual dashboard."""
-        index_path = _STATIC_DIR / "index.html"
-        if index_path.exists():
-            return HTMLResponse(index_path.read_text(encoding="utf-8"))
-        return HTMLResponse("<h1>Dashboard not found</h1><p>Static files missing at: "
-                            f"{_STATIC_DIR}</p>", status_code=404)
+    async def reference_home():
+        """Serve an explicit API-only compatibility notice, never the v2 dashboard."""
+        return HTMLResponse(
+            """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Engraphis v1 reference</title></head>
+<body><main><h1>Engraphis v1 reference API</h1>
+<p>This compatibility server is API-only and uses an isolated legacy database.</p>
+<p>Use <code>engraphis-dashboard</code> or <code>engraphis-server</code> for the
+current v2 dashboard and service.</p></main></body></html>"""
+        )
 
-    if _STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     return app
 
@@ -442,10 +475,11 @@ async def _consciousness_loop(*, enable_consolidation: bool = True) -> None:
         try:
             await asyncio.sleep(settings.loop_interval)
             _ticks += 1
-            touched = reweight.decay_pass(namespace=None)
+            touched = await asyncio.to_thread(reweight.decay_pass, namespace=None)
             if touched:
                 logger.info("Decay pass: %d memories reweighted", touched)
-            result = thoughts_engine.synthesize_thoughts(
+            result = await asyncio.to_thread(
+                thoughts_engine.synthesize_thoughts,
                 namespace=None,
                 max_chunks=settings.loop_top_k,
                 persist=True,

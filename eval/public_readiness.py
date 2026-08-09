@@ -75,6 +75,13 @@ _FORBIDDEN_CONTENT_FIELDS = frozenset({
     "response_raw",
     "retrieved_context",
 })
+_FORBIDDEN_CONTENT_FINGERPRINT_FIELDS = frozenset({
+    "query_sha256",
+    "answer_or_response_sha256",
+    "context_or_prompt_sha256",
+    "question_sha256",
+    "detail_sha256",
+})
 _SECRET_FIELD_RE = re.compile(
     r"(?:^|[-_])(?:api[-_]?key|access[-_]?token|authorization|bearer|credential|"
     r"password|passwd|secret|private[-_]?key)(?:[-_]|$)",
@@ -95,21 +102,14 @@ def _nonnegative_integer(value: Any) -> bool:
 
 
 def _artifact_scope(artifact: Mapping[str, Any]) -> Any:
-    """Read the explicit measurement boundary from supported public envelopes."""
-    if "measurement_scope" in artifact:
-        return artifact["measurement_scope"]
+    """Read the single authoritative measurement boundary."""
     protocol = artifact.get("protocol")
-    if isinstance(protocol, Mapping):
-        config = protocol.get("config")
-        if isinstance(config, Mapping):
-            if "measurement_scope" in config:
-                return config["measurement_scope"]
-            if "claim_boundary" in config:
-                return config["claim_boundary"]
-    metrics = artifact.get("metrics")
-    if isinstance(metrics, Mapping):
-        return metrics.get("measurement_scope") or metrics.get("claim_boundary")
-    return None
+    if not isinstance(protocol, Mapping):
+        return None
+    config = protocol.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    return config.get("measurement_scope")
 
 
 def _artifact_provenance(artifact: Mapping[str, Any]) -> dict[str, Any]:
@@ -145,6 +145,10 @@ def _unsafe_public_fields(value: Any, *, path: str = "artifact") -> list[str]:
             lowered = label.casefold()
             if lowered in _FORBIDDEN_CONTENT_FIELDS:
                 errors.append(f"{field_path} must not contain raw benchmark content")
+            if lowered in _FORBIDDEN_CONTENT_FINGERPRINT_FIELDS:
+                errors.append(
+                    f"{field_path} must not contain a content-derived fingerprint"
+                )
             if _SECRET_FIELD_RE.search(lowered):
                 errors.append(f"{field_path} must not contain credential material")
             errors.extend(_unsafe_public_fields(item, path=field_path))
@@ -193,11 +197,20 @@ def validate_artifact(artifact: Any) -> list[str]:
     if not isinstance(system, Mapping):
         errors.append("artifact.system must be an object")
     else:
-        if not _nonempty_string(system.get("git_commit")):
-            errors.append("artifact.system.git_commit must be a non-empty string")
+        if not (
+            isinstance(system.get("git_commit"), str)
+            and _IMMUTABLE_REVISION_RE.fullmatch(system["git_commit"])
+        ):
+            errors.append(
+                "artifact.system.git_commit must be an immutable lowercase 40-character commit"
+            )
         declared_config_sha256 = system.get("config_sha256")
         if not _is_sha256(declared_config_sha256):
             errors.append("artifact.system.config_sha256 must be a lowercase SHA-256 digest")
+        if system.get("git_dirty") is not False:
+            errors.append("artifact.system.git_dirty must be false")
+        if system.get("dirty_state_sha256") != hashlib.sha256(b"").hexdigest():
+            errors.append("artifact.system.dirty_state_sha256 must attest a clean worktree")
 
     environment = artifact.get("environment")
     if not isinstance(environment, Mapping):
@@ -246,6 +259,43 @@ def validate_artifact(artifact: Any) -> list[str]:
         errors.append(
             "artifact measurement scope must be one of: " + ", ".join(sorted(_SCOPES))
         )
+    if (
+        scope == "end_to_end"
+        and isinstance(suite, Mapping)
+        and suite.get("name") == "LongMemEval-V2"
+    ):
+        config_value = protocol.get("config") if isinstance(protocol, Mapping) else None
+        config = config_value if isinstance(config_value, Mapping) else {}
+        execution = config.get("execution_binding")
+        matrix = config.get("matrix_binding")
+        n_total = protocol.get("n_total") if isinstance(protocol, Mapping) else None
+        if (
+            not isinstance(execution, Mapping)
+            or execution.get("verified") is not True
+            or execution.get("status") != "complete"
+            or execution.get("clean_checkout") is not True
+            or not _is_sha256(execution.get("manifest_sha256"))
+            or execution.get("upstream_revision") != config.get("upstream_revision")
+        ):
+            errors.append(
+                "LongMemEval-V2 end-to-end evidence requires a verified clean execution binding"
+            )
+        elif (
+            execution.get("source_questions") != n_total
+            or execution.get("output_rows") != n_total
+        ):
+            errors.append(
+                "LongMemEval-V2 execution binding must cover every public record"
+            )
+        if (
+            not isinstance(matrix, Mapping)
+            or matrix.get("verified") is not True
+            or not _is_sha256(matrix.get("manifest_sha256"))
+            or not _is_sha256(matrix.get("config_sha256"))
+        ):
+            errors.append(
+                "LongMemEval-V2 end-to-end evidence requires a verified matrix binding"
+            )
 
     records = artifact.get("records")
     if not isinstance(records, list):
@@ -264,8 +314,18 @@ def validate_artifact(artifact: Any) -> list[str]:
             errors.append("artifact.protocol.n_scored must not exceed artifact.protocol.n_total")
 
     privacy = artifact.get("privacy")
-    if not isinstance(privacy, Mapping) or privacy.get("raw_query_policy") != "redacted_sha256":
-        errors.append("artifact.privacy.raw_query_policy must be redacted_sha256")
+    required_privacy = {
+        "raw_query_policy": "omitted",
+        "raw_answer_policy": "omitted",
+        "raw_context_policy": "omitted",
+        "content_fingerprint_policy": "omitted",
+    }
+    if not isinstance(privacy, Mapping) or any(
+        privacy.get(key) != expected for key, expected in required_privacy.items()
+    ):
+        errors.append(
+            "artifact.privacy must omit raw query, answer, context, and content fingerprints"
+        )
     errors.extend(_unsafe_public_fields(artifact))
     return errors
 
@@ -418,7 +478,7 @@ def validate_manifest(manifest: Any) -> list[str]:
         if (
             _nonempty_string(private_path)
             and _nonempty_string(public_path)
-            and private_path.strip() == public_path.strip()
+            and str(private_path).strip() == str(public_path).strip()
         ):
             errors.append("manifest.artifacts.private and public paths must differ")
 

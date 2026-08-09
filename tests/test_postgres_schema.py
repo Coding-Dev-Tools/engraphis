@@ -258,10 +258,18 @@ def test_postgres_introspection_is_filtered_bounded_and_cross_schema_safe(monkey
     assert dsn not in json.dumps(snapshot.metadata)
     assert snapshot.metadata["source_digest"]
     ids = {entity["id"] for entity in snapshot.entities}
-    assert "constraint:public.users.shared_name" in ids
-    assert "constraint:public.orders.shared_name" in ids
+    assert postgres_schema._catalog_id(
+        "constraint", "public", "users", "shared_name",
+    ) in ids
+    assert postgres_schema._catalog_id(
+        "constraint", "public", "orders", "shared_name",
+    ) in ids
     assert {
-        ("table:public.orders", "table:auth.accounts", "references")
+        (
+            postgres_schema._catalog_id("table", "public", "orders"),
+            postgres_schema._catalog_id("table", "auth", "accounts"),
+            "references",
+        )
     } <= {
         (relation["source"], relation["target"], relation["relation"])
         for relation in snapshot.relations
@@ -290,6 +298,21 @@ def test_postgres_source_digest_excludes_credentials_and_connection_options():
         "host=db.example dbname=appdb user=alice password=first-password"
     ) == postgres_schema._source_digest(
         "host=db.example dbname=appdb user=bob password=second-password"
+    )
+    assert postgres_schema._source_digest(
+        "host=db.example dbname=appdb user=alice password=first-password"
+    ) != postgres_schema._source_digest(
+        "host=other.example dbname=appdb user=alice password=first-password"
+    )
+    assert postgres_schema._source_digest(
+        "host=db.example dbname=appdb user=alice password=first-password"
+    ) != postgres_schema._source_digest(
+        "host=db.example dbname=other user=alice password=first-password"
+    )
+    assert postgres_schema._source_digest(
+        "host=db.example port=5432 dbname=appdb user=alice password=first-password"
+    ) != postgres_schema._source_digest(
+        "host=db.example port=5433 dbname=appdb user=alice password=first-password"
     )
 
 
@@ -361,3 +384,254 @@ def test_large_postgres_snapshot_keeps_every_chunk_distinct(monkeypatch):
 
     assert len(result["memory_ids"]) > 1
     assert len(set(result["memory_ids"])) == len(result["memory_ids"])
+
+
+
+def test_dotted_postgres_identifiers_stay_distinct_through_service_ingestion(monkeypatch):
+    connection = _Connection()
+
+    def execute(query, params=()):
+        normalized = " ".join(query.split())
+        connection.cursor_obj.calls.append((normalized, tuple(params)))
+        if "current_database()" in normalized:
+            connection.cursor_obj.result = [("appdb",)]
+        elif "information_schema.tables" in normalized:
+            connection.cursor_obj.result = [
+                ("a", "b.c", "BASE TABLE"),
+                ("a.b", "c", "BASE TABLE"),
+            ]
+        elif "information_schema.columns" in normalized:
+            connection.cursor_obj.result = [
+                ("a", "b.c", "id", 1, "integer", "NO", None),
+                ("a.b", "c", "id", 1, "integer", "NO", None),
+            ]
+        else:
+            connection.cursor_obj.result = [
+                ("PRIMARY KEY", "a", "b.c", "id",
+                 "a", "b.c", "id", "pk.shared"),
+                ("PRIMARY KEY", "a.b", "c", "id",
+                 "a.b", "c", "id", "pk.shared"),
+            ]
+
+    connection.cursor_obj.execute = execute
+    monkeypatch.setattr(postgres_schema, "_connect", lambda _dsn: connection)
+    snapshot = postgres_schema.PostgresSchemaIntrospector().inspect(
+        "postgresql://db.example/appdb",
+        schemas=["a", "a.b"],
+    )
+
+    assert len({entity["id"] for entity in snapshot.entities}) == len(snapshot.entities)
+    graph_entities = {
+        kind: [entity for entity in snapshot.entities if entity["kind"] == kind]
+        for kind in ("table", "column", "constraint")
+    }
+    for entities in graph_entities.values():
+        assert len(entities) == 2
+        assert len({entity["name"] for entity in entities}) == 2
+
+    class _Introspector:
+        def inspect(self, _dsn, *, schemas=None):
+            return snapshot
+
+    monkeypatch.setattr(
+        postgres_schema,
+        "get_postgres_introspector",
+        lambda: _Introspector(),
+    )
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    result = service.import_postgres_schema(
+        "postgresql://db.example/appdb",
+        workspace="acme",
+        schemas=["a", "a.b"],
+    )
+    stored_rows = service.store.conn.execute(
+        "SELECT id, name, etype FROM entities"
+    ).fetchall()
+    for kind, entities in graph_entities.items():
+        assert {
+            row["name"] for row in stored_rows if row["etype"] == kind
+        } == {
+            entity["name"] for entity in entities
+        }
+    assert len(stored_rows) == len(snapshot.entities)
+    actual_ids = {
+        entity["id"]: next(
+            row["id"]
+            for row in stored_rows
+            if row["name"] == entity["name"] and row["etype"] == entity["kind"]
+        )
+        for entity in snapshot.entities
+    }
+    stored_edges = {
+        (row["src"], row["dst"], row["relation"])
+        for row in service.store.conn.execute(
+            "SELECT src, dst, relation FROM edges"
+        ).fetchall()
+    }
+    assert {
+        (
+            actual_ids[relation["source"]],
+            actual_ids[relation["target"]],
+            relation["relation"],
+        )
+        for relation in snapshot.relations
+    } <= stored_edges
+    assert result["relations"] == len(snapshot.relations)
+
+
+def test_postgres_inspection_runs_before_the_local_write_transaction(monkeypatch):
+    snapshot = SchemaSnapshot(
+        title="PostgreSQL schema: lock-safe",
+        text="# PostgreSQL schema: lock-safe",
+        metadata={"database": "lock-safe", "tables": 0, "source_digest": "digest"},
+    )
+    service = MemoryService.create(":memory:", graph_extractor="none")
+
+    class _Introspector:
+        def inspect(self, _dsn, *, schemas=None):
+            assert not service.store.conn.transaction_owned_by_current_thread()
+            return snapshot
+
+    monkeypatch.setattr(
+        postgres_schema,
+        "get_postgres_introspector",
+        lambda: _Introspector(),
+    )
+    service.import_postgres_schema(
+        "postgresql://db.example/lock-safe",
+        workspace="acme",
+    )
+
+
+def _write_state(service):
+    tables = (
+        "memories",
+        "mem_vectors",
+        "entities",
+        "edges",
+        "audit",
+        "operation_receipts",
+    )
+    return {
+        table: service.store.conn.execute(
+            f"SELECT COUNT(*) AS count FROM {table}"
+        ).fetchone()["count"]
+        for table in tables
+    }
+
+
+def test_postgres_import_rolls_back_earlier_chunks_when_a_later_write_fails(
+    monkeypatch,
+):
+    snapshot = SchemaSnapshot(
+        title="PostgreSQL schema: atomic",
+        text=" ".join(f"distinct_{index}" for index in range(20_000)),
+        metadata={"database": "atomic", "tables": 2, "source_digest": "digest"},
+    )
+
+    class _Introspector:
+        def inspect(self, _dsn, *, schemas=None):
+            return snapshot
+
+    monkeypatch.setattr(
+        postgres_schema,
+        "get_postgres_introspector",
+        lambda: _Introspector(),
+    )
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.store.get_or_create_workspace("acme")
+    before = _write_state(service)
+    original_remember = service.remember
+    calls = 0
+
+    def fail_second_chunk(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected later-chunk failure")
+        return original_remember(*args, **kwargs)
+
+    monkeypatch.setattr(service, "remember", fail_second_chunk)
+    with pytest.raises(RuntimeError, match="later-chunk failure"):
+        service.import_postgres_schema(
+            "postgresql://db.example/atomic",
+            workspace="acme",
+        )
+
+    assert calls == 2
+    assert _write_state(service) == before
+
+
+@pytest.mark.parametrize("failure_site", ["entity", "edge"])
+def test_postgres_import_rolls_back_all_local_writes_when_graph_projection_fails(
+    monkeypatch,
+    failure_site,
+):
+    snapshot = SchemaSnapshot(
+        title="PostgreSQL schema: atomic",
+        text="# PostgreSQL schema: atomic",
+        entities=[
+            {"id": "database:atomic", "name": "atomic", "kind": "database"},
+            {"id": "table:atomic", "name": '"public"."items"', "kind": "table"},
+            {"id": "column:atomic", "name": '"public"."items"."id"', "kind": "column"},
+        ],
+        relations=[
+            {
+                "source": "database:atomic",
+                "target": "table:atomic",
+                "relation": "contains",
+            },
+            {
+                "source": "table:atomic",
+                "target": "column:atomic",
+                "relation": "contains",
+            },
+        ],
+        metadata={"database": "atomic", "tables": 1, "source_digest": "digest"},
+    )
+
+    class _Introspector:
+        def inspect(self, _dsn, *, schemas=None):
+            return snapshot
+
+    monkeypatch.setattr(
+        postgres_schema,
+        "get_postgres_introspector",
+        lambda: _Introspector(),
+    )
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.store.get_or_create_workspace("acme")
+    before = _write_state(service)
+
+    if failure_site == "entity":
+        original_upsert = service.store.upsert_entity
+        entity_calls = 0
+
+        def reject_second_entity(*args, **kwargs):
+            nonlocal entity_calls
+            entity_calls += 1
+            if entity_calls == 2:
+                raise RuntimeError("injected entity failure")
+            return original_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(service.store, "upsert_entity", reject_second_entity)
+    else:
+        original_upsert = service.store.upsert_edge
+        edge_calls = 0
+
+        def reject_second_edge(*args, **kwargs):
+            nonlocal edge_calls
+            edge_calls += 1
+            if edge_calls == 2:
+                raise RuntimeError("injected edge failure")
+            return original_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(service.store, "upsert_edge", reject_second_edge)
+
+    with pytest.raises(RuntimeError, match=f"{failure_site} failure"):
+        service.import_postgres_schema(
+            "postgresql://db.example/atomic",
+            workspace="acme",
+        )
+
+    assert _write_state(service) == before

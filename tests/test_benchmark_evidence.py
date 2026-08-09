@@ -73,7 +73,7 @@ class CharacterTokenizer:
         return list(text)
 
 
-def test_public_record_redaction_uses_an_allowlist_for_raw_payload_aliases():
+def test_public_record_redaction_omits_raw_payloads_and_content_fingerprints():
     record = redact_public_record({
         "question_id": "q1",
         "query": "private query",
@@ -88,20 +88,13 @@ def test_public_record_redaction_uses_an_allowlist_for_raw_payload_aliases():
         "tool_calls": [{"arguments": "private tool input"}],
     })
 
-    for field in (
-        "query", "answer_variants", "model_output", "context", "retrieved_context",
-    ):
-        assert field not in record
-    assert record["question_id"] == "q1"
-    assert len(record["query_sha256"]) == 64
-    assert len(record["answer_or_response_sha256"]) == 64
-    assert len(record["context_or_prompt_sha256"]) == 64
+    assert record == {"question_id": "q1"}
 
 
-def test_readme_distinguishes_every_current_token_context_measurement(
+def test_readme_distinguishes_every_registered_token_context_measurement(
     offline_release_evidence,
 ):
-    """Public token-efficiency copy must preserve each metric's counting boundary."""
+    """Public token-efficiency copy preserves each registered metric boundary."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     chunking = offline_release_evidence["chunking"]
     whole = chunking["reports"]["whole"]
@@ -113,16 +106,8 @@ def test_readme_distinguishes_every_current_token_context_measurement(
 
     for evidence in (
         "## Measured token and context savings",
-        "98.21 percent less long-history context",
-        f"{chunking['context_reduction_pct']:.1f}% lower",
-        "73.9 percent fewer tokens in the smallest useful memory",
-        f"{100 * context['serialized_payload_savings_ratio']:.2f} percent smaller "
-        "recall payload proxy",
-        "47.8 percent less repeated-memory context after consolidation",
         "<summary>See benchmark details and reproduce the results</summary>",
         "### Measurement details and reproducibility",
-        "49,915,394** tokens → Engraphis: **891,857** tokens",
-        "98.2133% lower",
         f"{whole['mean_context_tokens']:.1f}** tokens → structure-aware chunks: "
         f"**{chunked['mean_context_tokens']:.1f}** tokens",
         f"{chunking['context_reduction_pct']:.1f}% lower",
@@ -134,48 +119,68 @@ def test_readme_distinguishes_every_current_token_context_measurement(
         f"{context['saved_serialized_payload_tokens']:,} proxy tokens avoided",
         f"{100 * context['serialized_payload_savings_ratio']:.2f}% lower",
         f"{payload_samples} payload samples; {timed_recalls} timed recalls",
-        "230** tokens → one digest: **120** tokens",
-        "47.8% lower",
-        "1,883** total agent-facing tokens",
-        "59 more tokens",
-        "3.1% higher",
-        "demonstrates bypass behavior, not token savings",
         f"1,500** tokens; observed mean: **{context['mean_tokens']:.2f}**; "
         f"observed maximum: **{context['max_tokens']}**",
         "does **not** serialize the MCP envelope",
         "not an MCP transport response",
         "must not be added together",
         "not a storage-reduction claim",
+        "offline-fixtures-v1.json",
+        "offline-chunking",
+        "offline-performance",
+        "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2",
         "There is no universal memory-count",
         "python -m eval.vector_scale",
-        "vector_backend=\"sqlite-vec\"",
+        'vector_backend="sqlite-vec"',
     ):
         assert evidence in readme
+
+    for unsupported in (
+        "49,915,394",
+        "891,857",
+        "98.2133%",
+        "Repeated-memory consolidation fixture",
+        "1,883** total agent-facing tokens",
+        "3.1% higher",
+    ):
+        assert unsupported not in readme
 
     assert payload_samples == performance["corpus"]["questions"]
     assert timed_recalls == payload_samples * performance["run"]["iterations"]
 
 
-def test_readme_keeps_external_evidence_claims_adjacent_to_their_boundary():
-    """A headline external diagnostic must carry its evidence boundary nearby."""
+def test_public_docs_withhold_unregistered_external_numbers():
+    """External diagnostics stay qualitative until a public artifact is registered."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
     assert "<summary>See benchmark details and reproduce the results</summary>" in readme
-    assert "unpinned, noncanonical retrieval diagnostic" in readme.lower()
-    assert "not official\nLoCoMo QA" in readme
-    assert "not reproduced by the\nsmall offline fixtures below" in readme
+    assert "model-dependent, consolidation, productivity, and latency results remain unpublished" in readme
+    assert "absence\nfrom this registry means no public number is claimed" in benchmarks
+    assert "withholds their case counts, retrieval scores,\ntoken coverage, and throughput" in benchmarks
+    assert "Exact vector scale envelope" in benchmarks
+    assert "python -m eval.redteam_poisoning" in security
+
+    for unsupported in (
+        "49,915,394",
+        "891,857",
+        "98.2133%",
+        "0.6045",
+        "0.6625",
+        "0.1259",
+        "0.5100",
+        "20.666 ms",
+    ):
+        assert unsupported not in readme
+        assert unsupported not in benchmarks
+
     for supporting_detail in (
         "### Choose a vector backend for your corpus",
         "python -m eval.redteam_poisoning",
         "[local and hosted plans]",
     ):
         assert supporting_detail not in readme
-
-    assert "unpinned, noncanonical workload diagnostic" in benchmarks.lower()
-    assert "Exact vector scale envelope" in benchmarks
-    assert "python -m eval.redteam_poisoning" in security
 
 
 def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
@@ -231,17 +236,21 @@ def test_readme_visual_pngs_match_their_svg_canvas():
 def test_example_visual_uses_the_checked_in_offline_fixture_results(
     offline_release_evidence,
 ):
-    """The new examples must not drift away from the commands readers can run."""
+    """The examples stay tied to executable fixtures and their public artifact."""
     chunking = offline_release_evidence["chunking"]
     whole = chunking["reports"]["whole"]
     chunked = chunking["reports"]["chunked"]
     grounded = offline_release_evidence["grounded"]
-    visual = (ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg").read_text(
-        encoding="utf-8"
-    )
+    visual = (
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg"
+    ).read_text(encoding="utf-8")
 
     assert chunking["context_reduction_pct"] == 71.1
-    assert f"{whole['mean_context_tokens']:.1f} → {chunked['mean_context_tokens']:.1f} tokens" in visual
+    result = (
+        f"{whole['mean_context_tokens']:.1f} → "
+        f"{chunked['mean_context_tokens']:.1f} tokens"
+    )
+    assert result in visual
     assert grounded == {
         "answer_rate": 1.0,
         "abstain_rate": 1.0,
@@ -251,14 +260,15 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
         "n_answerable": 5,
         "n_unanswerable": 5,
     }
-    assert "5/5 answerable questions grounded" in visual
-    assert "5/5 off-topic questions abstained" in visual
+    assert "5/5 answerable questions" in visual
+    assert "5/5 off-topic questions" in visual
+    assert "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2" in visual
 
 
-def test_context_savings_visual_is_plain_language_and_uses_measured_results(
+def test_context_savings_visual_uses_only_registered_measurements(
     offline_release_evidence,
 ):
-    """The headline chart must stay simple and tied to the documented measurements."""
+    """The headline chart contains no unsupported public number."""
     visual = (ROOT / "docs" / "images" / "context-efficiency.svg").read_text(
         encoding="utf-8"
     )
@@ -272,10 +282,9 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results(
 
     for evidence in (
         "Give your agent more room to think",
-        "Replay everything · 49,915,394 tokens",
-        "Engraphis · 891,857 tokens",
-        "98.21% less",
-        "Focused context; full-history recall was higher",
+        "Public evidence is checksum-bound",
+        "offline-fixtures-v1.json",
+        "No external or model-dependent number is published without the same evidence",
         f"Whole documents · {whole['mean_context_tokens']:.1f} tokens",
         f"Focused chunks · {chunked['mean_context_tokens']:.1f} tokens",
         f"{chunking['context_reduction_pct']:.1f}% less",
@@ -288,23 +297,130 @@ def test_context_savings_visual_is_plain_language_and_uses_measured_results(
         f"Full proxy · {context['full_serialized_payload_tokens']:,} tokens",
         f"Compact proxy · {context['compact_serialized_payload_tokens']:,} tokens",
         f"{100 * context['serialized_payload_savings_ratio']:.2f}% less",
-        "Repeated memories · 230 tokens",
-        "Consolidated digest · 120 tokens",
-        "47.8% less",
-        "53× more evidence",
-        "INCLUDING INDEXING",
-        "97.72% less total",
-        "paid back by question 10",
+        "Evidence pending",
         f"{context['mean_tokens']:.2f} average · {context['max_tokens']} max",
         "percentages are not additive",
+        "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2",
+        "4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537",
     ):
         assert evidence in visual
+
+    for unsupported in (
+        "49,915,394",
+        "891,857",
+        "98.21% less",
+        "Repeated memories · 230 tokens",
+        "47.8% less",
+        "53× more evidence",
+        "97.72% less total",
+    ):
+        assert unsupported not in visual
 
     text_sizes = {
         float(value)
         for value in re.findall(r'font-size="([^"]+)"', visual)
     }
-    assert text_sizes == {13.2, 14.3, 17.6, 18.7, 25.3, 29.7, 33.0}
+    assert {12.5, 13.2, 14.3, 17.6, 18.7, 20.0, 24.0, 25.3, 29.7, 33.0} == text_sizes
+
+
+def test_public_numeric_evidence_registry_is_complete_and_live(
+    offline_release_evidence,
+):
+    """Every retained public aggregate resolves to one checksum-bound live run."""
+    artifact_path = (
+        ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v1.json"
+    )
+    sidecar_path = artifact_path.with_suffix(".json.sha256")
+    artifact_bytes = artifact_path.read_bytes()
+    artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
+    expected_sha = "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2"
+
+    assert artifact_sha == expected_sha
+    assert sidecar_path.read_text(encoding="ascii") == (
+        f"{expected_sha}  {artifact_path.name}\n"
+    )
+    artifact = json.loads(artifact_bytes)
+    assert artifact["schema"] == "engraphis-public-offline-fixtures/v1"
+    assert not any(artifact["privacy"].values())
+
+    file_hashes = artifact["suite"]["files"]
+    assert file_hashes == {
+        path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+        for path in sorted(file_hashes)
+    }
+    suite_manifest = json.dumps(
+        file_hashes, sort_keys=True, separators=(",", ":")
+    ).encode()
+    assert hashlib.sha256(suite_manifest).hexdigest() == artifact["suite"]["digest"]
+
+    runs = {run["id"]: run for run in artifact["runs"]}
+    assert set(runs) == {
+        "offline-chunking",
+        "offline-performance",
+        "offline-grounded",
+    }
+    for run in runs.values():
+        assert hashlib.sha256(run["command"].encode()).hexdigest() == run["config_digest"]
+
+    chunking = offline_release_evidence["chunking"]
+    chunking_result = runs["offline-chunking"]["result"]
+    for mode in ("whole", "chunked"):
+        live = chunking["reports"][mode]
+        recorded = chunking_result[mode]
+        assert recorded["memories"] == live["memories_stored"]
+        assert recorded["recall_at_k"] == live["recall_at_k"]
+        assert recorded["mean_context_tokens"] == live["mean_context_tokens"]
+        assert recorded["mean_evidence_tokens"] == live["mean_evidence_tokens"]
+        assert recorded["max_stored_tokens"] == live["max_stored_tokens"]
+    assert chunking_result["context_reduction_pct"] == chunking["context_reduction_pct"]
+
+    performance = offline_release_evidence["performance"]
+    performance_result = runs["offline-performance"]["result"]
+    assert performance_result["questions"] == performance["corpus"]["questions"]
+    assert performance_result["timed_recalls"] == performance["run"]["timed_recalls"]
+    assert performance_result["recall_at_k"] == performance["quality"]["recall_at_k"]
+    assert performance_result["hit_at_k"] == performance["quality"]["hit_at_k"]
+    assert (
+        performance_result["answer_token_recall"]
+        == performance["quality"]["answer_token_recall"]
+    )
+    assert performance_result["mean_context_tokens"] == performance["context"]["mean_tokens"]
+    assert performance_result["max_context_tokens"] == performance["context"]["max_tokens"]
+    assert (
+        performance_result["full_serialized_payload_tokens"]
+        == performance["context"]["full_serialized_payload_tokens"]
+    )
+    assert (
+        performance_result["compact_serialized_payload_tokens"]
+        == performance["context"]["compact_serialized_payload_tokens"]
+    )
+
+    grounded = offline_release_evidence["grounded"]
+    grounded_result = runs["offline-grounded"]["result"]
+    assert grounded_result == {
+        "answerable": grounded["n_answerable"],
+        "grounded": grounded["grounded_hits"],
+        "off_topic": grounded["n_unanswerable"],
+        "abstained": grounded["abstain_hits"],
+        "decision_accuracy": grounded["accuracy"],
+    }
+
+    surfaces = (
+        ROOT / "README.md",
+        ROOT / "BENCHMARKS.md",
+        ROOT / "docs" / "images" / "context-efficiency.svg",
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg",
+    )
+    for surface in surfaces:
+        assert expected_sha in surface.read_text(encoding="utf-8")
+
+    claimed_ids = set(
+        re.findall(
+            r"offline-(?:chunking|performance|grounded)",
+            "\n".join(path.read_text(encoding="utf-8") for path in surfaces),
+        )
+    )
+    assert claimed_ids == set(runs)
 
 
 def test_benchmark_guide_tracks_the_live_offline_evaluators(offline_release_evidence):
@@ -470,7 +586,10 @@ def test_envelope_hashes_dataset_config_and_retains_exclusions(tmp_path):
         "n_total": 2,
         "n_scored": 1,
     }
-    assert report["exclusions"] == [excluded]
+    assert report["exclusions"] == [{
+        "question_id": "q2",
+        "reason": "no_gold_evidence",
+    }]
     assert json.loads(json.dumps(report))["schema"] == SCHEMA
 
 
@@ -486,8 +605,8 @@ def test_envelope_redacts_top_level_exclusion_detail(tmp_path):
     )
 
     assert report["exclusions"] == [{
-        "question_id": "q1", "reason": "invalid",
-        "detail_sha256": hashlib.sha256(b'"private prompt text"').hexdigest(),
+        "question_id": "q1",
+        "reason": "invalid",
     }]
 
 
@@ -828,12 +947,29 @@ def test_canonical_validator_rejects_tampered_confidence_intervals(tmp_path):
         ("iterations", -1, ".iterations must be a positive integer"),
         ("iterations", True, ".iterations must be a positive integer"),
         ("strata_key", "topic", ".strata_key must equal category"),
+        ("low", 0.75, "must exactly match deterministic recomputation"),
     )
     for key, value, expected in mutations:
         report = deepcopy(valid)
         report["metrics"]["confidence_intervals"]["recall_at_1"][key] = value
         errors = validate_report(report, canonical=True)
         assert any(expected in error for error in errors), (key, value, errors)
+    for metric_name in (
+        "recall_at_1", "recall_at_5", "recall_at_10",
+        "mrr_at_1", "mrr_at_5", "mrr_at_10",
+        "ndcg_at_1", "ndcg_at_5", "ndcg_at_10",
+    ):
+        report = deepcopy(valid)
+        interval = report["metrics"]["confidence_intervals"][metric_name]
+        if interval["low"] > 0:
+            interval["low"] = round(interval["low"] - 0.000001, 6)
+        else:
+            interval["high"] = round(interval["high"] + 0.000001, 6)
+        errors = validate_report(report, canonical=True)
+        assert any(
+            "must exactly match deterministic recomputation" in error
+            for error in errors
+        ), (metric_name, errors)
 
     extra = deepcopy(valid)
     extra["metrics"]["confidence_intervals"]["recall_at_1"]["mean"] = 1.0
@@ -881,31 +1017,11 @@ def test_canonical_validator_rejects_tampered_paired_bootstrap_payloads(tmp_path
         "seed": 20260729,
         "iterations": 20,
     }
-    assert validate_report(available, canonical=True) == []
-
-    available_mutations = (
-        ("metric", "recall_at_3", ".metric must name a canonical rank metric"),
-        ("delta", float("inf"), "delta/low/high must be finite"),
-        ("delta", 1.1, "delta/low/high must be finite"),
-        ("low", -1.1, "delta/low/high must be finite"),
-        ("high", 1.1, "delta/low/high must be finite"),
-        ("low", 0.3, "low <= delta <= high"),
-        ("n", 0, ".n must equal the positive non-excluded record count"),
-        ("n", 2, ".n must equal the positive non-excluded record count"),
-        ("seed", -1, ".seed must be a non-negative integer"),
-        ("iterations", 0, ".iterations must be a positive integer"),
-        ("iterations", True, ".iterations must be a positive integer"),
+    errors = validate_report(available, canonical=True)
+    assert any(
+        "must be unavailable until an immutable baseline artifact" in error
+        for error in errors
     )
-    for key, value, expected in available_mutations:
-        report = deepcopy(available)
-        report["metrics"]["paired_bootstrap"][key] = value
-        errors = validate_report(report, canonical=True)
-        assert any(expected in error for error in errors), (key, value, errors)
-
-    extra = deepcopy(available)
-    extra["metrics"]["paired_bootstrap"]["mean"] = 0.25
-    errors = validate_report(extra, canonical=True)
-    assert any("available payload must match the canonical schema" in error for error in errors)
 
 
 def test_canonical_validator_recomputes_all_rank_aggregates_from_record_ids(tmp_path):

@@ -16,7 +16,7 @@ hermes memory status
 
 Select `engraphis` in the picker. The provider automatically recalls approved,
 scoped memories before turns and records bounded turn history locally. Its direct
-tools are `engraphis_search`, `engraphis_store`, and `engraphis_erase`.
+tools are `engraphis_search` and `engraphis_store`.
 
 By default, it uses the dependency-free local embedder if no cached local semantic
 model is available. It never downloads a model. To use an installed local model,
@@ -34,6 +34,6 @@ export ENGRAPHIS_HERMES_REPO=my-project
 ```
 
 For encrypted storage, configure Engraphis's existing SQLCipher option in the Hermes
-environment before launch. Secrets are rejected at write time. `engraphis_erase` maps
-to Engraphis's audited secure erase operation, which permanently removes a selected
-record and leaves a sync tombstone so it is not restored by a later sync.
+environment before launch. Secrets are rejected at write time. Permanent deletion is
+deliberately not model-visible through this provider; use Engraphis's authenticated
+operator surfaces when a record must be securely erased.

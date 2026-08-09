@@ -48,3 +48,23 @@ def test_v1_local_license_activation_is_retired(monkeypatch):
         )
         assert response.status_code == 501
         assert response.json()["detail"]["cloud_only"] is True
+
+
+def test_raw_exports_do_not_apply_a_silent_row_limit(monkeypatch):
+    from engraphis.stores import vectors as mem_store
+
+    calls = []
+
+    def list_documents(namespace=None, limit=None, offset=None):
+        calls.append({"namespace": namespace, "limit": limit, "offset": offset})
+        return []
+
+    monkeypatch.setattr(mem_store, "list_documents", list_documents)
+    with _client(monkeypatch) as client:
+        assert client.get("/memory/export").status_code == 200
+        assert client.get("/memory/vaults/default/export").status_code == 200
+
+    assert calls == [
+        {"namespace": None, "limit": None, "offset": None},
+        {"namespace": "default", "limit": None, "offset": None},
+    ]
