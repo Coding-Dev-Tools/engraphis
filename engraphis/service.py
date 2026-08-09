@@ -993,7 +993,43 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
     # Recover from a crash during a previous two-step swap (legacy code).
     staging = p.with_suffix(".v2_swap")
     if not p.exists() and staging.exists():
-        os.replace(str(staging), str(p))
+        # If a completed-but-not-swapped migration output also exists
+        # (.v2-migrating-*), prefer it over the stale v1 original in
+        # .v2_swap — the migration had finished writing the new file but
+        # crashed before the final os.replace into db_path.
+        migrating = sorted(
+            p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if migrating:
+            os.replace(str(migrating[0]), str(p))
+            for leftover in migrating[1:]:
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
+        else:
+            os.replace(str(staging), str(p))
+    elif not p.exists():
+        # No .v2_swap either, but a stray .v2-migrating-* might remain
+        # from a crash where the original was already removed.
+        migrating = sorted(
+            p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if migrating:
+            os.replace(str(migrating[0]), str(p))
+            for leftover in migrating[1:]:
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
     if not p.exists() or not p.is_file():
         return  # fresh install, ":memory:", or nothing there yet — Store() creates v2 cleanly
     import sqlite3
@@ -6020,7 +6056,6 @@ class MemoryService:
         with self._graph_job_lock:
             if self._closing or self._closed:
                 raise ValidationError("memory service is shutting down")
-            self._recover_stale_graph_jobs()
             self._graph_job_threads = {
                 key: value for key, value in self._graph_job_threads.items()
                 if value.is_alive()
@@ -6029,6 +6064,7 @@ class MemoryService:
             if owns_graph_txn:
                 self.store.conn.execute("BEGIN IMMEDIATE")
             try:
+                self._recover_stale_graph_jobs()
                 current_scope = self.store.conn.execute(
                     "SELECT 1 FROM workspaces WHERE id=?", (wid,)
                 ).fetchone()
