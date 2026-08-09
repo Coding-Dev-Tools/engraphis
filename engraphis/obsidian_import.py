@@ -914,7 +914,8 @@ class ObsidianImporter:
     ) -> list[dict]:
         """Resolve derived links in bounded, cancellable, replay-safe batches."""
         items = self.store.list_source_import_items(
-            vault_id=vault_id, states=["imported", "unchanged", "renamed", "skipped"],
+            vault_id=vault_id,
+            states=["imported", "unchanged", "renamed", "skipped", "missing"],
         )
         memory_by_path = {
             str(item["relative_path"]): str(item["memory_id"])
@@ -922,6 +923,7 @@ class ObsidianImporter:
         }
         note_by_path = {note.relative_path: note for note in scan.notes}
         exact: dict[str, list[str]] = {}
+        historical_exact: dict[str, list[str]] = {}
         names: dict[str, list[str]] = {}
 
         def add_exact(key: str, path: str) -> None:
@@ -938,6 +940,15 @@ class ObsidianImporter:
             keys.update(alias.casefold() for alias in note.aliases)
             for key in keys:
                 names.setdefault(key, []).append(path)
+        for path in memory_by_path:
+            add_exact_path = historical_exact.setdefault(path.casefold(), [])
+            if path not in add_exact_path:
+                add_exact_path.append(path)
+            suffixless = str(PurePosixPath(path).with_suffix(""))
+            if suffixless != path:
+                add_exact_path = historical_exact.setdefault(suffixless.casefold(), [])
+                if path not in add_exact_path:
+                    add_exact_path.append(path)
         warnings: list[dict] = []
         batch_open = False
         writes_in_batch = 0
@@ -1000,15 +1011,26 @@ class ObsidianImporter:
                             names.get(PurePosixPath(paths[-1]).stem.casefold(), [])
                         ))
                     if len(candidates) != 1:
-                        if candidates:
-                            retire_ambiguous_links(
-                                source_id,
-                                [
-                                    memory_by_path[path]
-                                    for path in candidates
-                                    if memory_by_path.get(path)
-                                ],
-                            )
+                        target_ids = [
+                            memory_by_path[path]
+                            for path in candidates
+                            if memory_by_path.get(path)
+                        ]
+                        if not target_ids and not candidates:
+                            historical_paths = [
+                                historical_path
+                                for path in paths
+                                for historical_path in historical_exact.get(
+                                    path.casefold(), []
+                                )
+                            ]
+                            target_ids = [
+                                memory_by_path[path]
+                                for path in sorted(set(historical_paths))
+                                if memory_by_path.get(path)
+                            ]
+                        if target_ids:
+                            retire_ambiguous_links(source_id, sorted(set(target_ids)))
                         warnings.append(self._outcome(
                             note, "warning",
                             "ambiguous_wikilink" if candidates else "unresolved_wikilink",
