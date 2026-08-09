@@ -151,6 +151,16 @@ h3 { margin: 0; font-size: 16px; }
   letter-spacing: -.01em;
   text-decoration: none;
 }
+.plan-badge {
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 1px solid var(--c-line2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--c-mid);
+  font-size: 10.5px;
+}
+.plan-badge:hover { border-color: var(--c-acc); color: var(--c-fg); }
 .workspace-switcher {
   display: grid;
   gap: 3px;
@@ -1025,6 +1035,7 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
   .primary-nav { grid-row: 5; }
   .manage-nav { grid-row: 6; }
   .sidebar-promo { grid-row: 7; }
+  .brand-row .plan-badge { display: none; }
   .page-wrap, .view-column { padding: 22px 16px 42px; }
   .today-rail { grid-template-columns: 1fr; }
   .rail-section { border-right: 0; }
