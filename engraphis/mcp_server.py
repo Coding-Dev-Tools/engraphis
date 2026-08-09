@@ -259,6 +259,23 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
             payload, "answer", citation_safe=payload.get("grounded") is True
         )
 
+    # Post-processing: ensure grounded answers always end with a citation marker
+    if payload.get("grounded") is True and current_tokens <= max_response_tokens:
+        answer = str(payload.get("answer") or "")
+        if answer and not re.search(r"\[\d+\]$", answer.rstrip()):
+            # Answer doesn't end with citation - truncate to last complete citation
+            matches = list(re.finditer(r"\[\d+\]", answer))
+            if matches:
+                last_match = matches[-1]
+                payload["answer"] = answer[:last_match.end()].rstrip()
+                current_tokens = measure()
+            else:
+                # No citations - grounded answer without citations is an abstention
+                payload["grounded"] = False
+                payload["abstained"] = True
+                payload["answer"] = ""
+                current_tokens = measure()
+
     # Source records can themselves exceed a very small response budget even
     # after their bodies are empty. Remove only whole trailing records so IDs and
     # citation metadata are never partially serialized.

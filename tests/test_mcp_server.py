@@ -111,6 +111,31 @@ def test_response_budget_keeps_grounded_answer_at_a_complete_citation():
     assert _response_tokens(result) <= budget
 
 
+def test_response_budget_truncates_to_last_citation_not_arbitrary_prefix():
+    """Grounded answers must end with a citation marker, not arbitrary text."""
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    # Answer with text after the last citation
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First fact [1] and trailing text without citation marker",
+            "citations": [{**citation, "content": "supporting body " * 50}],
+        },
+        150,  # Tight budget forces truncation
+    )
+
+    # Answer must either end with [n] or be empty (abstention)
+    if result["answer"]:
+        assert result["answer"].rstrip().endswith("[1]"), \
+            f"Answer '{result['answer']}' must end with citation marker"
+    else:
+        assert result["grounded"] is False
+        assert result["abstained"] is True
+
+
 def test_response_budget_ignores_unbounded_citation_numbers():
     from engraphis.mcp_server import _apply_response_budget
 
