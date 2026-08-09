@@ -18,7 +18,7 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
-from engraphis.core.query_planner import DeterministicQueryPlanner
+from engraphis.core.query_planner import DeterministicQueryPlanner, MAX_PLANNED_QUERIES
 from engraphis.core.recall import RecallEngine
 from engraphis.core.store import Store
 
@@ -69,6 +69,14 @@ class _StructuredPlannerLLM:
             "mtype_limits": {"working": 1},
             "reason_codes": ["exact_identifier"],
         }
+
+
+class _PayloadLLM:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def extract_json(self, *_args, **_kwargs):
+        return self.payload
 
 
 class _MutatingPlanner:
@@ -194,7 +202,7 @@ def test_auto_plan_is_sanitized_to_original_plus_two_unique_queries():
     assert [item["text"] for item in details["queries"]] == [
         query,
         "ReleaseGate",
-        "extra ignored",
+        "not the original",
     ]
     assert details["queries"][0]["priority"] == 1
 
@@ -317,6 +325,81 @@ def test_optional_llm_planner_is_injected_and_receives_deadline():
     assert plan.queries[1].mtypes == (MemoryType.PROCEDURAL,)
     assert plan.mtype_limits == {MemoryType.WORKING: 1}
 
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "queries": [
+                {"text": str(index), "priority": 1, "profile": "balanced"}
+                for index in range(MAX_PLANNED_QUERIES + 1)
+            ],
+        },
+        {"queries": [{"text": "x" * 2_049, "priority": 1, "profile": "balanced"}]},
+        {"queries": [{"text": "route", "priority": 101, "profile": "balanced"}]},
+        {"queries": [{"text": "route", "priority": True, "profile": "balanced"}]},
+        {
+            "queries": [{
+                "text": "route",
+                "priority": 1,
+                "profile": "balanced",
+                "mtypes": [item.value for item in MemoryType] + ["semantic"],
+            }],
+        },
+        {"queries": [], "reason_codes": [str(index) for index in range(9)]},
+    ],
+)
+def test_llm_planner_rejects_provider_payloads_above_declared_bounds(payload):
+    with pytest.raises(ValueError):
+        LLMQueryPlanner(_PayloadLLM(payload)).plan("original")
+
+
+def test_core_bounds_injected_planner_queries_before_full_iteration():
+    class BombQueries(tuple):
+        def __iter__(self):
+            for index in range(MAX_PLANNED_QUERIES + 2):
+                if index >= MAX_PLANNED_QUERIES:
+                    raise AssertionError("core iterated beyond the query bound")
+                yield PlannedQuery(f"route-{index}", 1, "balanced")
+
+    plan = RetrievalPlan(BombQueries(), {}, ())
+    store, embedder, engine, workspace, repo = _engine(_StaticPlanner(plan))
+    _add(store, embedder, workspace, repo, "Deployment policy.")
+    result = engine.recall(
+        "deployment",
+        SearchFilter(workspace_id=workspace, repo_id=repo),
+        planning="auto",
+        diagnostics=True,
+    )
+
+    assert len(result.planning_details["queries"]) <= MAX_PLANNED_QUERIES
+    assert result.planning_details["fallback_reason"] is None
+
+
+def test_core_bounds_injected_planner_limits_before_full_iteration():
+    class BombLimits(dict):
+        def items(self):
+            for mtype in MemoryType:
+                yield mtype, 1
+            raise AssertionError("core iterated beyond the type-limit bound")
+
+    plan = RetrievalPlan(
+        (PlannedQuery("deployment", 1, "balanced"),),
+        BombLimits(),
+        (),
+    )
+    store, embedder, engine, workspace, repo = _engine(_StaticPlanner(plan))
+    _add(store, embedder, workspace, repo, "Deployment policy.")
+    result = engine.recall(
+        "deployment",
+        SearchFilter(workspace_id=workspace, repo_id=repo),
+        planning="auto",
+        diagnostics=True,
+    )
+
+    assert len(result.planning_details["mtype_limits"]) <= len(MemoryType)
+    assert result.planning_details["fallback_reason"] is None
 
 def test_planner_details_are_emitted_only_with_diagnostics():
     store, embedder, engine, workspace, repo = _engine()

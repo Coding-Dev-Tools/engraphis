@@ -19,6 +19,8 @@ from scripts import (
     start_dashboard,
     start_server,
     sync,
+    repair_embed_dim,
+    watch_repo,
 )
 
 
@@ -48,6 +50,13 @@ def test_server_and_retired_inspector_reject_unknown_arguments():
         with pytest.raises(SystemExit) as exc:
             main(["--definitely-invalid"])
         assert exc.value.code == 2
+
+
+def test_cli_rejects_the_removed_legacy_thoughts_command(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["engraphis-cli", "thoughts"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("value", ["0", "65536", "bad"])
@@ -89,8 +98,7 @@ def test_approval_cli_uses_configured_memory_service_factory(monkeypatch):
     captured = {}
 
     class FakeStore:
-        def close(self):
-            captured["closed"] = True
+        pass
 
     class FakeEngine:
         def approve_for_prompt(self, memory_id, *, reviewer, reason):
@@ -105,6 +113,9 @@ def test_approval_cli_uses_configured_memory_service_factory(monkeypatch):
         def create(cls, db_path, **kwargs):
             captured["create"] = (db_path, kwargs)
             return cls()
+
+        def close(self):
+            captured["closed"] = True
 
     output = []
     monkeypatch.setattr(approve_memory, "MemoryService", FakeService)
@@ -210,7 +221,7 @@ def test_operational_factories_forward_embedding_stack_settings(monkeypatch, mod
         ),
     ],
 )
-def test_operational_commands_close_the_store_on_early_return(monkeypatch, module, argv):
+def test_operational_commands_close_the_service_on_early_return(monkeypatch, module, argv):
     closed = []
 
     class FakeConnection:
@@ -220,11 +231,16 @@ def test_operational_commands_close_the_store_on_early_return(monkeypatch, modul
     class FakeStore:
         conn = FakeConnection()
 
+    class FakeService:
+        def __init__(self, store):
+            self.store = store
+            self.engine = SimpleNamespace(store=store)
+
         def close(self):
             closed.append(True)
 
     store = FakeStore()
-    service = SimpleNamespace(store=store, engine=SimpleNamespace(store=store))
+    service = FakeService(store)
     monkeypatch.setattr(module, "_service", lambda _path: service)
 
     assert module.main(argv) == 2
@@ -244,6 +260,7 @@ def test_local_cli_ingest_is_recallable_across_clean_processes(tmp_path):
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_UPDATE_CHECK": "0",
+        "ENGRAPHIS_WORKSPACES": "",
     }
     ingest = subprocess.run(
         [sys.executable, "-m", "scripts.cli", "ingest", "The release is blue.", "-n", "ops"],
@@ -340,3 +357,291 @@ def test_cli_bulk_review_is_dry_run_by_default_and_excludes_quarantine(
     ]
     assert "Approved 1 memories." in output
     assert "The verified release is cobalt." not in output
+
+
+
+def _watcher_engine(root: Path, *, fail_full: bool = False):
+    calls = []
+
+    class Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class Connection:
+        def execute(self, statement, params):
+            if "FROM workspaces" in statement:
+                return Result({"id": "ws_1"})
+            return Result({"id": "repo_1", "root_path": str(root)})
+
+    class Store:
+        conn = Connection()
+
+    class Engine:
+        store = Store()
+
+        def index_repo(self, repo_id, root_path):
+            calls.append(("full", repo_id, Path(root_path)))
+            if fail_full:
+                raise RuntimeError("startup reconciliation failed")
+            return {
+                "files_indexed": 1,
+                "files_unchanged": 2,
+                "files_removed": 1,
+                "files_failed": 0,
+            }
+
+        def index_repo_incremental(self, repo_id, root_path, paths):
+            calls.append(("incremental", repo_id, Path(root_path), list(paths)))
+            return {"files_indexed": len(paths), "files_failed": 0}
+
+    return Engine(), calls
+
+
+def test_watch_repo_reconciles_persisted_state_before_incremental_callbacks(
+    tmp_path, capsys
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    engine, calls = _watcher_engine(root)
+    args = SimpleNamespace(
+        db="fixture.db", workspace="acme", repo="backend",
+        interval=5.0, no_watch=True,
+    )
+
+    assert watch_repo._run(args, engine) == 0
+
+    assert calls == [("full", "repo_1", root)]
+    assert "Reindex complete." in capsys.readouterr().out
+
+
+def test_watch_repo_one_shot_propagates_startup_reindex_failure(tmp_path, caplog):
+    root = tmp_path / "repo"
+    root.mkdir()
+    engine, calls = _watcher_engine(root, fail_full=True)
+    args = SimpleNamespace(
+        db="fixture.db", workspace="acme", repo="backend",
+        interval=5.0, no_watch=True,
+    )
+
+    assert watch_repo._run(args, engine) == 1
+
+    assert calls == [("full", "repo_1", root)]
+    assert "startup reindex failed" in caplog.text
+
+
+def test_polling_watcher_detects_same_size_rewrite_with_preserved_mtime(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    original = source.stat()
+    watcher = watch_repo._PollingWatcher(tmp_path)
+
+    assert watcher.poll() == []
+    source.write_text("value = 2\n", encoding="utf-8")
+    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    assert watcher.poll() == [str(source)]
+
+def test_polling_watcher_untrack_causes_reappearance_on_next_poll(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+
+    # Baseline poll
+    assert watcher.poll() == []
+
+    # Modify the file
+    source.write_text("x = 2\n", encoding="utf-8")
+    changed = watcher.poll()
+    assert len(changed) == 1
+
+    # Without untrack, next poll sees no change
+    assert watcher.poll() == []
+
+    # After untrack, the file reappears as changed
+    watcher.untrack([str(source)])
+    retry = watcher.poll()
+    assert len(retry) == 1
+    assert retry[0] == str(source)
+
+def test_polling_watcher_untrack_ignores_unknown_paths(tmp_path):
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    watcher.poll()
+    # Should not raise
+    watcher.untrack(["/nonexistent/path.py"])
+    assert watcher.poll() == []
+
+
+def test_polling_watcher_retries_failed_deletions(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    assert watcher.poll() == []
+
+    source.unlink()
+    deleted = watcher.poll()
+    assert deleted == [str(source)]
+
+    watcher.untrack(deleted, deletions=True)
+    assert watcher.poll() == [str(source)]
+
+    source.write_text("x = 2\n", encoding="utf-8")
+    assert watcher.poll() == [str(source)]
+    assert watcher.poll() == []
+
+
+def test_delete_namespace_is_atomic_and_records_one_batch_receipt(
+    monkeypatch, capsys
+):
+    from engraphis.core.interfaces import MemoryRecord, Scope
+    from engraphis.service import MemoryService
+
+    service = MemoryService.create(":memory:", extractor="none", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("ops")
+    ids = [
+        service.store.add_memory(MemoryRecord(
+            id="",
+            content=f"independent namespace record {index}",
+            scope=Scope.WORKSPACE,
+            workspace_id=workspace_id,
+        ))
+        for index in range(3)
+    ]
+    original_close = service.store.close
+    original_close_validity = service.store.close_validity
+    monkeypatch.setattr(cli, "_service", lambda: service)
+    monkeypatch.setattr(service.store, "close", lambda: None)
+    receipt_row = service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM operation_receipts"
+    ).fetchone()
+    assert receipt_row is not None
+    receipt_count = receipt_row["n"]
+    calls = 0
+
+    def fail_second(memory_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected batch retirement failure")
+        return original_close_validity(memory_id, **kwargs)
+
+    monkeypatch.setattr(service.store, "close_validity", fail_second)
+    args = argparse.Namespace(namespace="ops", force=True)
+    try:
+        with pytest.raises(RuntimeError, match="injected batch retirement failure"):
+            cli.cmd_delete_ns(args)
+
+        for memory_id in ids:
+            record = service.store.get_memory(memory_id)
+            assert record is not None
+            assert record.valid_to is None
+        audit_row = service.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM audit WHERE action='invalidate'"
+        ).fetchone()
+        current_receipt_row = service.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM operation_receipts"
+        ).fetchone()
+        assert audit_row is not None and audit_row["n"] == 0
+        assert current_receipt_row is not None
+        assert current_receipt_row["n"] == receipt_count
+
+        monkeypatch.setattr(service.store, "close_validity", original_close_validity)
+        cli.cmd_delete_ns(args)
+
+        records = [service.store.get_memory(memory_id) for memory_id in ids]
+        assert all(record is not None and record.valid_to is not None for record in records)
+        assert len({record.valid_to for record in records if record is not None}) == 1
+        audit_row = service.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM audit WHERE action='invalidate'"
+        ).fetchone()
+        current_receipt_row = service.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM operation_receipts"
+        ).fetchone()
+        assert audit_row is not None and audit_row["n"] == 3
+        assert current_receipt_row is not None
+        assert current_receipt_row["n"] == receipt_count + 1
+        receipt = service.store.conn.execute(
+            "SELECT operation, target_count, status FROM operation_receipts "
+            "ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        assert receipt is not None
+        assert receipt["operation"].startswith("sha256:")
+        assert (receipt["target_count"], receipt["status"]) == (3, "ok")
+        assert "Retired 3 memories" in capsys.readouterr().out
+    finally:
+        original_close()
+
+
+def test_embedding_repair_uses_configured_default_and_governed_markers(
+    tmp_path, monkeypatch, capsys
+):
+    import sqlite3
+    import numpy as np
+    from engraphis.core.interfaces import MemoryRecord
+    from engraphis.core.store import Store
+
+    db_path = tmp_path / "repair.db"
+    store = Store(str(db_path))
+    workspace_id = store.get_or_create_workspace("repair")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="legacy vector", workspace_id=workspace_id,
+        embedding=np.array([1.0, 0.0], dtype=np.float32),
+    ))
+    store.close()
+    monkeypatch.setattr(
+        repair_embed_dim,
+        "settings",
+        SimpleNamespace(
+            db_path=db_path,
+            embed_model="",
+            embed_dim=4,
+            embed_revision="",
+            require_immutable_models=False,
+            vector_backend="numpy",
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["repair-embed-dim", "--no-backup"])
+
+    repair_embed_dim.main()
+
+    with sqlite3.connect(db_path) as connection:
+        vector = connection.execute(
+            "SELECT dim, model FROM mem_vectors WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT version FROM embedding_state WHERE identity='__active__'"
+        ).fetchone()
+        rebuilding = connection.execute(
+            "SELECT version FROM embedding_state WHERE identity='__rebuilding__'"
+        ).fetchone()
+    assert vector is not None and active is not None
+    assert vector[0] == 4
+    assert vector[1] == active[0]
+    assert rebuilding is None
+    assert "'repaired': 1" in capsys.readouterr().out
+
+
+def test_embedding_repair_refuses_a_missing_path_without_creating_it(
+    tmp_path, monkeypatch
+):
+    missing = tmp_path / "typo.db"
+    monkeypatch.setattr(
+        repair_embed_dim,
+        "settings",
+        SimpleNamespace(
+            db_path=missing,
+            embed_model="",
+            embed_dim=4,
+            embed_revision="",
+            require_immutable_models=False,
+            vector_backend="numpy",
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError):
+        repair_embed_dim.repair(str(missing), backup=False)
+
+    assert not missing.exists()

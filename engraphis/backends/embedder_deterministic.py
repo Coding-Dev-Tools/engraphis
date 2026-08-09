@@ -96,13 +96,19 @@ class DeterministicEmbedder:
         return out
 
 
+def _bounded_trigrams(text: str, limit: int = 512) -> list[str]:
+    """Return at most *limit* leading trigrams without scanning the unused suffix."""
+    count = min(max(0, int(limit)), max(0, len(text) - 2))
+    return [text[index:index + 3] for index in range(count)]
+
+
 def _tokenize(text: str, kind: str) -> list[str]:
     text = (text or "").lower()
     # For code, keep identifier-ish boundaries; for text, split on non-alphanumerics.
     sep = "".join(c if c.isalnum() else " " for c in text)
     tokens = [t for t in sep.split() if t]
     # add character trigrams for short/OOV robustness
-    trigrams = [text[j:j + 3] for j in range(max(0, len(text) - 2))][:512]
+    trigrams = _bounded_trigrams(text)
     return tokens + trigrams + _variant_features(text, tokens)
 
 

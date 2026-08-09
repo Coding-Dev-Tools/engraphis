@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from engraphis.backends.embedder_api import ApiEmbedder
-from engraphis.backends.embedder_deterministic import DeterministicEmbedder, _tokenize
+from engraphis.backends.embedder_deterministic import (
+    DeterministicEmbedder,
+    _bounded_trigrams,
+    _tokenize,
+)
 
 
 def _similarity(left: str, right: str) -> float:
@@ -52,6 +56,24 @@ def test_unrecognized_ordinary_text_keeps_legacy_feature_mapping():
     assert hashlib.sha256(vectors.tobytes()).hexdigest() == (
         "c2378cd31c56863b0c65fe7b0634aa62250af35b94853298bfed34fbb71875df"
     )
+
+
+def test_trigram_work_is_bounded_before_slicing_long_input():
+    class _CountingText(str):
+        def __new__(cls, value):
+            instance = super().__new__(cls, value)
+            instance.slices = 0
+            return instance
+
+        def __getitem__(self, item):
+            if isinstance(item, slice):
+                self.slices += 1
+            return super().__getitem__(item)
+
+    text = _CountingText("x" * 1_000_000)
+
+    assert len(_bounded_trigrams(text)) == 512
+    assert text.slices == 512
 
 
 @pytest.mark.parametrize("dimension", [True, 0, -1, 1.5, "384", 65_537])
@@ -174,21 +196,76 @@ def test_api_per_item_fallback_rejects_partial_failure_instead_of_zero_vector(mo
         ApiEmbedder(model="model", api_key="key").embed(["a", "b"])
 
 
+def test_api_embeddings_endpoint_normalizes_versioned_and_unversioned_bases():
+    assert ApiEmbedder(
+        model="model", api_key="key", dim=2,
+    )._embeddings_url == "https://openrouter.ai/api/v1/embeddings"
+    assert ApiEmbedder(
+        model="model", base_url="https://provider.example", api_key="key", dim=2,
+    )._embeddings_url == "https://provider.example/v1/embeddings"
+    assert ApiEmbedder(
+        model="model", base_url="https://provider.example/custom/v1/", api_key="key", dim=2,
+    )._embeddings_url == "https://provider.example/custom/v1/embeddings"
+    assert ApiEmbedder(
+        model="model",
+        base_url="https://provider.example/custom/v1/?tenant=one",
+        api_key="key",
+        dim=2,
+    )._embeddings_url == "https://provider.example/custom/v1/embeddings?tenant=one"
+    assert ApiEmbedder(
+        model="model",
+        base_url="https://provider.example/custom/v1/?signature=abc/",
+        api_key="key",
+        dim=2,
+    )._embeddings_url == (
+        "https://provider.example/custom/v1/embeddings?signature=abc/"
+    )
+    assert ApiEmbedder(
+        model="model",
+        base_url="https://provider.example/custom/v1/embeddings?tenant=one",
+        api_key="key",
+        dim=2,
+    )._embeddings_url == "https://provider.example/custom/v1/embeddings?tenant=one"
+
+
 def test_api_embedding_identity_is_credential_free_and_space_specific():
     first = ApiEmbedder(
         model="model-a", base_url="https://provider.example", api_key="secret-a", dim=2,
+        space_version="provider-revision-1",
     )
     same = ApiEmbedder(
         model="model-a", base_url="https://provider.example", api_key="secret-b", dim=2,
+        space_version="provider-revision-1",
     )
     other = ApiEmbedder(
         model="model-b", base_url="https://provider.example", api_key="secret-a", dim=2,
+        space_version="provider-revision-1",
+    )
+    changed = ApiEmbedder(
+        model="model-a", base_url="https://provider.example", api_key="secret-a", dim=2,
+        space_version="provider-revision-2",
+    )
+    credentialed = ApiEmbedder(
+        model="model-a",
+        base_url="https://alice:secret@provider.example/v1?token=one",
+        api_key="secret-a",
+        dim=2,
+        space_version="provider-revision-1",
+    )
+    rotated_credentials = ApiEmbedder(
+        model="model-a",
+        base_url="https://bob:rotated@provider.example/v1?token=two",
+        api_key="secret-b",
+        dim=2,
+        space_version="provider-revision-1",
     )
 
     assert first.embedding_identity == "api_embeddings"
     assert first.embedding_version == same.embedding_version
-    assert first.embedding_version != other.embedding_version
+    assert len({first.embedding_version, other.embedding_version, changed.embedding_version}) == 3
     assert "secret" not in first.embedding_version
+    assert credentialed.embedding_version == rotated_credentials.embedding_version
+    assert ApiEmbedder(model="model-a", api_key="key", dim=2).embedding_version == ""
 
 
 def test_api_rejects_all_failed_fallback_without_a_known_dimension():

@@ -141,7 +141,7 @@ def test_index_repo_receipt_makes_public_tool_non_idempotent(monkeypatch, tmp_pa
     assert annotations.idempotentHint is False
 
 
-def test_postgres_ingest_stores_a_new_snapshot_and_receipts_each_call(monkeypatch):
+def test_postgres_ingest_reuses_exact_snapshot_and_appends_effects(monkeypatch):
     from engraphis.backends import postgres_schema
 
     server = _memory_server(monkeypatch)
@@ -171,10 +171,12 @@ def test_postgres_ingest_stores_a_new_snapshot_and_receipts_each_call(monkeypatc
     kwargs = {"dsn": "postgresql://local/appdb", "workspace": "acme"}
     first = json.loads(server.engraphis_ingest_postgres_schema(**kwargs))
     first_receipts = _count(server, "operation_receipts")
+    first_audits = _count(server, "audit")
     second = json.loads(server.engraphis_ingest_postgres_schema(**kwargs))
-    assert first["id"] != second["id"]
-    assert _count(server, "memories") == 2
+    assert first["id"] == second["id"]
+    assert _count(server, "memories") == 1
     assert _count(server, "operation_receipts") > first_receipts
+    assert _count(server, "audit") > first_audits
 
     annotations = _annotations("engraphis_ingest_postgres_schema")
     assert annotations.readOnlyHint is False
@@ -187,7 +189,8 @@ def test_forced_update_check_rewrites_persistent_cache(monkeypatch, tmp_path):
     cache = tmp_path / "update-check.json"
     clock = iter((1000.0, 1001.0, 1002.0, 1003.0))
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CACHE", str(cache))
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_CACHE", raising=False)
+    monkeypatch.setattr(update_check, "_cache_path", lambda: str(cache))
     monkeypatch.setattr(update_check.time, "time", lambda: next(clock))
     monkeypatch.setattr(
         update_check,

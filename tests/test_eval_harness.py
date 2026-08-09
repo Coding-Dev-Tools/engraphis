@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ class FakePinnedReaderCounter:
 
 def test_harness_runs_and_scores():
     report = run(load_dataset(str(DATASET)), k=3)
-    assert report["questions"] == 4
+    assert report["questions"] == 9
     # The deterministic embedder should retrieve supporting facts for these
     # lexically-grounded questions; demand non-trivial recall so a regression trips CI.
     assert report["hit_at_k"] >= 0.75
@@ -105,10 +106,12 @@ def test_v2_harness_envelope_records_usage_latency_and_rank_metrics():
             "confidence_intervals", "paired_bootstrap"} <= set(metrics)
     assert metrics["confidence_intervals"]["recall_at_5"]["iterations"] == 8
     assert metrics["paired_bootstrap"]["available"] is False
-    assert report["legacy_summary"]["questions"] == 4
+    assert report["legacy_summary"]["questions"] == 9
 
 
-def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeypatch):
+def test_canonical_harness_requires_pinned_profile_and_complete_artifact(
+    monkeypatch, tmp_path,
+):
     with pytest.raises(ValueError, match="pinned revisions"):
         run(load_dataset(str(DATASET)), canonical=True, dataset_path=str(DATASET))
 
@@ -133,6 +136,7 @@ def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeyp
     canonical_embedder = DeterministicEmbedder(dim=256)
     canonical_embedder.model_name = "example/embedder"
     canonical_embedder.revision = "d" * 40
+    canonical_embedder.supports_semantic_search = True
     with pytest.raises(ValueError, match="positive bootstrap_iterations"):
         run(
             load_dataset(str(DATASET)),
@@ -166,6 +170,31 @@ def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeyp
     assert report["records"][0]["usage"]["token_counter"] == (
         "example/reader@" + "c" * 40
     )
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    private_report = tmp_path / "private.json"
+    public_artifact = tmp_path / "public.json"
+    monkeypatch.setattr(
+        "eval.harness.get_embedder",
+        lambda model, dim, **kwargs: canonical_embedder,
+    )
+    harness_main([
+        "--dataset", str(DATASET),
+        "--canonical",
+        "--canonical-profile", str(profile_path),
+        "--embed-model", "example/embedder",
+        "--embed-revision", "d" * 40,
+        "--bootstrap-iterations", "2",
+        "--report", str(private_report),
+        "--artifact", str(public_artifact),
+    ])
+    assert private_report.is_file()
+    assert public_artifact.is_file()
+    assert public_artifact.with_name("public.json.sha256").is_file()
+    assert not private_report.with_name("private.json.sha256").exists()
+    artifact = json.loads(public_artifact.read_text(encoding="utf-8"))
+    assert artifact["models"]["embedder"]["model_id"] == "example/embedder"
+    assert artifact["models"]["embedder"]["revision"] == "d" * 40
     with pytest.raises(ValueError, match="model_name and revision"):
         run(load_dataset(str(DATASET)), k=3, canonical=True,
             dataset_path=str(DATASET), canonical_profile=profile,
@@ -283,11 +312,15 @@ def test_paired_bootstrap_rejects_duplicate_scored_question_ids():
 
 def test_harness_cli_keeps_legacy_default_and_offers_opt_in_v2_artifacts(tmp_path, capsys):
     artifact = tmp_path / "run.json"
+    report_path = tmp_path / "private-report.json"
     harness_main([
         "--dataset", str(DATASET), "--v2", "--artifact", str(artifact),
+        "--report", str(report_path),
         "--bootstrap-iterations", "2",
     ])
     assert artifact.exists() and artifact.with_name("run.json.sha256").exists()
+    assert report_path.exists()
+    assert not report_path.with_name("private-report.json.sha256").exists()
     assert '"schema": "engraphis-benchmark/v2"' in capsys.readouterr().out
     with pytest.raises(SystemExit, match="2"):
         harness_main(["--dataset", str(DATASET), "--canonical"])
@@ -430,15 +463,41 @@ def test_harness_v2_grounded_and_abstention_metrics_are_available_or_explicitly_
     assert available["metrics"]["abstention"]["n"] == 2
 
 
-def test_harness_rejects_answerable_question_without_gold_evidence():
+def test_harness_rejects_explicitly_answerable_question_without_gold_evidence():
     data = [{
         "id": "broken",
         "memories": [{"tag": "fact", "text": "The release train leaves on Tuesday."}],
-        "questions": [{"id": "no-gold", "q": "when does the release train leave",
-                       "supporting": []}],
+        "questions": [{
+            "id": "no-gold",
+            "q": "when does the release train leave",
+            "supporting": [],
+            "answerable": True,
+        }],
     }]
-    with pytest.raises(ValueError, match="no supporting evidence"):
+    with pytest.raises(ValueError, match="answer evidence or supporting memory tags"):
         run(data, v2=True, dataset_path=str(DATASET), bootstrap_iterations=2)
+
+
+def test_harness_scores_answer_variants_without_inventing_retrieval_gold():
+    data = [{
+        "id": "answer-only",
+        "memories": [{"tag": "fact", "text": "The deployment region is US East."}],
+        "questions": [{
+            "id": "region",
+            "q": "which deployment region",
+            "answer": "us-east-1",
+            "answer_variants": ["us-east-1", "US East"],
+            "supporting": [],
+        }],
+    }]
+
+    report = run(data, v2=True, dataset_path=str(DATASET), bootstrap_iterations=2)
+
+    assert report["metrics"]["retrieval_scored_questions"] == 0
+    assert report["metrics"]["answer_token_recall_n"] == 1
+    assert report["records"][0]["retrieval_scored"] is False
+    assert report["records"][0]["answer_scored"] is True
+    assert report["metrics"]["answer_token_recall"] == 1.0
 
 
 
@@ -449,6 +508,18 @@ def test_retrieval_metrics_are_duplicate_safe_and_fail_closed():
     assert metrics.ndcg_at_k(["gold", "gold"], ["gold"], 2) == 1.0
     assert metrics.reciprocal_rank(["noise", "gold", "gold"], ["gold"]) == pytest.approx(0.5)
     assert metrics.answer_token_recall([], "") == 0.0
+    assert metrics.answer_token_recall(
+        ["The deployment region is US East."],
+        ["us-east-1", "US East"],
+    ) == 1.0
+    with pytest.raises(ValueError, match="string or a sequence"):
+        metrics.answer_token_recall(["text"], [None])
+    assert metrics.answer_token_recall(
+        ["The deployment region is US East."],
+        ["US East", "us-east-1"],
+    ) == 1.0
+    with pytest.raises(ValueError, match="retrieved_texts"):
+        metrics.answer_token_recall([None], "text")
     with pytest.raises(ValueError, match="positive integers"):
         metrics.retrieval_metrics_at_depths(["gold"], ["gold"], depths=(0,))
     with pytest.raises(ValueError, match="strings"):

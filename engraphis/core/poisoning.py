@@ -17,6 +17,7 @@ POLICY_VERSION = "deterministic-v3"
 QUARANTINE_STATE = "quarantined"
 REVIEW_PENDING = "pending"
 REVIEW_APPROVED = "approved"
+_DERIVED_GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
 
 # Source labels below identify producers outside the local memory authority.  They
 # are enforced by the service/sync boundaries, not trusted merely because a payload
@@ -99,6 +100,50 @@ def pending_llm_consolidation_envelope(
     meta["llm_consolidation"] = review
     meta["provenance"] = dict(details)
     return details, meta, kind
+
+
+def llm_extraction_requires_review(metadata: object) -> bool:
+    """Whether persisted metadata identifies a model-authored extracted fact."""
+    return isinstance(_mapping(metadata).get("llm_extraction"), Mapping)
+
+
+def pending_llm_extraction_envelope(
+    provenance: object,
+    metadata: object,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Return a fail-closed review envelope for model-authored extraction output.
+
+    The caller's ingress approval applies to the submitted source text, not to claims a
+    model derives from it. Provider activity remains available for governance, while
+    structured graph hints are preserved outside the executable graph-hint keys until an
+    owner creates a reviewed successor.
+    """
+    details = _mapping(provenance)
+    meta = _mapping(metadata)
+    extraction = meta.get("llm_extraction")
+    if not isinstance(extraction, Mapping):
+        return details, meta, False
+
+    details.update({
+        "trusted": False,
+        "review_state": REVIEW_PENDING,
+        "trust_origin": "llm_extraction",
+        "derived_by_llm_extraction": True,
+        "derived_graph_inert": True,
+    })
+    hints: dict[str, Any] = {}
+    for key in _DERIVED_GRAPH_HINT_KEYS:
+        if key in meta:
+            hints[key] = meta.pop(key)
+    existing_hints = meta.get("unverified_derived_graph")
+    if isinstance(existing_hints, Mapping):
+        hints = {**dict(existing_hints), **hints}
+    if hints:
+        hints["source"] = "llm_extraction"
+        meta["unverified_derived_graph"] = hints
+    meta["llm_extraction"] = {**dict(extraction), "review_required": True}
+    meta["provenance"] = dict(details)
+    return details, meta, True
 
 
 @dataclass(frozen=True)
@@ -442,7 +487,10 @@ def provenance_is_approved(provenance: object) -> bool:
     # exist. Older structured-consolidation rows predate the explicit marker, so the
     # source label itself is a fail-closed compatibility signal. Governed approval writes
     # a distinct ``human_review`` successor and therefore clears this condition.
-    unverified_llm_derivation = llm_consolidation_kind(details) is not None
+    unverified_llm_derivation = (
+        llm_consolidation_kind(details) is not None
+        or details.get("derived_by_llm_extraction") is True
+    )
     return (
         provenance_is_trusted(provenance)
         and not unverified_llm_derivation
@@ -488,6 +536,7 @@ def prompt_eligible(provenance: object, metadata: object = None) -> bool:
     """
     return (
         provenance_is_approved(provenance)
+        and not llm_extraction_requires_review(metadata)
         and metadata_is_trusted(metadata)
         and inspection_eligible(provenance, metadata)
     )

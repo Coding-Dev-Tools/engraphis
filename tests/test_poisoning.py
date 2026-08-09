@@ -282,7 +282,9 @@ def test_untrusted_ingest_keeps_ingress_authority_over_extractor_metadata():
 
     assert record.provenance["trusted"] is False
     assert record.metadata["provenance"]["trusted"] is False
-    assert record.metadata["entities"] == ["Vendor"]
+    assert "entities" not in record.metadata
+    assert record.metadata["unverified_derived_graph"]["entities"] == ["Vendor"]
+    assert record.metadata["unverified_derived_graph"]["source"] == "llm_extraction"
     assert record.metadata["llm_extraction"]["fact_index"] == 1
     assert "quarantine" not in record.metadata
     assert "arbitrary_control_field" not in record.metadata
@@ -702,3 +704,57 @@ def test_zero_width_external_source_cannot_claim_local_authority():
     record = service.store.get_memory(result["id"])
     assert record.provenance["trusted"] is False
     assert record.provenance["trust_origin"] == "external_ingress"
+
+
+
+def test_approval_cli_closes_owned_service_exactly_once_on_success_and_failure(
+    monkeypatch,
+):
+    import argparse
+    import builtins
+    import importlib
+
+    module = importlib.import_module("scripts.approve_memory")
+    args = argparse.Namespace(
+        memory_id="mem_pending",
+        db="unused.db",
+        reason="verified",
+        reviewer="owner",
+    )
+    monkeypatch.setattr(
+        module.argparse.ArgumentParser, "parse_args", lambda _parser: args,
+    )
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(module.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        builtins, "input", lambda _prompt: "APPROVE mem_pending",
+    )
+
+    class TrackingService:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.close_count = 0
+            self.engine = self
+
+        def approve_for_prompt(self, *_args, **_kwargs):
+            if self.fail:
+                raise RuntimeError("approval failed")
+            return {"id": "mem_approved"}
+
+        def close(self):
+            self.close_count += 1
+
+    success = TrackingService()
+    monkeypatch.setattr(
+        module.MemoryService, "create", lambda *_args, **_kwargs: success,
+    )
+    module.main()
+    assert success.close_count == 1
+
+    failure = TrackingService(fail=True)
+    monkeypatch.setattr(
+        module.MemoryService, "create", lambda *_args, **_kwargs: failure,
+    )
+    with pytest.raises(RuntimeError, match="approval failed"):
+        module.main()
+    assert failure.close_count == 1

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 from engraphis import update_check as u
+from engraphis.private_state import UnsafeStateFile
 
 
 # ── pure version math ─────────────────────────────────────────────────────────
@@ -81,6 +83,39 @@ def test_parse_generic_and_garbage():
     assert u._parse_release_payload("not a dict") is None
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "999.0\nforged",
+        "999.0\x1b]52;clipboard\x07",
+        {"major": 999},
+        ["999", "0"],
+        "9" * (u._MAX_VERSION_TEXT + 1),
+    ],
+)
+def test_release_payload_rejects_non_display_safe_versions(version):
+    assert u._parse_release_payload(
+        {"version": version, "url": "https://example.test/release"}
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "file:///tmp/release",
+        "https://user@example.test/release",
+        "https://example.test/release\nforged",
+        "https://example.test/" + "x" * u._MAX_RELEASE_URL,
+    ],
+)
+def test_release_payload_drops_unsafe_display_urls(url):
+    assert u._parse_release_payload({"version": "9.9.9", "url": url}) == {
+        "version": "9.9.9",
+        "url": "",
+    }
+
+
 # ── network guard (no socket opened for a bad scheme/host) ────────────────────
 @pytest.mark.parametrize("url", [
     "http://example.com/releases",   # plain http, non-loopback
@@ -142,10 +177,70 @@ def test_recognized_explicit_opt_in_values(monkeypatch, value):
 def cache(tmp_path, monkeypatch):
     """Isolate the on-disk cache and force checks enabled with a known endpoint."""
     path = tmp_path / "update.json"
-    monkeypatch.setenv("ENGRAPHIS_UPDATE_CACHE", str(path))
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_CACHE", raising=False)
+    monkeypatch.setattr(u, "_cache_path", lambda: str(path))
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
     monkeypatch.setenv("ENGRAPHIS_UPDATE_URL", "https://example.test/latest")
     return path
+
+
+def test_cache_setting_is_a_bounded_ttl_not_a_path(tmp_path, monkeypatch):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    state = tmp_path / "state"
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(state))
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CACHE", str(victim))
+
+    assert u._cache_ttl_seconds() == u.CACHE_TTL_SECONDS
+    cache_path = u._cache_path()
+    assert cache_path is not None
+    assert Path(cache_path) == state / "update_check.json"
+    u._write_cache("1.2.3", "https://example.test/release")
+
+    assert victim.read_text(encoding="utf-8") == "keep"
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CACHE", "60")
+    assert u._cache_ttl_seconds() == 60
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CACHE", "0")
+    assert u._cache_ttl_seconds() == u.CACHE_TTL_SECONDS
+    monkeypatch.setenv(
+        "ENGRAPHIS_UPDATE_CACHE",
+        str(u._MAX_CACHE_TTL_SECONDS + 1),
+    )
+    assert u._cache_ttl_seconds() == u.CACHE_TTL_SECONDS
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assert f"# ENGRAPHIS_UPDATE_CACHE={u.CACHE_TTL_SECONDS}" in example
+    assert str(u._MAX_CACHE_TTL_SECONDS) in example
+
+
+def test_default_cache_directory_is_owner_private(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits are not authoritative on Windows")
+    state = tmp_path / "state"
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(state))
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_CACHE", raising=False)
+
+    u._write_cache("1.2.3", "https://example.test/release")
+
+    cache_path = Path(u._cache_path())
+    assert cache_path.exists()
+    assert state.stat().st_mode & 0o077 == 0
+    assert cache_path.stat().st_mode & 0o077 == 0
+
+
+def test_cache_write_is_fail_silent_when_private_directory_is_unsafe(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        u,
+        "ensure_owner_private_dir",
+        lambda _path: (_ for _ in ()).throw(UnsafeStateFile("unsafe")),
+    )
+
+    u._write_cache("1.2.3", "https://example.test/release")
 
 
 def test_check_fetches_writes_cache_and_reports_update(cache, monkeypatch):
@@ -247,9 +342,41 @@ def test_linked_cache_is_ignored_and_never_overwrites_target(cache):
     assert victim.read_text() == "do not replace"
 
 
+def test_cached_and_direct_notice_values_are_sanitized(cache, monkeypatch):
+    monkeypatch.setattr(u, "CURRENT_VERSION", "1.0.0")
+    cache.write_text(
+        json.dumps(
+            {
+                "latest": "9.9.9\nforged",
+                "url": "https://example.test/release\nforged",
+                "error": "unavailable\rforged",
+                "checked_at": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = u._snapshot_from_cache(u._read_cache())
+    assert snapshot["latest"] == ""
+    assert snapshot["url"] == ""
+    assert snapshot["error"] == ""
+    assert snapshot["update_available"] is False
+    assert u.notice_line(snapshot) is None
+    assert u.notice_line(
+        {
+            "enabled": True,
+            "update_available": True,
+            "latest": "9.9.9\nforged",
+            "current": "1.0.0",
+            "url": "https://example.test/release",
+        }
+    ) is None
+
+
 def test_notice_line(monkeypatch):
     line = u.notice_line({"enabled": True, "update_available": True,
                           "latest": "1.4.0", "current": "1.0.0", "url": "https://rel/1.4.0"})
+    assert line is not None
     assert "1.4.0" in line and "1.0.0" in line and "pip install -U engraphis" in line
     assert u.notice_line({"enabled": True, "update_available": False}) is None
 

@@ -26,6 +26,7 @@ def test_read_only_factory_forwards_configured_vector_backend(monkeypatch):
 
     assert captured["vector_backend"] == "auto"
     assert captured["embed_dim"] == 768
+    assert captured["read_only"] is True
 
 
 def test_read_only_api_requires_token_and_does_not_reinforce():
@@ -209,3 +210,116 @@ def test_read_only_graph_does_not_lazy_backfill():
     assert svc.store.conn.execute(
         "SELECT COUNT(*) AS n FROM entities"
     ).fetchone()["n"] == before
+
+
+def test_factory_owned_read_only_service_is_immutable_and_closed(monkeypatch, tmp_path):
+    db_path = tmp_path / "readonly.db"
+    writable = MemoryService.create(str(db_path), embed_model="", graph_extractor="none")
+    writable.remember("Immutable inspector fixture.", workspace="w")
+    writable.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    writable.close()
+    watched = [db_path, tmp_path / "readonly.db-wal", tmp_path / "readonly.db-shm"]
+    before = {
+        path.name: path.read_bytes() if path.exists() else None
+        for path in watched
+    }
+
+    monkeypatch.setattr(settings, "db_path", str(db_path))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "vector_backend", "numpy")
+    monkeypatch.setattr(settings, "extractor", "none")
+    app = create_read_only_app()
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        response = client.get(
+            "/recall", params={"query": "immutable", "workspace": "w"}
+        )
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+
+    after = {
+        path.name: path.read_bytes() if path.exists() else None
+        for path in watched
+    }
+    assert after == before
+    assert app.state.service._closed is True
+
+
+def test_injected_read_only_service_remains_caller_owned():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    app = create_read_only_app(svc)
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+    assert svc._closed is False
+    assert svc.store.conn.execute("SELECT 1").fetchone()[0] == 1
+    svc.close()
+
+
+def test_read_only_code_routes_validate_and_forward_capacity():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    observed = {}
+
+    def code_path(*args, **kwargs):
+        observed["path"] = kwargs["capacity"]
+        return {"capacity": kwargs["capacity"], "truncated": True}
+
+    def code_impact(*args, **kwargs):
+        observed["impact"] = kwargs["capacity"]
+        return {"capacity": kwargs["capacity"], "truncated": True}
+
+    def code_export(**kwargs):
+        observed["export"] = kwargs["capacity"]
+        return {"graph": {"limit": kwargs["capacity"], "truncated": True}}
+
+    svc.code_path = code_path
+    svc.code_impact = code_impact
+    svc.export_code_graph = code_export
+    client = TestClient(create_read_only_app(svc))
+
+    path = client.post("/code/path", json={
+        "workspace": "w", "repo": "r", "source": "a", "target": "b",
+        "capacity": 321,
+    })
+    impact = client.post("/code/impact", json={
+        "workspace": "w", "repo": "r", "changed_files": ["a.py"],
+        "capacity": 654,
+    })
+    exported = client.get(
+        "/code/export",
+        params={"workspace": "w", "repo": "r", "capacity": 987},
+    )
+    invalid = client.post("/code/path", json={
+        "workspace": "w", "repo": "r", "source": "a", "target": "b",
+        "capacity": 50_001,
+    })
+
+    assert path.json() == {"capacity": 321, "truncated": True}
+    assert impact.json() == {"capacity": 654, "truncated": True}
+    assert exported.json()["graph"] == {"limit": 987, "truncated": True}
+    assert observed == {"path": 321, "impact": 654, "export": 987}
+    assert invalid.status_code == 422
+    svc.close()
+
+
+def test_read_only_unhandled_error_is_json_and_redacted(caplog):
+    secret = "https://provider.invalid/?token=do-not-return-or-log"
+
+    class _ExplodingService:
+        def recall(self, *args, **kwargs):
+            raise RuntimeError(secret)
+
+    app = create_read_only_app(_ExplodingService())
+    with caplog.at_level("ERROR", logger="engraphis.read_only"):
+        response = TestClient(app).get(
+            "/recall", params={"query": "trigger", "workspace": "w"}
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "internal server error"}
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text

@@ -137,6 +137,7 @@ def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypa
     start_dashboard.main(["--no-open"])
     assert captured["proxy_headers"] is False
     assert "forwarded_allow_ips" not in captured
+    assert captured["access_log"] is False
 
 
 def test_reload_uses_an_asgi_import_string(monkeypatch):
@@ -153,6 +154,7 @@ def test_reload_uses_an_asgi_import_string(monkeypatch):
     assert captured["app"] == "engraphis.dashboard_app:app"
     assert captured["reload"] is True
     assert captured["proxy_headers"] is False
+    assert captured["access_log"] is False
 
 
 def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
@@ -178,6 +180,7 @@ def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
     start_dashboard.main(["--no-open"])
 
     assert captured["log_config"] is None
+    assert captured["access_log"] is False
     # Exercise the same Config initialization uvicorn.run performs. A future launcher
     # change that restores Uvicorn's default dictConfig will replace our formatter here.
     uvicorn.Config(fake.app, log_config=captured["log_config"], log_level="info")
@@ -217,3 +220,126 @@ def test_launcher_reports_a_non_engraphis_port_conflict(monkeypatch, capsys):
     error = capsys.readouterr().err
     assert "http://127.0.0.1:8719 is already in use" in error
     assert "--port" in error
+
+
+def test_dashboard_streaming_body_limit_rejects_before_parsing_with_cors(
+    monkeypatch, tmp_path,
+):
+    pytest.importorskip("fastapi")
+    httpx = pytest.importorskip("httpx")
+    import anyio
+    from fastapi import FastAPI, Request
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "dashboard.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "vector_backend", "numpy")
+    monkeypatch.setattr(settings, "loop_interval", 0)
+    monkeypatch.setattr(settings, "loop_consolidate", 0)
+    from engraphis.dashboard_app import _RequestBodyLimitMiddleware
+
+    app = FastAPI()
+    app.add_middleware(_RequestBodyLimitMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://dashboard.example"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    parsed = []
+    @app.post("/api/auth/session")
+    async def parse_body(request: Request):
+        parsed.append(await request.body())
+        return {"parsed": True}
+
+    async def chunks():
+        yield b"x" * 4096
+        yield b"x" * 4097
+
+    async def request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            declared = await client.post(
+                "/api/auth/session",
+                content=b"{}",
+                headers={
+                    "Content-Length": str(8 * 1024 + 1),
+                    "Content-Type": "application/json",
+                    "Origin": "https://dashboard.example",
+                },
+            )
+            streamed = await client.post(
+                "/api/auth/session",
+                content=chunks(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://dashboard.example",
+                },
+            )
+            return declared, streamed
+
+    declared, streamed = anyio.run(request)
+    for response in (declared, streamed):
+        assert response.status_code == 413
+        assert response.json() == {
+            "error": "request body too large",
+            "max_bytes": 8 * 1024,
+        }
+        assert (
+            response.headers["access-control-allow-origin"]
+            == "https://dashboard.example"
+        )
+    assert parsed == []
+
+
+def test_dashboard_lifespan_releases_its_service(monkeypatch):
+    pytest.importorskip("fastapi")
+    import anyio
+
+    from engraphis import dashboard_app, update_check
+
+    class _Store:
+        prompt_eligibility_counts = None
+        embedding_space_health = None
+        active_embedding_space = None
+        begin_embedding_rebuild = None
+        finish_embedding_rebuild = None
+
+    class _Service:
+        allowed_workspaces = None
+        store = _Store()
+        engine = types.SimpleNamespace(
+            embedder=types.SimpleNamespace(dim=16),
+        )
+
+        @staticmethod
+        def stats():
+            return {}
+
+    service = _Service()
+    released = []
+    original_find_spec = dashboard_app.importlib.util.find_spec
+    monkeypatch.setattr(
+        dashboard_app.importlib.util,
+        "find_spec",
+        lambda name: None if name == "mcp" else original_find_spec(name),
+    )
+    monkeypatch.setattr(dashboard_app.MemoryService, "create", lambda *args, **kwargs: service)
+    monkeypatch.setattr(dashboard_app.v2_api, "set_service", lambda bound: None)
+    monkeypatch.setattr(dashboard_app.v2_api, "release_service", released.append)
+    monkeypatch.setattr(update_check, "emit_startup_notice", lambda callback: None)
+    monkeypatch.setattr(dashboard_app.settings, "loop_interval", 0)
+    monkeypatch.setattr(dashboard_app.settings, "loop_consolidate", 0)
+    app = dashboard_app.create_app()
+
+    async def run_lifespan():
+        async with app.router.lifespan_context(app):
+            pass
+
+    anyio.run(run_lifespan)
+    assert released == [service]

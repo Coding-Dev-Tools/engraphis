@@ -17,13 +17,16 @@ unreferenced extracted entities. It removes the record's old audit details, reco
 content-free erasure marker, enables SQLite `secure_delete`, checkpoints/truncates the WAL when
 SQLite permits it, and runs `VACUUM` to rebuild the live database without free-page/FTS tombstone
 content. Recognised local migration and embed-repair SQLite backups are scanned and rewritten too.
+For sync, only a non-secret workspace/repo record receives a `remote_erasure` marker; secret,
+session, reserved user-scope, and migrated legacy markers are `never_export` and stay local.
 
 This is best-effort physical remediation, not a promise of universal deletion. The result reports
 whether WAL/VACUUM maintenance and injected vector-index deletion succeeded. It cannot erase:
 
 - filesystem snapshots, deleted-file recovery sectors, copied/exported databases, or backup
   systems Engraphis cannot identify and open;
-- remote sync peers, cloud backups, or logs outside the local database;
+- remote sync peers that have not yet accepted an eligible `remote_erasure` marker, cloud
+  backups, or logs outside the local database; `never_export` markers never notify peers;
 - values already returned to, cached by, or observed by a running/compromised agent.
 
 Always rotate or revoke the credential first. If an injected external vector backend reports a

@@ -234,6 +234,7 @@ def main(argv=None) -> None:
             "host": args.host,
             "port": args.port,
             "proxy_headers": False,
+            "access_log": False,
         }
         if args.reload:
             run_options["reload"] = True

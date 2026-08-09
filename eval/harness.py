@@ -39,6 +39,7 @@ import time
 from typing import Any, Callable, Optional
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
+from engraphis.backends.embedder_st import get_embedder
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
@@ -424,6 +425,33 @@ def _validate_dataset(dataset: list[dict]) -> None:
             for field in ("answer", "evidence"):
                 if field in question and not isinstance(question[field], str):
                     raise ValueError(f"{case_id}:{question_number - 1}: {field} must be a string")
+            variants = question.get("answer_variants")
+            if variants is not None and (
+                not isinstance(variants, list)
+                or not variants
+                or any(
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or value != value.strip()
+                    for value in variants
+                )
+                or len(set(variants)) != len(variants)
+            ):
+                raise ValueError(
+                    f"{case_id}:{question_number - 1}: answer_variants must be "
+                    "unique non-empty strings"
+                )
+            accepted_answers = list(variants or [])
+            accepted_answers.extend(
+                question[field]
+                for field in ("answer", "evidence")
+                if isinstance(question.get(field), str) and question[field].strip()
+            )
+            if answerable is True and not accepted_answers and not supporting:
+                raise ValueError(
+                    f"{case_id}:{question_number - 1}: answerable questions require "
+                    "answer evidence or supporting memory tags"
+                )
 
 
 
@@ -501,20 +529,27 @@ def _mean(records: list[dict], field: str) -> float:
 
 
 def _v2_metrics(records: list[dict], *, bootstrap_iterations: int) -> dict:
-    """Aggregate conventional retrieval scores plus deterministic uncertainty."""
-    scored = [item for item in records if not item.get("excluded")]
+    """Aggregate retrieval and answer coverage over their distinct gold labels."""
+    retrieval_scored = [
+        item for item in records if item.get("retrieval_scored") is True
+    ]
+    answer_scored = [item for item in records if item.get("answer_scored") is True]
     metric_fields = [
         "recall_at_1", "recall_at_5", "recall_at_10",
         "mrr_at_1", "mrr_at_5", "mrr_at_10",
         "ndcg_at_1", "ndcg_at_5", "ndcg_at_10",
     ]
     summary: dict[str, Any] = {
-        field: round(_mean(scored, field), 6) for field in metric_fields
+        field: round(_mean(retrieval_scored, field), 6) for field in metric_fields
     }
-    summary["answer_token_recall"] = round(_mean(scored, "answer_token_recall"), 6)
+    summary["retrieval_scored_questions"] = len(retrieval_scored)
+    summary["answer_token_recall"] = round(
+        _mean(answer_scored, "answer_token_recall"), 6
+    )
+    summary["answer_token_recall_n"] = len(answer_scored)
     summary["confidence_intervals"] = {
         field: stratified_bootstrap_ci(
-            scored,
+            retrieval_scored,
             lambda rows, metric=field: _mean(list(rows), metric),
             iterations=bootstrap_iterations,
         )
@@ -756,14 +791,6 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             question_id = str(q.get("id") or f"{case.get('id')}:{question_number}")
             started = time.perf_counter_ns()
             supporting = q.get("supporting", ["whole_document"] if document_record else [])
-            # An answerable question must name its gold evidence; an empty support list
-            # would otherwise score as a perfect recall/ndcg via the metric defaults.
-            # Explicitly unanswerable questions are excluded from scoring instead.
-            if q.get("answerable") is not False and not supporting:
-                raise ValueError(
-                    f"question '{question_id}' is answerable but declares no supporting "
-                    "evidence; add gold `supporting` ids or mark `answerable: false`"
-                )
             res = _recall_for_baseline(
                 engine, q["q"], workspace_id=wid, repo_id=rid, k=k,
                 token_budget=token_budget, baseline=baseline,
@@ -774,12 +801,18 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             retrieved_ids = [c["id"] for c in res.chunks]
             retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
-            excluded = None
-            if q.get("answerable") is False:
-                excluded = exclusion(
-                    str(q.get("id") or f"{case.get('id')}:{question_number}"),
-                    str(q.get("exclusion_reason") or "no_gold_evidence"),
-                )
+            retrieval_scored = bool(supporting)
+            accepted_answer = (
+                q.get("answer_variants")
+                or q.get("answer")
+                or q.get("evidence")
+                or ""
+            )
+            answer_scored = q.get("answerable") is not False and bool(accepted_answer)
+            excluded = None if retrieval_scored else exclusion(
+                str(q.get("id") or f"{case.get('id')}:{question_number}"),
+                str(q.get("exclusion_reason") or "no_gold_retrieval_evidence"),
+            )
             depth_metrics = metrics.retrieval_metrics_at_depths(
                 retrieved_tags, supporting, depths=(1, 5, 10),
             )
@@ -800,18 +833,22 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                 context_tokens=usage["context_tokens"],
                 latency_ms=latency_ms,
                 excluded=excluded,
-                case=case.get("id"), q=q["q"],
+                case=case.get("id"),
+                q=q["q"],
+                retrieval_scored=retrieval_scored,
+                answer_scored=answer_scored,
                 **({"answerable": answerable} if isinstance(answerable, bool) else {}),
-                **({"grounded": grounded_answer.grounded,
+                **({
+                    "grounded": grounded_answer.grounded,
                     "abstained": grounded_answer.abstained,
-                    "grounded_support": round(grounded_answer.support, 6)}
-                   if grounded_answer is not None else {}),
+                    "grounded_support": round(grounded_answer.support, 6),
+                } if grounded_answer is not None else {}),
                 recall_at_k=metrics.recall_at_k(retrieved_tags, supporting),
                 hit_at_k=metrics.hit_at_k(retrieved_tags, supporting),
                 mrr_at_k=metrics.mrr_at_k(retrieved_tags, supporting, k),
                 ndcg_at_k=metrics.ndcg_at_k(retrieved_tags, supporting, k),
                 answer_token_recall=metrics.answer_token_recall(
-                    retrieved_texts, q.get("answer", q.get("evidence", "")),
+                    retrieved_texts, accepted_answer,
                 ),
                 usage=usage,
                 **depth_metrics,
@@ -854,17 +891,26 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                     })
         store.close()
 
-    scored = [item for item in per_q if not item.get("excluded")]
-    n = max(len(scored), 1)
+    retrieval_rows = [
+        item for item in per_q if item.get("retrieval_scored") is True
+    ]
+    answer_rows = [item for item in per_q if item.get("answer_scored") is True]
+    retrieval_n = max(len(retrieval_rows), 1)
+    answer_n = max(len(answer_rows), 1)
     report = {
         "questions": len(per_q),
-        "scored_questions": len(scored),
+        "scored_questions": len(retrieval_rows),
+        "answer_scored_questions": len(answer_rows),
         "exclusions": [item["excluded"] for item in per_q if item.get("excluded")],
-        "recall_at_k": round(sum(x["recall_at_k"] for x in scored) / n, 4),
-        "hit_at_k": round(sum(x["hit_at_k"] for x in scored) / n, 4),
-        "mrr_at_k": round(sum(x["mrr_at_k"] for x in scored) / n, 4),
-        "ndcg_at_k": round(sum(x["ndcg_at_k"] for x in scored) / n, 4),
-        "answer_token_recall": round(sum(x["answer_token_recall"] for x in scored) / n, 4),
+        "recall_at_k": round(
+            sum(x["recall_at_k"] for x in retrieval_rows) / retrieval_n, 4
+        ),
+        "hit_at_k": round(sum(x["hit_at_k"] for x in retrieval_rows) / retrieval_n, 4),
+        "mrr_at_k": round(sum(x["mrr_at_k"] for x in retrieval_rows) / retrieval_n, 4),
+        "ndcg_at_k": round(sum(x["ndcg_at_k"] for x in retrieval_rows) / retrieval_n, 4),
+        "answer_token_recall": round(
+            sum(x["answer_token_recall"] for x in answer_rows) / answer_n, 4
+        ),
         "k": k,
         "baseline_label": baseline.label,
         "baseline_execution": baseline.as_dict(),
@@ -878,6 +924,7 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         raise RuntimeError("v2 dataset path validation was bypassed")
     profile = validated_profile if canonical else None
     config = {
+        "measurement_scope": "retrieval_only",
         "k": int(k),
         "dim": int(dim),
         "token_budget": token_budget,
@@ -977,6 +1024,51 @@ def run_baseline_matrix(
     }
 
 
+def _load_cli_embedder(
+    model_name: Optional[str],
+    revision: Optional[str],
+    *,
+    dim: int,
+) -> Optional[Embedder]:
+    """Load an explicitly pinned semantic embedder or fail closed."""
+    if bool(model_name) != bool(revision):
+        raise ValueError("--embed-model and --embed-revision must be supplied together")
+    if model_name is None:
+        return None
+    embedder = get_embedder(
+        model_name,
+        dim,
+        revision=revision,
+        require_immutable_models=True,
+    )
+    expected_model = model_name.removeprefix("local:").strip()
+    if (
+        getattr(embedder, "supports_semantic_search", False) is not True
+        or getattr(embedder, "model_name", None) != expected_model
+        or getattr(embedder, "revision", None) != revision
+    ):
+        raise ValueError(
+            "configured canonical semantic embedder is unavailable or mismatched"
+        )
+    return embedder
+
+
+def _write_immutable_report(report: dict, output: str | Path) -> None:
+    """Write one strict JSON report without creating a publication sidecar."""
+    payload = json.dumps(
+        report,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=True,
+        allow_nan=False,
+    ) + "\n"
+    target = Path(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.read_text(encoding="utf-8") != payload:
+        raise ValueError(f"refusing to replace different report: {target}")
+    target.write_text(payload, encoding="utf-8")
+
+
 def _print(report: dict) -> None:
     print(f"\nEngraphis eval — {report['questions']} questions @ k={report['k']}")
     print(f"  recall@k            : {report['recall_at_k']:.3f}")
@@ -996,16 +1088,24 @@ def main(argv: Optional[list[str]] = None) -> None:
                     help="emit the provenance-complete engraphis-benchmark/v2 envelope")
     ap.add_argument("--artifact", default=None,
                     help="immutably write a v2 JSON artifact and SHA-256 sidecar")
+    ap.add_argument("--report", default=None,
+                    help="immutably write the JSON report without a publication checksum")
     ap.add_argument("--canonical", action="store_true",
                     help="require a complete dataset and a pinned canonical profile (implies --v2)")
     ap.add_argument("--canonical-profile", default=None,
                     help="JSON file with pinned benchmark, reader, and embedding revisions")
+    ap.add_argument("--embed-model", default=None,
+                    help="semantic embedding model required for canonical CLI runs")
+    ap.add_argument("--embed-revision", default=None,
+                    help="immutable embedding revision required with --embed-model")
     ap.add_argument("--baseline-label", default="full_hybrid",
                     help="executable baseline: " + ", ".join(sorted(_EXECUTABLE_BASELINES)))
     ap.add_argument("--bootstrap-iterations", type=int, default=1000,
                     help="deterministic stratified-bootstrap iterations for v2 output")
     ap.add_argument("--grounded", action="store_true",
                     help="run deterministic grounded recall for rows declaring answerable")
+    ap.add_argument("--output-dir", default=None,
+                    help="save the JSON report to this directory (filename derived from dataset + timestamp)")
     args = ap.parse_args(argv)
 
     if args.artifact and not (args.v2 or args.canonical):
@@ -1018,19 +1118,57 @@ def main(argv: Optional[list[str]] = None) -> None:
             profile = json.loads(Path(args.canonical_profile).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             ap.error(f"could not read --canonical-profile: {exc}")
+    if args.canonical:
+        if not args.embed_model or not args.embed_revision:
+            ap.error("--canonical requires --embed-model and --embed-revision")
+        expected_embedding = (
+            profile.get("embedding") if isinstance(profile, dict) else None
+        )
+        if (
+            isinstance(expected_embedding, dict)
+            and (
+                args.embed_model.removeprefix("local:").strip()
+                != expected_embedding.get("model")
+                or args.embed_revision != expected_embedding.get("revision")
+            )
+        ):
+            ap.error(
+                "--embed-model/--embed-revision must match the canonical profile"
+            )
 
     try:
+        embedder = _load_cli_embedder(
+            args.embed_model,
+            args.embed_revision,
+            dim=args.dim,
+        )
         report = run(
             load_dataset(args.dataset), k=args.k, dim=args.dim,
             v2=args.v2 or args.canonical, dataset_path=args.dataset,
             token_budget=args.token_budget, canonical=args.canonical,
             canonical_profile=profile, bootstrap_iterations=args.bootstrap_iterations,
             baseline_label=args.baseline_label, grounded=args.grounded,
+            embedder=embedder,
         )
+        if args.report:
+            _write_immutable_report(report, args.report)
         if args.artifact:
             write_canonical_artifact(report, args.artifact, canonical=args.canonical)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
+    if args.output_dir:
+        try:
+            import datetime
+            out_dir = Path(args.output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            dataset_stem = Path(args.dataset).stem
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_file = out_dir / f"{dataset_stem}_{ts}.json"
+            out_file.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+            latest = out_dir / f"{dataset_stem}_latest.json"
+            latest.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+        except OSError as exc:
+            ap.error(f"could not write to --output-dir: {exc}")
     if args.json or args.v2 or args.canonical:
         print(json.dumps(report, indent=2))
     else:

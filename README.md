@@ -11,7 +11,7 @@
 **Give your AI agents a memory. See it, search it, and maintain it, all in a beautiful WebUI on your own machine.**
 
 <p align="center">
-  <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
   <br>
   <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
@@ -41,7 +41,7 @@ does not measure provider billing. The `/context-savings` API and
 filters.
 
 <p align="center">
-  <img src="docs/images/context-efficiency.svg" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 71.1 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 57.15 percent smaller recall payload proxy, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart showing three deterministic offline comparisons. Structure-aware chunks reduce mean retrieved content from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens while Recall at 5 remains 1.000. A compact recall JSON-shape proxy uses 10,202 rather than 23,810 tokens. Evidence artifact SHA-256: c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -54,31 +54,33 @@ filters.
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
 | Whole documents | 740.3 tokens | 1.000 |
-| Engraphis structure-aware chunks | 214.1 tokens | 1.000 |
+| Engraphis structure-aware chunks | 214.3 tokens | 1.000 |
 
-The chunked mode returns the relevant passage instead of the whole document: **526.2 fewer tokens
+The chunked mode returns the relevant passage instead of the whole document: **526.0 fewer tokens
 per question**. Under the same model-context budget, that leaves roughly **526 tokens** for task
-instructions or other relevant evidence.
+instructions or other relevant evidence. This is evidence ID `offline-chunking` in the registered
+artifact below.
 
 ### Measurement details and reproducibility
 
-The table below records every current token/context efficiency measurement and its counting
-boundary.
+The table below contains every exact token/context aggregate currently published here and keeps
+its counting boundary explicit.
 
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
-| Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
-| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.1** tokens | **526.2 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.3** tokens | **526.0 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,202** tokens | **13,608 proxy tokens avoided** (**57.15% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
-| Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
-| Small histories across 26 CodeMem agent tasks | Always retrieve: **1,883** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | Adaptive uses **59 more tokens** (**3.1% higher**) while eliminating all **26** memory calls | Both completed **24/26** tasks with the same deterministic offline task agent; this fixture demonstrates bypass behavior, not token savings |
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
-The LoCoMo context-use row is an **unpinned, noncanonical retrieval diagnostic**, not official
-LoCoMo QA, answer-quality, provider-cost, or leaderboard evidence. It is not reproduced by the
-small offline fixtures below; [BENCHMARKS.md](BENCHMARKS.md) records its exact limitations and
-the separate hash-bound canonical retrieval diagnostic.
+These values are evidence IDs `offline-chunking` and `offline-performance` in
+[`offline-fixtures-v1.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v1.json),
+SHA-256
+`c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2`.
+[`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
+records the matching suite digest, exact commands, and per-command config digests. External,
+model-dependent, consolidation, productivity, and latency results remain unpublished until the
+same evidence exists for them.
 
 The compact payload shape avoids duplicating full memory bodies when the packed context and source
 list are enough. The evaluator tokenizes JSON-shaped full and compact payload proxies built from
@@ -90,27 +92,25 @@ The measures are deliberately separate and **must not be added together**: chunk
 content of retrieved memory records before `ContextPacker`, whereas compact recall counts a
 serialized JSON-shape payload proxy. “Tokens to evidence” is the size of the smallest
 retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
-accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
-memories in this fixture), so this is a context-efficiency result, not a storage-reduction claim.
+accuracy. Chunking creates more focused stored records, so this is a context-efficiency result,
+not a storage-reduction claim.
 
-Reproduce the quality and token/context measurements without a network connection or API key:
+Reproduce the registered quality and token/context measurements without a network connection or
+API key:
 
 ```bash
-python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
 python -m eval.grounded
-python -m eval.chunking_eval
-python -m eval.adversarial_memory_security
+python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5
 python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
-python -m eval.productivity --dataset eval/datasets/codemem.jsonl
 ```
 
 These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
 LongMemEval QA scores or a third-party leaderboard result. Compact-response counts use the exact
 `engraphis.regex.v1` counter; the chunking evaluation uses its documented deterministic
 normalized-character estimator. Chunking measures retrieved memory content, while compact recall
-measures a serialized JSON-shape payload proxy, not an MCP transport response. See
-[`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
-limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
+measures a serialized JSON-shape payload proxy, not an MCP transport response. See the registered
+artifact and [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md)
+for definitions, limitations, and canonical external-evaluation requirements.
 
 </details>
 
@@ -143,7 +143,7 @@ continues to support Python 3.9+.
 | Offline Python library | `pip install engraphis` | `MemoryService.create("engraphis.db")` |
 
 For MCP clients other than Codex, configure a stdio server whose command is `engraphis-mcp`; see
-the [agent connection guide](docs/AGENT_CONNECT.md).
+the [agent connection guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md).
 
 ### Updating
 
@@ -159,12 +159,20 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > and `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table
 > and performs a one-time entity-canonicalization repair, then migrates automatically on first
 > open. A tombstone with a known `repo_id` is terminal only in that repository; legacy repo-less
-> tombstones remain global. See the [1.4.0 release notes](CHANGELOG.md#140---2026-08-02).
+> tombstones remain global. See the [1.4.0 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#140---2026-08-02).
 
 > **Upgrading to 1.5:** schema 10 bounds legacy retention state and schema 11 backfills explicit
 > approval only for eligible pre-review local memories. Pending and quarantined evidence remains
 > gated. Existing 1.4.x databases migrate automatically when Engraphis 1.5 opens them; see the
-> [1.5 release notes](CHANGELOG.md#150---2026-08-04).
+> [1.5 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#150---2026-08-04).
+
+> **Current source:** schema 15 adds the local source-import manifest (vaults, imports,
+> job items) for document and note-collection tracking. Schema 14 introduced the
+> initial note-collection manifest; schema 15 generalized it to support multiple source
+> kinds with content-free scope-security triggers.
+> Schema 12 classifies content-free erasure markers before sync: existing markers migrate to
+> local-only `never_export`; new secure erasures become `remote_erasure` only for non-secret
+> `workspace`/`repo` records that were already eligible for sharing.
 
 ---
 
@@ -207,6 +215,10 @@ Appearance & Engine** (Classic).
 | **Docker** | `docker compose up`: see `docker-compose.yml` for the one-command deployment |
 | **Any** | `engraphis-dashboard` in a terminal |
 
+In a source checkout, `scripts/launch_dashboard.ps1` is only a Windows convenience wrapper. It
+delegates configuration, startup health, browser opening, and process lifecycle to the same
+`engraphis-dashboard` entrypoint rather than maintaining a second behavior path.
+
 ### Accessibility-first inspection, built in
 
 Inspect memories, supersession diffs, recall scores, timelines, links, consolidation, and audit
@@ -233,13 +245,13 @@ The memory engine, embeddings, conflict resolution, and recall stay local withou
 explicitly configured provider adds structured extraction, cited synthesis, consolidation, and
 retention supervision. Configure it in **Settings → Connect an LLM**. The activity view records
 outcomes, never keys, prompts, or raw provider responses. See the
-[LLM provider guide](docs/LLM_PROVIDERS.md) for setup and privacy choices.
+[LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md) for setup and privacy choices.
 
 > Privacy boundary: text sent to an explicitly selected provider leaves the local process under
 > that provider's terms. Use `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and the offline
 > `chunk` extractor when ingestion must remain entirely local.
 
-Choose and configure an external LLM with the [LLM provider guide](docs/LLM_PROVIDERS.md),
+Choose and configure an external LLM with the [LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md),
 including OpenAI, Anthropic, Google, OpenRouter, Ollama, Cohere Command, Command Code Provider,
 and other compatible endpoints. The guide also covers Codex subscription MCP connections.
 
@@ -275,7 +287,7 @@ pipeline. Measure your machine with `python -m eval.vector_scale --backend numpy
 `python -m eval.performance` on a representative corpus. If exact scans miss your latency target,
 install `engraphis[vector]`, create the engine with `vector_backend="sqlite-vec"`, and remeasure.
 The stable sqlite-vec `vec0` backend executes exact KNN in native code; it is acceleration, not a
-claim of sublinear ANN scaling. See [BENCHMARKS.md](BENCHMARKS.md) for the reproducible commands
+claim of sublinear ANN scaling. See [BENCHMARKS.md](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md) for the reproducible commands
 and reporting limits.
 
 Dashboard, REST, and MCP entrypoints default to `ENGRAPHIS_VECTOR_BACKEND=auto`: they use
@@ -284,6 +296,14 @@ Programmatic `MemoryEngine.create()` and `MemoryService.create()` retain the det
 `numpy` default unless a backend is requested explicitly.
 Use `python -m eval.vector_scale --backend sqlite-vec` for an input-identical direct-search
 comparison; setup/index-build time is explicitly excluded from the timed search envelope.
+
+Persistent vectors fail closed unless the embedder can publish a durable, secret-free space
+fingerprint. Sentence Transformers use the loaded Hub commit or a manifest of local artifacts;
+when a remote model's immutable identity cannot be resolved, persistent vector recall remains
+gated instead of mixing spaces. For programmatic OpenAI-compatible embeddings, construct
+`ApiEmbedder` with an operator/provider `space_version`; without it the adapter remains usable for
+ephemeral embedding only. Its `base_url` may be a provider root or a `/v1` root and is normalized
+to exactly one `/v1/embeddings` endpoint.
 
 `sqlcipher3-binary` publishes CPython manylinux x86-64 wheels. On that target,
 `engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
@@ -325,12 +345,12 @@ docker compose up                     # → http://127.0.0.1:8700
 ```
 
 For Docker Compose persistence and loopback-port configuration, see the
-[Docker deployment guide](docs/DOCKER.md).
+[Docker deployment guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md).
 `engraphis-server` and `engraphis server` are headless compatibility aliases
 for this same v2 service, so every public surface has the same scoped recall and retention model.
 
 For optional LAN exposure, token configuration, and HTTP MCP setup, see the
-[Docker deployment guide](docs/DOCKER.md).
+[Docker deployment guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md).
 
 Set `ENGRAPHIS_API_TOKEN` to require API authentication and `ENGRAPHIS_DB_KEY` to encrypt
 the local database at rest. Hosted-plan credentials configure customer clients; they do not
@@ -342,13 +362,13 @@ install premium server implementations into this image. See `docker-compose.yml`
 
 ```bash
 pip install "engraphis[mcp]"
-engraphis-init                     # writes .env + prints config snippets
+engraphis-init                     # writes ~/.engraphis/config.env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
 codex mcp add engraphis -- engraphis-mcp  # Codex subscription
 
 ```
-For Codex subscription setup and verification, see the [agent connection guide](docs/AGENT_CONNECT.md)
-and the [LLM provider guide](docs/LLM_PROVIDERS.md).
+For Codex subscription setup and verification, see the [agent connection guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md)
+and the [LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md).
 
 `engraphis-mcp` is zero-configuration Smart MCP: agents begin with nine compact tools for sessions,
 prompt-ready recall, durable memory, governed record read/update, conflict review, action discovery,
@@ -358,21 +378,21 @@ the indicated read or action executor; no profile selection is required. The gat
 the discovered capability again before it runs it, and clients remain responsible for their
 normal destructive-action approval boundary.
 
-Existing clients that pin the historical 33 named tools can use
+Existing clients that pin the historical 34 named tools can use
 `engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
-including `engraphis_check_update`, is in the [MCP tool reference](docs/MCP_TOOLS.md).
+including `engraphis_check_update`, is in the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md).
 
 ### Pi extension
 
 For installation, configuration, lifecycle commands, and the local trust boundary, see the
-[Pi extension guide](integrations/pi/README.md).
+[Pi extension guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md).
 
 ### Hermes provider
 
 Engraphis also ships a native Hermes memory-provider plugin with local prefetch, bounded turn
 capture, scoped recall, and explicit secure erase. Install Engraphis in the Hermes Python
 environment, copy the provider, then select it with `hermes memory setup`. See the
-[Hermes integration guide](integrations/hermes/README.md). The provider never installs itself or
+[Hermes integration guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/hermes/README.md). The provider never installs itself or
 downloads an embedding model.
 
 ## Quickstart: repository graph
@@ -411,7 +431,7 @@ engraphis-graph-server                 # API at http://127.0.0.1:8720; schema at
 ```
 
 A non-loopback bind fails closed unless `ENGRAPHIS_GRAPH_TOKEN` (or
-`ENGRAPHIS_API_TOKEN`) is set. See [the v3 architecture/design document](docs/ARCHITECTURE_V3.md).
+`ENGRAPHIS_API_TOKEN`) is set. See [the v3 architecture/design document](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md).
 
 ---
 
@@ -428,11 +448,15 @@ print(hit["context"])
 
 The same `MemoryService` backs the dashboard and the MCP server.
 
+New writes support `session`, `repo`, and `workspace` visibility. `scope="user"` is reserved and
+rejected until records carry an immutable owner identity; it must not be treated as private
+per-person memory. Historical user-scope rows remain workspace-bound for compatibility.
+
 After an upgrade, `stats()` reports prompt-eligibility counts and active embedding-space
 coverage. Zero-result recall identifies a review-gated scope instead of silently looking empty,
 and `engraphis-cli review list|approve` provides a dry-run-first local bulk workflow. Embedding
 model changes trigger a guarded rebuild; vector recall stays disabled until every stored vector
-matches the new fingerprint. See [recall recovery](docs/RECALL_RECOVERY.md).
+matches the new fingerprint. See [recall recovery](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/RECALL_RECOVERY.md).
 
 Agent hosts can avoid retrieval when their existing history already fits:
 
@@ -458,7 +482,7 @@ For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budg
 reader's tokenizer when reader-model token parity is required. `engraphis_recall` remains the compatible full-recall
 surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
 would duplicate it. For advanced query-planning configuration, see the
-[architecture guide](docs/ARCHITECTURE_V3.md#query-planning).
+[architecture guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md#query-planning).
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
@@ -484,7 +508,7 @@ Engraphis separates automatic write resolution from explicit human governance:
 | `promote` | A narrow learning now applies more broadly | Writes a wider-scope successor and closes/links the source instead of editing scope in place |
 | `merge` | Combining two or more overlapping memories | Retires every source and creates one memory that supersedes all of them |
 | `retire` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
-| `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; sources stay live unless explicit supersession is requested |
+| `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; source episodes remain live |
 
 Manual N→1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
 
@@ -508,7 +532,7 @@ storage; for a legacy leak use the explicitly destructive `MemoryService.secure_
 FTS/vector-index and derived graph/link rows, runs SQLite secure-delete, WAL checkpoint, and
 VACUUM, and scans recognised local SQLite recovery backups. It cannot erase exports, filesystem
 snapshots, remote peers, unknown backups, or information a running/compromised agent already
-read; rotate the credential. See [secure-erasure limits](docs/SECURE_ERASURE.md). `forget`
+read; rotate the credential. See [secure-erasure limits](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SECURE_ERASURE.md). `forget`
 remains a deprecated compatibility alias for `retire`.
 
 All sources must belong to the named workspace. The result inherits the strictest source
@@ -523,8 +547,8 @@ The core engine, local dashboard, MCP server, and manual consolidation are Apach
 **Pro and Team are services** that provide optional access to the official hosted service; its
 control-plane, billing, relay, compute, and Team identity modules live in a private repository.
 They do not limit the local core. See
-[hosted plans](docs/HOSTED_PLANS.md), [licensing](docs/LICENSING.md), and
-[Cloud Sync](docs/SYNC.md) for service boundaries, lifecycle, and pricing.
+[hosted plans](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/HOSTED_PLANS.md), [licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LICENSING.md), and
+[Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md) for service boundaries, lifecycle, and pricing.
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
 to support the project and add hosted services.
@@ -535,7 +559,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + Smart MCP (Classic 33-tool compatibility) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 34-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -553,9 +577,9 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes a zero-configuration Smart MCP gateway plus a 33-tool Classic compatibility
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 34-tool Classic compatibility
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
-The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
+The focused [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
 
 ---
@@ -564,8 +588,8 @@ the full inventory and parameters.
 
 Memory, entity, and code relationships live in one local graph. Engraphis also provides
 content-free operation receipts for inspectable audit evidence. See the
-[architecture](docs/ARCHITECTURE_V3.md), [MCP tool reference](docs/MCP_TOOLS.md), and
-[security policy](SECURITY.md) for the data model, tools, and guarantees.
+[architecture](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md), [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md), and
+[security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/main/SECURITY.md) for the data model, tools, and guarantees.
 
 ---
 
@@ -573,14 +597,14 @@ content-free operation receipts for inspectable audit evidence. See the
 
 Cloud Sync is an optional hosted Pro/Team service. The public package includes the customer client
 and deterministic merge implementation; hosted relay and account operations are separate. See
-[Cloud Sync](docs/SYNC.md) for setup, encryption, merge behavior, and the local folder exchange.
+[Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md) for setup, encryption, merge behavior, and the local folder exchange.
 
 ---
 
 ## Security and trust boundaries
 
 Engraphis is local-first and binds to loopback by default. Read the
-[security policy](SECURITY.md) before remote deployment or integrating external resources; it
+[security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/main/SECURITY.md) before remote deployment or integrating external resources; it
 covers supported versions, data protections, threat model, and vulnerability reporting.
 
 ---
@@ -616,8 +640,8 @@ oversized key files rather than following an unexpected filesystem object.
 
 Import supported documents and code through the dashboard, a local folder, or MCP. Optional
 extractors add offline chunking, structured LLM extraction, document OCR, transcription, and
-PostgreSQL schema ingestion. See the [MCP tool reference](docs/MCP_TOOLS.md),
-[architecture guide](docs/ARCHITECTURE_V3.md), and [security policy](SECURITY.md) for formats,
+PostgreSQL schema ingestion. See the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md),
+[architecture guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md), and [security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/main/SECURITY.md) for formats,
 configuration, and local-resource safeguards.
 
 ---
@@ -626,17 +650,20 @@ configuration, and local-resource safeguards.
 
 Manual consolidation is free, local, and dry-run by default; use the dashboard, SDK, CLI, or
 MCP. Hosted Pro and Team automation is optional managed compute that produces reviewable
-proposals rather than silently changing local data. See [hosted plans](docs/HOSTED_PLANS.md),
-[licensing](docs/LICENSING.md), and the [MCP tool reference](docs/MCP_TOOLS.md) for scope and use.
+proposals rather than silently changing local data. See [hosted plans](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/HOSTED_PLANS.md),
+[licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LICENSING.md), and the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) for scope and use.
 
 ---
 
 ## Configuration
 
-All via environment (or `.env`):
+Values come from the process environment. Engraphis also loads the owner-private
+`~/.engraphis/config.env`; `ENGRAPHIS_ENV_FILE` can select another absolute owner-private regular
+file. It never searches the working directory for `.env`, and explicit process variables win.
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
+| `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before dotenv values load. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
@@ -648,7 +675,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_HTTP_INDEX_ROOT` | First `ENGRAPHIS_INDEX_ROOTS` entry, or current directory | Single root for dashboard and REST `POST /api/code/index`; submitted paths resolve beneath it. An explicit root (or fallback entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and CLI indexing continue to use `ENGRAPHIS_INDEX_ROOTS`. |
 | `ENGRAPHIS_DB_KEY` | Not set | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
-| `ENGRAPHIS_EMBED_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the embedding model |
+| `ENGRAPHIS_EMBED_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the embedding model. Loaded Hub commits or local artifact manifests identify persistent vector spaces; unresolved mutable identities keep vector recall fail-closed. |
 | `ENGRAPHIS_RERANK_MODEL` | Not set | Optional sentence-transformers cross-encoder reranker |
 | `ENGRAPHIS_RERANK_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the reranker |
 | `ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS` | `false` | When enabled, require a 40-hex commit before loading remote embedding models, rerankers, or chunk tokenizers; `local:` selectors and filesystem paths remain permitted |
@@ -671,15 +698,18 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
-| `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
-| `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API |
+| `ENGRAPHIS_UPDATE_CACHE` | `86400` | Update-check cache TTL in seconds, bounded to `1..31622400`; this is never a cache-file path |
+| `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API. A saved rotating credential stays bound to the control endpoint recorded for its family; reconnect to change it. |
+| `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API. A saved rotating credential stays bound to its recorded compute endpoint; reconnect to change it. |
 | `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | Not set | Hosted organization bound to this customer session |
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
 
-See `.env.example` for the full customer-runtime and managed-service client options.
+See `.env.example` for the full variable inventory. Supply those values through the process
+environment or the trusted config file above; copying it to an arbitrary `./.env` does not make
+Engraphis load it.
 
 ---
 
@@ -690,8 +720,9 @@ engraphis/
 ├── engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
+│   ├── factory.py           # outer v2 composition root; selects and injects concrete backends
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # Smart MCP gateway + 33-tool Classic compatibility server
+│   ├── mcp_server.py        # Smart MCP gateway + 34-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
@@ -711,17 +742,21 @@ engraphis/
 ```
 
 New capability belongs in the v2 path (`engraphis/core/`, `engraphis/backends/`, and
-`MemoryService`) behind the interfaces in `core/interfaces.py`. The flat-namespace v1 server
-under `engraphis/app.py`, `routes/`, `stores/`, and `engines/` remains a compatibility/reference
-surface; `engraphis-dashboard`, the MCP server, and the Python quickstart above use v2.
+`MemoryService`) behind the interfaces in `core/interfaces.py`. Algorithm modules in `core/`
+remain backend-agnostic; `engraphis/factory.py` is the outer composition root used by
+`engraphis.create_memory_engine()` and the compatibility `MemoryEngine.create()` entry point, then
+injects the selected collaborators into `core/engine.py`. The flat-namespace v1 server under
+`engraphis/app.py`, `routes/`, `stores/`, and `engines/` remains a
+compatibility/reference surface; `engraphis-dashboard`, the MCP server, and the Python quickstart
+above use v2.
 
 ---
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). "Engraphis" is a trademark of the
+Apache-2.0. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE) and [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/main/NOTICE). "Engraphis" is a trademark of the
 Engraphis project; the license does not grant trademark rights. Code already distributed
 under Apache-2.0 keeps that grant; later releases cannot retroactively withdraw it. The
 official hosted control plane, its production credentials and records, managed operations,
 support, and future separately delivered commercial modules are outside the public source
-grant. See [`docs/LICENSING.md`](docs/LICENSING.md) for the complete boundary.
+grant. See [`docs/LICENSING.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LICENSING.md) for the complete boundary.

@@ -482,3 +482,58 @@ def _family_representatives(
 def _reverse_text(value: str) -> str:
     # Stable reverse-sort helper without relying on process-randomized hashes.
     return "".join(chr(0x10FFFF - ord(char)) for char in value)
+
+
+def pack_response_text(
+    text: str,
+    token_budget: int,
+    counter: Optional[Callable[[str], int]] = None,
+) -> tuple[str, int]:
+    """Truncate free-form response text to fit within *token_budget*.
+
+    Preserves sentence boundaries and qualifier terms when possible; falls
+    back to token-boundary truncation.  Returns ``(packed_text, actual_count)``.
+    """
+    count = counter or RegexTokenCounter()
+    text = (text or "").strip()
+    if not text or token_budget <= 0:
+        return "", 0
+    if count(text) <= token_budget:
+        return text, count(text)
+
+    tokens = list(_TOKEN_RE.finditer(text))
+    if not tokens:
+        return "", 0
+
+    # Prefer sentence-aligned truncation when the text has multiple sentences.
+    sentences = [part.strip() for part in _SENTENCE_RE.split(text) if part.strip()]
+    if len(sentences) > 1:
+        built = ""
+        for index, sentence in enumerate(sentences):
+            proposed = f"{built} {sentence}".strip() if built else sentence
+            remaining = index + 1 < len(sentences)
+            marked = f"{proposed} […]" if remaining else proposed
+            if count(marked if remaining else proposed) <= token_budget:
+                built = proposed
+            else:
+                break
+        if built:
+            if count(built) < count(text):
+                marked = f"{built} […]"
+                if count(marked) <= token_budget:
+                    built = marked
+            return built, count(built)
+
+    # Token-boundary fallback.
+    limit = min(len(tokens), token_budget)
+    while limit > 0:
+        end = tokens[limit - 1].end()
+        excerpt = text[:end].rstrip()
+        if limit < len(tokens):
+            marked = f"{excerpt} […]"
+            if count(marked) <= token_budget:
+                excerpt = marked
+        if count(excerpt) <= token_budget:
+            return excerpt, count(excerpt)
+        limit -= 1
+    return "", 0

@@ -25,7 +25,7 @@ import re
 import secrets
 import stat
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024  # skip absurdly large blobs before reading them
 MAX_TOTAL_PULL_BYTES = 256 * 1024 * 1024
@@ -101,50 +101,70 @@ class FolderTransport:
                 pass
             raise
 
-    def pull(self) -> list[tuple[str, bytes]]:
-        """Return ``(name, data)`` for every bundle currently in the folder.
+    def pull(self) -> Iterator[tuple[str, bytes]]:
+        """Yield every readable bundle, then fail once if any candidate was omitted.
 
-        Oversized files are skipped rather than read, bounding memory use if the
-        shared folder ever holds a corrupt or hostile blob (defense in depth — the
-        sync engine also caps row counts once the JSON is parsed)."""
-        out: list[tuple[str, bytes]] = []
+        Safety caps remain strict, but a capped/raced/oversized object must make the
+        round observably incomplete instead of silently looking successful.
+        """
+        paths, incomplete = self._bundle_paths()
         total = 0
-        for p in self._bundle_paths():
-            data = self._read_regular_bundle(p)
+        for path in paths:
+            data = self._read_regular_bundle(path)
             if data is None:
+                incomplete = True
                 continue
             if total + len(data) > MAX_TOTAL_PULL_BYTES:
+                incomplete = True
                 continue
-            out.append((p.name, data))
             total += len(data)
-        return out
+            yield path.name, data
+        if incomplete:
+            raise RuntimeError("folder pull incomplete")
 
     def list_names(self) -> list[str]:
-        return [p.name for p in self._bundle_paths()]
+        paths, _ = self._bundle_paths()
+        return [path.name for path in paths]
 
-    def _bundle_paths(self) -> list[Path]:
-        """Return a deterministic, bounded set of regular bundle files.
+    def _bundle_paths(self) -> tuple[list[Path], bool]:
+        """Return a deterministic, bounded set plus an omission indicator.
 
-        The shared folder is untrusted. Do not follow symlinks, and do not materialize an
-        unbounded directory listing merely to sort it.
+        The shared folder is untrusted. Do not follow symlinks, and do not materialize
+        an unbounded directory listing merely to sort it.
         """
-        def candidates():
+        incomplete = False
+
+        def candidates() -> Iterator[Path]:
+            nonlocal incomplete
             try:
                 with os.scandir(self.root) as entries:
                     for index, entry in enumerate(entries):
                         if index >= MAX_DIRECTORY_ENTRIES:
+                            incomplete = True
                             break
+                        if _safe_name(entry.name) != entry.name:
+                            continue
                         try:
                             if not entry.is_file(follow_symlinks=False):
+                                incomplete = True
                                 continue
                         except OSError:
+                            incomplete = True
                             continue
-                        if _safe_name(entry.name) == entry.name:
-                            yield Path(entry.path)
+                        yield Path(entry.path)
+            except FileNotFoundError:
+                return
             except OSError:
+                incomplete = True
                 return
 
-        return heapq.nsmallest(MAX_BUNDLES, candidates(), key=lambda path: path.name)
+        selected = heapq.nsmallest(
+            MAX_BUNDLES + 1, candidates(), key=lambda path: path.name
+        )
+        if len(selected) > MAX_BUNDLES:
+            incomplete = True
+            selected = selected[:MAX_BUNDLES]
+        return selected, incomplete
 
     @staticmethod
     def _read_regular_bundle(path: Path) -> Optional[bytes]:

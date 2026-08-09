@@ -23,5 +23,8 @@ test("Pi's actual package loader recognizes and loads the extension manifest", a
 		"engraphis_discover_actions",
 		"engraphis_execute_read",
 		"engraphis_execute_action",
+		"engraphis_get_memory",
+		"engraphis_update_memory",
+		"engraphis_conflict_review",
 	]);
 });

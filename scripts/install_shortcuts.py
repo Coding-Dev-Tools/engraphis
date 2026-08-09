@@ -17,6 +17,7 @@ extra.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import platform
 import shlex
@@ -24,6 +25,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+_OWNER_ID = "engraphis-dashboard-shortcut-v1"
+_LINUX_OWNER_LINE = f"X-Engraphis-Managed={_OWNER_ID}"
+_BAT_OWNER_LINE = f"REM Engraphis-Managed: {_OWNER_ID}"
 
 
 def _icon_path(base: str) -> str:
@@ -82,17 +87,126 @@ def _shortcut_paths(system: str, desktop: Path, start_menu: Path, *, home: Path)
     ]
 
 
+def _path_present(path: Path) -> bool:
+    return path.is_symlink() or path.exists()
+
+
+def _windows_marker(path: Path) -> Path:
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    return path.with_name(f".{path.name}.{digest}.engraphis-owner")
+
+
+def _write_windows_marker(path: Path) -> None:
+    marker = _windows_marker(path)
+    if _path_present(marker):
+        raise FileExistsError(f"refusing to overwrite launcher ownership marker: {marker}")
+    if path.is_symlink() or not path.is_file():
+        raise FileNotFoundError(f"cannot mark a missing launcher: {path}")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    marker.write_text(
+        f"{_OWNER_ID}\nsha256:{digest}\n",
+        encoding="utf-8",
+    )
+
+
+def _is_owned_shortcut(system: str, path: Path, *, home: Path) -> bool:
+    """Verify identity from file content/target, never from a familiar pathname alone."""
+    if system == "Windows":
+        if path.suffix.casefold() == ".lnk":
+            marker = _windows_marker(path)
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or not marker.is_file()
+                or marker.is_symlink()
+            ):
+                return False
+            try:
+                lines = marker.read_text(encoding="utf-8").splitlines()
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                return lines == [_OWNER_ID, f"sha256:{digest}"]
+            except (OSError, UnicodeError):
+                return False
+        if path.suffix.casefold() != ".bat" or path.is_symlink() or not path.is_file():
+            return False
+        try:
+            return path.read_text(encoding="utf-8").splitlines()[:1] == [_BAT_OWNER_LINE]
+        except (OSError, UnicodeError):
+            return False
+    if system == "Darwin":
+        expected_app = home / "Applications" / "Engraphis Dashboard.app"
+        if path.is_symlink():
+            try:
+                return path.resolve(strict=False) == expected_app.resolve(strict=False)
+            except OSError:
+                return False
+        marker = path / "Contents" / "Resources" / ".engraphis-owner"
+        launcher = path / "Contents" / "MacOS" / "engraphis-dashboard"
+        plist = path / "Contents" / "Info.plist"
+        try:
+            return (
+                path.is_dir()
+                and marker.is_file()
+                and not marker.is_symlink()
+                and marker.read_text(encoding="utf-8") == _OWNER_ID + "\n"
+                and launcher.is_file()
+                and plist.is_file()
+            )
+        except (OSError, UnicodeError):
+            return False
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    return (
+        _LINUX_OWNER_LINE in lines
+        and "Type=Application" in lines
+        and "Exec=engraphis-dashboard" in lines
+    )
+
+
+def _remove_owned_path(system: str, path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    if system == "Windows" and path.suffix.casefold() == ".lnk":
+        marker = _windows_marker(path)
+        if marker.is_file() and not marker.is_symlink():
+            marker.unlink()
+
+
+def _prepare_install_paths(system: str, paths: list[Path], *, home: Path) -> None:
+    """Validate every collision before removing any artifact from a prior install."""
+    for path in paths:
+        present = _path_present(path)
+        owned = present and _is_owned_shortcut(system, path, home=home)
+        marker = (
+            _windows_marker(path)
+            if system == "Windows" and path.suffix.casefold() == ".lnk"
+            else None
+        )
+        marker_present = marker is not None and _path_present(marker)
+        if (present or marker_present) and not owned:
+            collision = marker if marker_present and not present else path
+            raise FileExistsError(
+                f"refusing to overwrite an unrecognized launcher collision: {collision}"
+            )
+    for path in paths:
+        if _path_present(path):
+            _remove_owned_path(system, path)
+
+
 def _remove_shortcuts(system: str, desktop: Path, start_menu: Path, *, home: Path) -> list[Path]:
-    """Remove known launcher artifacts, leaving all neighboring user files untouched."""
+    """Remove only launchers whose durable identity still matches this installer."""
     removed: list[Path] = []
     for path in _shortcut_paths(system, desktop, start_menu, home=home):
+        if not _is_owned_shortcut(system, path, home=home):
+            continue
         try:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.is_dir():
-                shutil.rmtree(path)
-            else:
-                continue
+            _remove_owned_path(system, path)
         except FileNotFoundError:
             continue
         removed.append(path)
@@ -102,26 +216,23 @@ def _remove_shortcuts(system: str, desktop: Path, start_menu: Path, *, home: Pat
 
 def _windows(desktop: Path, start_menu: Path, args: argparse.Namespace) -> None:
     icon = _validated_icon_path(args.icon)
-    ps_cmd = """
+    desktop_link = desktop / "Engraphis Dashboard.lnk"
+    menu_link = start_menu / "Engraphis" / "Engraphis Dashboard.lnk"
+    ps_cmd = r"""
 #Requires -Version 5.1
 $WshShell = New-Object -ComObject WScript.Shell
+$desktop = $env:ENGRAPHIS_SHORTCUT_DESKTOP
+$smDir = $env:ENGRAPHIS_SHORTCUT_START_MENU
+if (!(Test-Path $smDir)) { New-Item -ItemType Directory -Path $smDir | Out-Null }
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$startMenu = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs"
-
-# Desktop shortcut
 $lnk = $WshShell.CreateShortcut((Join-Path $desktop "Engraphis Dashboard.lnk"))
-$lnk.TargetPath = "engraphis-dashboard.exe"    # resolved via PATH
+$lnk.TargetPath = "engraphis-dashboard.exe"
 $lnk.Arguments = ""
 $lnk.WorkingDirectory = (Get-Location).Path
 $lnk.IconLocation = $env:ENGRAPHIS_SHORTCUT_ICON
-$lnk.Description = "Engraphis Dashboard WebUI — local AI memory engine"
+$lnk.Description = "Engraphis Dashboard WebUI - local AI memory engine"
 $lnk.Save()
-Write-Host "  Desktop shortcut created."
 
-# Start Menu shortcut (per-user)
-$smDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Engraphis"
-if (!(Test-Path $smDir)) { New-Item -ItemType Directory -Path $smDir | Out-Null }
 $lnk2 = $WshShell.CreateShortcut((Join-Path $smDir "Engraphis Dashboard.lnk"))
 $lnk2.TargetPath = "engraphis-dashboard.exe"
 $lnk2.Arguments = ""
@@ -129,58 +240,67 @@ $lnk2.WorkingDirectory = (Get-Location).Path
 $lnk2.IconLocation = $env:ENGRAPHIS_SHORTCUT_ICON
 $lnk2.Description = "Engraphis Dashboard WebUI"
 $lnk2.Save()
-Write-Host "  Start Menu shortcut created."
 """
     child_env = os.environ.copy()
     child_env["ENGRAPHIS_SHORTCUT_ICON"] = icon
+    child_env["ENGRAPHIS_SHORTCUT_DESKTOP"] = str(desktop)
+    child_env["ENGRAPHIS_SHORTCUT_START_MENU"] = str(menu_link.parent)
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-            check=True, capture_output=True, text=True, env=child_env)
+            check=True, capture_output=True, text=True, env=child_env,
+        )
+        for link in (desktop_link, menu_link):
+            if link.is_symlink() or not link.is_file():
+                raise RuntimeError("PowerShell did not create the expected shortcut")
+        for link in (desktop_link, menu_link):
+            _write_windows_marker(link)
         print("  Desktop shortcut created.")
         print("  Start Menu shortcut created.")
-    except (OSError, subprocess.CalledProcessError):
-        # Do not echo an exception or captured stderr here: either can include
-        # environment-specific paths or child-process output. The fallback is
-        # deliberately useful even when PowerShell itself cannot be launched.
-        print("  ⚠ PowerShell shortcut creation failed.", file=sys.stderr)
+    except (OSError, subprocess.CalledProcessError, RuntimeError):
+        # Child stderr and exceptions can contain private paths or environment content.
+        print("  PowerShell shortcut creation failed.", file=sys.stderr)
         print("  Falling back to a simple .bat launcher on Desktop.", file=sys.stderr)
-        # Don't `start` the URL here — engraphis-dashboard already opens the
-        # browser itself once the server is actually ready. Doing both opens
-        # two tabs (one immediately, dead until the server boots; one live).
         bat = desktop / "Engraphis Dashboard.bat"
-        bat.write_text('@echo off\nengraphis-dashboard\n'
-                       'echo.\necho Dashboard stopped. Press any key.\npause >nul\n')
+        bat.write_text(
+            _BAT_OWNER_LINE + "\n@echo off\nengraphis-dashboard\n"
+            "echo.\necho Dashboard stopped. Press any key.\npause >nul\n",
+            encoding="utf-8",
+        )
         print(f"  Desktop launcher created: {bat}")
 
 
-def _macos(desktop: Path, args: argparse.Namespace) -> None:
+def _macos(
+    desktop: Path,
+    args: argparse.Namespace,
+    *,
+    home: Path | None = None,
+) -> None:
     icon = _validated_icon_path(args.icon)
-    app_dir = Path.home() / "Applications" / "Engraphis Dashboard.app"
+    home = Path.home() if home is None else home
+    app_dir = home / "Applications" / "Engraphis Dashboard.app"
     contents = app_dir / "Contents"
     macos_dir = contents / "MacOS"
     resources = contents / "Resources"
-
-    # Clean and rebuild
-    if app_dir.exists():
-        shutil.rmtree(app_dir)
-    macos_dir.mkdir(parents=True, exist_ok=True)
-    resources.mkdir(parents=True, exist_ok=True)
+    macos_dir.mkdir(parents=True, exist_ok=False)
+    resources.mkdir(parents=True, exist_ok=False)
 
     launcher = macos_dir / "engraphis-dashboard"
     working_directory = shlex.quote(str(Path.cwd()))
-    launcher.write_text(f"""#!/bin/bash
-    cd -- {working_directory}
-    exec engraphis-dashboard
-""")
+    launcher.write_text(
+        "#!/bin/bash\n"
+        f"cd -- {working_directory}\n"
+        "exec engraphis-dashboard\n",
+        encoding="utf-8",
+    )
     launcher.chmod(0o755)
 
-    # Copy icon
     ico_src = Path(icon)
     if ico_src.exists():
         shutil.copy2(ico_src, resources / "engraphis.icns")
 
-    (contents / "Info.plist").write_text("""<?xml version="1.0" encoding="UTF-8"?>
+    (contents / "Info.plist").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -202,26 +322,31 @@ def _macos(desktop: Path, args: argparse.Namespace) -> None:
     <key>LSMinimumSystemVersion</key>
     <string>10.14</string>
 </dict>
-</plist>""")
+</plist>""",
+        encoding="utf-8",
+    )
+    (resources / ".engraphis-owner").write_text(
+        _OWNER_ID + "\n",
+        encoding="utf-8",
+    )
 
-    # Symlink to Desktop
     desktop_link = desktop / "Engraphis Dashboard.app"
-    if desktop_link.exists() or desktop_link.is_symlink():
-        desktop_link.unlink()
     desktop_link.symlink_to(app_dir)
-
     print(f"  Application created: {app_dir}")
     print("  Desktop alias created.")
 
 
-def _linux(desktop: Path, args: argparse.Namespace) -> None:
-    # Desktop-entry values are line-oriented.  Unlike command arguments, an Icon value
-    # is copied into the file rather than passed through a shell, so reject controls
-    # before writing anything rather than attempting incomplete escaping.
+def _linux(
+    desktop: Path,
+    args: argparse.Namespace,
+    *,
+    home: Path | None = None,
+) -> None:
+    # Desktop-entry values are line-oriented. Reject controls before mutating files.
     icon = _validated_icon_path(args.icon)
-
+    home = Path.home() if home is None else home
     desktop_file_path = desktop / "engraphis-dashboard.desktop"
-    app_dir = Path.home() / ".local" / "share" / "applications"
+    app_dir = home / ".local" / "share" / "applications"
     app_dir.mkdir(parents=True, exist_ok=True)
 
     desktop_file = f"""[Desktop Entry]
@@ -234,18 +359,13 @@ Terminal=false
 Categories=Development;Utility;
 Keywords=AI;memory;agent;dashboard;
 StartupWMClass=engraphis-dashboard
+{_LINUX_OWNER_LINE}
 """
-
-    desktop_file_path.write_text(desktop_file)
-    # Desktop shells commonly require the executable bit before offering a launcher
-    # from the user's Desktop.  This copy intentionally remains user-launchable.
+    desktop_file_path.write_text(desktop_file, encoding="utf-8")
     os.chmod(desktop_file_path, 0o755)
 
-    # Also install to applications directory for Start Menu
     app_entry = app_dir / "engraphis-dashboard.desktop"
     shutil.copy2(desktop_file_path, app_entry)
-    # XDG application entries are data read by the menu, not executable launchers.
-    # Keeping this non-executable avoids expanding the executable surface in $HOME.
     os.chmod(app_entry, 0o644)
 
     print(f"  Desktop shortcut created: {desktop_file_path}")
@@ -300,13 +420,15 @@ def main() -> None:
             sys.exit(0)
 
     print("Creating shortcuts...")
+    paths = _shortcut_paths(system, desktop, start_menu, home=home)
+    _prepare_install_paths(system, paths, home=home)
 
     if system == "Windows":
         _windows(desktop, start_menu, args)
     elif system == "Darwin":
-        _macos(desktop, args)
+        _macos(desktop, args, home=home)
     else:
-        _linux(desktop, args)
+        _linux(desktop, args, home=home)
 
     print()
     print("Done. Double-click the shortcut to open the Engraphis dashboard.")

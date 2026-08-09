@@ -1,5 +1,5 @@
 /** The zero-configuration Smart MCP surface visible to Pi agents. */
-export const EXTENSION_VERSION = "0.1.0";
+export const EXTENSION_VERSION = "0.2.0";
 
 export const CORE_DIRECT_TOOLS = [
 	"engraphis_session",
@@ -8,6 +8,9 @@ export const CORE_DIRECT_TOOLS = [
 	"engraphis_discover_actions",
 	"engraphis_execute_read",
 	"engraphis_execute_action",
+	"engraphis_get_memory",
+	"engraphis_update_memory",
+	"engraphis_conflict_review",
 ] as const;
 
 type Environment = Readonly<Record<string, string | undefined>>;

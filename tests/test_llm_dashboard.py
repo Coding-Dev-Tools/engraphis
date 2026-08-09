@@ -9,7 +9,9 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from engraphis import config as config_module  # noqa: E402
 from engraphis.config import settings  # noqa: E402
+from engraphis.core.interfaces import ExtractedFact, MemoryRecord, Scope  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
 
@@ -59,8 +61,26 @@ class _WorkingLLM:
         ]}
 
 
+class _ActivityOnlyExtractor:
+    def extract(self, _text):
+        return [ExtractedFact(
+            content="A model-derived fact without graph hints.",
+            metadata={
+                "llm_extraction": {
+                    "mode": "llm_structured",
+                    "provider": _WorkingLLM.provider,
+                    "model": _WorkingLLM.model,
+                },
+            },
+        )]
+
+
 def _client(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        config_module,
+        "_CONFIG_ENV_PATH",
+        tmp_path / "home" / ".engraphis" / "config.env",
+    )
     monkeypatch.setattr(settings, "llm_provider", _WorkingLLM.provider)
     monkeypatch.setattr(settings, "llm_model", _WorkingLLM.model)
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
@@ -99,7 +119,7 @@ def test_successful_connection_auto_enables_extractor_and_activity_is_explainabl
     assert status["retention_supervisor"] == "none"
     assert "base_url" not in status
 
-    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    persisted = config_module.trusted_env_path().read_text(encoding="utf-8")
     assert "ENGRAPHIS_EXTRACTOR=llm_structured" in persisted
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=1" in persisted
     assert "test-key" not in persisted
@@ -124,6 +144,49 @@ def test_successful_connection_auto_enables_extractor_and_activity_is_explainabl
     assert any("SQLite" in item["entities"] for item in activity["activities"])
 
 
+def test_caller_deferred_graph_envelope_cannot_forge_llm_activity(monkeypatch, tmp_path):
+    client, svc = _client(monkeypatch, tmp_path)
+    svc.engine.extractor = _ActivityOnlyExtractor()
+
+    result = svc.ingest(
+        "A source without graph hints.",
+        workspace="demo",
+        scope="workspace",
+        metadata={
+            "unverified_derived_graph": {"entities": ["FORGED_BY_CALLER"]},
+        },
+    )
+    record = svc.store.get_memory(result["facts"][0]["id"])
+    assert "unverified_derived_graph" not in record.metadata
+    assert record.metadata["client_supplied_graph"]["unverified_derived_graph"] == {
+        "entities": ["FORGED_BY_CALLER"],
+    }
+
+    response = client.get("/api/llm/activity?workspace=demo")
+    assert response.status_code == 200
+    assert response.json()["activities"][0]["entities"] == []
+
+
+def test_activity_ignores_malformed_legacy_deferred_graph_envelope(monkeypatch, tmp_path):
+    client, svc = _client(monkeypatch, tmp_path)
+    workspace_id = svc.store.get_or_create_workspace("legacy")
+    svc.store.add_memory(MemoryRecord(
+        id="",
+        content="Legacy extracted fact.",
+        workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        metadata={
+            "llm_extraction": {"mode": "llm_structured"},
+            "unverified_derived_graph": ["malformed"],
+        },
+    ))
+
+    response = client.get("/api/llm/activity?workspace=legacy")
+    assert response.status_code == 200
+    assert response.json()["activities"][0]["entities"] == []
+    assert response.json()["activities"][0]["relations"] == []
+
+
 def test_manual_off_prevents_reenable_until_user_turns_extractor_back_on(
         monkeypatch, tmp_path):
     client, svc = _client(monkeypatch, tmp_path)
@@ -134,7 +197,7 @@ def test_manual_off_prevents_reenable_until_user_turns_extractor_back_on(
     assert disabled.json()["extractor_enabled"] is False
     assert svc.engine.extractor.extract("disabled") == []
     assert settings.llm_auto_extract is False
-    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    persisted = config_module.trusted_env_path().read_text(encoding="utf-8")
     assert "ENGRAPHIS_EXTRACTOR=none" in persisted
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=0" in persisted
 

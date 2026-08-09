@@ -33,11 +33,15 @@ profile, and restricted/public output paths. Run it through the allowlisted orch
 
 ```bash
 python -m scripts.run_public_benchmark --manifest "$ENGRAPHIS_BENCHMARK_RUN_DIR/point.json"
-python -m scripts.run_public_benchmark --manifest "$ENGRAPHIS_BENCHMARK_RUN_DIR/point.json" --execute
+python -m scripts.run_public_benchmark --manifest "$ENGRAPHIS_BENCHMARK_RUN_DIR/point.json" \
+  --execute --claims-input "$ENGRAPHIS_BENCHMARK_RUN_DIR/reviewed-claims.json"
 ```
 
 The first command is a redacted dry-run. The second is the only form that starts the pinned local
-commands, and it refuses a missing dataset, hash mismatch, commit mismatch, or dirty worktree.
+commands. Execution requires a protected, pre-reviewed claims JSON array (or object with a
+`claims` array), snapshots it into the manifest's restricted output, and refuses a missing
+dataset, hash mismatch, commit mismatch, dirty worktree, or attempts to reuse the claims output
+as the input.
 
 Use one separate `engraphis-public-benchmark-series/v1` manifest as the predeclared comparison
 contract. It records the required baseline and budget matrix, the frozen holdout, and distinct
@@ -73,6 +77,22 @@ Every canonical holdout run must include these labels at every fixed budget:
 
 Use the exact baseline semantics in [eval/BASELINES.md](../eval/BASELINES.md). A baseline that
 cannot be executed faithfully must fail or be marked unavailable, never relabeled as a result.
+
+### Official LongMemEval-V2 adapter matrix
+
+The adapter's public evidence matrix is narrower and explicit: six variants at five budgets, for
+30 official runs. Materialize it in the restricted run directory before any scored question:
+
+```bash
+python -m eval.longmemeval_v2_matrix \
+  --output "$ENGRAPHIS_BENCHMARK_RUN_DIR/longmemeval-v2/configs"
+```
+
+The generated manifest contains `balanced`, `planner`, `episodic_cap_2`,
+`planner_episodic_cap_2`, `context_k_2`, and `planner_context_k_2`. The two `context_k=2` variants
+are matched retrieval-depth comparators for the two memory-type-cap variants; without them, a cap
+effect could be only a smaller candidate set. Every variant runs at 256, 512, 1,024, 2,048, and
+4,096 evidence tokens.
 
 ## 4. Execute in stages
 
@@ -115,20 +135,68 @@ LoCoMo and LongMemEval external adapters as diagnostics until their official har
 comparison matrix are represented by the pinned LongMemEval-V2 path. The series manifest is the
 release checklist for all of those points.
 
-For official LongMemEval-V2, use the pinned adapter and upstream harness described in
-[BENCHMARKS.md](../BENCHMARKS.md), then create the redacted evidence artifact with the exporter
-documented in [eval/EVIDENCE.md](../eval/EVIDENCE.md). Hosted productivity runs follow the smoke,
-pilot, and full ceilings in [docs/LUNA_BENCHMARK_PLAN.md](LUNA_BENCHMARK_PLAN.md).
+For official LongMemEval-V2, add the exact pinned official checkout to `PYTHONPATH` and execute
+each generated manifest cell through the Engraphis wrapper. The wrapper consumes all eight
+`--engraphis-*` receipt arguments and delegates the remaining arguments unchanged to the official
+harness:
+
+```bash
+export ENGRAPHIS_LMV2_RUN="$ENGRAPHIS_BENCHMARK_RUN_DIR/longmemeval-v2"
+export PYTHONPATH="/path/to/LongMemEval-V2:$PYTHONPATH"
+
+python -m eval.run_longmemeval_v2 \
+  --engraphis-execution-manifest "$ENGRAPHIS_LMV2_RUN/receipts/balanced-1024.json" \
+  --engraphis-per-question "$ENGRAPHIS_LMV2_RUN/output/balanced-1024.jsonl" \
+  --engraphis-questions "$ENGRAPHIS_LMV2_RUN/data/questions.json" \
+  --engraphis-haystack "$ENGRAPHIS_LMV2_RUN/data/haystack.json" \
+  --engraphis-trajectories "$ENGRAPHIS_LMV2_RUN/data/trajectories.json" \
+  --engraphis-memory-config "$ENGRAPHIS_LMV2_RUN/configs/balanced-1024.json" \
+  --engraphis-matrix-manifest "$ENGRAPHIS_LMV2_RUN/configs/manifest.json" \
+  --engraphis-seed 42 \
+  <official LongMemEval-V2 harness arguments for balanced-1024>
+```
+
+The official checkout must be clean and exactly
+`6f020ac2fc3275e46c706d3406e02c3ed79b7be2`. The wrapper writes the execution manifest only after
+the official harness returns successfully, rejects duplicate question IDs, and verifies exact
+set equality between every source question ID and output question ID. It records both counts,
+source/config/output hashes, the delegated-argument digest, checkout state, and environment. A
+partial output cannot acquire a completion receipt.
+
+Then export the bound, redacted evidence:
+
+```bash
+python -m eval.longmemeval_v2_evidence \
+  --per-question "$ENGRAPHIS_LMV2_RUN/output/balanced-1024.jsonl" \
+  --questions "$ENGRAPHIS_LMV2_RUN/data/questions.json" \
+  --haystack "$ENGRAPHIS_LMV2_RUN/data/haystack.json" \
+  --trajectories "$ENGRAPHIS_LMV2_RUN/data/trajectories.json" \
+  --memory-config "$ENGRAPHIS_LMV2_RUN/configs/balanced-1024.json" \
+  --execution-manifest "$ENGRAPHIS_LMV2_RUN/receipts/balanced-1024.json" \
+  --matrix-manifest "$ENGRAPHIS_LMV2_RUN/configs/manifest.json" \
+  --ablation balanced --token-budget 1024 --seed 42 \
+  --upstream-revision 6f020ac2fc3275e46c706d3406e02c3ed79b7be2 \
+  --output artifacts/longmemeval-v2-balanced-1024.json
+```
+
+Repeat both commands for every manifest cell, changing the variant, budget, paths, and official
+harness arguments together. The exporter rejects an execution receipt whose hashes, seed,
+checkout, row count, or source-question coverage do not match the requested artifact. Each
+per-question adapter record also exposes inserted and retrieved counts by memory type. A
+memory-type-cap claim is accepted only when at least two inserted memory types are populated.
+Hosted productivity runs follow the smoke, pilot, and full ceilings in
+[docs/LUNA_BENCHMARK_PLAN.md](LUNA_BENCHMARK_PLAN.md).
 
 ## 5. Keep private and public artifacts separate
 
 Private artifacts may contain raw questions, answers, prompts, retrieved context, per-question
 debug details, and resumable checkpoints. Store them outside git with restricted access.
 
-Public artifacts must contain only the sorted redacted envelope, hashes, configuration and model
-provenance, aggregate metrics, confidence intervals, exclusions, failure summaries, and checksum.
-They must contain no raw questions, answers, prompts, context, credentials, user data, or
-question-derived identifiers. Generate charts only from the public aggregate artifact.
+Public artifacts contain only the sorted redacted envelope, whole-input/source-file digests,
+non-content question IDs needed to prove complete coverage, configuration and model provenance,
+aggregate metrics, confidence intervals, exclusions, failure summaries, and checksum. They contain
+no raw questions, answers, prompts, context, credentials, or user data. They contain no per-record
+content hashes or fingerprints. Generate charts only from the public aggregate artifact.
 
 ## 6. Validate claims before publication
 

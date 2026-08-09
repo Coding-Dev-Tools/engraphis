@@ -1,5 +1,6 @@
 """Smoke test for the MCP binding. Skips cleanly when the optional 'mcp' package
 is not installed, so the offline CI gate is unaffected."""
+import logging
 import json
 import re
 import subprocess
@@ -19,11 +20,237 @@ def test_stdio_server_default_log_level_is_quiet():
     assert mcp.settings.log_level == "WARNING"
 
 
+def _response_tokens(payload):
+    from engraphis.core.context import RegexTokenCounter
+
+    return RegexTokenCounter()(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+
+
+def test_response_budget_one_character_body_always_makes_progress():
+    from engraphis.mcp_server import _apply_response_budget
+
+    empty = _apply_response_budget(
+        {"memories": [{"id": "mem_1", "content": ""}]}, 1_000_000
+    )
+    budget = _response_tokens(empty)
+    result = _apply_response_budget(
+        {"memories": [{"id": "mem_1", "content": "x"}]}, budget
+    )
+
+    assert result["memories"][0]["content"] == ""
+    assert _response_tokens(result) <= budget
+    assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
+def test_response_budget_respects_two_token_json_floor():
+    from engraphis.mcp_server import _apply_response_budget
+
+    result = _apply_response_budget(
+        {"context": "far too much context", "memories": [{"content": "x"}]}, 2
+    )
+
+    assert result == {}
+    assert _response_tokens(result) == 2
+
+
+def test_response_budget_reduces_grounded_answer_and_citation_bodies():
+    from engraphis.mcp_server import _apply_response_budget
+
+    base = {
+        "grounded": True,
+        "abstained": False,
+        "answer": "",
+        "citations": [{"n": 1, "id": "mem_1", "content": ""}],
+    }
+    budget = _response_tokens(_apply_response_budget(base, 1_000_000))
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "A deliberately oversized grounded answer. [1] " * 20,
+            "citations": [{
+                "n": 1,
+                "id": "mem_1",
+                "content": "The complete supporting citation body. " * 20,
+            }],
+        },
+        budget,
+    )
+
+    assert result["answer"] == ""
+    assert result["citations"] == [{"n": 1, "id": "mem_1", "content": ""}]
+    assert _response_tokens(result) <= budget
+    assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
+def test_response_budget_keeps_grounded_answer_at_a_complete_citation():
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    budget = _response_tokens(_apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1]",
+            "citations": [citation.copy()],
+        },
+        1_000_000,
+    ))
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First supported fact [1] and additional detail that will not fit.",
+            "citations": [{**citation, "content": "supporting citation body " * 20}],
+        },
+        budget,
+    )
+
+    assert result["grounded"] is True
+    assert result["answer"] == "First supported fact [1]"
+    assert "[1]" in result["answer"]
+    assert _response_tokens(result) <= budget
+
+
+def test_response_budget_truncates_to_last_citation_not_arbitrary_prefix():
+    """Grounded answers must end with a citation marker, not arbitrary text."""
+    from engraphis.mcp_server import _apply_response_budget
+
+    citation = {"n": 1, "id": "mem_1", "content": ""}
+    # Answer with text after the last citation
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": "First fact [1] and trailing text without citation marker",
+            "citations": [{**citation, "content": "supporting body " * 50}],
+        },
+        150,  # Tight budget forces truncation
+    )
+
+    # Answer must either end with [n] or be empty (abstention)
+    if result["answer"]:
+        assert result["answer"].rstrip().endswith("[1]"), \
+            f"Answer '{result['answer']}' must end with citation marker"
+    else:
+        assert result["grounded"] is False
+        assert result["abstained"] is True
+
+
+def test_response_budget_ignores_unbounded_citation_numbers():
+    from engraphis.mcp_server import _apply_response_budget
+
+    huge_number = "9" * 5_000
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "abstained": False,
+            "answer": f"Untrusted text [{huge_number}]",
+            "citations": [{"n": 1, "id": "mem_1", "content": "support"}],
+        },
+        2,
+    )
+
+    assert _response_tokens(result) <= 2
+
+
+
+@pytest.mark.parametrize(
+    ("host", "host_header", "origin", "classic"),
+    [
+        ("127.1.2.3", "127.1.2.3:9876", "http://127.1.2.3:9876", False),
+        ("::1", "[::1]:9876", "http://[::1]:9876", True),
+    ],
+)
+def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
+        monkeypatch, host, host_header, origin, classic):
+    import asyncio
+    from types import SimpleNamespace
+
+    from mcp.server.transport_security import TransportSecurityMiddleware
+    from starlette.requests import Request
+
+    from engraphis import mcp_http_cli
+
+    runs = []
+
+    def server():
+        return SimpleNamespace(
+            settings=SimpleNamespace(
+                host=None,
+                port=None,
+                transport_security=None,
+            ),
+            run=lambda **kwargs: runs.append(kwargs),
+        )
+
+    smart_server = server()
+    classic_server = server()
+    fake_module = SimpleNamespace(mcp=smart_server, classic_mcp=classic_server)
+    monkeypatch.setitem(sys.modules, "engraphis.mcp_server", fake_module)
+    monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
+
+    argv = ["--host", host, "--port", "9876"]
+    if classic:
+        argv.append("--classic")
+    mcp_http_cli.main(argv)
+
+    selected = classic_server if classic else smart_server
+    assert selected.settings.host == host
+    assert selected.settings.port == 9876
+    assert runs == [{"transport": "streamable-http"}]
+    middleware = TransportSecurityMiddleware(selected.settings.transport_security)
+
+    def request(request_host, request_origin):
+        headers = [(b"host", request_host.encode())]
+        if request_origin is not None:
+            headers.append((b"origin", request_origin.encode()))
+        return Request({
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/mcp",
+            "raw_path": b"/mcp",
+            "query_string": b"",
+            "headers": headers,
+            "client": ("127.0.0.1", 54321),
+            "server": (host, 9876),
+        })
+
+    assert asyncio.run(middleware.validate_request(request(host_header, origin))) is None
+    bad_host = asyncio.run(
+        middleware.validate_request(request("attacker.invalid:9876", origin))
+    )
+    assert bad_host is not None and bad_host.status_code == 421
+    bad_origin = asyncio.run(
+        middleware.validate_request(request(host_header, "http://attacker.invalid"))
+    )
+    assert bad_origin is not None and bad_origin.status_code == 403
+
 def test_unexpected_tool_failure_does_not_leak_exception_text():
     from engraphis.mcp_server import _err
     output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
     assert output.startswith("Error:")
     assert "SECRET" not in output and "private" not in output
+
+
+def test_unexpected_tool_failure_log_stays_redacted(caplog):
+    from engraphis.mcp_server import _err
+
+    with caplog.at_level(logging.ERROR, logger="engraphis.mcp"):
+        output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
+
+    assert output.startswith("Error:")
+    assert "SECRET" not in caplog.text
+    assert "private" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert caplog.records
+    record = caplog.records[0]
+    assert record.getMessage() == "MCP tool operation failed"
+    assert getattr(record, "error_class", None) == "RuntimeError"
+    assert record.exc_info is None
 
 
 def _module_with_memory_db(monkeypatch):
@@ -32,6 +259,95 @@ def _module_with_memory_db(monkeypatch):
     # Back the global service with an in-memory db so tests never touch real storage.
     monkeypatch.setattr(srv, "_service", MemoryService.create(":memory:"))
     return srv
+
+
+def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
+    import asyncio
+
+    srv = _module_with_memory_db(monkeypatch)
+    service = srv.service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "api")
+    symbol_id = service.store.upsert_symbol(
+        repo_id=repo_id,
+        kind="function",
+        name="deploy",
+        fqname="deploy",
+        file="deploy.py",
+        span="1-1",
+    )
+    memory = json.loads(srv.engraphis_remember(
+        content="Deploy uses the release runbook.",
+        workspace="acme",
+        repo="api",
+    ))
+
+    first = json.loads(srv.engraphis_link_symbol(
+        symbol_id=symbol_id,
+        memory_id=memory["id"],
+        workspace="acme",
+        repo="api",
+    ))
+    after_first = service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone()
+    second = json.loads(srv.engraphis_link_symbol(
+        symbol_id=symbol_id,
+        memory_id=memory["id"],
+        workspace="acme",
+        repo="api",
+    ))
+
+    assert first["link_id"] == second["link_id"]
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM code_memory_links"
+    ).fetchone()["n"] == 1
+    assert service.store.conn.execute(
+        "SELECT id, symbol_id, memory_id, relation FROM code_memory_links"
+    ).fetchone() == after_first
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM operation_receipts WHERE operation='link'"
+    ).fetchone()["n"] == 2
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE action='link_symbol' AND target=?",
+        (first["link_id"],),
+    ).fetchone()["n"] == 2
+    tools = {tool.name: tool for tool in asyncio.run(srv.classic_mcp.list_tools())}
+    annotations = tools["engraphis_link_symbol"].annotations
+    assert annotations.readOnlyHint is False
+    assert annotations.idempotentHint is True
+
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "engraphis_remember",
+            {
+                "content": "Ownerless user memory must not be created.",
+                "workspace": "acme",
+                "scope": "user",
+            },
+        ),
+        (
+            "engraphis_ingest",
+            {
+                "content": "Ownerless user ingest must not be created.",
+                "workspace": "acme",
+                "scope": "user",
+            },
+        ),
+    ],
+)
+def test_classic_writes_reject_ownerless_user_scope(monkeypatch, tool_name, arguments):
+    srv = _module_with_memory_db(monkeypatch)
+    expected = "Error: operation failed. Check the Engraphis server logs for details."
+
+    assert getattr(srv, tool_name)(**arguments) == expected
+    assert srv.service().store.conn.execute(
+        "SELECT COUNT(*) AS n FROM memories"
+    ).fetchone()["n"] == 0
 
 
 def test_lazy_mcp_factory_forwards_configured_embedding_backend(monkeypatch):
@@ -89,7 +405,7 @@ _ALL_TOOLS = {
     "engraphis_answer", "engraphis_ingest", "engraphis_consolidate",
     "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
-    "engraphis_export_receipts",
+    "engraphis_export_receipts", "engraphis_link_symbol",
     "engraphis_check_update",
 }
 
@@ -121,11 +437,11 @@ def test_server_identity_and_tools_registered():
 
     classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
     assert srv.classic_mcp.name == "engraphis_mcp"
-    assert len(_ALL_TOOLS) == 33
+    assert len(_ALL_TOOLS) == 34
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("### Classic 33-tool inventory", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 34-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = classic["engraphis_remember"].inputSchema.get("properties", {})
@@ -147,9 +463,26 @@ def test_server_identity_and_tools_registered():
             "response_mode", "planning", "mtype_limits"} <= set(
         classic["engraphis_answer"].inputSchema.get("properties", {})
     )
+    for tool_name in (
+        "engraphis_recall",
+        "engraphis_recall_context",
+        "engraphis_recall_grounded",
+        "engraphis_answer",
+    ):
+        budget_schema = classic[tool_name].inputSchema["properties"][
+            "max_response_tokens"
+        ]
+        integer_schema = next(
+            choice for choice in budget_schema["anyOf"]
+            if choice.get("type") == "integer"
+        )
+        assert integer_schema["minimum"] == 2
     assert {"as_of", "valid_at", "known_at"} <= set(
         classic["engraphis_export_code_graph"].inputSchema.get("properties", {})
     )
+    assert "supersede_sources" not in classic[
+        "engraphis_consolidate"
+    ].inputSchema.get("properties", {})
 
 
 def test_mcp_server_module_entrypoint_runs_stdio_handshake():
