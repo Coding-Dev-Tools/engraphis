@@ -181,7 +181,14 @@ def test_import_folder_preserves_relative_case_and_uses_lexical_stem(
     nested = root / "NestedDir"
     nested.mkdir(parents=True)
     (nested / "notes.v1.md").write_text("body", encoding="utf-8")
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(root))
+    monkeypatch.setattr(
+        vault_routes.Path,
+        "home",
+        classmethod(lambda _cls: fake_home),
+    )
     monkeypatch.setattr(
         vault_routes.ingest_engine,
         "ingest_document",

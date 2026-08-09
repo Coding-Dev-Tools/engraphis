@@ -6177,26 +6177,36 @@ class Store:
     def link_memory_symbol(self, *, repo_id: str, symbol_id: str, memory_id: str,
                            relation: str = "mentions", confidence: float = 1.0,
                            commit: bool = True) -> str:
-        existing = self.conn.execute(
-            "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
-            "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
-            (repo_id, symbol_id, memory_id, relation),
-        ).fetchone()
-        if existing is not None:
-            return existing["id"]
-        link_id = ids.new_id("edge")
-        stamp = now_ts()
-        self.conn.execute(
-            "INSERT OR IGNORE INTO code_memory_links("
-            "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
-            "valid_from, ingested_at"
-            ") VALUES (?,?,?,?,?,?,?,?,?)",
-            (link_id, repo_id, symbol_id, memory_id, relation,
-             max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
-        )
-        if commit:
-            self.conn.commit()
-        return link_id
+        # The partial unique index makes the check-and-insert safe across concurrent
+        # callers. Keep the whole sequence in one write operation and read the winner
+        # back after INSERT OR IGNORE; returning the freshly generated id after a
+        # uniqueness conflict would violate the idempotency contract.
+        with self._write_operation("link_memory_symbol", commit=commit):
+            existing = self.conn.execute(
+                "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+                "AND memory_id=? AND relation=? AND valid_to IS NULL "
+                "AND expired_at IS NULL",
+                (repo_id, symbol_id, memory_id, relation),
+            ).fetchone()
+            if existing is not None:
+                return existing["id"]
+            link_id = ids.new_id("edge")
+            stamp = now_ts()
+            self.conn.execute(
+                "INSERT OR IGNORE INTO code_memory_links("
+                "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
+                "valid_from, ingested_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (link_id, repo_id, symbol_id, memory_id, relation,
+                 max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
+            )
+            winner = self.conn.execute(
+                "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+                "AND memory_id=? AND relation=? AND valid_to IS NULL "
+                "AND expired_at IS NULL",
+                (repo_id, symbol_id, memory_id, relation),
+            ).fetchone()
+            return winner["id"] if winner is not None else link_id
 
     def clear_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
         stamp = now_ts()

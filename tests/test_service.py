@@ -1132,6 +1132,14 @@ def test_link_symbol_rejects_ambiguous_short_name_but_accepts_qualified_name():
         "SELECT action FROM audit WHERE action='link_symbol' AND target=?", (linked["link_id"],)
     ).fetchone() is not None
 
+    repeated = s.link_symbol("api.deploy", memory["id"], workspace="acme", repo="api")
+    assert repeated["link_id"] == linked["link_id"]
+    assert s.store.conn.execute(
+        "SELECT COUNT(*) FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+        "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
+        (repo_id, first, memory["id"], "mentions"),
+    ).fetchone()[0] == 1
+
 
 def test_search_code_requires_repo():
     s = _svc()
@@ -1475,3 +1483,37 @@ def test_graph_index_job_rejects_new_work_during_shutdown():
 
     service._closing = False
     service.close()
+
+
+def test_graph_index_job_reuse_preserves_caller_owned_transaction(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.create_workspace("acme")
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_worker(_job_id):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(service, "_run_graph_index_job", hold_worker)
+    try:
+        service.start_graph_index_job(workspace="acme")
+        assert started.wait(2)
+
+        conn = service.store.conn
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE workspaces SET settings=? WHERE name=?",
+            ('{"outer":"preserved"}', "acme"),
+        )
+        reused = service.start_graph_index_job(workspace="acme")
+
+        assert reused["reused"] is True
+        assert conn.transaction_owned_by_current_thread() is True
+        assert conn.execute(
+            "SELECT settings FROM workspaces WHERE name=?", ("acme",)
+        ).fetchone()["settings"] == '{"outer":"preserved"}'
+        conn.rollback()
+    finally:
+        release.set()
+        service.close()

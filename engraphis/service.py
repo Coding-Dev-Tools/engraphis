@@ -23,6 +23,7 @@ import contextvars
 import logging
 import math
 import copy
+import sys
 import time
 import threading
 import numpy as np
@@ -6035,7 +6036,8 @@ class MemoryService:
                     (wid,),
                 ).fetchone()
                 if active is not None:
-                    self.store.conn.commit()
+                    if owns_graph_txn:
+                        self.store.conn.commit()
                     return self._graph_job_dict(active, reused=True)
                 global_active = int(self.store.conn.execute(
                     "SELECT COUNT(*) AS n FROM jobs WHERE kind='graph_index' "
