@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -265,6 +266,9 @@ def test_ambiguous_wikilink_retires_previous_derived_edge(tmp_path: Path):
         home.read_text(encoding="utf-8").replace("projects/Plan|the plan", "Plan"),
         encoding="utf-8",
     )
+    # Keep this case focused on the only supporting reference. The default fixture's
+    # backlink is covered by the independent-support regression below.
+    (vault / "projects" / "Plan.md").write_text("# Plan\n\nNo backlink.\n", encoding="utf-8")
     service = _service(tmp_path / "memory.db")
     try:
         service.import_obsidian_vault(
@@ -309,6 +313,105 @@ def test_ambiguous_wikilink_retires_previous_derived_edge(tmp_path: Path):
         ).fetchone()[0] == initial_links
     finally:
         service.close()
+
+
+def test_ambiguous_wikilink_preserves_independent_derived_edge(tmp_path: Path):
+    vault = _vault(tmp_path)
+    home = vault / "Home.md"
+    home.write_text(
+        home.read_text(encoding="utf-8").replace("projects/Plan|the plan", "Plan"),
+        encoding="utf-8",
+    )
+    service = _service(tmp_path / "memory.db")
+    try:
+        service.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+        home_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Home base",)
+        ).fetchone()[0]
+        plan_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Plan",)
+        ).fetchone()[0]
+        archive = vault / "archive"
+        archive.mkdir()
+        (archive / "Plan.md").write_text("# Another Plan\n", encoding="utf-8")
+
+        second = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        assert any(row["reason"] == "ambiguous_wikilink" for row in second["files"])
+        # Plan.md still points back to Home.md, so its independent support keeps the
+        # aggregate undirected edge live even though Home.md is now ambiguous.
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links "
+            "WHERE reason=? AND a=? AND b=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, plan_id),
+        ).fetchone()[0] == 1
+    finally:
+        service.close()
+
+
+def test_concurrent_imports_leave_one_live_source_revision(tmp_path: Path):
+    vault = _vault(tmp_path)
+    db = tmp_path / "memory.db"
+    initial = _service(db)
+    initial.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+    initial.close()
+
+    home = vault / "Home.md"
+    home.write_text(
+        home.read_text(encoding="utf-8").replace(
+            "See [[projects/Plan|the plan]].", "The concurrent revision."
+        ),
+        encoding="utf-8",
+    )
+    first = _service(db)
+    second = _service(db)
+    barrier = threading.Barrier(2)
+    states = threading.local()
+    errors: list[BaseException] = []
+
+    def gate_first_write(original):
+        def gated(*args, **kwargs):
+            if not getattr(states, "waited", False):
+                states.waited = True
+                barrier.wait(timeout=10)
+            return original(*args, **kwargs)
+        return gated
+
+    first.engine.remember_with_resolution = gate_first_write(  # type: ignore[method-assign]
+        first.engine.remember_with_resolution
+    )
+    second.engine.remember_with_resolution = gate_first_write(  # type: ignore[method-assign]
+        second.engine.remember_with_resolution
+    )
+
+    def run(service: MemoryService) -> None:
+        try:
+            service.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    workers = [threading.Thread(target=run, args=(service,)) for service in (first, second)]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+        assert not any(worker.is_alive() for worker in workers)
+        assert not errors
+        subject_key = first.store.conn.execute(
+            "SELECT subject_key FROM source_imports WHERE relative_path='Home.md' "
+            "ORDER BY last_seen_at DESC LIMIT 1"
+        ).fetchone()[0]
+        live = first.store.conn.execute(
+            "SELECT id FROM memories WHERE subject_key=? AND valid_to IS NULL "
+            "AND expired_at IS NULL",
+            (subject_key,),
+        ).fetchall()
+        assert len(live) == 1
+    finally:
+        first.close()
+        second.close()
 
 
 def test_missing_wikilink_retires_previous_derived_edge(tmp_path: Path):

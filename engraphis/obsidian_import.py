@@ -658,14 +658,19 @@ class ObsidianImporter:
         )
 
     def _live_subject_memory(self, subject_key: str) -> Optional[str]:
+        live = self._live_subject_memories(subject_key)
+        return live[0] if live else None
+
+    def _live_subject_memories(self, subject_key: str) -> list[str]:
+        """Return every currently-live revision for a source subject."""
         if not subject_key:
-            return None
-        row = self.store.conn.execute(
+            return []
+        rows = self.store.conn.execute(
             "SELECT id FROM memories WHERE subject_key=? AND valid_to IS NULL "
-            "AND expired_at IS NULL ORDER BY valid_from DESC, ingested_at DESC, id DESC LIMIT 1",
+            "AND expired_at IS NULL ORDER BY valid_from DESC, ingested_at DESC, id DESC",
             (subject_key,),
-        ).fetchone()
-        return str(row["id"]) if row is not None else None
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def _apply_plan(
         self, plan: _Plan, *, vault_id: str, import_id: str,
@@ -739,16 +744,26 @@ class ObsidianImporter:
         state = "renamed" if plan.action == "renamed" else "imported"
 
         def finalize(memory_id: str) -> None:
-            if old_memory_id:
-                old = self.store.get_memory(old_memory_id)
+            # The plan was prepared outside the engine's write transaction. Re-read
+            # the subject here so a concurrent importer cannot leave two live revisions.
+            predecessor_ids = {
+                candidate for candidate in (
+                    old_memory_id, *self._live_subject_memories(subject_key)
+                ) if candidate and candidate != memory_id
+            }
+            for predecessor_id in sorted(predecessor_ids):
+                old = self.store.get_memory(predecessor_id)
                 if old is not None and old.valid_to is None:
+                    close_at = imported_at
+                    if old.valid_from is not None:
+                        close_at = max(close_at, old.valid_from + 0.000001)
                     self.store.close_validity(
-                        old_memory_id, at=imported_at,
+                        predecessor_id, at=close_at,
                         actor=f"{self.SOURCE_KIND}_importer",
                         reason=f"{self.SOURCE_KIND}_source_revision", commit=False,
                     )
                     self.store.retire_memory_graph_state(
-                        old_memory_id, at=imported_at, commit=False,
+                        predecessor_id, at=close_at, commit=False,
                     )
             if plan.action == "conflict" and policy == "new" and old_item is not None:
                 self.store.upsert_source_import_item(
@@ -953,6 +968,8 @@ class ObsidianImporter:
         batch_open = False
         writes_in_batch = 0
         references_seen = 0
+        retire_pairs: set[tuple[str, str]] = set()
+        desired_pairs: set[tuple[str, str]] = set()
 
         def check_cancel() -> None:
             if job_id is not None:
@@ -967,24 +984,32 @@ class ObsidianImporter:
             batch_open = False
             writes_in_batch = 0
 
+        def pair_key(a: str, b: str) -> tuple[str, str]:
+            return (a, b) if a <= b else (b, a)
+
         def retire_ambiguous_links(source_id: str, target_ids: list[str]) -> None:
+            # Defer retirement until every note has been examined. mem_links is an
+            # aggregate undirected edge, so another note may still support this pair.
+            for target_id in target_ids:
+                if target_id != source_id:
+                    retire_pairs.add(pair_key(source_id, target_id))
+
+        def retire_unsupported_links() -> None:
             nonlocal batch_open, writes_in_batch
-            if not target_ids:
-                return
-            if not batch_open:
-                self.store.conn.execute("BEGIN IMMEDIATE")
-                batch_open = True
-            marks = ",".join("?" for _ in target_ids)
-            stamp = time.time()
-            cursor = self.store.conn.execute(
-                "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
-                "WHERE reason=? AND valid_to IS NULL AND expired_at IS NULL "
-                "AND ((a=? AND b IN (" + marks + ")) "
-                "OR (b=? AND a IN (" + marks + ")))",
-                (stamp, stamp, self.LINK_REASON, source_id, *target_ids,
-                 source_id, *target_ids),
-            )
-            writes_in_batch += max(int(cursor.rowcount), 0)
+            for a, b in sorted(retire_pairs - desired_pairs):
+                if not batch_open:
+                    self.store.conn.execute("BEGIN IMMEDIATE")
+                    batch_open = True
+                stamp = time.time()
+                cursor = self.store.conn.execute(
+                    "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
+                    "WHERE reason=? AND valid_to IS NULL AND expired_at IS NULL "
+                    "AND ((a=? AND b=?) OR (a=? AND b=?))",
+                    (stamp, stamp, self.LINK_REASON, a, b, b, a),
+                )
+                writes_in_batch += max(int(cursor.rowcount), 0)
+                if writes_in_batch >= 128:
+                    flush()
 
         try:
             for source_path, note in note_by_path.items():
@@ -1039,6 +1064,7 @@ class ObsidianImporter:
                     target_id = memory_by_path.get(candidates[0])
                     if not target_id or target_id == source_id:
                         continue
+                    desired_pairs.add(pair_key(source_id, target_id))
                     if not batch_open:
                         self.store.conn.execute("BEGIN IMMEDIATE")
                         batch_open = True
@@ -1049,6 +1075,7 @@ class ObsidianImporter:
                     writes_in_batch += 1
                     if writes_in_batch >= 128:
                         flush()
+            retire_unsupported_links()
         except BaseException:
             if batch_open and self.store.conn.transaction_owned_by_current_thread():
                 self.store.conn.rollback()
