@@ -167,8 +167,8 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > [1.5 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#150---2026-08-04).
 
 > **Current source:** schema 15 adds the local source-import manifest (vaults, imports,
-> job items) for document and Obsidian collection tracking. Schema 14 introduced the
-> initial Obsidian-only manifest; schema 15 generalized it to support multiple source
+> job items) for document and note-collection tracking. Schema 14 introduced the
+> initial note-collection manifest; schema 15 generalized it to support multiple source
 > kinds with content-free scope-security triggers.
 > Schema 12 classifies content-free erasure markers before sync: existing markers migrate to
 > local-only `never_export`; new secure erasures become `remote_erasure` only for non-secret

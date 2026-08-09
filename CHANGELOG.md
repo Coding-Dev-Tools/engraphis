@@ -20,7 +20,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `never_export` markers remain private and only validated `remote_erasure` markers may cross
   sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
   descriptive-state sync; schema 14-15 add the local source-import manifest for document
-  and Obsidian collection tracking with scope-security triggers.
+  and note-collection tracking with scope-security triggers.
 
 ### Fixed
 
