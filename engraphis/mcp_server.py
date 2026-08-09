@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
 
@@ -2723,7 +2723,10 @@ def engraphis_update_memory(
                                           max_length=50)] = None,
     importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
                                                  le=1.0)] = None,
-    actor: Annotated[str, Field(description="Optional actor label.", max_length=200)] = "user",
+    actor: Annotated[str, Field(
+        description="Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        max_length=200,
+    )] = "user",
 ) -> str:
     """Edit a memory's metadata fields (title/type/importance). An identical retry is an
     atomic no-op. Content edits must go through the governed correction path so bi-temporal
@@ -2732,9 +2735,11 @@ def engraphis_update_memory(
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
+        principal = _authenticated_principal()
+        effective_actor = principal["id"] if principal is not None else actor
         return _ok(service().update_memory(
             memory_id, workspace=workspace, repo=repo,
-            title=title, mtype=mtype, importance=importance, actor=actor,
+            title=title, mtype=mtype, importance=importance, actor=effective_actor,
         ))
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)

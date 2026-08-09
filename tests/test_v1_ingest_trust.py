@@ -14,6 +14,8 @@ import threading
 import numpy as np
 import pytest
 
+pytest.importorskip("pydantic", reason="v1 ingest tests require the optional full-stack dependencies")
+
 from engraphis.engines import ingest as ingest_engine
 from engraphis.engines import recall as recall_engine
 from engraphis.engines import reweight, thoughts as thoughts_engine

@@ -677,6 +677,31 @@ def test_update_memory_edits_metadata_and_rejects_secrets(monkeypatch):
     assert retryable is False
 
 
+def test_update_memory_audits_authenticated_principal_not_supplied_actor(monkeypatch):
+    server = _memory_server(monkeypatch)
+    from engraphis.service import set_current_user
+
+    try:
+        set_current_user({
+            "id": "usr_alice", "email": "alice@example.test", "role": "member",
+        })
+        created = server._service.remember(
+            "Authenticated actor fixture.", workspace="acme", title="before",
+        )
+        updated = _payload(server.engraphis_update_memory(
+            memory_id=created["id"], workspace="acme", title="after",
+            actor="usr_attacker",
+        ))
+        assert updated["updated"] == ["title"]
+        audit = server._service.store.conn.execute(
+            "SELECT actor FROM audit WHERE action='memory_update' AND target=?",
+            (created["id"],),
+        ).fetchone()
+        assert audit["actor"] == "usr_alice"
+    finally:
+        set_current_user(None)
+
+
 def test_conflict_review_lists_pending_and_quarantined_without_bodies(monkeypatch):
     server = _memory_server(monkeypatch)
     # A normal approved memory is NOT in the review inbox.
