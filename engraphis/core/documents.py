@@ -26,6 +26,7 @@ import re
 import stat
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 import unicodedata
+from urllib.parse import unquote, urlsplit
 import zipfile
 from xml.etree import ElementTree
 
@@ -1040,8 +1041,16 @@ def _epub_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
     parts: List[str] = []
     for item_id in spine:
         href = manifest.get(item_id, "")
-        candidate = base / href
-        if not href or candidate.is_absolute() or ".." in candidate.parts:
+        parsed_href = urlsplit(href)
+        href_path = unquote(parsed_href.path)
+        candidate = base / href_path
+        if (
+            not href_path
+            or parsed_href.scheme
+            or parsed_href.netloc
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+        ):
             raise DocumentParseError("invalid EPUB content path")
         raw = archive.read(candidate.as_posix())
         text = _html_text(_decode_epub_chapter(raw), limit=MAX_CONTAINER_TEXT_CHARS - sum(len(part) for part in parts))
