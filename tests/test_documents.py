@@ -261,6 +261,23 @@ def test_unreadable_directory_is_reported_and_marks_scan_incomplete(monkeypatch,
     )
 
 
+def test_unreadable_root_is_reported_and_marks_scan_incomplete(monkeypatch, tmp_path):
+    original_iterdir = Path.iterdir
+
+    def fail_root(path):
+        if path == tmp_path:
+            raise OSError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_root)
+    scan = scan_document_tree(tmp_path)
+    assert scan.complete is False
+    assert any(
+        issue.relative_path == "." and issue.reason == "unreadable directory"
+        for issue in scan.skipped
+    )
+
+
 def test_xml_and_container_attacks_and_invalid_rtf_fail_closed():
     with pytest.raises(DocumentParseError, match="entities"):
         parse_document(b'<!DOCTYPE x [<!ENTITY boom "x">]><x>&boom;</x>', "unsafe.xml")

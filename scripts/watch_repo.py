@@ -36,6 +36,38 @@ _WATCHED_EXTENSIONS = frozenset({
 })
 
 
+def _watched_files(root: Path):
+    """Yield watched files using the code indexer's directory policy."""
+    from engraphis.backends.codegraph import (
+        _DEFAULT_EXCLUDE_DIRS,
+        _ignored_by_rules,
+        _rel_posix,
+        load_ignore_patterns,
+    )
+
+    names, globs, unignore = load_ignore_patterns(str(root))
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, str(root))
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _DEFAULT_EXCLUDE_DIRS
+            and not _ignored_by_rules(
+                _rel_posix(rel_dir, name), name, names, globs, unignore
+            )
+        ]
+        for fname in filenames:
+            if os.path.splitext(fname)[1].lower() not in _WATCHED_EXTENSIONS:
+                continue
+            if _ignored_by_rules(
+                _rel_posix(rel_dir, fname), fname, names, globs, unignore
+            ):
+                continue
+            full = os.path.join(dirpath, fname)
+            if not os.path.islink(full):
+                yield full
+
+
 class _PollingWatcher:
     """Poll-based detector using content-backed file signatures.
 
@@ -49,33 +81,29 @@ class _PollingWatcher:
         self.root = root
         self.interval = max(1.0, interval)
         self._signatures: dict[str, tuple[int, int, bytes]] = {}
+        self._pending_signatures: dict[str, tuple[int, int, bytes]] | None = None
         self._initial_scan_done = False
 
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
         signatures: dict[str, tuple[int, int, bytes]] = {}
-        for dirpath, _dirnames, filenames in os.walk(self.root):
-            for fname in filenames:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext not in _WATCHED_EXTENSIONS:
-                    continue
-                full = os.path.join(dirpath, fname)
-                try:
-                    digest = hashlib.blake2b(digest_size=16)
-                    with open(full, "rb") as handle:
-                        info = os.fstat(handle.fileno())
-                        while True:
-                            chunk = handle.read(64 * 1024)
-                            if not chunk:
-                                break
-                            digest.update(chunk)
-                    signatures[full] = (
-                        int(getattr(info, "st_mtime_ns", info.st_mtime * 1_000_000_000)),
-                        int(info.st_size),
-                        digest.digest(),
-                    )
-                except OSError:
-                    pass
+        for full in _watched_files(self.root):
+            try:
+                digest = hashlib.blake2b(digest_size=16)
+                with open(full, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    while True:
+                        chunk = handle.read(64 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                signatures[full] = (
+                    int(getattr(info, "st_mtime_ns", info.st_mtime * 1_000_000_000)),
+                    int(info.st_size),
+                    digest.digest(),
+                )
+            except OSError:
+                pass
         return signatures
 
     def poll(self) -> list[str]:
@@ -99,8 +127,16 @@ class _PollingWatcher:
             if path not in current:
                 changed.append(path)
 
-        self._signatures = current
+        # Keep the candidate separate until the caller confirms that incremental
+        # indexing succeeded. A transient read/parse failure must be retried.
+        self._pending_signatures = current
         return changed
+
+    def acknowledge(self) -> None:
+        """Accept the most recent poll after its changes were indexed successfully."""
+        if self._pending_signatures is not None:
+            self._signatures = self._pending_signatures
+            self._pending_signatures = None
 
 
 def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
@@ -260,7 +296,10 @@ def _run(args, engine) -> int:
         return 1
     changed_during_startup = watcher.poll()
     if changed_during_startup:
-        reindex(changed_during_startup)
+        if reindex(changed_during_startup):
+            watcher.acknowledge()
+    else:
+        watcher.acknowledge()
     print(f"Watching {root} (poll every {args.interval}s, Ctrl+C to stop)...")
 
     while not stop_event.is_set():
@@ -269,7 +308,10 @@ def _run(args, engine) -> int:
             break
         changed = watcher.poll()
         if changed:
-            reindex(changed)
+            if reindex(changed):
+                watcher.acknowledge()
+        else:
+            watcher.acknowledge()
 
     print("Stopped.")
     return 0

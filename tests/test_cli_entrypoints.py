@@ -445,6 +445,38 @@ def test_polling_watcher_detects_same_size_rewrite_with_preserved_mtime(tmp_path
     assert watcher.poll() == [str(source)]
 
 
+def test_polling_watcher_retries_failed_changes_until_acknowledged(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+
+    assert watcher.poll() == []
+    source.write_text("value = 2\n", encoding="utf-8")
+    assert watcher.poll() == [str(source)]
+    assert watcher.poll() == [str(source)]
+
+    watcher.acknowledge()
+    assert watcher.poll() == []
+
+
+def test_polling_watcher_prunes_codegraph_exclusions(tmp_path):
+    source = tmp_path / "src" / "keep.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    for directory in ("node_modules", ".venv", "target"):
+        ignored = tmp_path / directory
+        ignored.mkdir()
+        (ignored / "generated.py").write_text("value = 2\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "ignored.py").write_text("value = 3\n", encoding="utf-8")
+    (tmp_path / ".engraphisignore").write_text("generated\n", encoding="utf-8")
+
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    assert watcher.poll() == []
+    assert set(watcher._signatures) == {str(source)}
+
+
 def test_delete_namespace_is_atomic_and_records_one_batch_receipt(
     monkeypatch, capsys
 ):

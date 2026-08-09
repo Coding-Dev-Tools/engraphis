@@ -359,15 +359,26 @@ def scan_document_tree(
     portable_paths = set()
     for path, issue in _walk_tree(root, root):
         raw_relative = path.relative_to(root).as_posix()
+        if issue:
+            # The root itself is represented by "." when its directory listing fails.
+            # Keep that sentinel as a valid issue path so the incomplete flag is set
+            # before normal path validation can reject it.
+            if raw_relative == ".":
+                relative = "."
+            else:
+                try:
+                    relative = normalize_document_path(raw_relative)
+                except DocumentParseError as exc:
+                    result.rejected.append(DocumentFileIssue(raw_relative, _safe_reason(exc)))
+                    continue
+            result.skipped.append(DocumentFileIssue(relative, issue))
+            if issue == "unreadable directory":
+                result.complete = False
+            continue
         try:
             relative = normalize_document_path(raw_relative)
         except DocumentParseError as exc:
             result.rejected.append(DocumentFileIssue(raw_relative, _safe_reason(exc)))
-            continue
-        if issue:
-            result.skipped.append(DocumentFileIssue(relative, issue))
-            if issue == "unreadable directory":
-                result.complete = False
             continue
         if relative in normalized_paths or relative.casefold() in portable_paths:
             result.rejected.append(DocumentFileIssue(relative, "duplicate normalized source path"))
