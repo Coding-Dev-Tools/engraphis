@@ -66,9 +66,24 @@ def _load_trusted_dotenv() -> None:
     try:
         from dotenv import dotenv_values
     except ImportError as exc:
-        raise RuntimeError(
-            "python-dotenv is required to load ENGRAPHIS_ENV_FILE"
-        ) from exc
+        if _CONFIG_ENV_EXPLICIT:
+            raise RuntimeError(
+                "python-dotenv is required to load ENGRAPHIS_ENV_FILE"
+            ) from exc
+        # Core-floor (numpy-only) installs do not include python-dotenv.
+        # If the implicit owner-private config exists but dotenv is unavailable,
+        # warn instead of crashing at import time so the core remains usable
+        # without optional extras.  Explicit ENGRAPHIS_ENV_FILE stays strict so
+        # user-selected configuration is not silently ignored.
+        import warnings
+        warnings.warn(
+            "A trusted Engraphis config file exists but python-dotenv is not installed; "
+            "the trusted config file will not be loaded. Install "
+            "'python-dotenv' or 'engraphis[all]' to enable env-file support.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
     parsed = dotenv_values(stream=StringIO(raw))
     for key, value in parsed.items():
         if key == "ENGRAPHIS_ENV_FILE" or value is None:

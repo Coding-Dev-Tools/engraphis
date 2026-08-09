@@ -721,7 +721,7 @@
     if (!eligible) {
       target.append(
         empty('No receipt-backed context savings yet.'),
-        node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'} so far.`),
+        node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'} so far.`),
       );
       return;
     }
@@ -731,7 +731,7 @@
       metric.progress,
       node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
       node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
-      node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}.`),
+      node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'}.`),
     );
   }
 
