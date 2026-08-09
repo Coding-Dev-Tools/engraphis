@@ -68,6 +68,13 @@ def test_dependency_automation_covers_every_root_ecosystem():
     assert lock["packages"]["node_modules/impeccable"]["version"] == "3.5.0"
 
 
+def test_playwright_server_never_opens_the_developers_configured_database():
+    config = _text("playwright.config.js")
+
+    assert "ENGRAPHIS_DB_PATH: ':memory:'" in config
+    assert "reuseExistingServer: false" in config
+
+
 def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
