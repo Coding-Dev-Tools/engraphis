@@ -2134,9 +2134,7 @@ def graph(workspace: Optional[str] = None,
     service closes that gap.
     """
     ws = workspace or _default_ws()
-    selected = None if layers is None else [
-        x.strip() for x in layers.split(",") if x.strip()
-    ]
+    selected = _graph_csv(layers)
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
         include_code=include_code, repo=repo, backfill=False, full=full,

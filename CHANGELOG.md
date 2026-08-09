@@ -89,6 +89,24 @@ stronger release and evaluation evidence.
   including clean-checkout completion receipts, exact source-question coverage, privacy-safe
   export binding, matched `context_k=2` comparators, and memory-type count evidence.
 
+### Added
+
+- Dashboard Settings panel and startup banner now display the running Engraphis
+  version, fetched from the existing `/api/info` endpoint.
+
+### Fixed
+
+- Wrap `engraphis_get_memory` post-inspect body in error-redaction try/except
+  matching all other Smart gateway tools, preventing internal SQL errors and
+  file paths from leaking through FastMCP error responses.
+- Fix malformed SQLite URI on Windows in `_keyword_search` and `/api/memories`
+  fallback paths: use `Path.resolve().as_uri()` instead of bare string
+  interpolation, matching the store's URI construction.
+- Apply `_graph_csv()` limit enforcement to the `/graph` endpoint's `layers`
+  parameter, matching all other graph endpoints.
+- Log a warning when `ENGRAPHIS_LLM_EXTRA_HEADERS` contains invalid JSON
+  instead of silently dropping the headers.
+
 ## [1.5] - 2026-08-04
 
 Minor release advancing the v2 engine to schema 11 with governed recall recovery,

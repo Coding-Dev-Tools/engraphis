@@ -887,12 +887,18 @@ def _parse_headers(raw: str) -> dict:
         return {}
     try:
         parsed = json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        print(f"[engraphis] ENGRAPHIS_LLM_EXTRA_HEADERS contains invalid JSON: {exc}",
+              file=sys.stderr)
         return {}
     if not isinstance(parsed, dict):
+        print("[engraphis] ENGRAPHIS_LLM_EXTRA_HEADERS must be a JSON object",
+              file=sys.stderr)
         return {}
     if not all(isinstance(key, str) and isinstance(value, str)
                for key, value in parsed.items()):
+        print("[engraphis] ENGRAPHIS_LLM_EXTRA_HEADERS keys and values must be strings",
+              file=sys.stderr)
         return {}
     return parsed
 
