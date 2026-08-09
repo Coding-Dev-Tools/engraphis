@@ -358,13 +358,10 @@ def import_folder(req: FolderImportReq):
             for root in env_roots.split(os.pathsep)
             if root
         )
-    # Keep the normalized, symlink-resolved value in the same variable that is
-    # passed to filesystem APIs. CodeQL recognizes this direct containment guard;
-    # the second canonical check below closes a directory-link swap after it.
-    real_path = os.path.normcase(os.path.realpath(os.path.expanduser(req.path)))
+    requested_path = os.path.normcase(os.path.realpath(os.path.expanduser(req.path)))
     if not any(
-        real_path == root
-        or real_path.startswith(root.rstrip(os.sep) + os.sep)
+        requested_path == root
+        or requested_path.startswith(root.rstrip(os.sep) + os.sep)
         for root in allowed_roots
     ):
         raise HTTPException(
@@ -372,9 +369,36 @@ def import_folder(req: FolderImportReq):
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    try:
-        folder = Path(real_path).resolve(strict=True)
-    except (OSError, RuntimeError):
+    # Resolve the user-selected folder by walking from an allowlisted root. The
+    # filesystem APIs below receive only paths returned by that trusted walk;
+    # request text is used only for component comparisons, never as a path root.
+    folder: Optional[Path] = None
+    for root in allowed_roots:
+        relative = os.path.relpath(requested_path, root)
+        components = tuple(part for part in Path(relative).parts if part not in ("", "."))
+        if any(part == ".." for part in components):
+            continue
+        try:
+            current = Path(root).resolve(strict=True)
+            for component in components:
+                with os.scandir(current) as entries:
+                    match = next(
+                        (
+                            entry for entry in entries
+                            if os.path.normcase(entry.name) == component
+                        ),
+                        None,
+                    )
+                if match is None or match.is_symlink() or not match.is_dir(follow_symlinks=False):
+                    current = None
+                    break
+                current = Path(match.path)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if current is not None:
+            folder = current
+            break
+    if folder is None:
         raise HTTPException(404, f"Path not found: {req.path}") from None
     canonical_path = os.path.normcase(os.path.realpath(str(folder)))
     if not any(
