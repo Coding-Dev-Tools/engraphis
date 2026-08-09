@@ -312,7 +312,7 @@ def make_connector(key: str) -> _EncryptedConnector:
         raw.row_factory = sqlcipher3.Row
         return _TranslatingConnection(raw)
 
-    return _connect
+    return _EncryptedConnector(sqlcipher3, pragma)
 
 
 def connector_from_env() -> Optional[_EncryptedConnector]:

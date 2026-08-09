@@ -1861,7 +1861,9 @@ class SyncEngine:
         known[conflict_id] = preserved
         report["conflicts_preserved"] += 1
 
-    def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
+    def _write(
+        self, rec: MemoryRecord, *, commit: bool = True,
+    ) -> Optional[_VectorIndexAction]:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
         derived state coherent: re-embed for the vector arm when an embedder is wired.
 

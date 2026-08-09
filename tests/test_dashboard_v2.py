@@ -81,7 +81,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260730-drag-stability'" in ledger_js.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'" in ledger_js.text
         assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
         assert "/v2-assets/ledger.js?v=20260728-connected-memories" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")

@@ -760,6 +760,8 @@ BEFORE INSERT ON source_imports WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
@@ -771,6 +773,8 @@ WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
@@ -788,6 +792,8 @@ BEFORE INSERT ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL
@@ -805,6 +811,8 @@ BEFORE UPDATE OF job_id, source_id ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
           AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL

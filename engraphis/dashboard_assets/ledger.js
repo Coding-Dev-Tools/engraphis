@@ -369,7 +369,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260730-drag-stability',
+        '/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics',
         'EngraphisGraph',
       ));
       graphAssetsPromise = attempt;
@@ -695,6 +695,32 @@
     return Math.max(0, Math.round(number(value))).toLocaleString();
   }
 
+  function savingsRatio(value) {
+    return Math.max(0, Math.min(1, number(value)));
+  }
+
+  function savingsMetric(estimate) {
+    const ratio = savingsRatio(estimate.savings_ratio);
+    const hero = node('div', 'savings-hero');
+    const value = node('div', 'savings-value');
+    value.append(
+      node('strong', 'savings-number', formatSavingsTokens(estimate.saved_tokens)),
+      node('span', 'savings-unit', 'tokens avoided'),
+    );
+    const rate = node('div', 'savings-rate');
+    rate.append(
+      node('strong', 'savings-rate-value', `${(ratio * 100).toFixed(1)}%`),
+      node('span', 'savings-rate-label', 'estimated reduction'),
+    );
+    hero.append(value, rate);
+    const progress = document.createElement('progress');
+    progress.className = 'savings-progress';
+    progress.max = 1;
+    progress.value = ratio;
+    progress.setAttribute('aria-label', `${(ratio * 100).toFixed(1)}% estimated context reduction`);
+    return { hero, progress };
+  }
+
   function savingsCounts(payload) {
     const estimate = payload && payload.estimated ? payload.estimated : {};
     return {
@@ -718,9 +744,11 @@
       );
       return;
     }
+    const metric = savingsMetric(estimate);
     target.append(
-      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
-      node('p', '', `Across ${eligible} eligible context deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(0)}% estimated reduction`),
+      metric.hero,
+      metric.progress,
+      node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
       node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
       node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}.`),
     );
