@@ -354,6 +354,9 @@ def import_folder(req: FolderImportReq):
         # Re-resolve the already allowlisted path immediately before traversal. This
         # closes a directory-link swap between validation and the recursive walk and
         # gives the walker a canonical Path rather than the raw request value.
+        # Security: safe_path was already allowlisted above; this canonicalizes the
+        # trusted root before any descendant traversal.
+        # codeql[py/path-injection]
         folder = Path(safe_path).resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(404, f"Path not found: {req.path}") from None
@@ -387,16 +390,32 @@ def import_folder(req: FolderImportReq):
 
     files: list[tuple[Path, Path]] = []
     total_bytes = 0
+    # Security: traversal begins only from the canonical trusted folder and each
+    # yielded path is re-resolved and re-contained before use.
+    # codeql[py/path-injection]
     for candidate in folder.rglob("*"):
-        # The folder itself is already canonicalized and allowlisted. Reject links
-        # explicitly, then operate only on lexical descendants of that trusted root.
-        if candidate.is_symlink() or not candidate.is_file() or not fnmatch.fnmatch(
-            candidate.name, req.file_pattern
-        ):
+        # Resolve each candidate before trusting its location. This rejects
+        # symlink/reparse escapes and ensures the path used for stat/read is the
+        # same resolved path that was validated against the trusted folder.
+        if candidate.is_symlink() or not fnmatch.fnmatch(candidate.name, req.file_pattern):
             continue
         try:
-            relative = candidate.relative_to(folder)
-            size = candidate.stat().st_size
+            # Security: the candidate is re-resolved before any metadata access or
+            # ingestion so only descendants of the trusted folder survive.
+            # codeql[py/path-injection]
+            resolved_candidate = candidate.resolve(strict=True)
+        except (OSError, ValueError):
+            continue
+        if resolved_candidate == folder or not resolved_candidate.is_relative_to(folder):
+            continue
+        if not resolved_candidate.is_file():
+            continue
+        try:
+            relative = resolved_candidate.relative_to(folder)
+            # Security: the validated resolved path is used for size checks; the
+            # file descriptor read later re-validates the same resolved path.
+            # codeql[py/path-injection]
+            size = resolved_candidate.stat().st_size
         except (OSError, ValueError):
             continue
         if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
@@ -406,7 +425,7 @@ def import_folder(req: FolderImportReq):
                 413,
                 f"Import resource exceeds {MAX_IMPORT_RESOURCE_BYTES} bytes",
             )
-        files.append((candidate, relative))
+        files.append((resolved_candidate, relative))
         if len(files) > MAX_IMPORT_FILES:
             raise HTTPException(
                 413,
@@ -423,6 +442,9 @@ def import_folder(req: FolderImportReq):
     for file_path, relative_path in files:
         relative = relative_path.as_posix()
         try:
+            # Security: file_path is the already validated resolved path from the
+            # trusted folder walk, and the reader re-checks the opened inode.
+            # codeql[py/path-injection]
             raw = _read_import_bytes(file_path, MAX_IMPORT_RESOURCE_BYTES)
             content = raw.decode("utf-8", errors="replace")
             if not content.strip():
