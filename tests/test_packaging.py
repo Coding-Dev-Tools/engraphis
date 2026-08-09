@@ -66,17 +66,26 @@ def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
     from engraphis import mcp_http_cli
 
     calls = []
+    security_calls = []
+    transport_security = object()
     fake_mcp = types.SimpleNamespace(
         settings=types.SimpleNamespace(host=None, port=None),
         run=lambda *, transport: calls.append(transport),
     )
     monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
+    monkeypatch.setattr(
+        mcp_http_cli,
+        "_transport_security",
+        lambda host, port: security_calls.append((host, port)) or transport_security,
+    )
     monkeypatch.setitem(sys.modules, "engraphis.mcp_server", types.SimpleNamespace(mcp=fake_mcp))
 
     mcp_http_cli.main(["--host", "::1", "--port", "9876", "--transport", "sse"])
 
     assert fake_mcp.settings.host == "::1"
     assert fake_mcp.settings.port == 9876
+    assert fake_mcp.settings.transport_security is transport_security
+    assert security_calls == [("::1", 9876)]
     assert calls == ["sse"]
 
 

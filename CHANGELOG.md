@@ -33,7 +33,7 @@ stronger release and evaluation evidence.
 - Fail closed on new `user`-scope memory writes until records carry an immutable owner identity;
   preserve historical reads and the existing promotion rejection instead of presenting
   workspace-bound rows as private personal memory.
-- Load optional dotenv configuration only from the owner-private
+- Parse bounded dotenv-style configuration without an optional runtime dependency, and load it only from the owner-private
   `~/.engraphis/config.env` or an absolute owner-private file selected by
   `ENGRAPHIS_ENV_FILE`; arbitrary working-directory `.env` files are not a trust boundary.
 - Clarify Cloud Sync credential-origin binding, secret-manager-only unattended credentials,

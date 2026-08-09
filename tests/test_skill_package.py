@@ -4,6 +4,8 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "skills" / "engraphis-memory" / "references" / "TOOLS.md"
@@ -18,6 +20,10 @@ def _section(text: str, tool_name: str) -> str:
 
 
 def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
+    pytest.importorskip(
+        "pydantic", minversion="2.0", reason="runtime MCP schema extra not installed"
+    )
+    pytest.importorskip("mcp", reason="runtime MCP schema extra not installed")
     from engraphis.mcp_server import classic_mcp, smart_mcp
 
     reference = REFERENCE.read_text(encoding="utf-8")

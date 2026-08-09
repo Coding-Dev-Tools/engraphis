@@ -12,7 +12,6 @@ import stat
 import sys
 import time
 from contextlib import contextmanager
-from io import StringIO
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -27,6 +26,9 @@ from engraphis.private_state import (
 )
 
 _MAX_CONFIG_ENV_BYTES = 1024 * 1024
+_CONFIG_ENV_ASSIGNMENT = re.compile(
+    r"(?:export[ \t]+)?([A-Z][A-Z0-9_]*)[ \t]*=(.*)"
+)
 
 
 def _resolve_config_env_path(
@@ -50,11 +52,97 @@ _CONFIG_ENV_PATH, _CONFIG_ENV_EXPLICIT = _resolve_config_env_path()
 
 
 def trusted_env_path() -> Path:
-    """Return the config leaf selected before any dotenv values were applied."""
+    """Return the config leaf selected before any trusted values were applied."""
     return _CONFIG_ENV_PATH
 
 
-def _load_trusted_dotenv() -> None:
+def _trusted_env_syntax_error(line_number: int) -> ValueError:
+    """Return a value-free parse error so configuration secrets are never echoed."""
+    return ValueError(f"trusted config contains invalid syntax on line {line_number}")
+
+
+def _parse_trusted_env_value(value: str, line_number: int) -> str:
+    """Parse one bounded dotenv-style value without expansion or shell evaluation."""
+    text = value.strip(" \t")
+    if not text:
+        return ""
+
+    # A quote at the beginning delimits the entire value. Backslashes only escape
+    # that quote or another backslash; every other sequence stays literal.
+    if text[0] in {"'", '"'}:
+        delimiter = text[0]
+        parsed: list[str] = []
+        index = 1
+        while index < len(text):
+            char = text[index]
+            if char == delimiter:
+                suffix = text[index + 1 :]
+                if suffix and re.fullmatch(r"[ \t]+#.*", suffix) is None:
+                    raise _trusted_env_syntax_error(line_number)
+                return "".join(parsed)
+            if char == "\\" and index + 1 < len(text):
+                following = text[index + 1]
+                if following in {delimiter, "\\"}:
+                    parsed.append(following)
+                    index += 2
+                    continue
+            parsed.append(char)
+            index += 1
+        raise _trusted_env_syntax_error(line_number)
+
+    # Unquoted JSON and policies may contain balanced quotes. Scan them so a #
+    # inside JSON/CSP remains data while a whitespace-delimited trailing comment
+    # is ignored. Dollar expressions are deliberately left untouched.
+    delimiter = ""
+    escaped = False
+    comment_at: Optional[int] = None
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if delimiter:
+            if char == delimiter:
+                delimiter = ""
+            continue
+        if char in {"'", '"'} and (
+            index == 0 or text[index - 1] in " \t{[(:,="
+        ):
+            delimiter = char
+        elif char == "#" and index > 0 and text[index - 1] in " \t":
+            comment_at = index
+            break
+    if delimiter:
+        raise _trusted_env_syntax_error(line_number)
+    if comment_at is not None:
+        text = text[:comment_at].rstrip(" \t")
+    return text
+
+
+def _parse_trusted_env(raw: str) -> dict[str, str]:
+    """Parse the small, deterministic environment-file subset Engraphis supports.
+
+    Blank lines and comments are ignored, optional ``export`` is accepted, and a
+    later duplicate replaces an earlier value. Values are never interpolated.
+    """
+    parsed: dict[str, str] = {}
+    for line_number, raw_line in enumerate(raw.splitlines(), start=1):
+        if "\x00" in raw_line:
+            raise _trusted_env_syntax_error(line_number)
+        line = raw_line.lstrip(" \t")
+        if not line or line.startswith("#"):
+            continue
+        match = _CONFIG_ENV_ASSIGNMENT.fullmatch(line)
+        if match is None:
+            raise _trusted_env_syntax_error(line_number)
+        key, value = match.groups()
+        parsed[key] = _parse_trusted_env_value(value, line_number)
+    return parsed
+
+
+def _load_trusted_env() -> None:
     raw = read_private_text(
         _CONFIG_ENV_PATH,
         max_bytes=_MAX_CONFIG_ENV_BYTES,
@@ -63,24 +151,14 @@ def _load_trusted_dotenv() -> None:
     )
     if raw is None:
         return
-    try:
-        from dotenv import dotenv_values
-    except ImportError as exc:
-        raise RuntimeError(
-            "python-dotenv is required to load ENGRAPHIS_ENV_FILE"
-        ) from exc
-    parsed = dotenv_values(stream=StringIO(raw))
+    parsed = _parse_trusted_env(raw)
     for key, value in parsed.items():
-        if key == "ENGRAPHIS_ENV_FILE" or value is None:
+        if key == "ENGRAPHIS_ENV_FILE":
             continue
-        if re.fullmatch(r"[A-Z][A-Z0-9_]*", key) is None:
-            raise ValueError("trusted config contains an invalid environment setting")
-        if "\x00" in value:
-            raise ValueError("trusted config contains an invalid environment value")
         os.environ.setdefault(key, value)
 
 
-_load_trusted_dotenv()
+_load_trusted_env()
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_NOTICES = set()
