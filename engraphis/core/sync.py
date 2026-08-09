@@ -887,7 +887,8 @@ class SyncEngine:
         # become exportable. links_among() below receives only the retained ids, which also
         # prevents a link from disclosing a filtered endpoint.
         mems = [m for m in self.store.list_memories(flt, include_invalid=True)
-                if m.sensitivity != "secret" and m.scope != Scope.SESSION]
+                if m.sensitivity != "secret"
+                and m.scope not in (Scope.SESSION, Scope.USER)]
         if repo_id is not None:
             repo_rows = self.store.conn.execute(
                 "SELECT id, name FROM repos WHERE workspace_id=? AND id=?",

@@ -4834,6 +4834,12 @@ class MemoryService:
             pass  # sqlite-vec vector table only present when that backend is active
         c.execute(f"DELETE FROM mem_links WHERE a IN {msub} OR b IN {msub}", (wid, wid))
         c.execute("DELETE FROM memories WHERE workspace_id=?", (wid,))
+        # These content-free sync/governance rows are not foreign-key cascades. A
+        # hard workspace deletion must remove them too, otherwise stale markers can
+        # later authorize a tombstone or block a newly created workspace's sync.
+        c.execute("DELETE FROM memory_sync_exports WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM memory_tombstones WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM maintenance_cursors WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM entities WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM edges WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM sessions WHERE workspace_id=?", (wid,))
@@ -5193,6 +5199,27 @@ class MemoryService:
                     f"UPDATE {table} SET workspace_id=?, repo_id=? "
                     f"WHERE workspace_id=? AND repo_id IS ?",
                     (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
+
+        # Export proofs and remote-erasure markers survive memory re-homing so the
+        # next sync can still converge. Their repository owner follows the same
+        # collision map as the memories themselves.
+        for row in [dict(x) for x in c.execute(
+                "SELECT memory_id, repo_id FROM memory_sync_exports "
+                "WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "UPDATE memory_sync_exports SET workspace_id=?, repo_id=? "
+                "WHERE memory_id=?",
+                (wid_dst, _new_repo(row["repo_id"]), row["memory_id"]),
+            )
+        for row in [dict(x) for x in c.execute(
+                "SELECT memory_id, repo_id FROM memory_tombstones "
+                "WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "UPDATE memory_tombstones SET workspace_id=?, repo_id=? "
+                "WHERE memory_id=?",
+                (wid_dst, _new_repo(row["repo_id"]), row["memory_id"]),
+            )
+        c.execute("DELETE FROM maintenance_cursors WHERE workspace_id=?", (wid_src,))
 
         # 5) Receipt payload hashes bind their original workspace scope digest and chain
         # predecessor. Re-homing them would either forge that evidence or fork the target

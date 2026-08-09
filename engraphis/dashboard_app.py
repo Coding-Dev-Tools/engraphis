@@ -529,8 +529,31 @@ def create_app() -> FastAPI:
         reason = req.reason.strip()
         if not reason:
             return JSONResponse({"error": "review reason required"}, status_code=422)
-        source = svc.store.get_memory(req.memory_id)
+        try:
+            source = svc.store.get_memory(req.memory_id)
+        except ValueError:
+            return JSONResponse(
+                {"error": "workspace approval is not permitted"}, status_code=403
+            )
         if source is None:
+            # A bound Store intentionally redacts foreign rows as ``None``. Keep the
+            # dashboard's authorization contract distinct from a genuinely missing id
+            # by checking only the content-free owner identity before returning 404.
+            raw = svc.store.conn.execute(
+                "SELECT workspace_id FROM memories WHERE id=?", (req.memory_id,)
+            ).fetchone()
+            if raw is not None:
+                workspace = svc.store.conn.execute(
+                    "SELECT name FROM workspaces WHERE id=?", (raw["workspace_id"],)
+                ).fetchone()
+                if workspace is not None:
+                    try:
+                        svc._authorize_workspace(workspace["name"])
+                    except ValueError:
+                        return JSONResponse(
+                            {"error": "workspace approval is not permitted"},
+                            status_code=403,
+                        )
             return JSONResponse({"error": "memory not found"}, status_code=404)
         workspace = svc.store.conn.execute(
             "SELECT name FROM workspaces WHERE id=?", (source.workspace_id,),

@@ -262,6 +262,8 @@ select = ["E4", "E7", "E9", "F"]
 include = [
     "engraphis/core",
     "engraphis/backends",
+    "engraphis/factory.py",
+    "engraphis/__init__.py",
     "eval/harness.py",
     "eval/external.py",
 ]

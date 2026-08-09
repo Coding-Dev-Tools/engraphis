@@ -282,7 +282,12 @@ def parse_document(
         # extension boundary; a malformed third-party adapter must produce the
         # same content-free per-file error as every other parser failure rather
         # than leaking an AttributeError/UnicodeEncodeError to a caller.
-        if not isinstance(record.content, str) or not isinstance(record.body, str):
+        if (
+            not isinstance(record.content, str)
+            or not isinstance(record.body, str)
+            or not isinstance(record.title, str)
+            or not isinstance(record.metadata, dict)
+        ):
             raise DocumentParseError("document adapter returned invalid text")
         try:
             canonical_sha256 = hashlib.sha256(record.content.encode("utf-8")).hexdigest()
@@ -290,6 +295,7 @@ def parse_document(
             # A lone surrogate in ``body`` otherwise escapes this boundary and
             # can fail later while serialising preview or memory metadata.
             record.body.encode("utf-8")
+            record.title.encode("utf-8")
         except UnicodeEncodeError:
             raise DocumentParseError("document adapter returned invalid text") from None
         if (
@@ -304,7 +310,12 @@ def parse_document(
             raise DocumentParseError("document produced no readable text")
         if len(record.content) > MAX_DOCUMENT_CHARS or len(record.body) > MAX_DOCUMENT_CHARS:
             raise DocumentParseError("document exceeds 100000 character safety limit")
-        if secret_kind(record.content) is not None or secret_kind(record.body) is not None:
+        if (
+            secret_kind(record.content) is not None
+            or secret_kind(record.body) is not None
+            or secret_kind(record.title) is not None
+            or secret_kind(record.metadata) is not None
+        ):
             raise DocumentParseError("source appears to contain a secret")
         return record
     if not spec.container and _looks_binary(raw):
@@ -533,17 +544,51 @@ def _decode_text(raw: bytes) -> Tuple[str, List[str]]:
         return raw.decode("utf-8-sig", errors="replace"), ["invalid UTF-8 was replaced with U+FFFD"]
 
 
+class _HTMLCharsetParser(HTMLParser):
+    """Find the first real HTML ``meta`` charset declaration."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.encoding = ""
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        if self.encoding or tag.casefold() != "meta":
+            return
+        values = {
+            key.casefold(): value or ""
+            for key, value in attrs
+            if key
+        }
+        candidate = values.get("charset", "").strip()
+        if not candidate and values.get("http-equiv", "").casefold() == "content-type":
+            match = re.search(
+                r"\bcharset\s*=\s*([A-Za-z0-9._:-]+)",
+                values.get("content", ""),
+                re.IGNORECASE,
+            )
+            candidate = match.group(1) if match else ""
+        if candidate:
+            self.encoding = candidate
+
+
 def _decode_html(raw: bytes) -> Tuple[str, List[str]]:
     """Decode HTML using an early in-document charset declaration when present."""
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return _decode_text(raw)
-    head = raw[:65536]
-    match = _HTML_CHARSET_RE.search(head) or _HTML_CONTENT_CHARSET_RE.search(head)
-    if match is None:
+    parser = _HTMLCharsetParser()
+    try:
+        # Charset declarations are ASCII by definition.  Parsing a latin-1 view
+        # lets HTMLParser ignore comments, script/style data, and other non-meta
+        # content without needing to decode the document using a guessed charset.
+        parser.feed(raw[:65536].decode("latin-1"))
+        parser.close()
+    except Exception:
+        return _decode_text(raw)
+    if not parser.encoding:
         return _decode_text(raw)
     try:
-        encoding = codecs.lookup(match.group(1).decode("ascii")).name
-    except (LookupError, UnicodeDecodeError):
+        encoding = codecs.lookup(parser.encoding).name
+    except LookupError:
         return _decode_text(raw)
     try:
         return raw.decode(encoding), []
@@ -554,17 +599,6 @@ def _decode_html(raw: bytes) -> Tuple[str, List[str]]:
 
 
 _RTF_ANSI_CODE_PAGE_RE = re.compile(rb"\\ansicpg([0-9]+)")
-_HTML_CHARSET_RE = re.compile(
-    rb"<meta\b[^>]*\bcharset\s*=\s*['\"]?\s*([A-Za-z0-9._:-]+)",
-    re.IGNORECASE,
-)
-_HTML_CONTENT_CHARSET_RE = re.compile(
-    rb"<meta\b[^>]*\bcontent\s*=\s*['\"][^'\"]*?\bcharset\s*=\s*"
-    rb"([A-Za-z0-9._:-]+)[^'\"]*['\"]",
-    re.IGNORECASE,
-)
-
-
 def _decode_rtf(raw: bytes) -> Tuple[str, List[str]]:
     """Decode literal RTF bytes using the document's declared ANSI code page."""
     match = _RTF_ANSI_CODE_PAGE_RE.search(raw[:4096])
@@ -1031,7 +1065,19 @@ def _ods_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
     cell_count = 0
     total = 0
     for row in (item for item in root.iter() if item.tag.endswith("table-row")):
+        repeated_row_raw = next(
+            (
+                value for key, value in row.attrib.items()
+                if str(key).endswith("number-rows-repeated")
+            ),
+            "1",
+        )
+        try:
+            repeated_row = max(1, min(int(repeated_row_raw), 10_000))
+        except (TypeError, ValueError):
+            repeated_row = 1
         cells: List[str] = []
+        row_cell_count = 0
         row_size = 0
         row_separator = 1 if rows else 0
         for cell in (item for item in row if item.tag.endswith("table-cell")):
@@ -1070,13 +1116,18 @@ def _ods_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
                 raise DocumentParseError("document exceeds 100000 character safety limit")
             cells.extend([value] * repeated)
             row_size += addition
-            cell_count += repeated
+            row_cell_count += repeated
         text = "\t".join(cells).strip()
         if text:
-            if total + row_separator + len(text) > MAX_CONTAINER_TEXT_CHARS:
+            addition = (
+                row_separator + len(text) * repeated_row
+                + max(0, repeated_row - 1)
+            )
+            if total + addition > MAX_CONTAINER_TEXT_CHARS:
                 raise DocumentParseError("document exceeds 100000 character safety limit")
-            rows.append(text)
-            total += row_separator + len(text)
+            rows.extend([text] * repeated_row)
+            total += addition
+            cell_count += row_cell_count * repeated_row
     if not rows:
         body, metadata = _office_body(
             archive, "content.xml",

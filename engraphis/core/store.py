@@ -3672,6 +3672,20 @@ class Store:
             raise ValueError(f"workspace '{name}' is not permitted on this instance")
         return name
 
+    def _authorize_workspace_id(self, workspace_id: Optional[str]) -> Optional[str]:
+        """Apply the instance allow-list to an already-resolved workspace id."""
+        if self.allowed_workspaces is None:
+            return workspace_id
+        if workspace_id is None:
+            raise ValueError("workspace is not permitted on this instance")
+        row = self.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (str(workspace_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("workspace was not found")
+        self._authorize_workspace(str(row["name"]))
+        return workspace_id
+
     def create_workspace(self, name: str, *, settings: Optional[dict] = None) -> str:
         self._authorize_workspace(name)
         wid = ids.new_id("workspace")
@@ -3716,6 +3730,7 @@ class Store:
             raise
 
     def create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
+        self._authorize_workspace_id(workspace_id)
         rid = ids.new_id("repo")
         self.conn.execute(
             "INSERT INTO repos(id, workspace_id, name, root_path, vcs_remote, primary_lang, "
@@ -3728,6 +3743,7 @@ class Store:
 
     def get_or_create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
         """Return one scoped repository id, creating it atomically when absent."""
+        self._authorize_workspace_id(workspace_id)
         row = self.conn.execute(
             "SELECT id FROM repos WHERE workspace_id=? AND name=?", (workspace_id, name)
         ).fetchone()
@@ -3771,6 +3787,7 @@ class Store:
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None,
                       *, agent: str = "", user_id: str = "", goal: str = "",
                       commit: bool = True) -> str:
+        self._authorize_workspace_id(workspace_id)
         sid = ids.new_id("session")
         self.conn.execute(
             "INSERT INTO sessions(id, workspace_id, repo_id, agent, user_id, goal, status, "
@@ -3966,6 +3983,7 @@ class Store:
         internal compatibility path. Sync may separately preserve the empty pre-v13
         descriptive clock; ordinary local writes always mint a real HLC.
         """
+        self._authorize_workspace_id(rec.workspace_id)
         if (
             _enum(rec.scope) == Scope.USER.value
             and not _allow_legacy_user_scope
@@ -4204,6 +4222,11 @@ class Store:
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
         row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        if row is not None and self.allowed_workspaces is not None:
+            try:
+                self._authorize_workspace_id(row["workspace_id"])
+            except ValueError:
+                return None
         return _row_to_record(row) if row else None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
@@ -4226,6 +4249,11 @@ class Store:
             rows = self.conn.fetchall(
                 f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
             for row in rows:
+                if self.allowed_workspaces is not None:
+                    try:
+                        self._authorize_workspace_id(row["workspace_id"])
+                    except ValueError:
+                        continue
                 out[row["id"]] = _row_to_record(row)
         return out
 
@@ -4780,6 +4808,37 @@ class Store:
         ).fetchone() is not None
 
     @classmethod
+    def _secure_erase_targets(cls, conn, memory_id: str) -> list[str]:
+        """Include deterministic sync-conflict successors in one erase operation."""
+        if not cls._has_table(conn, "memories"):
+            return [memory_id]
+        rows = conn.execute(
+            "SELECT id, metadata, provenance FROM memories"
+        ).fetchall()
+        parents: dict[str, set[str]] = {}
+        for row in rows:
+            metadata = _loads(row["metadata"], {})
+            provenance = _loads(row["provenance"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            provenance = provenance if isinstance(provenance, dict) else {}
+            sync_conflict = metadata.get("sync_conflict")
+            candidates = {provenance.get("conflict_of")}
+            if isinstance(sync_conflict, dict):
+                candidates.add(sync_conflict.get("memory_id"))
+            for parent in candidates:
+                parent_id = str(parent or "")
+                if parent_id:
+                    parents.setdefault(parent_id, set()).add(str(row["id"]))
+        targets = [memory_id]
+        seen = {memory_id}
+        for parent in targets:
+            for child in sorted(parents.get(parent, set())):
+                if child not in seen:
+                    seen.add(child)
+                    targets.append(child)
+        return targets
+
+    @classmethod
     def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
         """Remove a memory and all known local derivatives from one SQLite database.
 
@@ -4990,8 +5049,19 @@ class Store:
         for pattern in patterns:
             for candidate in parent.glob(pattern):
                 try:
-                    if candidate.is_file() and candidate.resolve() != primary:
-                        found.append(candidate.resolve())
+                    stat_result = candidate.lstat()
+                    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                    if candidate.is_symlink() or (
+                        reparse and getattr(stat_result, "st_file_attributes", 0) & reparse
+                    ):
+                        continue
+                    resolved = candidate.resolve()
+                    if (
+                        resolved != primary
+                        and resolved.parent == parent
+                        and resolved.is_file()
+                    ):
+                        found.append(resolved)
                 except OSError:
                     continue
         return sorted(set(found), key=lambda value: str(value))
@@ -5012,31 +5082,41 @@ class Store:
             # the destructive transaction means the deletion and terminal tombstone
             # commit (or roll back) as one unit.
             device_id = self.device_id()
-            current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
-            if not current["present"]:
-                raise KeyError(f"no memory with id '{memory_id}'")
-            export_marker = self.get_memory_sync_export(memory_id)
-            if (
-                export_marker is not None
-                and export_marker["workspace_id"] == current.get("workspace_id")
-            ):
-                export_class = TOMBSTONE_REMOTE_ERASURE
-                tombstone_workspace_id = export_marker["workspace_id"]
-                tombstone_repo_id = export_marker["repo_id"]
-            else:
-                export_class = TOMBSTONE_NEVER_EXPORT
-                tombstone_workspace_id = current.get("workspace_id")
-                tombstone_repo_id = current.get("repo_id")
-            # Current scope/sensitivity cannot prove that an id ever crossed a sync
-            # boundary. Only the durable content-free marker can authorize a remote
-            # erasure; absent or scope-conflicting evidence fails closed to local-only.
-            self.add_memory_tombstone(
-                memory_id, deleted_at=now_ts(),
-                device_id=device_id,
-                workspace_id=tombstone_workspace_id,
-                repo_id=tombstone_repo_id,
-                export_class=export_class,
+            targets = self._secure_erase_targets(self.conn, memory_id)
+            current_rows = []
+            for target_id in targets:
+                marker = self.get_memory_sync_export(target_id)
+                current = self._erase_memory_rows(self.conn, target_id, actor=actor)
+                if current["present"]:
+                    current_rows.append((target_id, current, marker))
+            current = next(
+                (row for row in current_rows if row[0] == memory_id), None
             )
+            if current is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            primary_export_class = TOMBSTONE_NEVER_EXPORT
+            for target_id, erased, export_marker in current_rows:
+                if (
+                    export_marker is not None
+                    and export_marker["workspace_id"] == erased.get("workspace_id")
+                ):
+                    export_class = TOMBSTONE_REMOTE_ERASURE
+                    tombstone_workspace_id = export_marker["workspace_id"]
+                    tombstone_repo_id = export_marker["repo_id"]
+                else:
+                    export_class = TOMBSTONE_NEVER_EXPORT
+                    tombstone_workspace_id = erased.get("workspace_id")
+                    tombstone_repo_id = erased.get("repo_id")
+                # Current scope/sensitivity cannot prove that an id ever crossed a
+                # sync boundary. Only the durable content-free marker can authorize
+                # a remote erasure; absent or scope-conflicting evidence fails closed.
+                self.add_memory_tombstone(
+                    target_id, deleted_at=now_ts(), device_id=device_id,
+                    workspace_id=tombstone_workspace_id,
+                    repo_id=tombstone_repo_id, export_class=export_class,
+                )
+                if target_id == memory_id:
+                    primary_export_class = export_class
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.commit()
         except BaseException:
@@ -5052,10 +5132,11 @@ class Store:
             conn = None
             try:
                 conn = self._open_connection(str(backup))
-                erased = self._erase_memory_rows(conn, memory_id, actor="secure_erase")
+                for target_id in targets:
+                    self._erase_memory_rows(conn, target_id, actor="secure_erase")
                 conn.commit()
                 self._checkpoint_and_vacuum(conn, durable=True)
-                if erased["present"]:
+                if current_rows:
                     backup_processed += 1
             except Exception:  # pragma: no cover - keyed/corrupt/locked backups vary by deployment
                 backup_failed += 1
@@ -5068,7 +5149,7 @@ class Store:
         return {
             "id": memory_id,
             "status": "securely_erased",
-            "export_class": export_class,
+            "export_class": primary_export_class,
             "maintenance": maintenance,
             "recognised_backups_erased": backup_processed,
             "recognised_backups_failed": backup_failed,
@@ -6756,13 +6837,25 @@ class Store:
             source_ids = set().union(*(
                 set(_provenance_memory_ids(edge.provenance)) for edge in edges
             )) if edges else set()
-            memories = self.get_memories(sorted(source_ids))
+            support_rows = self.edge_supports_in_scope(
+                [edge.id for edge in edges], at=valid_at, flt=flt,
+            ) if edges else []
+            support_ids = {str(row["memory_id"]) for row in support_rows
+                           if row.get("memory_id")}
+            memories = self.get_memories(sorted(source_ids | support_ids))
+            supports_by_edge: dict[str, set[str]] = {}
+            for support in support_rows:
+                supports_by_edge.setdefault(str(support["edge_id"]), set()).add(
+                    str(support["memory_id"])
+                )
             for edge in edges:
                 if not _edge_is_prompt_eligible(edge.provenance):
                     continue
-                sources = _provenance_memory_ids(edge.provenance)
+                sources = set(_provenance_memory_ids(edge.provenance))
+                sources.update(supports_by_edge.get(edge.id, set()))
                 if sources and not all(
                     (memory := memories.get(memory_id))
+                    and (flt is None or memory_matches_filter(memory, flt, at=valid_at))
                     and _row_is_prompt_eligible(memory.provenance, memory.metadata)
                     for memory_id in sources
                 ):
@@ -7326,28 +7419,32 @@ class Store:
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
-                     interaction_level: str = "") -> str:
+                     interaction_level: str = "", ts: Optional[float] = None) -> str:
         # Events are not memories, but are durable, searchable agent context too. Do
         # not create a side channel that can retain a credential after memory capture is
         # blocked.
         reject_secrets((("event content", content), ("event refs", refs)))
         eid = ids.new_id("event")
-        owns_session_transaction = False
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        event_ts = _finite_timestamp(ts, "event timestamp")
+        if event_ts is None:
+            event_ts = now_ts()
         try:
             if session_id:
-                owns_session_transaction = self.begin_session_write(
+                self.begin_session_write(
                     session_id, workspace_id=workspace_id, repo_id=repo_id or None
                 )
             self.conn.execute(
                 "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
                 "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
                 (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
-                 interaction_level, now_ts()),
+                 interaction_level, event_ts),
             )
-            self.conn.commit()
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.commit()
             return eid
         except BaseException:
-            if (owns_session_transaction
+            if (owns_transaction
                     and self.conn.transaction_owned_by_current_thread()):
                 self.conn.rollback()
             raise
@@ -8570,6 +8667,16 @@ class Store:
         p = f"{alias}." if alias else ""
         where: list[str] = []
         params: list[Any] = []
+        if self.allowed_workspaces is not None:
+            names = sorted(str(name) for name in self.allowed_workspaces)
+            if not names:
+                where.append("0")
+            else:
+                marks = ",".join("?" for _ in names)
+                where.append(
+                    f"{p}workspace_id IN (SELECT id FROM workspaces WHERE name IN ({marks}))"
+                )
+                params.extend(names)
         if flt:
             if flt.workspace_id:
                 where.append(f"{p}workspace_id=?")

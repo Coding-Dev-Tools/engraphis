@@ -24,33 +24,36 @@ from engraphis.service import (
 
 
 logger = logging.getLogger("engraphis.read_only")
+MAX_READ_ONLY_BODY_BYTES = 2_000_000
+MAX_READ_ONLY_TEXT_CHARS = 100_000
+MAX_READ_ONLY_LIST_ITEMS = 2_000
 
 
 class IntentRecallRequest(BaseModel):
-    query: str
-    intent: str = "recall"
-    workspace: Optional[str] = None
-    repo: Optional[str] = None
-    mtypes: Optional[list[str]] = None
-    k: int = 8
+    query: str = Field(..., min_length=1, max_length=MAX_READ_ONLY_TEXT_CHARS)
+    intent: str = Field("recall", max_length=64)
+    workspace: Optional[str] = Field(None, max_length=256)
+    repo: Optional[str] = Field(None, max_length=256)
+    mtypes: Optional[list[str]] = Field(None, max_length=16)
+    k: int = Field(8, ge=1, le=500)
     as_of: Optional[float] = None
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
-    token_budget: Optional[int] = None
-    retrieval_profile: str = "balanced"
-    candidate_depth: str = "fixed"
-    response_mode: str = "compact"
+    token_budget: Optional[int] = Field(None, ge=1, le=100_000)
+    retrieval_profile: str = Field("balanced", max_length=32)
+    candidate_depth: str = Field("fixed", max_length=32)
+    response_mode: str = Field("compact", max_length=32)
     diagnostics: bool = False
-    planning: str = "off"
-    mtype_limits: Optional[dict[str, StrictInt]] = None
+    planning: str = Field("off", max_length=32)
+    mtype_limits: Optional[dict[str, StrictInt]] = Field(None, max_length=16)
 
 
 class CodePathRequest(BaseModel):
-    workspace: str
-    repo: str
-    source: str
-    target: str
-    max_depth: int = 8
+    workspace: str = Field(..., min_length=1, max_length=256)
+    repo: str = Field(..., min_length=1, max_length=256)
+    source: str = Field(..., min_length=1, max_length=MAX_READ_ONLY_TEXT_CHARS)
+    target: str = Field(..., min_length=1, max_length=MAX_READ_ONLY_TEXT_CHARS)
+    max_depth: int = Field(8, ge=1, le=128)
     capacity: int = Field(
         default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
     )
@@ -60,9 +63,11 @@ class CodePathRequest(BaseModel):
 
 
 class CodeImpactRequest(BaseModel):
-    workspace: str
-    repo: str
-    changed_files: list[str]
+    workspace: str = Field(..., min_length=1, max_length=256)
+    repo: str = Field(..., min_length=1, max_length=256)
+    changed_files: list[str] = Field(
+        ..., min_length=1, max_length=MAX_READ_ONLY_LIST_ITEMS,
+    )
     capacity: int = Field(
         default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
     )
@@ -139,6 +144,35 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                 {"error": "internal server error"}, status_code=500
             )
 
+    @app.middleware("http")
+    async def limit_request_body(request, call_next):
+        content_length = request.headers.get("content-length")
+        try:
+            declared_length = int(content_length) if content_length else 0
+        except ValueError:
+            declared_length = 0
+        if declared_length > MAX_READ_ONLY_BODY_BYTES:
+            return JSONResponse({"detail": "request body too large"}, status_code=413)
+        received = 0
+        original_receive = request.receive
+
+        async def limited_receive():
+            nonlocal received
+            message = await original_receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body") or b"")
+                if received > MAX_READ_ONLY_BODY_BYTES:
+                    raise ValueError("request body too large")
+            return message
+
+        request._receive = limited_receive
+        try:
+            return await call_next(request)
+        except ValueError as exc:
+            if str(exc) == "request body too large":
+                return JSONResponse({"detail": str(exc)}, status_code=413)
+            raise
+
     def run(fn, *args, **kwargs):
         try:
             return fn(*args, **kwargs)
@@ -150,18 +184,20 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         return {"ok": True, "mode": "read-only"}
 
     @app.get("/recall")
-    def recall(query: str, workspace: Optional[str] = None,
-               repo: Optional[str] = None, k: int = 8,
+    def recall(query: str = Query(..., min_length=1, max_length=MAX_READ_ONLY_TEXT_CHARS),
+               workspace: Optional[str] = Query(None, max_length=256),
+               repo: Optional[str] = Query(None, max_length=256),
+               k: int = Query(8, ge=1, le=500),
                as_of: Optional[float] = None,
                valid_at: Optional[float] = None,
                known_at: Optional[float] = None,
-               token_budget: Optional[int] = None,
-               retrieval_profile: str = "balanced",
-               candidate_depth: str = "fixed",
-               response_mode: str = "compact",
+               token_budget: Optional[int] = Query(None, ge=1, le=100_000),
+               retrieval_profile: str = Query("balanced", max_length=32),
+               candidate_depth: str = Query("fixed", max_length=32),
+               response_mode: str = Query("compact", max_length=32),
                diagnostics: bool = False,
-               planning: str = "off",
-               mtype_limits: Optional[str] = None):
+               planning: str = Query("off", max_length=32),
+               mtype_limits: Optional[str] = Query(None, max_length=4_000)):
         try:
             parsed_limits = json.loads(mtype_limits) if mtype_limits else None
             if parsed_limits is not None and not isinstance(parsed_limits, dict):

@@ -215,6 +215,26 @@ def test_ods_repeated_cells_are_bounded_before_materialization():
         parse_document(ods, "repeated.ods")
 
 
+def test_ods_repeated_rows_are_preserved_and_bounded():
+    ods = _zip({
+        "content.xml": (
+            '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+            'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+            '<office:body><office:spreadsheet><table:table>'
+            '<table:table-row table:number-rows-repeated="3">'
+            '<table:table-cell><text:p>Repeated</text:p></table:table-cell>'
+            '</table:table-row></table:table></office:spreadsheet></office:body>'
+            '</office:document-content>'
+        ),
+    })
+
+    record = parse_document(ods, "repeated-rows.ods")
+
+    assert record.body == "Repeated\nRepeated\nRepeated"
+    assert record.metadata == {"rows": 3, "cells": 3}
+
+
 def test_scan_is_safe_and_continues_after_per_file_errors(tmp_path):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "good.txt").write_text("good", encoding="utf-8")
@@ -307,6 +327,34 @@ def test_xml_attributes_are_preserved_and_secrets_are_rejected():
         )
 
 
+def test_adapter_metadata_and_title_secrets_are_rejected():
+    raw = b"%PDF-local"
+
+    def make_adapter(*, title="Report", metadata=None):
+        def adapter(data, path, mtime):
+            text = "safe extracted document"
+            return DocumentRecord(
+                relative_path=path, format="pdf", media_type="application/pdf",
+                title=title, content=text, body=text,
+                raw_sha256=hashlib.sha256(data).hexdigest(),
+                canonical_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                source_size=len(data), source_mtime_ns=mtime,
+                metadata=metadata or {},
+            )
+        return adapter
+
+    with pytest.raises(DocumentParseError, match="secret"):
+        parse_document(
+            raw, "report.pdf",
+            adapter=make_adapter(title="api_key=sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        )
+    with pytest.raises(DocumentParseError, match="secret"):
+        parse_document(
+            raw, "report.pdf",
+            adapter=make_adapter(metadata={"endpoint": "token=secret-value-123456789"}),
+        )
+
+
 def test_rtf_and_additional_office_containers_are_dependency_free():
     rtf = parse_document(b"{\\rtf1\\ansi Hello\\par world}", "notes.rtf")
     assert "Hello" in rtf.body and "world" in rtf.body
@@ -388,6 +436,17 @@ def test_html_uses_declared_non_utf8_charset_before_parsing():
         "page.html",
     )
     assert html.title == "Café"
+    assert html.body == "Café"
+
+
+def test_html_charset_detection_ignores_comments_and_script_text():
+    html = parse_document(
+        b'<!-- <meta charset="windows-1252"> -->'
+        b'<script>const fake = "<meta charset=windows-1252>";</script>'
+        b'<meta charset="utf-8"><p>Caf\xc3\xa9</p>',
+        "page.html",
+    )
+
     assert html.body == "Café"
 
 
