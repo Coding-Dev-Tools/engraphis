@@ -382,18 +382,48 @@ def test_manual_release_dispatch_cannot_publish():
 
 
 def test_source_tree_version_matches_pyproject():
-    """The ``PackageNotFoundError`` fallback in ``engraphis/__init__.py`` must equal the
-    ``[project] version``. It only shows up in an uninstalled source tree, so a stale
-    value survives every test run on an installed checkout and then leaks into the API
-    index and ``--version`` output of anyone running from a clone."""
+    """Both source-tree versions must equal the ``[project] version``."""
     import re
 
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     init = (ROOT / "engraphis" / "__init__.py").read_text(encoding="utf-8")
     declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    source = re.search(r'^_SOURCE_VERSION = "([^"]+)"', init, re.M)
     fallback = re.search(r'^    __version__ = "([^"]+)"', init, re.M)
-    assert declared and fallback, "version declarations moved — update this test"
-    assert declared.group(1) == fallback.group(1)
+    assert declared and source and fallback, "version declarations moved — update this test"
+    assert declared.group(1) == source.group(1) == fallback.group(1)
+
+
+def test_release_version_surfaces_are_synchronized():
+    """Repo-distributed integrations and release filters track the package version."""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert declared, "project version declaration moved — update this test"
+    version = declared.group(1)
+
+    commercial = json.loads(
+        (ROOT / "engraphis" / "commercial_manifest.json").read_text(encoding="utf-8")
+    )
+    assert commercial["version"] == version
+
+    hermes = (ROOT / "integrations" / "hermes" / "engraphis" / "plugin.yaml").read_text(
+        encoding="utf-8"
+    )
+    hermes_version = re.search(r"^version:\s*(\S+)\s*$", hermes, re.M)
+    assert hermes_version, "Hermes version declaration moved — update this test"
+    expected_hermes = version if version.count(".") >= 2 else f"{version}.0"
+    assert hermes_version.group(1) == expected_hermes
+
+    ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
+        encoding="utf-8"
+    )
+    assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == [version]
+
+    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
+    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
+    assert static == classic
+    static_text = static.decode("utf-8")
+    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == [version]
 
 
 def test_release_version_has_a_dated_changelog_section():

@@ -5,6 +5,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.6] - 2026-08-08
+
+Minor release advancing the v2 engine through schema 13 with deterministic sync state, tighter
+trust boundaries, synchronized agent guidance, and stronger release and evaluation evidence.
+
 ### Security
 
 - Fail closed on new `user`-scope memory writes until records carry an immutable owner identity;
@@ -20,9 +25,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `never_export` markers remain private and only validated `remote_erasure` markers may cross
   sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
   descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary.
+- Make read-only Store inspection write-free for SQLite and injected/SQLCipher connectors:
+  require injected connectors to expose `open_read_only(path)`, open existing checkpointed files
+  with `mode=ro&immutable=1` plus `PRAGMA query_only=ON`, and reject missing paths or active
+  WAL/rollback journals before a connector can create or recover state.
 
 ### Fixed
 
+- Publish separately backed vector-index changes for service memory-title edits only after the
+  canonical Store row, FTS mirror, portable vector, audit, and commit succeed; late Store failures
+  publish nothing, while post-commit provider failures preserve canonical state and record
+  content-free repair debt.
+- Defer separately backed vector-index upserts and deletes during sync until each canonical apply
+  batch commits, coalesce repeated IDs, publish nothing on late Store failure, and record
+  content-free repair debt if the provider fails after commit.
 - Synchronize the portable memory skill with the live Smart nine-tool and Classic 34-tool
   surfaces, including the two intentionally narrower Smart overlap schemas, trust/origin fields,
   planner and response bounds, context-savings filters, receipt anchors, and expanded health

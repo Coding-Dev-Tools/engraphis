@@ -166,11 +166,13 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > gated. Existing 1.4.x databases migrate automatically when Engraphis 1.5 opens them; see the
 > [1.5 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#150---2026-08-04).
 
-> **Current source:** schema 13 adds per-memory hybrid logical clocks for deterministic
-> descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary.
-> Schema 12 classifies content-free erasure markers before sync: existing markers migrate to
-> local-only `never_export`; new secure erasures become `remote_erasure` only for non-secret
-> `workspace`/`repo` records that were already eligible for sharing.
+> **Upgrading to 1.6:** schema 12 classifies content-free erasure markers before sync: existing
+> markers migrate to local-only `never_export`; new secure erasures become `remote_erasure` only
+> for non-secret `workspace`/`repo` records that were already eligible for sharing. In 1.6,
+> schema 13 adds per-memory hybrid logical clocks for deterministic descriptive-state sync and durable,
+> content-free proof that a memory crossed a sync boundary. Existing 1.5 databases migrate
+> automatically when Engraphis 1.6 opens them; see the
+> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
 
 ---
 
