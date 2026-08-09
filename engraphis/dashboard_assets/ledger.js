@@ -3572,12 +3572,15 @@
     switchView('manage');
     switchManageTab(control.dataset.manage);
   }));
-  byId('plan-badge').addEventListener('click', event => {
-    if (event.currentTarget.dataset.opensAccount === 'true') return;
-    event.preventDefault();
-    switchView('manage');
-    switchManageTab('plans');
-  });
+  const planBadge = byId('plan-badge');
+  if (planBadge) {
+    planBadge.addEventListener('click', event => {
+      if (event.currentTarget.dataset.opensAccount === 'true') return;
+      event.preventDefault();
+      switchView('manage');
+      switchManageTab('plans');
+    });
+  }
   all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
     switchView('provenance');
     switchProvenanceTab(control.dataset.provenance);

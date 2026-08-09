@@ -275,7 +275,7 @@ test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({
   const csp = response.headers()['content-security-policy'];
   expect(csp).toBeTruthy();
   expect(csp).not.toContain("'unsafe-inline'");
-  await expect(page.locator('#lic-badge')).toHaveText('TRY PRO');
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
 
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
@@ -342,7 +342,7 @@ test('a free installation is locked out of every hosted capability', async ({ pa
   await page.goto('/classic');
 
   // The baseline the paid cases below are the counterpart to: all three locks drawn.
-  await expect(page.locator('#lic-badge')).toHaveText('TRY PRO');
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
   await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
   await expect(page.locator(navLocks.automation)).toHaveText('PRO');
   await expect(page.locator(navLocks.team)).toHaveText('TEAM');
@@ -354,9 +354,9 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
   await mockLocalClient(page, 200, null, null, teamLicense);
   await page.goto('/classic');
 
-  // The badge settles before the locks: dashboard.js sets both inside loadLicense(),
-  // so asserting it first means the empty locks below cannot be read pre-render.
-  await expect(page.locator('#lic-badge')).toHaveText('TEAM');
+  // The header no longer carries a plan badge; entitlement state is represented by the
+  // feature locks and the detailed settings panel below.
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
   for (const [feature, selector] of Object.entries(navLocks)) {
     await expect(page.locator(selector), `${feature} is still locked for a Team customer`)
       .toHaveText('');
@@ -395,7 +395,7 @@ test('a paying Pro customer keeps only the Team upsell', async ({ page }) => {
   await mockLocalClient(page, 200, null, null, proLicense);
   await page.goto('/classic');
 
-  await expect(page.locator('#lic-badge')).toHaveText('PRO');
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
   await expect(page.locator(navLocks.analytics)).toHaveText('');
   await expect(page.locator(navLocks.automation)).toHaveText('');
   await expect(page.locator(navLocks.team)).toHaveText('TEAM');
@@ -419,10 +419,9 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
   await mockLocalClient(page, 402, null, null, lapsedTeamLicense);
   await page.goto('/classic');
 
-  // The badge says the plan AND that it is no longer live: a bare `TEAM` over rows of
-  // locks was the defect. The locks come back because the control plane withdrew the
-  // features.
-  await expect(page.locator('#lic-badge')).toHaveText('BILLING');
+  // The locks come back because the control plane withdrew the features; billing details
+  // are shown in the settings panel instead of a header badge.
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
   await expect(page.locator(navLocks.team)).toHaveText('TEAM');
   await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
 
@@ -457,14 +456,14 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   }));
   await page.goto('/classic');
 
-  await expect(page.locator('#lic-badge')).toHaveText('GET PRO');
+  await expect(page.locator('#lic-badge')).toHaveCount(0);
 
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
-  // The header GET PRO badge opens this panel, so it must retain the matching checkout action.
+  // The settings panel retains the matching checkout action.
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' })).toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
@@ -477,7 +476,7 @@ for (const cloudStatus of [402, 501]) {
     const errors = recordBrowserErrors(page);
     const calls = await mockLocalClient(page, cloudStatus);
     await page.goto('/classic');
-    await expect(page.locator('#lic-badge')).toHaveText('TRY PRO');
+    await expect(page.locator('#lic-badge')).toHaveCount(0);
 
     const analyticsBefore = calls.filter(call => call.path === '/analytics').length;
     await openView(page, 'analytics');
