@@ -751,20 +751,39 @@ class ObsidianImporter:
                     old_memory_id, *self._live_subject_memories(subject_key)
                 ) if candidate and candidate != memory_id
             }
+            successor = self.store.get_memory(memory_id)
+            successor_at = (
+                successor.valid_from
+                if successor is not None and successor.valid_from is not None
+                else imported_at
+            )
+            predecessors = []
             for predecessor_id in sorted(predecessor_ids):
                 old = self.store.get_memory(predecessor_id)
                 if old is not None and old.valid_to is None:
-                    close_at = imported_at
                     if old.valid_from is not None:
-                        close_at = max(close_at, old.valid_from + 0.000001)
-                    self.store.close_validity(
-                        predecessor_id, at=close_at,
-                        actor=f"{self.SOURCE_KIND}_importer",
-                        reason=f"{self.SOURCE_KIND}_source_revision", commit=False,
-                    )
-                    self.store.retire_memory_graph_state(
-                        predecessor_id, at=close_at, commit=False,
-                    )
+                        successor_at = max(successor_at, old.valid_from + 0.000001)
+                    predecessors.append(old)
+            # Two processes can compute valid_from before either acquires the write
+            # transaction. Move a skewed successor forward so its interval never
+            # overlaps the predecessor it is closing.
+            if successor is not None and successor.valid_from != successor_at:
+                self.store.conn.execute(
+                    "UPDATE memories SET valid_from=? WHERE id=?",
+                    (successor_at, memory_id),
+                )
+            for old in predecessors:
+                close_at = successor_at
+                if old.valid_from is not None:
+                    close_at = max(close_at, old.valid_from + 0.000001)
+                self.store.close_validity(
+                    old.id, at=close_at,
+                    actor=f"{self.SOURCE_KIND}_importer",
+                    reason=f"{self.SOURCE_KIND}_source_revision", commit=False,
+                )
+                self.store.retire_memory_graph_state(
+                    old.id, at=close_at, commit=False,
+                )
             if plan.action == "conflict" and policy == "new" and old_item is not None:
                 self.store.upsert_source_import_item(
                     vault_id=vault_id, source_key=str(old_item["source_key"]),
