@@ -2659,71 +2659,74 @@ def engraphis_get_memory(
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)
-    mem = record.get("memory") or {}
-    if not mem.get("id"):
-        return _gateway_error("memory_not_found")
-    svc = service()
-    target = svc.store.get_memory(mem["id"])
-    if target is None:
-        return _gateway_error("memory_not_found")
-    provenance = target.provenance
-    metadata = target.metadata
-    if not prompt_eligible(provenance, metadata):
-        return _gateway_error("memory_not_prompt_eligible")
-    # ``inspect`` serializes the governed record, but the store object is the
-    # authoritative source for fields that must not be lost in projection.
-    confidence = mem.get("confidence")
-    if confidence is None:
-        confidence = target.confidence
-    # ``inspect`` authorizes the target against the requested scope, while related
-    # records are intentionally returned as a bounded projection.  Keep the same
-    # hierarchy for that projection: an explicit repo request includes that repo and
-    # workspace-level records, whereas omitting repo retains the workspace-wide behavior.
-    requested_repo_id = None
-    if repo:
-        try:
-            _, requested_repo_id = svc._require_scope(workspace, repo)
-        except Exception as exc:  # noqa: BLE001 — inspect already validated the request
-            return _classify_gateway_exception(exc)
-    safe_links = []
-    for link in svc.store.get_links(mem["id"]):
-        other_id = (
-            link.get("b") if link.get("a") == mem["id"] else link.get("a")
-        )
-        other = svc.store.get_memory(other_id) if other_id else None
-        if (other is None or other.workspace_id != target.workspace_id
-                or not prompt_eligible(other.provenance, other.metadata)
-                or not svc._memory_visible_to_caller(other)):
-            continue
-        if (requested_repo_id is not None
-                and other.repo_id not in (None, requested_repo_id)):
-            continue
-        safe_links.append({
-            "id": other.id,
-            "relation": link.get("relation") or "related",
-            "layer": link.get("layer") or "semantic",
-            "reason": link.get("reason") or "",
-            "title": other.title or other.content[:80],
-            "live": bool(other.expired_at is None and other.valid_to is None),
+    try:
+        mem = record.get("memory") or {}
+        if not mem.get("id"):
+            return _gateway_error("memory_not_found")
+        svc = service()
+        target = svc.store.get_memory(mem["id"])
+        if target is None:
+            return _gateway_error("memory_not_found")
+        provenance = target.provenance
+        metadata = target.metadata
+        if not prompt_eligible(provenance, metadata):
+            return _gateway_error("memory_not_prompt_eligible")
+        # ``inspect`` serializes the governed record, but the store object is the
+        # authoritative source for fields that must not be lost in projection.
+        confidence = mem.get("confidence")
+        if confidence is None:
+            confidence = target.confidence
+        # ``inspect`` authorizes the target against the requested scope, while related
+        # records are intentionally returned as a bounded projection.  Keep the same
+        # hierarchy for that projection: an explicit repo request includes that repo and
+        # workspace-level records, whereas omitting repo retains the workspace-wide behavior.
+        requested_repo_id = None
+        if repo:
+            try:
+                _, requested_repo_id = svc._require_scope(workspace, repo)
+            except Exception as exc:  # noqa: BLE001 — inspect already validated the request
+                return _classify_gateway_exception(exc)
+        safe_links = []
+        for link in svc.store.get_links(mem["id"]):
+            other_id = (
+                link.get("b") if link.get("a") == mem["id"] else link.get("a")
+            )
+            other = svc.store.get_memory(other_id) if other_id else None
+            if (other is None or other.workspace_id != target.workspace_id
+                    or not prompt_eligible(other.provenance, other.metadata)
+                    or not svc._memory_visible_to_caller(other)):
+                continue
+            if (requested_repo_id is not None
+                    and other.repo_id not in (None, requested_repo_id)):
+                continue
+            safe_links.append({
+                "id": other.id,
+                "relation": link.get("relation") or "related",
+                "layer": link.get("layer") or "semantic",
+                "reason": link.get("reason") or "",
+                "title": other.title or other.content[:80],
+                "live": bool(other.expired_at is None and other.valid_to is None),
+            })
+        safe_chain = []
+        for entry in record.get("chain") or []:
+            other = svc.store.get_memory(entry.get("id")) if entry.get("id") else None
+            if (other is not None and other.workspace_id == target.workspace_id
+                    and prompt_eligible(other.provenance, other.metadata)
+                    and svc._memory_visible_to_caller(other)
+                    and (requested_repo_id is None
+                         or other.repo_id in (None, requested_repo_id))):
+                safe_chain.append(entry)
+        return _ok({
+            "id": mem.get("id"), "content": mem.get("content"), "title": mem.get("title"),
+            "mtype": mem.get("mtype"), "scope": mem.get("scope"),
+            "importance": mem.get("importance"), "confidence": confidence,
+            "valid_from": mem.get("valid_from"), "valid_to": mem.get("valid_to"),
+            "ingested_at": mem.get("ingested_at"),
+            "provenance": {k: provenance.get(k) for k in ("source", "trusted", "review_state")},
+            "links": safe_links, "chain": safe_chain,
         })
-    safe_chain = []
-    for entry in record.get("chain") or []:
-        other = svc.store.get_memory(entry.get("id")) if entry.get("id") else None
-        if (other is not None and other.workspace_id == target.workspace_id
-                and prompt_eligible(other.provenance, other.metadata)
-                and svc._memory_visible_to_caller(other)
-                and (requested_repo_id is None
-                     or other.repo_id in (None, requested_repo_id))):
-            safe_chain.append(entry)
-    return _ok({
-        "id": mem.get("id"), "content": mem.get("content"), "title": mem.get("title"),
-        "mtype": mem.get("mtype"), "scope": mem.get("scope"),
-        "importance": mem.get("importance"), "confidence": confidence,
-        "valid_from": mem.get("valid_from"), "valid_to": mem.get("valid_to"),
-        "ingested_at": mem.get("ingested_at"),
-        "provenance": {k: provenance.get(k) for k in ("source", "trusted", "review_state")},
-        "links": safe_links, "chain": safe_chain,
-    })
+    except Exception as exc:  # noqa: BLE001 — Smart gateway classification
+        return _classify_gateway_exception(exc)
 
 
 @smart_mcp.tool(
