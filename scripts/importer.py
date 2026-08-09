@@ -189,19 +189,31 @@ def _effective_manifest_repo(
     return next(iter(session_repos), None)
 
 
+def _effective_manifest_target(
+    snapshot: dict, *, repo: Optional[str], session_id: Optional[str], scope: Scope,
+) -> tuple[Optional[str], Optional[str]]:
+    """Normalize the manifest target the same way the service normalizes imports."""
+    effective_repo = _effective_manifest_repo(
+        snapshot, repo=repo, session_id=session_id,
+    )
+    effective_session = None if scope == Scope.REPO else session_id
+    return effective_repo, effective_session
+
+
 def _preview(args: argparse.Namespace, scan, workspace: str) -> dict:
     snapshot = _manifest_snapshot(args.db)
-    effective_repo = _effective_manifest_repo(
-        snapshot, repo=args.repo, session_id=args.session_id,
+    scope = _scope(args)
+    effective_repo, effective_session = _effective_manifest_target(
+        snapshot, repo=args.repo, session_id=args.session_id, scope=scope,
     )
     selected, workspace_id, repo_id = _snapshot_target(
         snapshot, root_digest=scan.vault_id, workspace=workspace,
-        repo=effective_repo, session_id=args.session_id, vault_id=args.vault_id,
+        repo=effective_repo, session_id=effective_session, vault_id=args.vault_id,
         source_kind="obsidian",
     )
     report = ObsidianImporter().preview(
         scan, workspace_id=workspace_id, repo_id=repo_id,
-        session_id=args.session_id, scope=_scope(args),
+        session_id=effective_session, scope=scope,
         memory_type=MemoryType(args.memory_type),
         vault_id=selected.get("id") if selected else None,
         vault_label=args.vault_label or Path(args.path).name,
@@ -217,17 +229,18 @@ def _preview(args: argparse.Namespace, scan, workspace: str) -> dict:
 
 def _preview_documents(args: argparse.Namespace, scan, workspace: str) -> dict:
     snapshot = _manifest_snapshot(args.db)
-    effective_repo = _effective_manifest_repo(
-        snapshot, repo=args.repo, session_id=args.session_id,
+    scope = _scope(args)
+    effective_repo, effective_session = _effective_manifest_target(
+        snapshot, repo=args.repo, session_id=args.session_id, scope=scope,
     )
     selected, workspace_id, repo_id = _snapshot_target(
         snapshot, root_digest=scan.source_id, workspace=workspace,
-        repo=effective_repo, session_id=args.session_id, vault_id=args.source_id,
+        repo=effective_repo, session_id=effective_session, vault_id=args.source_id,
         source_kind="documents",
     )
     report = DocumentImporter().preview(
         scan, workspace_id=workspace_id, repo_id=repo_id,
-        session_id=args.session_id, scope=_scope(args),
+        session_id=effective_session, scope=scope,
         memory_type=MemoryType(args.memory_type),
         source_id=selected.get("id") if selected else None,
         source_label=args.source_label or Path(args.path).name,

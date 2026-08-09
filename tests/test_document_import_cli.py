@@ -275,6 +275,44 @@ def test_manifest_matching_infers_repo_from_session_when_repo_is_omitted():
     assert (workspace_id, repo_id) == ("ws_acme", "repo_product")
 
 
+def test_manifest_matching_normalizes_repo_scope_session_target():
+    snapshot = {
+        "vaults": [
+            {
+                "id": "vlt_session",
+                "kind": "documents",
+                "root_digest": "s" * 64,
+                "workspace_name": "acme",
+                "repo_name": "product",
+                "session_id": "ses_product",
+            },
+            {
+                "id": "vlt_repo",
+                "kind": "documents",
+                "root_digest": "d" * 64,
+                "workspace_name": "acme",
+                "repo_name": "product",
+                "session_id": None,
+                "workspace_id": "ws_acme",
+                "repo_id": "repo_product",
+            },
+        ],
+    }
+
+    effective_repo, effective_session = importer._effective_manifest_target(
+        snapshot, repo=None, session_id="ses_product", scope=Scope.REPO,
+    )
+    selected, workspace_id, repo_id = importer._snapshot_target(
+        snapshot, root_digest="d" * 64, workspace="acme",
+        repo=effective_repo, session_id=effective_session, vault_id=None,
+        source_kind="documents",
+    )
+
+    assert (effective_repo, effective_session) == ("product", None)
+    assert selected["id"] == "vlt_repo"
+    assert (workspace_id, repo_id) == ("ws_acme", "repo_product")
+
+
 @pytest.mark.parametrize(
     "extra", [["--repo", "api"], ["--session", "ses_example"]],
 )
@@ -353,6 +391,34 @@ def test_universal_service_imports_mixed_tree_idempotently(tmp_path):
         "json", "markdown", "text",
     }
     assert all("obsidian" not in item for item in metadata)
+
+
+def test_extensionless_document_links_remain_ambiguous(tmp_path):
+    root = tmp_path / "Ambiguous"
+    root.mkdir()
+    (root / "Source.md").write_text(
+        "# Source\n\nSee [[foo]].\n", encoding="utf-8",
+    )
+    (root / "foo.md").write_text("# Markdown\n", encoding="utf-8")
+    (root / "foo.txt").write_text("Plain text\n", encoding="utf-8")
+    service = MemoryService.create(
+        str(tmp_path / "memory.db"), embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    try:
+        report = service.import_document_tree(
+            str(root), workspace="acme", confirmed=True,
+        )
+        assert report["counts"]["warning"] == 1
+        assert any(
+            row["reason"] == "ambiguous_wikilink"
+            for row in report["files"]
+        )
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE valid_to IS NULL"
+        ).fetchone()[0] == 0
+    finally:
+        service.close()
 
 
 def test_universal_upload_job_reports_adapter_and_registered_source(tmp_path):

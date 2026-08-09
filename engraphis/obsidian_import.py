@@ -881,13 +881,19 @@ class ObsidianImporter:
             for item in items if item.get("memory_id")
         }
         note_by_path = {note.relative_path: note for note in scan.notes}
-        exact: dict[str, str] = {}
+        exact: dict[str, list[str]] = {}
         names: dict[str, list[str]] = {}
+
+        def add_exact(key: str, path: str) -> None:
+            candidates = exact.setdefault(key, [])
+            if path not in candidates:
+                candidates.append(path)
+
         for path, note in note_by_path.items():
-            exact[path.casefold()] = path
+            add_exact(path.casefold(), path)
             suffixless = str(PurePosixPath(path).with_suffix(""))
             if suffixless != path:
-                exact[suffixless.casefold()] = path
+                add_exact(suffixless.casefold(), path)
             keys = {PurePosixPath(path).stem.casefold(), note.title.casefold()}
             keys.update(alias.casefold() for alias in note.aliases)
             for key in keys:
@@ -928,7 +934,7 @@ class ObsidianImporter:
                     for candidate in paths:
                         key = candidate.casefold()
                         if key in exact:
-                            candidates = [exact[key]]
+                            candidates = sorted(set(exact[key]))
                             break
                     if not candidates and paths:
                         candidates = sorted(set(
