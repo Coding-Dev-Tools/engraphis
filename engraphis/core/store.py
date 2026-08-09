@@ -1432,10 +1432,94 @@ class Store:
                 str(row["name"])
                 for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()
             }
+        memories_need_expired_at = (
+            "memories" in object_names and "expired_at" not in memory_columns
+        )
+        memories_need_valid_to = (
+            "memories" in object_names and "valid_to" not in memory_columns
+        )
         memories_need_modified_hlc = (
             "memories" in object_names and "modified_hlc" not in memory_columns
         )
         self._memories_need_modified_hlc = memories_need_modified_hlc
+        self._memories_need_valid_to = memories_need_valid_to
+        self._memories_need_expired_at = memories_need_expired_at
+        memory_entity_columns: set[str] = set()
+        if "memory_entities" in object_names:
+            memory_entity_columns = {
+                str(row["name"])
+                for row in self.conn.execute(
+                    "PRAGMA table_info(memory_entities)"
+                ).fetchall()
+            }
+        self._memory_entities_need_valid_to = (
+            "memory_entities" in object_names
+            and "valid_to" not in memory_entity_columns
+        )
+        self._memory_entities_need_expired_at = (
+            "memory_entities" in object_names
+            and "expired_at" not in memory_entity_columns
+        )
+        edge_columns: set[str] = set()
+        if "edges" in object_names:
+            edge_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(edges)").fetchall()
+            }
+        self._edges_need_valid_to = (
+            "edges" in object_names and "valid_to" not in edge_columns
+        )
+        self._edges_need_expired_at = (
+            "edges" in object_names and "expired_at" not in edge_columns
+        )
+        edge_support_columns: set[str] = set()
+        if "edge_supports" in object_names:
+            edge_support_columns = {
+                str(row["name"])
+                for row in self.conn.execute(
+                    "PRAGMA table_info(edge_supports)"
+                ).fetchall()
+            }
+        self._edge_supports_need_valid_to = (
+            "edge_supports" in object_names
+            and "valid_to" not in edge_support_columns
+        )
+        self._edge_supports_need_expired_at = (
+            "edge_supports" in object_names
+            and "expired_at" not in edge_support_columns
+        )
+        code_file_history_columns: set[str] = set()
+        if "code_file_history" in object_names:
+            code_file_history_columns = {
+                str(row["name"])
+                for row in self.conn.execute(
+                    "PRAGMA table_info(code_file_history)"
+                ).fetchall()
+            }
+        self._code_file_history_need_valid_to = (
+            "code_file_history" in object_names
+            and "valid_to" not in code_file_history_columns
+        )
+        self._code_file_history_need_expired_at = (
+            "code_file_history" in object_names
+            and "expired_at" not in code_file_history_columns
+        )
+        code_memory_link_columns: set[str] = set()
+        if "code_memory_links" in object_names:
+            code_memory_link_columns = {
+                str(row["name"])
+                for row in self.conn.execute(
+                    "PRAGMA table_info(code_memory_links)"
+                ).fetchall()
+            }
+        self._code_memory_links_need_valid_to = (
+            "code_memory_links" in object_names
+            and "valid_to" not in code_memory_link_columns
+        )
+        self._code_memory_links_need_expired_at = (
+            "code_memory_links" in object_names
+            and "expired_at" not in code_memory_link_columns
+        )
         session_columns: set[str] = set()
         if "sessions" in object_names:
             session_columns = {
@@ -1469,7 +1553,19 @@ class Store:
         needs_backup = bool(object_names) and (
             previous_version < SCHEMA_VERSION
             or mem_links_need_temporal_backfill
+            or memories_need_valid_to
+            or memories_need_expired_at
             or memories_need_modified_hlc
+            or getattr(self, "_memory_entities_need_valid_to", False)
+            or getattr(self, "_memory_entities_need_expired_at", False)
+            or getattr(self, "_edges_need_valid_to", False)
+            or getattr(self, "_edges_need_expired_at", False)
+            or getattr(self, "_edge_supports_need_valid_to", False)
+            or getattr(self, "_edge_supports_need_expired_at", False)
+            or getattr(self, "_code_file_history_need_valid_to", False)
+            or getattr(self, "_code_file_history_need_expired_at", False)
+            or getattr(self, "_code_memory_links_need_valid_to", False)
+            or getattr(self, "_code_memory_links_need_expired_at", False)
             or sessions_need_handoff
             or tombstones_need_export_class
             or sync_exports_need_table
@@ -1497,21 +1593,68 @@ class Store:
                 "PRAGMA table_info(operation_receipts)"
             ).fetchall()
         )
+        for table, needs_expired_at in (
+            (
+                "memories",
+                getattr(self, "_memories_need_valid_to", False)
+                or getattr(self, "_memories_need_expired_at", False),
+            ),
+            (
+                "memory_entities",
+                getattr(self, "_memory_entities_need_valid_to", False)
+                or getattr(self, "_memory_entities_need_expired_at", False),
+            ),
+            (
+                "edges",
+                getattr(self, "_edges_need_valid_to", False)
+                or getattr(self, "_edges_need_expired_at", False),
+            ),
+            (
+                "edge_supports",
+                getattr(self, "_edge_supports_need_valid_to", False)
+                or getattr(self, "_edge_supports_need_expired_at", False),
+            ),
+            (
+                "code_file_history",
+                getattr(self, "_code_file_history_need_valid_to", False)
+                or getattr(self, "_code_file_history_need_expired_at", False),
+            ),
+            (
+                "code_memory_links",
+                getattr(self, "_code_memory_links_need_valid_to", False)
+                or getattr(self, "_code_memory_links_need_expired_at", False),
+            ),
+        ):
+            if needs_expired_at:
+                try:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN valid_to REAL")
+                except sqlite3.OperationalError:
+                    pass
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN expired_at REAL")
         self._execute_script_transactional(SCHEMA_SQL)
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
         # Additive columns for DBs created before they existed — CREATE TABLE IF NOT
         # EXISTS above is a no-op on an already-existing table, so new columns need an
         # explicit, idempotent ALTER TABLE here (SQLite has no "ADD COLUMN IF NOT EXISTS").
+        #
+        # A few long-lived tables were introduced before their current bi-temporal
+        # ``expired_at`` field existed. Repair them here before any live indexes or
+        # queries mention that column, so partially migrated databases continue to
+        # open instead of crashing during startup.
         for stmt in (
             "ALTER TABLE memories ADD COLUMN sort_order REAL",
             "ALTER TABLE memories ADD COLUMN pinned_at REAL",
             "ALTER TABLE memories ADD COLUMN unpinned_at REAL",
             "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE memories ADD COLUMN expired_at REAL",
             "ALTER TABLE memories ADD COLUMN subject_key TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN claim_kind TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE memories ADD COLUMN modified_hlc TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE memory_entities ADD COLUMN expired_at REAL",
+            "ALTER TABLE edges ADD COLUMN expired_at REAL",
+            "ALTER TABLE edge_supports ADD COLUMN expired_at REAL",
             "ALTER TABLE edges ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE entities ADD COLUMN normalized_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE entities ADD COLUMN canonical_method TEXT NOT NULL DEFAULT 'exact'",
@@ -1535,6 +1678,7 @@ class Store:
             "ALTER TABLE code_edges ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE code_edges ADD COLUMN ingested_at REAL",
             "ALTER TABLE code_edges ADD COLUMN expired_at REAL",
+            "ALTER TABLE code_memory_links ADD COLUMN expired_at REAL",
             "ALTER TABLE edges ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE edge_supports ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE memory_entities ADD COLUMN valid_to_recorded_at REAL",

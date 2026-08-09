@@ -44,6 +44,81 @@ def _build_v1_db(path: str) -> None:
     conn.close()
 
 
+def _build_partial_v2_db_missing_memories_expired_at(path: str) -> None:
+    """Build a v2-shaped database that is missing only ``memories.expired_at``.
+
+    This mirrors the compatibility gap that once surfaced during startup: the
+    store can see an otherwise current schema, but the live memory indexes and
+    list queries still need the bi-temporal column to be repaired in place.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at REAL
+        );
+        INSERT INTO schema_migrations(version, applied_at) VALUES (15, 1000.0);
+
+        CREATE TABLE workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            created_at REAL,
+            settings TEXT DEFAULT '{}'
+        );
+        INSERT INTO workspaces(id, name, created_at, settings)
+        VALUES ('ws_legacy', 'default', 1000.0, '{}');
+
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            repo_id TEXT,
+            session_id TEXT,
+            scope TEXT NOT NULL DEFAULT 'repo',
+            mtype TEXT NOT NULL DEFAULT 'semantic',
+            title TEXT DEFAULT '',
+            content TEXT NOT NULL,
+            summary TEXT DEFAULT '',
+            keywords TEXT DEFAULT '[]',
+            metadata TEXT DEFAULT '{}',
+            importance REAL DEFAULT 0.0,
+            surprise REAL DEFAULT 1.0,
+            stability REAL DEFAULT 1.0,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            access_count INTEGER DEFAULT 0,
+            last_access REAL,
+            valid_from REAL,
+            valid_to REAL,
+            valid_to_recorded_at REAL,
+            ingested_at REAL,
+            modified_hlc TEXT NOT NULL DEFAULT '',
+            subject_key TEXT DEFAULT '',
+            claim_kind TEXT DEFAULT '',
+            pinned INTEGER DEFAULT 0,
+            sensitivity TEXT DEFAULT 'normal',
+            provenance TEXT DEFAULT '{}',
+            pinned_at REAL,
+            unpinned_at REAL,
+            sort_order REAL
+        );
+        INSERT INTO memories(
+            id, workspace_id, repo_id, session_id, scope, mtype, title, content,
+            summary, keywords, metadata, importance, surprise, stability, confidence,
+            access_count, last_access, valid_from, valid_to, valid_to_recorded_at,
+            ingested_at, modified_hlc, subject_key, claim_kind, pinned, sensitivity,
+            provenance, pinned_at, unpinned_at, sort_order
+        ) VALUES (
+            'mem_legacy', 'ws_legacy', NULL, NULL, 'workspace', 'semantic', 'theme',
+            'User prefers dark mode.', '', '[]', '{}', 0.0, 1.0, 1.0, 1.0,
+            3, 1000.0, 1000.0, NULL, NULL, 1000.0, '',
+            '', '', 0, 'normal', '{}', NULL, NULL, NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_store_crashes_on_a_raw_v1_db_without_the_guard(tmp_path):
     """Pin down the actual production failure mode so this test suite would have
     caught it: Store() alone (no MemoryService in front) really does blow up on a
@@ -215,8 +290,31 @@ def test_crash_recovery_stray_tmp_new_only(tmp_path):
     assert tmp_new.exists()
 
     svc = MemoryService.create(str(db))
-    mems = svc.store.list_memraries(include_invalid=True)
+    mems = svc.store.list_memories(include_invalid=True)
     assert len(mems) == 1
     assert "dark mode" in mems[0].content
     svc.store.close()
     assert not tmp_new.exists()
+
+
+def test_memory_service_create_repairs_partial_v2_db_missing_memories_expired_at(tmp_path):
+    """A partially upgraded db must still open if only the memories expiry column
+    is missing.
+
+    This protects the schema-repair path that runs before live memory indexes are
+    built, so an interrupted or hand-edited upgrade does not strand a user with a
+    startup crash.
+    """
+    db = tmp_path / "engraphis.db"
+    _build_partial_v2_db_missing_memories_expired_at(str(db))
+
+    svc = MemoryService.create(str(db))
+    mems = svc.store.list_memories(include_invalid=True)
+    assert len(mems) == 1
+    assert mems[0].content == "User prefers dark mode."
+    columns = {
+        row[1]
+        for row in svc.store.conn.execute("PRAGMA table_info(memories)").fetchall()
+    }
+    assert "expired_at" in columns
+    svc.store.close()
