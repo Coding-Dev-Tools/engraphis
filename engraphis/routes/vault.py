@@ -332,34 +332,27 @@ def import_folder(req: FolderImportReq):
         )
     real_path = os.path.realpath(os.path.expanduser(req.path))
     comparable_path = os.path.normcase(real_path)
-    safe_path: Optional[str] = None
+    folder: Optional[Path] = None
     for root in allowed_roots:
         comparable_root = os.path.normcase(root)
         if (
             comparable_path == comparable_root
             or comparable_path.startswith(comparable_root.rstrip(os.sep) + os.sep)
         ):
-            # Use the normalized form only for the containment comparison. On
-            # Windows, normcase() lowercases the path; retaining real_path keeps
-            # the caller's on-disk casing in relative paths and metadata.
-            safe_path = real_path
+            # Bind the traversal root only inside the normalized containment
+            # guard. On Windows, normcase() lowercases the comparison while the
+            # canonical Path preserves the caller's on-disk casing in metadata.
+            try:
+                folder = Path(real_path).resolve(strict=True)
+            except (OSError, RuntimeError):
+                raise HTTPException(404, f"Path not found: {req.path}") from None
             break
-    if safe_path is None:
+    if folder is None:
         raise HTTPException(
             403,
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    try:
-        # Re-resolve the already allowlisted path immediately before traversal. This
-        # closes a directory-link swap between validation and the recursive walk and
-        # gives the walker a canonical Path rather than the raw request value.
-        # Security: safe_path was already allowlisted above; this canonicalizes the
-        # trusted root before any descendant traversal.
-        # codeql[py/path-injection]
-        folder = Path(safe_path).resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise HTTPException(404, f"Path not found: {req.path}") from None
     if not any(
         folder == Path(root) or folder.is_relative_to(Path(root))
         for root in allowed_roots

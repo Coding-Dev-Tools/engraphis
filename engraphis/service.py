@@ -8584,30 +8584,35 @@ class MemoryService:
         # ── Decay distribution (retention buckets) ──────────────────────────────
         # R(t) = exp(-Δt_days / S). Bucket into 5 bands: critical (<0.2), low
         # (0.2–0.4), medium (0.4–0.6), high (0.6–0.8), strong (>0.8).
-        # Computed in SQL via CASE on the retention formula so this is one indexed
-        # scan, not a Python loop over every memory.
-        decay_sql = f"""
-            SELECT
-                SUM(CASE WHEN ret < 0.2 THEN 1 ELSE 0 END) AS critical,
-                SUM(CASE WHEN ret >= 0.2 AND ret < 0.4 THEN 1 ELSE 0 END) AS low,
-                SUM(CASE WHEN ret >= 0.4 AND ret < 0.6 THEN 1 ELSE 0 END) AS medium,
-                SUM(CASE WHEN ret >= 0.6 AND ret < 0.8 THEN 1 ELSE 0 END) AS high,
-                SUM(CASE WHEN ret >= 0.8 THEN 1 ELSE 0 END) AS strong
-            FROM (
-                SELECT EXP(
-                    -MAX(0, (? - COALESCE(last_access, ingested_at, ?)) / 86400.0)
-                    / MAX(stability, 0.01)
-                ) AS ret
-                FROM memories{live_where}
-            )
-        """
-        decay_row = conn.execute(decay_sql, [now, now, *live_params]).fetchone()
+        # SQLite's optional math extension is not available in every supported
+        # build. Fetch the indexed candidate columns and keep the calculation
+        # deterministic in Python instead of requiring SQLite's EXP().
+        decay_rows = conn.execute(
+            f"SELECT last_access, ingested_at, stability FROM memories{live_where}",
+            live_params,
+        ).fetchall()
+        decay_counts = [0, 0, 0, 0, 0]
+        for row in decay_rows:
+            anchor = row["last_access"] or row["ingested_at"] or now
+            stability = max(float(row["stability"] or 0.0), 0.01)
+            elapsed_days = max(0.0, (now - float(anchor)) / 86400.0)
+            retention = math.exp(-elapsed_days / stability)
+            if retention < 0.2:
+                decay_counts[0] += 1
+            elif retention < 0.4:
+                decay_counts[1] += 1
+            elif retention < 0.6:
+                decay_counts[2] += 1
+            elif retention < 0.8:
+                decay_counts[3] += 1
+            else:
+                decay_counts[4] += 1
         decay_distribution = [
-            {"bucket": "critical", "label": "< 20%", "count": int(decay_row["critical"] or 0)},
-            {"bucket": "low",      "label": "20–40%", "count": int(decay_row["low"] or 0)},
-            {"bucket": "medium",   "label": "40–60%", "count": int(decay_row["medium"] or 0)},
-            {"bucket": "high",     "label": "60–80%", "count": int(decay_row["high"] or 0)},
-            {"bucket": "strong",   "label": "> 80%",  "count": int(decay_row["strong"] or 0)},
+            {"bucket": "critical", "label": "< 20%", "count": decay_counts[0]},
+            {"bucket": "low",      "label": "20–40%", "count": decay_counts[1]},
+            {"bucket": "medium",   "label": "40–60%", "count": decay_counts[2]},
+            {"bucket": "high",     "label": "60–80%", "count": decay_counts[3]},
+            {"bucket": "strong",   "label": "> 80%",  "count": decay_counts[4]},
         ]
         # ── Orphan count (memories with no entity links) ────────────────────────
         # A memory is an orphan when it has zero live rows in memory_entities.
