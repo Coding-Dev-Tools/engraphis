@@ -474,6 +474,24 @@ def test_polling_watcher_untrack_ignores_unknown_paths(tmp_path):
     assert watcher.poll() == []
 
 
+def test_polling_watcher_retries_failed_deletions(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    watcher = watch_repo._PollingWatcher(tmp_path)
+    assert watcher.poll() == []
+
+    source.unlink()
+    deleted = watcher.poll()
+    assert deleted == [str(source)]
+
+    watcher.untrack(deleted, deletions=True)
+    assert watcher.poll() == [str(source)]
+
+    source.write_text("x = 2\n", encoding="utf-8")
+    assert watcher.poll() == [str(source)]
+    assert watcher.poll() == []
+
+
 def test_delete_namespace_is_atomic_and_records_one_batch_receipt(
     monkeypatch, capsys
 ):
