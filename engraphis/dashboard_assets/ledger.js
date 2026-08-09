@@ -369,7 +369,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260809-physics-guard',
+        '/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics',
         'EngraphisGraph',
       ));
       graphAssetsPromise = attempt;
@@ -491,28 +491,7 @@
   }
 
   function updatePlanBadge() {
-    const badge = byId('plan-badge');
-    if (!badge || !state.license) return;
-    const access = licenseAccessState();
-    const plan = licensePlanKey();
-    const trial = licenseTrialAvailable();
-    const label = access === 'active' ? plan.toUpperCase()
-      : access === 'trial' ? 'TRIAL'
-        : access === 'lapsed' ? 'BILLING'
-          : trial ? 'TRY PRO' : 'GET PRO';
-    const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
-      : access === 'lapsed' ? 'Update billing in Plans and billing'
-        : trial ? 'Start the 3-day Pro trial in Plans and billing'
-          : 'Subscribe to Pro in Plans and billing';
-    badge.textContent = label;
-    badge.setAttribute('aria-label', aria);
-    badge.title = aria;
-    const cta = hostedCta(plan || 'pro', 'header');
-    const opensAccount = cta.kind === 'account' && Boolean(cta.href);
-    badge.href = opensAccount ? cta.href : '#';
-    badge.target = opensAccount ? '_blank' : '';
-    badge.rel = opensAccount ? 'noopener' : '';
-    badge.dataset.opensAccount = String(opensAccount);
+    // The side-menu header intentionally has no plan or upgrade badge.
   }
 
   function renderSidebarCta() {
@@ -2861,8 +2840,8 @@
   function planPrices() {
     const annual = byId('billing-select').value === 'annual';
     return annual
-      ? { free: '$0', pro: '$100 / year · 1 named owner', team: '$200 / seat / year' }
-      : { free: '$0', pro: '$10 / month · 1 named owner', team: '$20 / seat / month' };
+      ? { free: '$0', pro: '$100 / owner / year', team: '$200 / seat / year' }
+      : { free: '$0', pro: '$10 / owner / month', team: '$20 / seat / month' };
   }
 
   function renderPlans() {
@@ -3191,12 +3170,6 @@
     switchView('manage');
     switchManageTab(control.dataset.manage);
   }));
-  byId('plan-badge').addEventListener('click', event => {
-    if (event.currentTarget.dataset.opensAccount === 'true') return;
-    event.preventDefault();
-    switchView('manage');
-    switchManageTab('plans');
-  });
   all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
     switchView('provenance');
     switchProvenanceTab(control.dataset.provenance);

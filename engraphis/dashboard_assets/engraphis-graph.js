@@ -85,9 +85,7 @@
      like it is racing away. Keep auto-fit useful without letting its scale become unstable. */
   const MAX_AUTO_FIT_ZOOM = 4;
   const SETTINGS_ALPHA_TARGET = 0.12;
-  const DRAG_ALPHA_TARGET = 0.18;
   const ALPHA_TARGET_HOLD_MS = 180;
-  const DRAG_SETTLE_DELAY_MS = 80;
 
   /* Physics is allowed to respond live, but one bad force update must never turn a
      settled graph into a high-speed slingshot. Keep the bounds in world units so they
@@ -1240,10 +1238,12 @@
       if (charge && charge.strength) charge.strength(-(mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel));
       if (link && link.distance) link.distance(s.link);
       if (typeof d3 === 'undefined') return;
-      if (!velocityGuardForce) velocityGuardForce = makeVelocityGuardForce();
-      fg.d3Force('velocityGuard', velocityGuardForce);
       if (!dragFollowForce) dragFollowForce = makeDragFollowForce();
       fg.d3Force('dragFollow', dragFollowForce);
+      /* D3 applies forces in insertion order. Register the guard after every motion force so
+         it is the final velocity boundary, including while a node is being dragged. */
+      if (!velocityGuardForce) velocityGuardForce = makeVelocityGuardForce();
+      fg.d3Force('velocityGuard', velocityGuardForce);
       fg.d3Force('radial', null);
       const layoutNodes = fg.graphData().nodes || [];
       /* The layout buttons are arrangements, not just five nearby slider presets. Keep the
@@ -1587,22 +1587,6 @@
       if (fg.warmupTicks) fg.warmupTicks(simulate ? (large ? 18 : 40) : 0);
     }
 
-    function setDragSimulationBudget(active) {
-      if (active) {
-        if (fg.cooldownTime) fg.cooldownTime(Infinity);
-        if (fg.cooldownTicks) fg.cooldownTicks(Infinity);
-        if (fg.warmupTicks) fg.warmupTicks(0);
-        if (fg.d3AlphaDecay) fg.d3AlphaDecay(0.08);
-        if (!dragFollowForce) dragFollowForce = makeDragFollowForce();
-        fg.d3Force('dragFollow', dragFollowForce);
-        return;
-      }
-      if (!state.settings.frozen && !staticFullLayout) {
-        setSimulationBudget(true);
-        if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
-      }
-    }
-
     function prepareReheat() {
       const nodes = fg.graphData().nodes || [];
       nodes.forEach(node => {
@@ -1630,7 +1614,7 @@
       fg.resetCountdown();
     }
 
-    function softReheat(dragging = false) {
+    function softReheat() {
       if (!supportsSoftAlpha()) {
         /* Keep the dependency-light Node harness and older vendor bundles working. The real
            browser bundle takes the bounded alpha-target path above. */
@@ -1639,7 +1623,7 @@
       }
       clearTimeout(softAlphaTimer);
       softAlphaTimer = 0;
-      fg.d3AlphaTarget(dragging || activeDragNode ? DRAG_ALPHA_TARGET : SETTINGS_ALPHA_TARGET);
+      fg.d3AlphaTarget(SETTINGS_ALPHA_TARGET);
       fg.resetCountdown();
       softAlphaTimer = setTimeout(() => {
         softAlphaTimer = 0;
@@ -1666,7 +1650,7 @@
       });
     }
 
-    function render(fit, reheat, dragging = false) {
+    function render(fit, reheat) {
       if (destroyed) return;
       if (suspended) {
         pendingRender = pendingRender
@@ -1745,7 +1729,7 @@
       }
       if (reheat && motion && !staticFullLayout && !state.settings.frozen) {
         prepareReheat();
-        softReheat(dragging);
+        softReheat();
       }
       if ((staticFullLayout || state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
       /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
@@ -1775,15 +1759,6 @@
       if (opts.onNodeClick) opts.onNodeClick(node);
     }
 
-    function reheatLiveLayout(dragging = false) {
-      if (destroyed || state.settings.frozen || staticFullLayout) return;
-      cancelAutoFit();
-      setDragSimulationBudget(dragging);
-      prepareReheat();
-      if (fg.d3AlphaDecay) fg.d3AlphaDecay(dragging ? 0.08 : alphaDecay());
-      softReheat(dragging);
-    }
-
     function finishNodeDrag(node) {
       if (!node) return;
       const retainAnchor = state.settings.frozen || staticFullLayout;
@@ -1792,10 +1767,14 @@
         node.fy = undefined;
       }
       setActiveDragNode(null);
-      setDragSimulationBudget(false);
       node.vx = 0;
       node.vy = 0;
-      if (!retainAnchor) reheatLiveLayout(false);
+      if (!retainAnchor) {
+        cancelAutoFit();
+        prepareReheat();
+        if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
+        softReheat();
+      }
     }
 
     /* A drag uses fx/fy only while the pointer is down. Pointer-up releases the anchor and gives
@@ -1845,11 +1824,6 @@
         invalidate();
       })
       .onNodeClick(handleNodeClick)
-      .onNodeDragStart(node => {
-        setActiveDragNode(node);
-        reheatLiveLayout(true);
-      })
-      .onNodeDragEnd(node => finishNodeDrag(node))
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
         zoom = z.k || 1;
@@ -1867,6 +1841,9 @@
         }
       });
 
+    /* Older force-graph bundles do not expose a drag-start accessor. Manual pointer capture
+       remains the primary controller, but register the vendor callbacks when a compatible
+       bundle provides them so a future drag implementation cannot bypass the same lifecycle. */
     /* force-graph's built-in drag always reheats the entire simulation. Ledger treats manual
        placement as a pin, so install a small scoped drag controller and leave global physics
        changes to the explicit Reheat control. Capturing pointer-down prevents the vendor's drag
@@ -1914,10 +1891,7 @@
           manualDrag.dragged = true;
           started = true;
         }
-        if (started) {
-          setActiveDragNode(manualDrag.node);
-          reheatLiveLayout(true);
-        }
+        if (started) setActiveDragNode(manualDrag.node);
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;

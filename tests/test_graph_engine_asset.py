@@ -160,7 +160,7 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "script.src='/static/vendor/force-graph.min.js?v=20260809-csp'" in source
     assert (
-        "script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard'"
+        "script.src='/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'"
         in source
     )
     render = source[source.index("function graphRender("):]
@@ -281,7 +281,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
+        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -296,7 +296,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
+        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1379,10 +1379,11 @@ def test_drag_release_contract_keeps_physics_live() -> None:
     assert "node.fx = undefined;" in finish
     assert "node.fy = undefined;" in finish
     assert "finishNodeDrag(current.node);" in end
-    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "function reheatLiveLayout" not in source
     assert "function finishNodeDrag(node)" in source
-    assert ".onNodeDragStart(node =>" in source
-    assert ".onNodeDragEnd(node => finishNodeDrag(node))" in source
+    assert "onNodeDragStart" not in source
+    assert "onNodeDragEnd" not in source
+    assert "softReheat();" in finish
 
 
 def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
@@ -1394,9 +1395,10 @@ def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
     assert "const MIN_DRAG_PULL = 4;" in source
     assert "const MAX_DRAG_PULL = 18;" in source
     assert "fg.d3Force('dragFollow', dragFollowForce);" in source
-    assert "function setDragSimulationBudget(active)" in source
-    assert "fg.cooldownTime(Infinity)" in source
-    assert "fg.cooldownTicks(Infinity)" in source
+    assert "function setDragSimulationBudget" not in source
+    assert "fg.cooldownTime(Infinity)" not in source
+    assert "fg.cooldownTicks(Infinity)" not in source
+    assert source.index("fg.d3Force('dragFollow', dragFollowForce);") < source.index("fg.d3Force('velocityGuard', velocityGuardForce);")
 
 
 @requires_node
@@ -1461,7 +1463,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'")
     assert d3 < force_graph < renderer
     assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
@@ -2424,16 +2426,16 @@ def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
     assert ".enableNodeDrag(false)" in source
     assert "node.fx = undefined;" in source
     assert "node.fy = undefined;" in source
-    assert "function reheatLiveLayout(dragging = false)" in source
+    assert "function reheatLiveLayout" not in source
     assert "function schedulePhysicsUpdate()" in source
     assert "physicsReheatPending" in source
     assert "cancelAutoFit();" in source
     assert "function prepareReheat()" in source
     assert "function supportsSoftAlpha()" in source
-    assert "function softReheat(dragging = false)" in source
-    assert "fg.d3AlphaTarget(dragging || activeDragNode ? DRAG_ALPHA_TARGET : SETTINGS_ALPHA_TARGET);" in source
+    assert "function softReheat()" in source
+    assert "fg.d3AlphaTarget(SETTINGS_ALPHA_TARGET);" in source
     assert "fg.resetCountdown();" in source
-    assert "softReheat(dragging);" in source
+    assert "softReheat();" in source
     assert "function makeDragFollowForce()" in source
     assert "d3AlphaTarget" in vendor and "resetCountdown" in vendor
     assert "d3AlphaTarget" in primary_vendor and "resetCountdown" in primary_vendor

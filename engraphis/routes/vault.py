@@ -344,6 +344,18 @@ def import_folder(req: FolderImportReq):
             continue
         try:
             resolved = candidate.resolve(strict=True)
+            # Re-verify containment after symlink resolution — resolve() can
+            # follow symlinks to paths outside the validated folder. The
+            # relative_to() below also catches this, but the explicit check
+            # satisfies static analysis and makes the invariant obvious.
+            resolved_comparable = os.path.normcase(str(resolved))
+            if not (
+                resolved_comparable == comparable_path
+                or resolved_comparable.startswith(
+                    os.path.normcase(str(folder)).rstrip(os.sep) + os.sep
+                )
+            ):
+                continue
             relative = resolved.relative_to(folder)
             size = resolved.stat().st_size
         except (OSError, ValueError):
