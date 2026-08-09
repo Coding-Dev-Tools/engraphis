@@ -211,6 +211,7 @@ def test_distribution_configuration_includes_public_evidence_tools():
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
         "include docs/RECALL_RECOVERY.md",
+        "include docs/DOCUMENT_IMPORT.md docs/OBSIDIAN_IMPORT.md",
         "include docs/images/context-efficiency.svg",
         "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
@@ -224,6 +225,8 @@ def test_distribution_configuration_includes_public_evidence_tools():
     ):
         assert rule in manifest
     assert "docker-compose.lan.yml" in REQUIRED_SDIST
+    assert "docs/DOCUMENT_IMPORT.md" in REQUIRED_SDIST
+    assert "docs/OBSIDIAN_IMPORT.md" in REQUIRED_SDIST
     assert "deploy/force-graph-1.51.4.licenses.json" in REQUIRED_SDIST
     assert "deploy/force-graph-1.51.4.yarn.lock" in REQUIRED_SDIST
     assert '"deploy/force-graph-1.51.4.licenses.json"' in pyproject
