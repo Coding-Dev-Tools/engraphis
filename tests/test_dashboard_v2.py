@@ -81,13 +81,13 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'" in ledger_js.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'" in ledger_js.text
         assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
-        assert "/v2-assets/ledger.js?v=20260809-pin-only-physics" in page.text
+        assert "/v2-assets/ledger.js?v=20260809-physics-guard" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js?v=20260809-csp" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics" in classic_js.text
+        assert "/v2-assets/engraphis-graph.js?v=20260809-physics-guard" in classic_js.text
         assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
@@ -109,8 +109,8 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
-            "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics",
-            "/v2-assets/ledger.js?v=20260809-pin-only-physics",
+            "/v2-assets/engraphis-graph.js?v=20260809-physics-guard",
+            "/v2-assets/ledger.js?v=20260809-physics-guard",
             "/v2-assets/ledger.css?v=20260728-connected-memories",
             "/classic-assets/dashboard.js?v=20260728-reference-materials",
         ):
@@ -124,6 +124,16 @@ def test_classic_dashboard_script_mirrors_the_static_compatibility_asset():
     assert (root / "classic_assets" / "dashboard.js").read_bytes() == (
         root / "static" / "dashboard.js"
     ).read_bytes()
+
+
+def test_memory_health_dashboard_uses_the_v2_analytics_contract():
+    root = Path(__file__).parents[1] / "engraphis"
+    for relative in ("classic_assets/dashboard.js", "static/dashboard.js"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "/analytics/health?workspace=" in source
+        assert "decay_distribution" in source
+        assert "conflict_frequency" in source
+        assert "/memory/health/overview" not in source
 
 
 def test_dashboard_and_mcp_recall_share_the_v2_service(monkeypatch, tmp_path):

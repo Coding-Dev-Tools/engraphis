@@ -21,6 +21,7 @@ from engraphis.private_state import (
     UnsafeStateFile,
     append_private_text,
     open_private_binary,
+    private_file_stat,
     read_private_text,
 )
 
@@ -318,14 +319,22 @@ class PrivateHostedLedger:
 
     def _load(self) -> None:
         try:
+            before = private_file_stat(self.path, allow_missing=True, owner_only=True)
             payload = read_private_text(
                 self.path, max_bytes=MAX_PRIVATE_LEDGER_BYTES, allow_missing=True,
                 owner_only=True
             )
+            after = private_file_stat(self.path, allow_missing=True, owner_only=True)
         except (OSError, UnsafeStateFile) as exc:
             raise HostedLedgerError(
                 "the private ledger is unsafe or unreadable"
             ) from exc
+        if before is None:
+            return
+        if after is None:
+            raise HostedLedgerError("the private ledger is unsafe or unreadable")
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise HostedLedgerError("the private ledger is unsafe or unreadable")
         if payload is None:
             return
         for number, line in enumerate(payload.splitlines(), 1):

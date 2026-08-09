@@ -86,6 +86,8 @@
   const MAX_AUTO_FIT_ZOOM = 4;
   const SETTINGS_ALPHA_TARGET = 0.12;
   const ALPHA_TARGET_HOLD_MS = 180;
+  const DRAG_ALPHA_TARGET = 0.18;
+  const DRAG_SETTLE_DELAY_MS = 80;
 
   /* Physics is allowed to respond live, but one bad force update must never turn a
      settled graph into a high-speed slingshot. Keep the bounds in world units so they
@@ -1741,7 +1743,7 @@
       }
       if (reheat && motion && !staticFullLayout && !state.settings.frozen) {
         prepareReheat();
-        softReheat();
+        softReheat(dragging);
       }
       if ((staticFullLayout || state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
       /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
@@ -1777,7 +1779,10 @@
       setDragSimulationBudget(dragging);
       prepareReheat();
       if (fg.d3AlphaDecay) fg.d3AlphaDecay(dragging ? 0.08 : alphaDecay());
-      softReheat(dragging);
+      /* Older bundles have no alpha-target countdown. They are already live during pointer
+         movement, so avoid a full fallback reheat on drag-start; release gets the one fallback
+         kick needed to settle after the temporary anchor is removed. */
+      if (!dragging || supportsSoftAlpha()) softReheat(dragging);
     }
 
     function finishNodeDrag(node) {
@@ -1857,6 +1862,18 @@
           if (opts.onCollapseChange) opts.onCollapseChange(collapsed);
         }
       });
+
+    /* Older force-graph bundles do not expose a drag-start accessor. Manual pointer capture
+       remains the primary controller, but register vendor callbacks when available. */
+    if (typeof fg.onNodeDragStart === 'function') {
+      fg.onNodeDragStart(node => {
+        setActiveDragNode(node);
+        reheatLiveLayout(true);
+      });
+    }
+    if (typeof fg.onNodeDragEnd === 'function') {
+      fg.onNodeDragEnd(node => finishNodeDrag(node));
+    }
 
     /* force-graph's built-in drag always reheats the entire simulation. Ledger treats manual
        placement as a pin, so install a small scoped drag controller and leave global physics

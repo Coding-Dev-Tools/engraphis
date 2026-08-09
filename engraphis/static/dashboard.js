@@ -1192,7 +1192,7 @@ function loadGraphEngine(){
  if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
  GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics';
+  script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard';
   /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
      resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
   script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
@@ -1554,14 +1554,19 @@ function loadConsolidateView(){
  clearWorkspaceRequired('consolidate-body','Run a dry preview before committing consolidation.');
 }
 async function loadHealthView(){
+ setWorkspaceControls('view-health',!!WS);
+ if(!WS)return workspaceRequired('health-stat-grid','review memory health');
+ clearWorkspaceRequired('health-stat-grid','Loading memory health…');
  const grid=document.getElementById('health-stat-grid'),decay=document.getElementById('health-decay-chart'),trends=document.getElementById('health-trends');
  if(grid)grid.innerHTML='<div class="spinner" data-csp-style="s86"></div>';
  try{
-  const h=await api('/memory/health/overview?namespace='+encodeURIComponent(WS||''));
-  const cards=[['Total memories',h.total||0],['Avg age (days)',h.avg_age_days||0],['Decay rate',h.decay_rate||0],['Stale',h.stale_count||0]];
+  const h=await api('/analytics/health?workspace='+encodeURIComponent(WS));
+  const distribution=Array.isArray(h.decay_distribution)?h.decay_distribution:[],conflicts=h.conflict_frequency||{};
+  const total=distribution.reduce((sum,item)=>sum+(Number(item.count)||0),0);
+  const cards=[['Total memories',total],['Orphan memories',Number(h.orphan_count)||0],['Conflicts (7d)',Number(conflicts.last_7d)||0],['Conflicts (total)',Number(conflicts.total)||0]];
   if(grid)grid.innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');
-  if(decay)decay.innerHTML='<div class="empty" data-csp-style="s12">Decay distribution chart not yet implemented.</div>';
-  if(trends)trends.innerHTML='<div class="empty" data-csp-style="s12">Trend analysis not yet implemented.</div>';
+  if(decay)decay.innerHTML=distribution.length?distribution.map(item=>`<div class="health-distribution-row"><span>${esc(String(item.label||item.bucket||''))}</span><strong>${Number(item.count)||0}</strong></div>`).join(''):'<div class="empty" data-csp-style="s12">No decay data yet.</div>';
+  if(trends)trends.innerHTML=`<div class="health-trend-list"><div>Memories without entity links: <strong>${Number(h.orphan_count)||0}</strong></div><div>Conflict events in the last 7 days: <strong>${Number(conflicts.last_7d)||0}</strong></div><div>Conflict events recorded: <strong>${Number(conflicts.total)||0}</strong></div></div>`;
  }catch(e){
   if(grid)grid.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>';
   if(decay)decay.innerHTML='';

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import heapq
 import logging
+import os
+import stat
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -46,6 +48,39 @@ _UPLOAD_FORM_FIELDS = 8
 _DUPLICATE_CANDIDATE_LIMIT = 500
 _DUPLICATE_RESULT_LIMIT = 200
 _DUPLICATE_BLOCK_SIZE = 256
+
+
+def _read_import_bytes(path: Path, max_bytes: int) -> bytes:
+    """Read one imported file without following a swapped leaf or reparse point."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
+            raise ValueError("import path is not a single-link regular file")
+        current = os.lstat(str(path))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(current.st_mode) or (
+            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
+        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("import path changed while it was opened")
+        data = bytearray()
+        while len(data) <= max_bytes:
+            chunk = os.read(descriptor, min(65_536, max_bytes + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("file grew beyond the import resource limit")
+        after = os.fstat(descriptor)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise ValueError("import file changed while it was read")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
 
 
 class _BoundedUploadRoute(APIRoute):
@@ -344,15 +379,12 @@ def import_folder(req: FolderImportReq):
             continue
         try:
             resolved = candidate.resolve(strict=True)
-            # Re-verify containment after symlink resolution — resolve() can
-            # follow symlinks to paths outside the validated folder. The
-            # relative_to() below also catches this, but the explicit check
-            # satisfies static analysis and makes the invariant obvious.
             resolved_comparable = os.path.normcase(str(resolved))
+            folder_comparable = os.path.normcase(str(folder))
             if not (
-                resolved_comparable == comparable_path
+                resolved_comparable == folder_comparable
                 or resolved_comparable.startswith(
-                    os.path.normcase(str(folder)).rstrip(os.sep) + os.sep
+                    folder_comparable.rstrip(os.sep) + os.sep
                 )
             ):
                 continue
@@ -384,10 +416,7 @@ def import_folder(req: FolderImportReq):
     for file_path, relative_path in files:
         relative = relative_path.as_posix()
         try:
-            with file_path.open("rb") as handle:
-                raw = handle.read(MAX_IMPORT_RESOURCE_BYTES + 1)
-            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
-                raise ValueError("file grew beyond the import resource limit")
+            raw = _read_import_bytes(file_path, MAX_IMPORT_RESOURCE_BYTES)
             content = raw.decode("utf-8", errors="replace")
             if not content.strip():
                 results["skipped"] += 1
