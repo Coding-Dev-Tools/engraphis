@@ -285,11 +285,45 @@ def test_cancelled_import_reports_planned_missing_rows_as_pending():
         )
         assert cancelled["state"] == "cancelled"
         assert cancelled["counts"].get("missing", 0) == 0
-        assert cancelled["counts"]["pending"] == 1
+        assert cancelled["counts"]["pending"] == 2
+        assert {
+            row["relative_path"] for row in cancelled["files"]
+            if row["status"] == "pending"
+        } == {"keep.txt", "gone.txt"}
         item = service.store.conn.execute(
             "SELECT state FROM source_imports WHERE relative_path='gone.txt'"
         ).fetchone()
         assert item["state"] == "imported"
+    finally:
+        service.close()
+
+
+def test_cancelled_import_reports_unprocessed_plans_as_pending():
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("cancel-plans")
+        importer = DocumentImporter(service)
+        cancelled = importer.import_scan(
+            _scan(("first.txt", b"First."), ("second.txt", b"Second.")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            confirmed=True, cancel_check=lambda: True,
+        )
+        assert cancelled["state"] == "cancelled"
+        assert cancelled["counts"]["documents"] == 2
+        assert cancelled["counts"]["pending"] == 2
+        assert {
+            row["relative_path"] for row in cancelled["files"]
+            if row["status"] == "pending"
+        } == {"first.txt", "second.txt"}
+        job_items = service.store.conn.execute(
+            "SELECT relative_path, result_state FROM source_import_items "
+            "WHERE job_id=? ORDER BY relative_path",
+            (cancelled["job_id"],),
+        ).fetchall()
+        assert [(row["relative_path"], row["result_state"]) for row in job_items] == [
+            ("first.txt", "pending"), ("second.txt", "pending"),
+        ]
     finally:
         service.close()
 

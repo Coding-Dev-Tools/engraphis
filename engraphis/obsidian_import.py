@@ -1159,6 +1159,19 @@ class ObsidianImporter:
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
     ) -> dict:
         files = list(outcomes)
+        processed_paths = {
+            str(row.get("relative_path") or "") for row in outcomes
+        }
+        files.extend(
+            {
+                **self._preview_row(plan),
+                "status": "pending",
+                "action": "pending",
+                "reason": "import_deferred",
+            }
+            for plan in plans
+            if plan.note.relative_path not in processed_paths
+        )
         files.extend({
             "relative_path": issue.relative_path, "status": "rejected", "action": "rejected",
             "reason": issue.reason, "warnings": [],
