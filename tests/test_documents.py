@@ -12,6 +12,7 @@ import pytest
 from engraphis.core.documents import (
     DOCUMENT_FORMATS,
     MAX_DOCUMENT_CHARS,
+    MAX_DOCUMENT_WARNINGS,
     DocumentRecord,
     DocumentParseError,
     document_format_for_path,
@@ -353,6 +354,31 @@ def test_adapter_metadata_and_title_secrets_are_rejected():
             raw, "report.pdf",
             adapter=make_adapter(metadata={"endpoint": "token=secret-value-123456789"}),
         )
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        ["api_key=sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+        ["x" * (MAX_DOCUMENT_CHARS + 1)],
+        ["warning"] * (MAX_DOCUMENT_WARNINGS + 1),
+    ],
+)
+def test_adapter_warnings_are_bounded_and_checked(warnings):
+    raw = b"%PDF-local"
+
+    def adapter(data, path, mtime):
+        text = "safe extracted document"
+        return DocumentRecord(
+            relative_path=path, format="pdf", media_type="application/pdf",
+            title="Report", content=text, body=text,
+            raw_sha256=hashlib.sha256(data).hexdigest(),
+            canonical_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            source_size=len(data), source_mtime_ns=mtime, warnings=warnings,
+        )
+
+    with pytest.raises(DocumentParseError, match="warnings"):
+        parse_document(raw, "invalid-warnings.pdf", adapter=adapter)
 
 
 def test_rtf_and_additional_office_containers_are_dependency_free():

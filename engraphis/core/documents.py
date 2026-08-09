@@ -37,6 +37,7 @@ from engraphis.core.secrets import secret_kind
 IMPORTER_VERSION = "1"
 MAX_DOCUMENT_BYTES = 100_000_000
 MAX_DOCUMENT_CHARS = 100_000
+MAX_DOCUMENT_WARNINGS = 100
 MAX_DOCUMENT_FILES = 10_000
 MAX_DOCUMENT_TREE_BYTES = 250_000_000
 MAX_CONTAINER_MEMBERS = 2_000
@@ -289,6 +290,14 @@ def parse_document(
             or not isinstance(record.metadata, dict)
         ):
             raise DocumentParseError("document adapter returned invalid text")
+        if (
+            not isinstance(record.warnings, list)
+            or len(record.warnings) > MAX_DOCUMENT_WARNINGS
+            or any(not isinstance(warning, str) for warning in record.warnings)
+            or any(len(warning) > MAX_DOCUMENT_CHARS for warning in record.warnings)
+            or any(secret_kind(warning) is not None for warning in record.warnings)
+        ):
+            raise DocumentParseError("document adapter returned invalid warnings")
         try:
             canonical_sha256 = hashlib.sha256(record.content.encode("utf-8")).hexdigest()
             # Validate both writable strings, not only the canonical content.
@@ -1577,6 +1586,7 @@ __all__ = [
     "AttachmentReference", "DOCUMENT_FORMATS", "DocumentFileIssue", "DocumentFormat",
     "DocumentLink", "DocumentParseError", "DocumentRecord", "DocumentScan",
     "MAX_DOCUMENT_BYTES", "MAX_DOCUMENT_CHARS", "MAX_DOCUMENT_FILES", "MAX_DOCUMENT_TREE_BYTES",
+    "MAX_DOCUMENT_WARNINGS",
     "canonical_source_id", "document_format_for_path", "normalize_document_path",
     "parse_document", "scan_document_tree", "supported_document_extensions",
 ]

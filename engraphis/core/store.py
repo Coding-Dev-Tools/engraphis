@@ -1566,9 +1566,27 @@ class Store:
                             "missing_at, last_error FROM source_imports "
                             "ORDER BY vault_id, relative_path"
                         ).fetchall()]
+                        repos = []
+                        sessions = []
+                        if {"repos", "workspaces"}.issubset(tables):
+                            repos = [dict(row) for row in conn.execute(
+                                "SELECT r.id, r.workspace_id, r.name, "
+                                "w.name AS workspace_name FROM repos r "
+                                "JOIN workspaces w ON w.id=r.workspace_id "
+                                "ORDER BY r.id"
+                            ).fetchall()]
+                            if "sessions" in tables:
+                                sessions = [dict(row) for row in conn.execute(
+                                    "SELECT s.id, s.workspace_id, s.repo_id, "
+                                    "w.name AS workspace_name, "
+                                    "r.name AS repo_name FROM sessions s "
+                                    "JOIN workspaces w ON w.id=s.workspace_id "
+                                    "LEFT JOIN repos r ON r.id=s.repo_id "
+                                    "ORDER BY s.id"
+                                ).fetchall()]
                         result = {
                             "schema_version": version, "vaults": vaults,
-                            "items": items,
+                            "items": items, "repos": repos, "sessions": sessions,
                         }
                 finally:
                     conn.close()

@@ -275,6 +275,21 @@ def test_manifest_matching_infers_repo_from_session_when_repo_is_omitted():
     assert (workspace_id, repo_id) == ("ws_acme", "repo_product")
 
 
+def test_first_import_infers_repo_from_session_lineage_without_a_vault():
+    snapshot = {
+        "vaults": [],
+        "sessions": [{
+            "id": "ses_product",
+            "workspace_name": "acme",
+            "repo_name": "product",
+        }],
+    }
+
+    assert importer._effective_manifest_repo(
+        snapshot, repo=None, session_id="ses_product",
+    ) == "product"
+
+
 def test_manifest_matching_normalizes_repo_scope_session_target():
     snapshot = {
         "vaults": [

@@ -184,6 +184,11 @@ def _effective_manifest_repo(
         for row in snapshot.get("vaults") or []
         if row.get("session_id") == session_id and row.get("repo_name")
     }
+    session_repos.update(
+        str(row["repo_name"])
+        for row in snapshot.get("sessions") or []
+        if row.get("id") == session_id and row.get("repo_name")
+    )
     if len(session_repos) > 1:
         raise ValueError("session maps to multiple repositories in the import manifest")
     return next(iter(session_repos), None)

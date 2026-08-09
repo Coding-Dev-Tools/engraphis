@@ -376,6 +376,31 @@ def test_manifest_snapshot_uses_injected_immutable_read_connector(tmp_path):
     assert not (tmp_path / "legacy.db-wal").exists()
 
 
+def test_manifest_snapshot_includes_repo_session_lineage_for_first_import(tmp_path):
+    db = tmp_path / "lineage.db"
+    owner = Store(str(db))
+    workspace_id = owner.get_or_create_workspace("acme")
+    repo_id = owner.get_or_create_repo(workspace_id, "product")
+    session_id = owner.start_session(workspace_id, repo_id)
+    owner.close()
+
+    snapshot = Store.snapshot_source_import_manifest(str(db))
+
+    assert snapshot["repos"] == [{
+        "id": repo_id,
+        "workspace_id": workspace_id,
+        "name": "product",
+        "workspace_name": "acme",
+    }]
+    assert snapshot["sessions"] == [{
+        "id": session_id,
+        "workspace_id": workspace_id,
+        "repo_id": repo_id,
+        "workspace_name": "acme",
+        "repo_name": "product",
+    }]
+
+
 def test_manifest_snapshot_rejects_path_replacement_between_lstat_and_open(
     monkeypatch, tmp_path,
 ):
