@@ -155,6 +155,22 @@ def _client(monkeypatch, tmp_path):
     return TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem-v1.db"))
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("notes.md", "notes"),
+        ("nested/notes.v1.md", "notes.v1"),
+        (r"nested\\notes.md", "notes"),
+        (".env", ".env"),
+        (None, ""),
+    ],
+)
+def test_upload_filename_stem_is_lexical_only(filename, expected):
+    from engraphis.routes.vault import _filename_stem
+
+    assert _filename_stem(filename) == expected
+
+
 def test_legacy_folder_import_contains_path_before_filesystem_access(
     monkeypatch,
     tmp_path,

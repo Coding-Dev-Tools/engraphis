@@ -84,6 +84,13 @@ def _ok(data: Any) -> dict[str, Any]:
     return {"data": data}
 
 
+def _filename_stem(filename: Optional[str]) -> str:
+    """Return a client filename's display stem without constructing a filesystem path."""
+    leaf = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem, separator, _suffix = leaf.rpartition(".")
+    return stem if separator and stem else leaf
+
+
 async def _bounded_upload_form(request: Request) -> None:
     """Parse multipart once with a strict file-count ceiling.
 
@@ -436,7 +443,7 @@ def upload_folder(
                 continue
             import re
             title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else Path(f.filename).stem
+            title = title_match.group(1).strip() if title_match else _filename_stem(f.filename)
             doc_id = f.filename.replace("/", "__").replace("\\", "__").replace(".md", "").replace(".", "-")
 
             ingest_engine.ingest_document(
@@ -535,7 +542,7 @@ def upload_folder_smart(
             title = (
                 title_match.group(1).strip()
                 if title_match
-                else Path(relative_path).stem
+                else _filename_stem(relative_path)
             )
             document_id = (
                 relative_path.replace("/", "__")
