@@ -25,7 +25,13 @@ import signal
 import sys
 from pathlib import Path
 
+<<<<<<< HEAD
 from engraphis.backends.codegraph import LANG_BY_EXT, _DEFAULT_EXCLUDE_DIRS, load_ignore_patterns
+||||||| 7d2d28c
+from engraphis.backends.codegraph import LANG_BY_EXT
+=======
+from engraphis.backends.codegraph import LANG_BY_EXT, _DEFAULT_EXCLUDE_DIRS, parse_engraphisignore
+>>>>>>> origin/infra-docs-tooling
 
 logger = logging.getLogger("engraphis.watch_repo")
 
@@ -49,6 +55,7 @@ class _PollingWatcher:
         self.interval = max(1.0, interval)
         self._signatures: dict[str, tuple[int, int, bytes]] = {}
         self._initial_scan_done = False
+<<<<<<< HEAD
         # Apply the same directory/name pruning the code indexer uses so the
         # watcher does not repeatedly hash every file under node_modules,
         # vendor, or build-output trees that will never be indexed anyway.
@@ -60,6 +67,20 @@ class _PollingWatcher:
             ignore_names, unignore = set(), set()
         self._exclude_dirs |= ignore_names
         self._exclude_dirs -= unignore
+||||||| 7d2d28c
+=======
+        # Apply the same directory/name pruning the code indexer uses so the
+        # watcher does not repeatedly hash every file under node_modules,
+        # vendor, or build-output trees that will never be indexed anyway.
+        # ``.engraphisignore`` at the repo root adds project-specific rules.
+        self._exclude_dirs: set[str] = set(_DEFAULT_EXCLUDE_DIRS)
+        try:
+            ignore_names, _ignore_globs, unignore = parse_engraphisignore(root)
+        except Exception:  # noqa: BLE001 — a broken ignore file must not abort scanning
+            ignore_names, unignore = set(), set()
+        self._exclude_dirs |= ignore_names
+        self._exclude_dirs -= unignore
+>>>>>>> origin/infra-docs-tooling
 
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
