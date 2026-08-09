@@ -883,6 +883,81 @@ def _title_from_content(content: str, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
+def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
+    """Best-effort diagnostic when the configured database holds zero memories.
+
+    Probes well-known sibling locations (the installed-default paths and the
+    owner-private ``~/.engraphis/engraphis.db``). When a sibling holds memories
+    and the configured path does not, emit a one-time stderr notice naming both
+    paths so the operator can reconcile. This is a diagnostic only — it never
+    raises, never blocks startup, and never reads memory content.
+    """
+    import sqlite3
+    configured = Path(db_path)
+    if not configured.is_file():
+        return
+    try:
+        probe = sqlite3.connect(str(configured))
+        try:
+            row = probe.execute("SELECT COUNT(*) FROM memories").fetchone()
+            configured_count = int(row[0]) if row else 0
+        except sqlite3.Error:
+            return  # no memories table yet, or unreadable — nothing to warn about
+        finally:
+            probe.close()
+    except sqlite3.Error:
+        return
+    if configured_count > 0:
+        return  # configured DB has data — no diagnostic needed
+    # Build the set of well-known sibling paths (excluding the configured one).
+    home = Path.home()
+    candidates: list[Path] = []
+    # Owner-private home location (most common for real data).
+    candidates.append(home / ".engraphis" / "engraphis.db")
+    # Platform-specific installed defaults.
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(Path(local_appdata) / "engraphis" / "engraphis.db")
+    elif sys.platform == "darwin":
+        candidates.append(
+            home / "Library" / "Application Support" / "engraphis" / "engraphis.db"
+        )
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME", str(home / ".local" / "share"))
+        candidates.append(Path(xdg) / "engraphis" / "engraphis.db")
+    # Deduplicate and exclude the configured path.
+    configured_resolved = configured.resolve()
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = str(candidate.resolve())
+        except OSError:
+            continue
+        if resolved == str(configured_resolved) or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            probe = sqlite3.connect(str(candidate))
+            try:
+                row = probe.execute("SELECT COUNT(*) FROM memories").fetchone()
+                count = int(row[0]) if row else 0
+            finally:
+                probe.close()
+        except sqlite3.Error:
+            continue
+        if count > 0:
+            print(
+                "[engraphis] WARNING: configured database %s has 0 memories, but "
+                "%s has %d memories. If this is unintentional, update "
+                "ENGRAPHIS_DB_PATH in ~/.engraphis/config.env to point to the "
+                "populated database." % (configured, candidate, count),
+                file=sys.stderr,
+            )
+            return  # one notice is enough
+
 def _auto_migrate_v1_if_needed(db_path: str) -> None:
     """If *db_path* is an existing v1-shaped SQLite file, migrate it to the v2 schema
     in place before :class:`~engraphis.core.engine.MemoryEngine` (via ``Store``) ever
@@ -1109,6 +1184,16 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
         )
+        # Startup diagnostic: warn when the configured database exists but is empty,
+        # while a sibling database at a well-known location has memories. Catches the
+        # exact misconfiguration that caused silent memory loss (config.env pointing to
+        # an empty DB while the real data lived elsewhere). Non-fatal — the service
+        # still starts against the configured path so fresh installs are unaffected.
+        if db_path != ":memory:" and not read_only:
+            try:
+                _warn_if_db_empty_with_populated_sibling(db_path)
+            except Exception:  # noqa: BLE001 — diagnostic must never block startup
+                pass
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
     # ── name → id resolution ───────────────────────────────────────────────────

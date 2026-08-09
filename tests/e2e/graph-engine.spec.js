@@ -86,6 +86,29 @@ async function openDashboard(page, { query = '' } = {}) {
       },
       set(value) { real = value; },
     });
+
+    // Ledger constructs the canonical engine directly, so capture that instance too. The
+    // product API remains unchanged; this only gives browser tests the same node/velocity
+    // visibility that the classic adapter gets through ForceGraph.
+    let engine = null;
+    let engineProxy = null;
+    Object.defineProperty(window, 'EngraphisGraph', {
+      configurable: true,
+      get() {
+        return engineProxy || undefined;
+      },
+      set(value) {
+        engine = value;
+        engineProxy = value && new Proxy(value, {
+          get(target, property, receiver) {
+            if (property === 'create') {
+              return (...args) => Reflect.apply(target.create, target, args);
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        });
+      },
+    });
   });
 
   page.on('request', request => requested.push(request.url()));

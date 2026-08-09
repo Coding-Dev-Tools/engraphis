@@ -1111,6 +1111,9 @@ class Store:
             "memory_sync_exports",
             "operation_receipts",
             "schema_migrations",
+            "source_vaults",
+            "source_imports",
+            "source_import_items",
         }
         rows = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1545,6 +1548,9 @@ class Store:
             "DEFAULT 'never_export' CHECK("
             "export_class IN ('never_export','remote_erasure'))",
             "ALTER TABLE sessions ADD COLUMN handoff TEXT DEFAULT '{}'",
+            "ALTER TABLE source_import_items ADD COLUMN source_format TEXT NOT NULL "
+            "DEFAULT '' CHECK(length(source_format)<=64 AND "
+            "source_format NOT GLOB '*[^A-Za-z0-9_.+-]*')",
         ):
             try:
                 self.conn.execute(stmt)

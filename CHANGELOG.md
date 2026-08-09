@@ -16,10 +16,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Clarify Cloud Sync credential-origin binding, secret-manager-only unattended credentials,
   version-3 rollback evidence, and the deliberately incomplete first-contact state without
   claiming an untrusted relay can prove a complete device set.
-- Advance through schema 13: schema 12 classifies content-free erasure markers so local-only
+- Advance through schema 15: schema 12 classifies content-free erasure markers so local-only
   `never_export` markers remain private and only validated `remote_erasure` markers may cross
   sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
-  descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary.
+  descriptive-state sync; schema 14-15 add the local source-import manifest for document
+  and Obsidian collection tracking with scope-security triggers.
 
 ### Fixed
 

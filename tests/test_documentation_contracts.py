@@ -232,10 +232,10 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
     erasure = _read("docs/SECURE_ERASURE.md")
     schema = _read("engraphis/core/schema.py")
 
-    assert "SCHEMA_VERSION = 13" in schema
-    assert agents.count("`SCHEMA_VERSION = 13`") == 2
-    assert "schema 13" in readme
-    assert "schema 13" in changelog
+    assert "SCHEMA_VERSION = 15" in schema
+    assert agents.count("`SCHEMA_VERSION = 15`") == 2
+    assert "schema 15" in readme
+    assert "schema 15" in changelog
 
     for document in (agents, readme, changelog, sync, erasure):
         normalized = " ".join(document.split())

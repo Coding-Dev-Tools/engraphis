@@ -457,7 +457,10 @@ def import_folder(req: FolderImportReq):
             size = _read_import_size(resolved_candidate)
         except (OSError, ValueError):
             continue
-        if any(not _path_within_root(resolved_candidate, Path(root)) for root in allowed_roots):
+        if not any(
+            _path_within_root(resolved_candidate, Path(root))
+            for root in allowed_roots
+        ):
             continue
         if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
             continue

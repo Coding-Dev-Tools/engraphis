@@ -123,7 +123,9 @@ def _err(exc: Exception) -> str:
     """Actionable, safe error string (never leaks internals)."""
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
-    logger.error("MCP tool operation failed (%s)", type(exc).__name__)
+    exc_type = type(exc).__name__
+    exc_msg = str(exc) if str(exc) else "(no message)"
+    logger.error("MCP tool operation failed: %s: %s", exc_type, exc_msg, exc_info=True)
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
