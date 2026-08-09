@@ -837,7 +837,7 @@ def _validate_confidence_intervals(
                 "category": record.get("category", "unknown"),
                 "value": recomputed[field],
             })
-        if seed_valid and iterations_valid and len(evidence) == n_scored:
+        if seed_valid and iterations_valid and len(evidence) == n_scored and n_scored > 0:
             expected = stratified_bootstrap_ci(
                 evidence,
                 lambda rows: (

@@ -1758,8 +1758,14 @@ class SyncEngine:
         if already_preserved is None and not dry_run:
             already_preserved = self.store.get_memory(conflict_id)
         metadata = dict(loser.metadata or {})
+        # Preserve quarantine before stripping local fields — conflict successors
+        # derived from quarantined payloads must remain quarantined so _write
+        # skips embedding poisoned content into the vector index.
+        _preserved_quarantine = metadata.get("quarantine")
         for key in _LOCAL_METADATA_FIELDS:
             metadata.pop(key, None)
+        if _preserved_quarantine is not None:
+            metadata["quarantine"] = _preserved_quarantine
         conflict_provenance = {
             "source": "sync_conflict",
             "trusted": False,
