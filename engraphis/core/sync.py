@@ -52,7 +52,7 @@ import json
 import logging
 import math
 import re
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import (
@@ -65,6 +65,7 @@ from engraphis.core.interfaces import (
     normalize_modified_hlc,
     parse_modified_hlc,
     vector_index_requires_sync,
+    vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import (
     PoisoningDecision,
@@ -85,6 +86,8 @@ from engraphis.core.store import (
 
 
 logger = logging.getLogger("engraphis.sync")
+
+_VectorIndexAction = tuple[str, str, Any, str]
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
@@ -1203,6 +1206,7 @@ class SyncEngine:
                 live_tombstones[tomb["id"]] = (timestamp, mapped_repo)
         for start in range(0, len(mem_dicts), APPLY_BATCH):
             batch = mem_dicts[start:start + APPLY_BATCH]
+            pending_index_actions: list[_VectorIndexAction] = []
             parsed = [dict_to_record(d) for d in batch]
             # One IN(...) lookup for the whole batch instead of get_memory() per row.
             # ``known`` doubles as the write-through cache so a duplicate id LATER in the
@@ -1220,13 +1224,19 @@ class SyncEngine:
             for d, rec in zip(batch, parsed):
                 self._apply_one(d, rec, report, accepted, known, local_ws,
                                 repo_remap, only_repo_id, src_device, dry_run,
-                                live_tombstones)
+                                live_tombstones, pending_index_actions)
             if not dry_run:
                 self.store.conn.commit()
+                self._publish_index_actions(pending_index_actions)
 
     def _apply_one(self, d: dict, rec, report: dict, accepted: dict, known: dict,
                    local_ws, repo_remap: dict, only_repo_id, src_device,
-                   dry_run: bool, live_tombstones: Optional[dict] = None) -> None:
+                   dry_run: bool, live_tombstones: Optional[dict] = None,
+                   pending_index_actions: Optional[list[_VectorIndexAction]] = None,
+                   ) -> None:
+        pending_index_actions = (
+            pending_index_actions if pending_index_actions is not None else []
+        )
         if rec is None:
             report["rejected"] += 1
             return
@@ -1340,9 +1350,11 @@ class SyncEngine:
         if existing is not None and provenance_is_approved(existing.provenance):
             content_changed = rec.content != existing.content
             self._rehome_external_record(rec, src_device=src_device)
-            self._preserve_hlc_conflict(
+            conflict_action = self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
+            if conflict_action is not None:
+                pending_index_actions.append(conflict_action)
             if not dry_run and content_changed:
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
@@ -1402,12 +1414,16 @@ class SyncEngine:
             rec.valid_to_recorded_at = now_ts()
             rec.embedding = None
         if existing is not None:
-            self._preserve_hlc_conflict(
+            conflict_action = self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
+            if conflict_action is not None:
+                pending_index_actions.append(conflict_action)
         if existing is None:
             if not dry_run:
-                self._write(rec, commit=False)
+                index_action = self._write(rec, commit=False)
+                if index_action is not None:
+                    pending_index_actions.append(index_action)
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_add", rec.id,
@@ -1431,7 +1447,9 @@ class SyncEngine:
                 report["unchanged"] += 1
             else:
                 if not dry_run:
-                    self._write(merged, commit=False)
+                    index_action = self._write(merged, commit=False)
+                    if index_action is not None:
+                        pending_index_actions.append(index_action)
                     # A synced bundle overwriting existing content is exactly the
                     # memory-poisoning surface (SECURITY.md): record who/what so the
                     # overwrite is never silent and "why is this known?" stays answerable.
@@ -1695,7 +1713,7 @@ class SyncEngine:
                 "index_%s_failed" % action,
                 memory_id,
                 "failure_type=%s" % failure_type,
-                commit=False,
+                commit=not self.store.conn.transaction_owned_by_current_thread(),
             )
         except Exception as audit_exc:
             logger.warning(
@@ -1729,11 +1747,11 @@ class SyncEngine:
         report: dict,
         known: dict,
         dry_run: bool,
-    ) -> None:
+    ) -> Optional[_VectorIndexAction]:
         """Keep the losing concurrent edit as one deterministic untrusted successor."""
         conflict = self._hlc_conflict(existing, incoming)
         if conflict is None:
-            return
+            return None
         physical, logical, existing_hash, incoming_hash = conflict
         winner = (
             existing
@@ -1824,9 +1842,10 @@ class SyncEngine:
                 or not _same_sync_payload(already_preserved, preserved)
             ):
                 raise SyncError("sync conflict identity collision")
-            return
+            return None
+        index_action = None
         if not dry_run:
-            self._write(preserved, commit=False)
+            index_action = self._write(preserved, commit=False)
             self.store.audit(
                 "sync",
                 "sync_conflict_preserved",
@@ -1840,13 +1859,17 @@ class SyncEngine:
             )
         known[conflict_id] = preserved
         report["conflicts_preserved"] += 1
+        return index_action
 
-    def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
+    def _write(
+        self, rec: MemoryRecord, *, commit: bool = True,
+    ) -> Optional[_VectorIndexAction]:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
         derived state coherent: re-embed for the vector arm when an embedder is wired.
 
         ``commit=False`` leaves the transaction open for the caller's batch (apply_bundle)."""
         quarantined = metadata_is_quarantined(rec.metadata)
+        external_index_action = None
         persistent_store = (
             self.store.path != ":memory:"
             and not self.store.path.startswith("file::memory:")
@@ -1899,29 +1922,71 @@ class SyncEngine:
                 self.index is not None
                 and vector_index_requires_sync(self.index, self.store)
             ):
-                try:
-                    self.index.delete([rec.id], commit=False)
-                except Exception as exc:
-                    self._audit_index_failure("delete", rec.id, exc)
+                if vector_index_shares_store_transaction(self.index, self.store):
+                    try:
+                        self.index.delete([rec.id], commit=False)
+                    except Exception as exc:
+                        self._audit_index_failure("delete", rec.id, exc)
+                else:
+                    external_index_action = ("delete", rec.id, None, "")
             if commit:
                 self.store.conn.commit()
-            return
+                self._publish_index_actions([external_index_action])
+                return None
+            return external_index_action
         if (
             rec.embedding is not None
             and not quarantined
             and self.index is not None
             and vector_index_requires_sync(self.index, self.store)
         ):
-            try:
-                self.index.upsert(
-                    [rec.id], rec.embedding.reshape(1, -1),
-                    [{"model": self.embedding_space}],
-                    commit=False,
+            if vector_index_shares_store_transaction(self.index, self.store):
+                try:
+                    self.index.upsert(
+                        [rec.id], rec.embedding.reshape(1, -1),
+                        [{"model": self.embedding_space}],
+                        commit=False,
+                    )
+                except Exception as exc:
+                    self._audit_index_failure("upsert", rec.id, exc)
+            else:
+                external_index_action = (
+                    "upsert", rec.id, rec.embedding.copy(), self.embedding_space,
                 )
-            except Exception as exc:
-                self._audit_index_failure("upsert", rec.id, exc)
         if commit:
             self.store.conn.commit()
+            self._publish_index_actions([external_index_action])
+            return None
+        return external_index_action
+
+    def _publish_index_actions(
+        self, actions: Iterable[Optional[_VectorIndexAction]],
+    ) -> None:
+        """Publish committed Store vectors to a separately-backed index.
+
+        Coalescing by id avoids exposing intermediate vectors when a bundle repeats one
+        memory inside a batch. Provider failures remain content-free repair debt while
+        the already-committed canonical memory stays available.
+        """
+        latest: dict[str, _VectorIndexAction] = {}
+        for action in actions:
+            if action is not None:
+                latest[action[1]] = action
+        index = self.index
+        if index is None:
+            return
+        for operation, memory_id, vector, model in latest.values():
+            try:
+                if operation == "delete":
+                    index.delete([memory_id])
+                elif operation == "upsert" and vector is not None:
+                    index.upsert(
+                        [memory_id], vector.reshape(1, -1), [{"model": model}],
+                    )
+                else:  # pragma: no cover - actions are constructed locally
+                    raise RuntimeError("invalid deferred vector-index action")
+            except Exception as exc:  # noqa: BLE001 - canonical Store state is committed
+                self._audit_index_failure(operation, memory_id, exc)
 
     @staticmethod
     def _rehome_external_record(rec: MemoryRecord, *, src_device: object) -> None:

@@ -1,6 +1,7 @@
 import gc
 import json
 import math
+from pathlib import Path
 import sqlite3
 import threading
 import weakref
@@ -2482,6 +2483,119 @@ def test_read_only_store_rejects_incomplete_current_version_marker(tmp_path):
 
     with pytest.raises(RuntimeError, match="complete current schema"):
         Store(str(db_path), read_only=True)
+
+
+def test_read_only_store_requires_explicit_injected_connector_contract(tmp_path):
+    db_path = tmp_path / "connector-contract.db"
+    writable = Store(str(db_path))
+    writable.get_or_create_workspace("connector-contract")
+    writable.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writable.close()
+    calls = []
+
+    def writable_only_connector(path):
+        calls.append(path)
+        return sqlite3.connect(path)
+
+    with pytest.raises(TypeError, match="open_read_only"):
+        Store(str(db_path), connect=writable_only_connector, read_only=True)
+    assert calls == []
+
+
+def test_read_only_connector_missing_path_never_creates_or_invokes(tmp_path):
+    missing = tmp_path / "missing-parent" / "missing.db"
+
+    class Connector:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, path):
+            self.calls.append(("write", path))
+            raise AssertionError("writable connector must not run")
+
+        def open_read_only(self, path):
+            self.calls.append(("read", path))
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            return sqlite3.connect(path)
+
+    connector = Connector()
+    with pytest.raises(RuntimeError, match="existing regular database"):
+        Store(str(missing), connect=connector, read_only=True)
+    assert connector.calls == []
+    assert not missing.parent.exists()
+    assert not missing.exists()
+
+
+def test_explicit_read_only_connector_opens_existing_snapshot_without_mutation(tmp_path):
+    db_path = tmp_path / "explicit-read-only.db"
+    writable = Store(str(db_path))
+    workspace_id = writable.get_or_create_workspace("explicit-read-only")
+    memory_id = writable.add_memory(MemoryRecord(
+        id="", content="connector evidence", workspace_id=workspace_id,
+    ))
+    writable.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writable.close()
+    tracked = [
+        db_path,
+        Path(f"{db_path}-wal"),
+        Path(f"{db_path}-shm"),
+        Path(f"{db_path}-journal"),
+    ]
+
+    def state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: state(path) for path in tracked}
+
+    class Connector:
+        def __init__(self):
+            self.read_paths = []
+
+        def __call__(self, _path):
+            raise AssertionError("writable connector must not run")
+
+        def open_read_only(self, path):
+            self.read_paths.append(path)
+            uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+            connection = sqlite3.connect(
+                uri, uri=True, timeout=30, check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            return connection
+
+    connector = Connector()
+    read_only = Store(str(db_path), connect=connector, read_only=True)
+    try:
+        assert connector.read_paths == [str(db_path.resolve())]
+        record = read_only.get_memory(memory_id)
+        assert record is not None and record.content == "connector evidence"
+        with pytest.raises(sqlite3.OperationalError):
+            read_only.conn.execute(
+                "UPDATE memories SET content='changed' WHERE id=?", (memory_id,)
+            )
+    finally:
+        read_only.close()
+    assert {path.name: state(path) for path in tracked} == before
+
+
+def test_read_only_store_rejects_active_rollback_journal_without_touching_it(tmp_path):
+    db_path = tmp_path / "active-journal.db"
+    writable = Store(str(db_path))
+    writable.get_or_create_workspace("active-journal")
+    writable.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writable.close()
+    journal = Path(f"{db_path}-journal")
+    journal.write_bytes(b"simulated hot rollback journal")
+    before = (journal.stat().st_size, journal.stat().st_mtime_ns)
+
+    with pytest.raises(RuntimeError, match="active rollback journal found"):
+        Store(str(db_path), read_only=True)
+
+    assert (journal.stat().st_size, journal.stat().st_mtime_ns) == before
 
 
 def test_public_store_rejects_user_scope_before_mutation_but_legacy_import_reads(store):

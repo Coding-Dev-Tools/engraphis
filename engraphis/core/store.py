@@ -23,7 +23,7 @@ import unicodedata
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 import numpy as np
 
@@ -131,6 +131,22 @@ def _close_connection_quietly(conn: Any) -> None:
         conn.close()
     except Exception:
         pass
+
+
+class ReadOnlyConnector(Protocol):
+    """Explicit contract for injected connectors used by a read-only ``Store``.
+
+    Writable compatibility remains the ordinary ``connector(path)`` call.  A
+    connector that also supports inspection must expose ``open_read_only(path)``
+    and open the already-existing regular file without creating, recovering, or
+    mutating the database or any sidecar.  Implementations should use their
+    driver's equivalent of SQLite ``mode=ro&immutable=1``.  Store rejects a bare
+    callable in read-only mode rather than guessing that it is safe.
+    """
+
+    def __call__(self, path: str) -> Any: ...
+
+    def open_read_only(self, path: str) -> Any: ...
 
 
 def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
@@ -1017,23 +1033,30 @@ class Store:
         writer: it opens a checkpointed SQLite file with ``mode=ro&immutable=1`` and
         skips schema setup, migrations, backups, and the persistent WAL-mode pragma.
         It is for inspection tools (notably security dry-runs) whose safety contract
-        includes leaving a database and its sidecar files untouched.  A non-empty WAL
-        is rejected rather than silently scanning an incomplete immutable snapshot.
+        includes leaving a database and its sidecar files untouched. Non-empty WAL and
+        rollback-journal sidecars are rejected rather than silently scanning an
+        incomplete immutable snapshot. An injected connector must implement the
+        :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
+        callable is rejected before it can be invoked.
         """
         self.path = path
         self._connect = connect
         self.read_only = bool(read_only)
         if self.read_only and path == ":memory:":
             raise ValueError("read-only Store requires an existing database file")
-        if self.read_only and self._connect is None:
-            wal_path = Path(f"{path}-wal")
-            if wal_path.is_file() and wal_path.stat().st_size:
-                raise RuntimeError(
-                    "read-only Store requires a checkpointed database; active WAL found"
+        read_only_path: Optional[str] = None
+        if self.read_only:
+            if self._connect is not None and not callable(
+                getattr(self._connect, "open_read_only", None)
+            ):
+                raise TypeError(
+                    "read-only Store requires an injected connector with an "
+                    "open_read_only(path) method"
                 )
+            read_only_path = self._preflight_read_only_path(path)
         if path != ":memory:" and not self.read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        raw_conn = self._open_connection(path)
+        raw_conn = self._open_connection(read_only_path or path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
@@ -1050,9 +1073,9 @@ class Store:
         try:
             self.conn.execute("PRAGMA foreign_keys=ON")
             if self.read_only:
-                # ``query_only`` also protects injected connectors whose implementation
-                # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
-                # creating a temporary table here: a dry-run must not write anything.
+                # Defense in depth after the stdlib immutable URI or the injected
+                # connector's explicit immutable-open contract. Do not probe FTS5 by
+                # creating a temporary table here: an inspection must not write anything.
                 self.conn.execute("PRAGMA query_only=ON")
                 self._validate_read_only_ready()
                 row = self.conn.execute(
@@ -1087,6 +1110,8 @@ class Store:
         if self._connect is not None:
             # Injected factories own opening, keying, row_factory, and exception
             # translation (notably the SQLCipher backend).
+            if self.read_only:
+                return self._connect.open_read_only(path)  # type: ignore[attr-defined]
             return self._connect(path)
         if self.read_only:
             uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
@@ -1095,6 +1120,54 @@ class Store:
             conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _preflight_read_only_path(path: str) -> str:
+        """Validate one immutable snapshot path without creating or opening it.
+
+        The resolved regular file is returned so a connector cannot reinterpret a
+        relative path after validation.  Active WAL/rollback-journal state is
+        refused because an immutable connection would skip recovery and silently
+        expose an incomplete snapshot.
+        """
+        candidate = Path(path)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            ) from None
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        file_attributes = int(getattr(info, "st_file_attributes", 0))
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or bool(reparse_flag and file_attributes & reparse_flag)
+        ):
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            )
+        for suffix, label in (("-wal", "WAL"), ("-journal", "rollback journal")):
+            sidecar = Path(f"{candidate}{suffix}")
+            try:
+                sidecar_info = os.lstat(sidecar)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise RuntimeError(
+                    f"read-only Store could not validate the {label} sidecar"
+                ) from None
+            if sidecar_info.st_size:
+                raise RuntimeError(
+                    "read-only Store requires a checkpointed database; "
+                    f"active {label} found"
+                )
+        try:
+            return str(candidate.resolve(strict=True))
+        except OSError:
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            ) from None
 
     def _validate_read_only_ready(self) -> None:
         """Fail closed unless the immutable snapshot can serve the current schema."""

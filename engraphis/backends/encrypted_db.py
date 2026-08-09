@@ -20,7 +20,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from engraphis.private_state import read_private_text
 
@@ -185,34 +185,45 @@ class _TranslatingConnection:
         return _guard(self._raw.__exit__, *exc)
 
 
-def make_connector(key: str) -> Callable[[str], object]:
-    """Return a ``connect(path) -> connection`` factory that opens *path* as an encrypted
-    SQLCipher database keyed with *key*. Raises :class:`EncryptionError` with an actionable
-    message if the driver is missing or the key does not unlock an existing file."""
-    try:
-        sqlcipher3 = importlib.import_module("sqlcipher3")
-    except Exception:  # noqa: BLE001
-        raise EncryptionError(
-            "ENGRAPHIS_DB_KEY is set but no compatible SQLCipher driver is importable. "
-            "On CPython manylinux x86-64, install it with: pip install "
-            "\"engraphis[encryption]\". On macOS, Windows, Linux ARM, or musl, "
-            "provision a compatible sqlcipher3 driver separately. Engraphis will not "
-            "fall back to plaintext."
-        ) from None
+class _EncryptedConnector:
+    """SQLCipher connector with distinct writable and immutable-open entry points.
 
-    pragma = _key_pragma(key)
+    ``__call__`` preserves the historical writable connector behavior.  Store's
+    explicit read-only connector contract uses ``open_read_only``; that path never
+    creates parent directories and requires SQLCipher's SQLite URI support for
+    ``mode=ro&immutable=1`` rather than opening writable and setting query-only late.
+    """
 
-    def _connect(path: str):
+    def __init__(self, driver, pragma: str) -> None:
+        self._driver = driver
+        self._pragma = pragma
+
+    def __call__(self, path: str):
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        return self._open(path, uri=False, read_only=False)
+
+    def open_read_only(self, path: str):
         try:
-            if path != ":memory:":
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-            raw = sqlcipher3.connect(path, timeout=30, check_same_thread=False)
+            target = Path(path).resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+        except OSError:
+            raise EncryptionError(
+                "could not initialize the encrypted database connection"
+            ) from None
+        return self._open(target, uri=True, read_only=True)
+
+    def _open(self, target: str, *, uri: bool, read_only: bool):
+        options = {"timeout": 30, "check_same_thread": False}
+        if uri:
+            options["uri"] = True
+        try:
+            raw = self._driver.connect(target, **options)
         except Exception:  # noqa: BLE001
             raise EncryptionError(
                 "could not initialize the encrypted database connection"
             ) from None
         try:
-            raw.execute(pragma)                   # MUST be the first statement
+            raw.execute(self._pragma)             # MUST be the first statement
         except Exception:  # noqa: BLE001
             try:
                 raw.close()
@@ -221,8 +232,13 @@ def make_connector(key: str) -> Callable[[str], object]:
             # Suppress the driver message (`from None`): a PRAGMA syntax error can echo the
             # statement text, which contains the key. Never surface key material.
             raise EncryptionError(
-                "failed to apply the database key — check the ENGRAPHIS_DB_KEY format") from None
+                "failed to apply the database key — check the ENGRAPHIS_DB_KEY format"
+            ) from None
         try:
+            if read_only:
+                # Defense in depth after the immutable URI has already constrained
+                # the open itself. This PRAGMA is connection-local and non-persistent.
+                raw.execute("PRAGMA query_only=ON")
             # Touch the header so a wrong key / plaintext-vs-encrypted mismatch fails now,
             # with a clear message, instead of deep inside an unrelated query later.
             raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -236,17 +252,37 @@ def make_connector(key: str) -> Callable[[str], object]:
                 "the file is not SQLCipher-encrypted (an existing plaintext DB cannot be "
                 "opened with a key; migrate it first)."
             ) from None
-        raw.row_factory = sqlcipher3.Row
+        raw.row_factory = self._driver.Row
         return _TranslatingConnection(raw)
 
-    return _connect
+
+def make_connector(key: str) -> _EncryptedConnector:
+    """Return a SQLCipher connector with writable and explicit read-only opens.
+
+    Raises :class:`EncryptionError` with an actionable message if the driver is
+    missing or the key does not unlock an existing file.
+    """
+    try:
+        sqlcipher3 = importlib.import_module("sqlcipher3")
+    except Exception:  # noqa: BLE001
+        raise EncryptionError(
+            "ENGRAPHIS_DB_KEY is set but no compatible SQLCipher driver is importable. "
+            "On CPython manylinux x86-64, install it with: pip install "
+            "\"engraphis[encryption]\". On macOS, Windows, Linux ARM, or musl, "
+            "provision a compatible sqlcipher3 driver separately. Engraphis will not "
+            "fall back to plaintext."
+        ) from None
+
+    return _EncryptedConnector(sqlcipher3, _key_pragma(key))
 
 
-def connector_from_env() -> Optional[Callable[[str], object]]:
-    """The connection factory for the current environment, or None when encryption is off.
+def connector_from_env() -> Optional[_EncryptedConnector]:
+    """The dual-mode connector for this environment, or None when encryption is off.
 
     Callers pass the result to ``Store(path, connect=...)`` / ``MemoryEngine.create`` /
-    ``MemoryService.create``. None means "use the stdlib sqlite3 default" (plaintext)."""
+    ``MemoryService.create``. Writable calls use ``connector(path)``; read-only Store
+    construction uses its explicit ``connector.open_read_only(path)`` contract. None
+    means "use the stdlib sqlite3 default" (plaintext)."""
     key = _resolve_key()
     if key is None:
         return None

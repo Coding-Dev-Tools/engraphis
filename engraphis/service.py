@@ -49,6 +49,7 @@ from engraphis.core.interfaces import (
     Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
+    vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -4599,7 +4600,7 @@ class MemoryService:
             and (importance is None or importance == existing.importance)
         ):
             return {"id": mid, "updated": []}
-        return self._update_memory_transactional(
+        result, external_index_action = self._update_memory_transactional(
             mid,
             workspace=workspace,
             repo=repo,
@@ -4608,6 +4609,45 @@ class MemoryService:
             importance=importance,
             actor=actor,
         )
+        if external_index_action is not None:
+            self._publish_memory_index_action(external_index_action)
+        return result
+
+    def _publish_memory_index_action(
+            self, action: tuple[str, str, Optional[np.ndarray], str]) -> None:
+        """Publish one committed title edit to a separately-backed vector index.
+
+        The Store row/vector/FTS state is canonical and has already committed when this
+        runs.  A provider failure therefore becomes explicit repair debt; it must never
+        be raised as though the canonical edit had rolled back.
+        """
+        operation, memory_id, vector, model = action
+        try:
+            if operation == "delete":
+                self.engine.index.delete([memory_id])
+            elif operation == "upsert" and vector is not None:
+                self.engine.index.upsert(
+                    [memory_id], vector.reshape(1, -1), [{"model": model}],
+                )
+            else:  # pragma: no cover - action is constructed locally
+                raise RuntimeError("invalid deferred vector-index action")
+        except Exception as exc:  # noqa: BLE001 - canonical Store state is committed
+            failure_type = type(exc).__name__
+            logger.warning(
+                "vector-index %s failed for title update %s (%s)",
+                operation, memory_id, failure_type,
+            )
+            try:
+                self.store.audit(
+                    "engine", f"index_{operation}_failed", memory_id,
+                    f"failure_type={failure_type}",
+                    commit=not self.store.conn.transaction_owned_by_current_thread(),
+                )
+            except Exception as audit_exc:  # noqa: BLE001 - retain original repair debt
+                logger.warning(
+                    "could not audit title-update vector-index failure (%s)",
+                    type(audit_exc).__name__,
+                )
 
 
     @_rollback_service_transaction
@@ -4615,7 +4655,9 @@ class MemoryService:
             self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
-                      actor: str = "user") -> dict:
+                      actor: str = "user") -> tuple[
+                          dict, Optional[tuple[str, str, Optional[np.ndarray], str]]
+                      ]:
         """In-place edit of a memory's metadata fields. Content edits go through
         ``correct`` so bi-temporal history is preserved."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -4626,6 +4668,7 @@ class MemoryService:
         old_title = existing.title if existing is not None else ""
         sets, params, changes = [], [], []
         title_changed = False
+        external_index_action = None
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
             _reject_secret_capture((("title", title),))
@@ -4653,7 +4696,7 @@ class MemoryService:
                 params.append(importance)
                 changes.append("importance")
         if not sets and title is None:
-            return {"id": mid, "updated": []}
+            return {"id": mid, "updated": []}, None
         if sets:
             params.append(mid)
             self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
@@ -4676,7 +4719,12 @@ class MemoryService:
                 ):
                     self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
                     if vector_index_requires_sync(self.engine.index, self.store):
-                        self.engine.index.delete([mid], commit=False)
+                        if vector_index_shares_store_transaction(
+                            self.engine.index, self.store,
+                        ):
+                            self.engine.index.delete([mid], commit=False)
+                        else:
+                            external_index_action = ("delete", mid, None, "")
                 else:
                     # Existing rows may predate the write-path secret guard.  Do not send
                     # such content to a remote embedder while changing unrelated metadata.
@@ -4710,23 +4758,19 @@ class MemoryService:
                     ):
                         raise ValidationError("embedder returned an invalid vector")
                     if vector_index_requires_sync(self.engine.index, self.store):
-                        try:
+                        if vector_index_shares_store_transaction(
+                            self.engine.index, self.store,
+                        ):
                             self.engine.index.upsert(
                                 [mid], vectors, [{"model": model}], commit=False
                             )
-                        except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
-                            logger.warning("vector-index upsert failed for title update %s (%s)",
-                                           mid, type(exc).__name__)
-                            try:
-                                self.store.audit(
-                                    "engine", "index_upsert_failed", mid,
-                                    "failure_type=%s" % type(exc).__name__, commit=False,
-                                )
-                            except Exception:
-                                pass
-                            raise
+                        else:
+                            external_index_action = (
+                                "upsert", mid, vectors[0].copy(), model,
+                            )
                     # Store owns the portable mirror for every backend. A separate
-                    # index was synchronized above; NumPy searches this row directly.
+                    # index is published only after this transaction commits; NumPy
+                    # searches this canonical row directly.
                     self.store.put_vector(mid, vectors[0], model=model)
             self.store._fts_upsert(
                 mid, row["title"] or "", row["content"] or "", kw,
@@ -4734,7 +4778,7 @@ class MemoryService:
 
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
-        return {"id": mid, "updated": changes}
+        return {"id": mid, "updated": changes}, external_index_action
     @_rollback_service_transaction
     def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
                          actor: str = "user") -> dict:

@@ -586,7 +586,7 @@ def test_update_memory_secret_title_does_not_embed_or_create_vector():
 
 
 
-def test_update_memory_rolls_back_title_when_index_update_fails():
+def test_update_memory_commits_canonical_title_when_external_index_update_fails(caplog):
     service = MemoryService.create(":memory:")
     created = service.remember("A durable release note.", workspace="acme", title="Old")
     mid = created["id"]
@@ -594,30 +594,106 @@ def test_update_memory_rolls_back_title_when_index_update_fails():
         "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
     ).fetchone()["vector"]
     original_index = service.engine.index
+    commits = []
 
     class BrokenIndex:
         dim = original_index.dim
 
         def upsert(self, _ids, _vectors, meta=None, *, commit=True):
-            raise RuntimeError("index unavailable")
+            commits.append(commit)
+            raise RuntimeError("sensitive-index-detail")
 
         def delete(self, _ids, *, commit=True):
             return None
 
     service.engine.index = BrokenIndex()
-    with pytest.raises(RuntimeError, match="index unavailable"):
-        service.update_memory(mid, workspace="acme", title="New")
+    with caplog.at_level("WARNING", logger="engraphis.service"):
+        result = service.update_memory(mid, workspace="acme", title="New")
+
+    assert result == {"id": mid, "updated": ["title"]}
+    assert commits == [True]
     saved = service.store.get_memory(mid)
-    assert saved.title == "Old"
+    assert saved.title == "New"
+    assert service.store.conn.execute(
+        "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()["vector"] != before_vector
+    assert mid in {
+        memory_id for memory_id, _score in service.store.fts_search("New", 5)
+    }
+    audit = service.store.conn.execute(
+        "SELECT detail FROM audit WHERE action='index_upsert_failed' AND target=?",
+        (mid,),
+    ).fetchone()
+    assert audit is not None and audit["detail"] == "failure_type=RuntimeError"
+    assert "sensitive-index-detail" not in caplog.text
+
+
+def test_update_memory_late_store_failure_does_not_publish_external_vector(monkeypatch):
+    service = MemoryService.create(":memory:")
+    created = service.remember("A durable release note.", workspace="acme", title="Old")
+    mid = created["id"]
+    before_vector = service.store.conn.execute(
+        "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()["vector"]
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, _vectors, meta=None, *, commit=True):
+            publications.append(("upsert", tuple(ids), commit))
+
+        def delete(self, ids, *, commit=True):
+            publications.append(("delete", tuple(ids), commit))
+
+    service.engine.index = RecordingExternalIndex()
+    original_audit = service.store.audit
+
+    def fail_late(actor, action, target, detail="", *, commit=True):
+        if action == "memory_update":
+            raise RuntimeError("late store failure")
+        return original_audit(actor, action, target, detail, commit=commit)
+
+    monkeypatch.setattr(service.store, "audit", fail_late)
+    with pytest.raises(RuntimeError, match="late store failure"):
+        service.update_memory(mid, workspace="acme", title="New")
+
+    assert service.store.get_memory(mid).title == "Old"
     assert service.store.conn.execute(
         "SELECT vector FROM mem_vectors WHERE id=?", (mid,)
     ).fetchone()["vector"] == before_vector
-    assert mid in {
-        memory_id for memory_id, _score in service.store.fts_search("Old", 5)
-    }
-    assert mid not in {
-        memory_id for memory_id, _score in service.store.fts_search("New", 5)
-    }
+    assert publications == []
+
+
+def test_update_memory_commit_failure_does_not_publish_external_vector(monkeypatch):
+    service = MemoryService.create(":memory:")
+    created = service.remember("A durable release note.", workspace="acme", title="Old")
+    mid = created["id"]
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, _vectors, meta=None, *, commit=True):
+            publications.append(("upsert", tuple(ids), commit))
+
+        def delete(self, ids, *, commit=True):
+            publications.append(("delete", tuple(ids), commit))
+
+    service.engine.index = RecordingExternalIndex()
+    connection_type = type(service.store.conn)
+    real_commit = connection_type.commit
+
+    def fail_outer_commit(connection):
+        if (
+            connection is service.store.conn
+            and not getattr(connection._pin, "defer_commits", 0)
+        ):
+            raise RuntimeError("late commit failure")
+        return real_commit(connection)
+
+    monkeypatch.setattr(connection_type, "commit", fail_outer_commit)
+    with pytest.raises(RuntimeError, match="late commit failure"):
+        service.update_memory(mid, workspace="acme", title="New")
+
+    assert service.store.get_memory(mid).title == "Old"
+    assert publications == []
 
 def test_update_memory_rebuilds_missing_fts_row_when_title_is_reapplied():
     service = MemoryService.create(":memory:")
