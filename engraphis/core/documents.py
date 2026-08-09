@@ -490,14 +490,19 @@ def _record(
     title: str, metadata: Dict[str, Any], warnings: List[str], *,
     source_mtime_ns: Optional[int],
 ) -> DocumentRecord:
+    bounded_title = title[:MAX_DOCUMENT_CHARS]
+    bounded_metadata = dict(metadata)
+    metadata_title = bounded_metadata.get("title")
+    if isinstance(metadata_title, str):
+        bounded_metadata["title"] = metadata_title[:MAX_DOCUMENT_CHARS]
     visible = "" if spec.name == "source" else _mask_code(body)
     headings = _headings(spec.name, visible)
-    for heading in metadata.get("document_headings", []):
+    for heading in bounded_metadata.get("document_headings", []):
         if isinstance(heading, str) and heading.strip():
             headings.append(heading.strip()[:300])
     headings = _dedupe(headings)
     links = _links(visible)
-    for target in metadata.get("document_links", []):
+    for target in bounded_metadata.get("document_links", []):
         if isinstance(target, str) and target:
             links.append(DocumentLink(target))
     links = _dedupe_links(links)
@@ -506,12 +511,12 @@ def _record(
     fallback = Path(relative_path).stem or "document"
     return DocumentRecord(
         relative_path=relative_path, format=spec.name, media_type=spec.media_type,
-        title=title or (headings[0] if headings else fallback), content=content, body=body,
+        title=bounded_title or (headings[0] if headings else fallback), content=content, body=body,
         raw_sha256=hashlib.sha256(raw).hexdigest(),
         canonical_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         source_size=len(raw), source_mtime_ns=source_mtime_ns,
-        title_source="metadata" if title else "heading" if headings else "filename",
-        metadata=metadata, tags=tags, headings=headings, links=links,
+        title_source="metadata" if bounded_title else "heading" if headings else "filename",
+        metadata=bounded_metadata, tags=tags, headings=headings, links=links,
         attachments=attachments, warnings=warnings,
     )
 
@@ -720,6 +725,29 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
         else:
             output.append(chr(unit))
 
+    def skip_unicode_fallback(start: int) -> int:
+        """Consume one RTF fallback character without exposing its syntax."""
+        if start >= len(content) or content[start] in "{}":
+            return start
+        if content[start] != "\\":
+            return start + 1
+        end = start + 1
+        if end >= len(content):
+            return end
+        marker = content[end]
+        if marker == "'":
+            return min(len(content), end + 3)
+        if marker.isalpha():
+            end += 1
+            while end < len(content) and content[end].isalpha():
+                end += 1
+            while end < len(content) and content[end] in "-0123456789":
+                end += 1
+            if end < len(content) and content[end] == " ":
+                end += 1
+            return end
+        return end + 1
+
     index = 0
     while index < len(content):
         char = content[index]
@@ -792,19 +820,10 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                     while remaining and end < len(content):
                         # A fallback control symbol/word represents one character;
                         # never consume a group delimiter while skipping it.
-                        if content[end] in "{}":
+                        next_end = skip_unicode_fallback(end)
+                        if next_end == end:
                             break
-                        if content[end] == "\\":
-                            end += 1
-                            if end < len(content) and content[end].isalpha():
-                                while end < len(content) and content[end].isalpha():
-                                    end += 1
-                                while end < len(content) and content[end] in "-0123456789":
-                                    end += 1
-                                if end < len(content) and content[end] == " ":
-                                    end += 1
-                        else:
-                            end += 1
+                        end = next_end
                         remaining -= 1
                     index = end
                     continue
@@ -1013,6 +1032,8 @@ def _ods_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
     total = 0
     for row in (item for item in root.iter() if item.tag.endswith("table-row")):
         cells: List[str] = []
+        row_size = 0
+        row_separator = 1 if rows else 0
         for cell in (item for item in row if item.tag.endswith("table-cell")):
             repeated_raw = next(
                 (
@@ -1044,15 +1065,18 @@ def _ods_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
                 ).strip()
             if not value:
                 continue
-            for _ in range(repeated):
-                cells.append(value)
-                cell_count += 1
+            addition = len(value) * repeated + max(0, repeated - 1) + (1 if cells else 0)
+            if total + row_separator + row_size + addition > MAX_CONTAINER_TEXT_CHARS:
+                raise DocumentParseError("document exceeds 100000 character safety limit")
+            cells.extend([value] * repeated)
+            row_size += addition
+            cell_count += repeated
         text = "\t".join(cells).strip()
         if text:
-            if total + len(text) + (1 if rows else 0) > MAX_CONTAINER_TEXT_CHARS:
+            if total + row_separator + len(text) > MAX_CONTAINER_TEXT_CHARS:
                 raise DocumentParseError("document exceeds 100000 character safety limit")
             rows.append(text)
-            total += len(text) + (1 if rows else 0)
+            total += row_separator + len(text)
     if not rows:
         body, metadata = _office_body(
             archive, "content.xml",

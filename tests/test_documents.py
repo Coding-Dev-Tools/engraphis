@@ -11,6 +11,7 @@ import pytest
 
 from engraphis.core.documents import (
     DOCUMENT_FORMATS,
+    MAX_DOCUMENT_CHARS,
     DocumentRecord,
     DocumentParseError,
     document_format_for_path,
@@ -158,6 +159,28 @@ def test_epub_titles_are_checked_for_secrets():
         parse_document(epub, "secret-title.epub")
 
 
+def test_epub_titles_are_bounded_before_record_creation():
+    oversized = "T" * (MAX_DOCUMENT_CHARS + 1)
+    epub = _zip({
+        "META-INF/container.xml": (
+            '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="EPUB/book.opf"/></rootfiles></container>'
+        ),
+        "EPUB/book.opf": (
+            '<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
+            f"<dc:title>{oversized}</dc:title></metadata>"
+            '<manifest><item id="one" href="one.xhtml"/></manifest>'
+            '<spine><itemref idref="one"/></spine></package>'
+        ),
+        "EPUB/one.xhtml": "<html><body><p>Safe chapter</p></body></html>",
+    })
+
+    record = parse_document(epub, "oversized-title.epub")
+
+    assert len(record.title) == MAX_DOCUMENT_CHARS
+    assert len(record.metadata["title"]) == MAX_DOCUMENT_CHARS
+
+
 def test_ods_extracts_attribute_backed_cells():
     ods = _zip({
         "content.xml": (
@@ -173,6 +196,23 @@ def test_ods_extracts_attribute_backed_cells():
     })
     record = parse_document(ods, "values.ods")
     assert record.body == "42\ttrue"
+
+
+def test_ods_repeated_cells_are_bounded_before_materialization():
+    oversized = "x" * 20_000
+    ods = _zip({
+        "content.xml": (
+            '<office:document-content xmlns:office="urn:o" '
+            'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">'
+            '<table:table><table:table-row>'
+            f'<table:table-cell office:string-value="{oversized}" '
+            'table:number-columns-repeated="10000"/>'
+            '</table:table-row></table:table></office:document-content>'
+        ),
+    })
+
+    with pytest.raises(DocumentParseError, match="exceeds"):
+        parse_document(ods, "repeated.ods")
 
 
 def test_scan_is_safe_and_continues_after_per_file_errors(tmp_path):
@@ -275,6 +315,11 @@ def test_rtf_and_additional_office_containers_are_dependency_free():
         "unicode.rtf",
     )
     assert unicode_rtf.body == "Café α é Smile 😀"
+    hex_fallback_rtf = parse_document(
+        b"{\\rtf1\\ansi\\uc1 \\u945\\'3f}",
+        "hex-fallback.rtf",
+    )
+    assert hex_fallback_rtf.body == "α"
     cyrillic_rtf = parse_document(
         b"{\\rtf1\\ansi\\ansicpg1251 \\'cf\\'f0\\'e8\\'ec\\'e5\\'f0}",
         "cyrillic.rtf",
