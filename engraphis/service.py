@@ -3576,7 +3576,8 @@ class MemoryService:
         }
 
     def link_symbol(self, symbol_id: str, memory_id: str, *, workspace: str, repo: str,
-                    relation: str = "mentions", confidence: float = 1.0) -> dict:
+                    relation: str = "mentions", confidence: float = 1.0,
+                    reason: str = "") -> dict:
         """Create or reinforce a manual link between a code symbol and a memory.
 
         Validates that both the symbol and the memory exist within the given
@@ -3588,6 +3589,10 @@ class MemoryService:
         symbol_id = _clean_text(symbol_id, field="symbol_id", max_chars=500)
         memory_id = _clean_text(memory_id, field="memory_id", max_chars=500)
         relation = _clean_name(relation, field="relation") or "mentions"
+        reason = _clean_text(
+            reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
+        )
+        _reject_secret_capture((("link_symbol reason", reason),))
         try:
             confidence = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
@@ -3613,15 +3618,18 @@ class MemoryService:
         receipt = self.store.record_receipt(
             "link", workspace_id=wid, repo_id=rid, actor=actor,
             target_count=1, status="ok",
-            metadata={"relation": relation, "result_count": 1},
+            metadata={"relation": relation, "result_count": 1,
+                      "reason": reason[:200] if reason else "",
+                      "symbol_id": symbol["id"], "memory_id": memory_id},
         )
         self.store.audit(
             actor, "link_symbol", link_id,
             f"symbol_id={symbol['id']}; memory_id={memory_id}; "
-            f"relation={relation}; confidence={confidence:.6f}",
+            f"relation={relation}; confidence={confidence:.6f}; reason={reason}",
         )
         return {"link_id": link_id, "symbol_id": symbol["id"],
                 "memory_id": memory_id, "relation": relation,
+                "reason": reason,
                 "workspace": workspace, "repo": repo, "receipt": receipt}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────

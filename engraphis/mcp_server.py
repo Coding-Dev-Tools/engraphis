@@ -1439,6 +1439,8 @@ def engraphis_link_symbol(
                                    max_length=100)] = "mentions",
     confidence: Annotated[float, Field(description="Link confidence 0..1.",
                           ge=0.0, le=1.0)] = 1.0,
+    reason: Annotated[str, Field(description="Optional reason or context for this link.",
+                                 max_length=500)] = "",
 ) -> str:
     """Manually create a link between a code symbol and a memory.
 
@@ -1453,7 +1455,7 @@ def engraphis_link_symbol(
     try:
         return _ok(service().link_symbol(
             symbol_id, memory_id, workspace=workspace, repo=repo,
-            relation=relation, confidence=confidence,
+            relation=relation, confidence=confidence, reason=reason,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
