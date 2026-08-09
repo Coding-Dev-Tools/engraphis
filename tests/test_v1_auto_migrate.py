@@ -124,3 +124,99 @@ def test_already_v2_db_is_left_alone(tmp_path):
     svc = MemoryService.create(str(db))            # must not raise, must not back up
     assert list(tmp_path.glob("*.v1-backup-*")) == []
     svc.store.close()
+
+
+
+def test_crash_recovery_v2_swap_only(tmp_path):
+    """Simulate a crash in legacy code after renaming original to .v2_swap
+    but before anything else happened. db_path is absent, .v2_swap holds
+    the original v1 data. Recovery must restore .v2_swap to db_path, then
+    the normal migration path converts it to v2."""
+    db = tmp_path / "engraphis.db"
+    _build_v1_db(str(db))
+    # Simulate the legacy crash: rename original to .v2_swap
+    swap = db.with_suffix(".v2_swap")
+    db.rename(swap)
+    assert not db.exists()
+    assert swap.exists()
+
+    svc = MemoryService.create(str(db))  # must recover and migrate
+    mems = svc.store.list_memories(include_invalid=True)
+    assert len(mems) == 1
+    assert "dark mode" in mems[0].content
+    assert mems[0].workspace_id
+    svc.store.close()
+    # .v2_swap consumed by recovery
+    assert not swap.exists()
+
+
+def test_crash_recovery_v2_swap_plus_tmp_new(tmp_path):
+    """Simulate a crash after legacy code renamed original to .v2_swap AND
+    the migration wrote a complete .v2-migrating-* file, but the final
+    os.replace into db_path never happened. Recovery must prefer the
+    migrated v2 file over the stale v1 in .v2_swap."""
+    db = tmp_path / "engraphis.db"
+    _build_v1_db(str(db))
+
+    # First, do a real migration to get a valid v2 file
+    svc = MemoryService.create(str(db))
+    svc.store.close()
+    # Now db is v2-migrated. Save the migrated file aside.
+    migrated_content = db.read_bytes()
+
+    # Reset: rebuild v1, simulate the legacy crash window
+    db.unlink()
+    _build_v1_db(str(db))
+    swap = db.with_suffix(".v2_swap")
+    db.rename(swap)  # original renamed to .v2_swap (legacy step 1)
+
+    # Plant the migrated file as a .v2-migrating-* (migration completed
+    # but os.replace into db_path never happened)
+    import time
+    ts = int(time.time())
+    tmp_new = db.with_name(db.stem + ".v2-migrating-%d" % ts + db.suffix)
+    tmp_new.write_bytes(migrated_content)
+
+    assert not db.exists()
+    assert swap.exists()
+    assert tmp_new.exists()
+
+    svc = MemoryService.create(str(db))  # must prefer tmp_new
+    mems = svc.store.list_memories(include_invalid=True)
+    assert len(mems) == 1
+    assert "dark mode" in mems[0].content
+    assert mems[0].workspace_id  # it's the migrated v2 file, not the v1 original
+    svc.store.close()
+
+    # Both staging artifacts cleaned up
+    assert not swap.exists()
+    assert not tmp_new.exists()
+
+
+def test_crash_recovery_stray_tmp_new_only(tmp_path):
+    """Edge case: db_path absent, no .v2_swap, but a stray .v2-migrating-*
+    exists. Recovery should promote it to db_path."""
+    db = tmp_path / "engraphis.db"
+    _build_v1_db(str(db))
+
+    # Do a real migration first
+    svc = MemoryService.create(str(db))
+    svc.store.close()
+    migrated_content = db.read_bytes()
+
+    # Simulate: db_path gone, no .v2_swap, but migrating file remains
+    db.unlink()
+    import time
+    ts = int(time.time())
+    tmp_new = db.with_name(db.stem + ".v2-migrating-%d" % ts + db.suffix)
+    tmp_new.write_bytes(migrated_content)
+
+    assert not db.exists()
+    assert tmp_new.exists()
+
+    svc = MemoryService.create(str(db))
+    mems = svc.store.list_memraries(include_invalid=True)
+    assert len(mems) == 1
+    assert "dark mode" in mems[0].content
+    svc.store.close()
+    assert not tmp_new.exists()

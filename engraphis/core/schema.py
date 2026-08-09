@@ -437,7 +437,9 @@ CREATE INDEX IF NOT EXISTS idx_code_mem_symbol
     ON code_memory_links(repo_id, symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_mem_memory
     ON code_memory_links(repo_id, memory_id);
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_mem_live_unique
+    ON code_memory_links(repo_id, symbol_id, memory_id, relation)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
 -- ── Event ledger & audit ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
     id               TEXT PRIMARY KEY,

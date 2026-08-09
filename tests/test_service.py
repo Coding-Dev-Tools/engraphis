@@ -1141,6 +1141,37 @@ def test_link_symbol_rejects_ambiguous_short_name_but_accepts_qualified_name():
     ).fetchone()[0] == 1
 
 
+def test_link_symbol_concurrent_creation_is_idempotent():
+    """Multiple threads racing to create the same symbol-memory link must produce exactly one row."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    s = _svc()
+    workspace_id = s.store.get_or_create_workspace("acme")
+    repo_id = s.store.get_or_create_repo(workspace_id, "api")
+    symbol_id = s.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="race_target", fqname="race_target",
+        file="race.py", span="1-1",
+    )
+    memory = s.remember("Race condition test", workspace="acme", repo="api")
+
+    def link_concurrently():
+        return s.link_symbol("race_target", memory["id"], workspace="acme", repo="api")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(link_concurrently) for _ in range(20)]
+        results = [f.result() for f in futures]
+
+    link_ids = {r["link_id"] for r in results}
+    assert len(link_ids) == 1, f"expected 1 unique link_id, got {len(link_ids)}: {link_ids}"
+
+    count = s.store.conn.execute(
+        "SELECT COUNT(*) FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
+        "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
+        (repo_id, symbol_id, memory["id"], "mentions"),
+    ).fetchone()[0]
+    assert count == 1, f"expected 1 row in code_memory_links, got {count}"
+
+
 def test_search_code_requires_repo():
     s = _svc()
     s.remember("x", workspace="acme")
