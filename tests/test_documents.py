@@ -1,6 +1,7 @@
 """Focused coverage for the dependency-free universal document parser."""
 from __future__ import annotations
 
+import hashlib
 import io
 from pathlib import Path
 import zipfile
@@ -37,6 +38,19 @@ def test_markdown_uses_obsidian_adapter_and_masks_code_discovery():
     assert record.tags == ["project", "active"]
     assert [link.target for link in record.links] == ["Roadmap"]
     assert record.metadata["adapter"] == "obsidian-markdown"
+
+
+def test_markdown_uses_detected_utf16_encoding_for_obsidian_parser():
+    raw = "---\ntitle: Café\n---\n# Roadmap\n[[Launch]]\n".encode("utf-16")
+
+    record = parse_document(raw, "notes/utf16.md")
+
+    assert record.title == "Café"
+    assert record.body == "# Roadmap\n[[Launch]]\n"
+    assert [link.target for link in record.links] == ["Launch"]
+    assert record.source_size == len(raw)
+    assert record.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert "\x00" not in record.content
 
 
 @pytest.mark.parametrize(

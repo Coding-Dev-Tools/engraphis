@@ -309,10 +309,13 @@ def parse_document(
     if not spec.container and _looks_binary(raw):
         raise DocumentParseError("binary content is not a readable document")
     if spec.name == "markdown":
-        markdown_text, _warnings = _decode_text(raw)
+        markdown_text, decode_warnings = _decode_text(raw)
         if len(markdown_text) > MAX_DOCUMENT_CHARS:
             raise DocumentParseError("document exceeds 100000 character safety limit")
-        record = _markdown_record(raw, relative_path, source_mtime_ns)
+        record = _markdown_record(
+            markdown_text, relative_path, source_mtime_ns,
+            raw=raw, decode_warnings=decode_warnings,
+        )
         if not record.body.strip():
             raise DocumentParseError("document produced no readable text")
         return record
@@ -412,9 +415,14 @@ def scan_document_tree(
     return result
 
 
-def _markdown_record(raw: bytes, relative_path: str, mtime_ns: Optional[int]) -> DocumentRecord:
+def _markdown_record(
+    text: str, relative_path: str, mtime_ns: Optional[int], *,
+    raw: bytes, decode_warnings: List[str],
+) -> DocumentRecord:
     try:
-        note = parse_obsidian_note(raw, relative_path, source_mtime_ns=mtime_ns)
+        # The adapter accepts UTF-8 bytes, so pass the already detected text through
+        # UTF-8 while retaining the original bytes for identity and size metadata.
+        note = parse_obsidian_note(text.encode("utf-8"), relative_path, source_mtime_ns=mtime_ns)
     except ValueError as exc:
         if "no readable text" in str(exc):
             raise DocumentParseError("document produced no readable text") from None
@@ -453,13 +461,16 @@ def _markdown_record(raw: bytes, relative_path: str, mtime_ns: Optional[int]) ->
     return DocumentRecord(
         relative_path=note.relative_path, format=spec.name, media_type=spec.media_type,
         title=discovered.title, content=note.content, body=note.body,
-        raw_sha256=note.raw_sha256, canonical_sha256=note.canonical_sha256,
-        source_size=note.source_size, source_mtime_ns=note.source_mtime_ns,
+        raw_sha256=hashlib.sha256(raw).hexdigest(), canonical_sha256=note.canonical_sha256,
+        source_size=len(raw), source_mtime_ns=mtime_ns,
         title_source=discovered.title_source, metadata={"adapter": "obsidian-markdown"},
         frontmatter=discovered.frontmatter, aliases=discovered.aliases, tags=discovered.tags,
         dates=discovered.dates, headings=discovered.headings,
         links=links, attachments=attachments,
-        warnings=note.warnings + [item for item in discovered.warnings if item not in note.warnings],
+        warnings=decode_warnings + note.warnings + [
+            item for item in discovered.warnings
+            if item not in note.warnings and item not in decode_warnings
+        ],
     )
 
 
