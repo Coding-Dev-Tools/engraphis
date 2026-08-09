@@ -103,20 +103,40 @@ class _PollingWatcher:
         return changed
 
 
-def _try_watchdog_watcher(root: Path, callback, stop_event):
-    """Attempt watchdog-based watching.  Returns True if started, False if unavailable."""
+def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
+    """Watch while queuing events that arrive during startup reconciliation."""
     try:
         from watchdog.observers import Observer  # type: ignore[import-not-found]
         from watchdog.events import FileSystemEventHandler  # type: ignore[import-not-found]
     except ImportError:
-        return False
+        return None
+
+    import threading
+
+    startup_done = threading.Event()
+    pending_paths: list[str] = []
+    pending_lock = threading.Lock()
+    callback_lock = threading.Lock()
+
+    def dispatch(paths):
+        unique = list(dict.fromkeys(paths))
+        if unique:
+            with callback_lock:
+                callback(unique)
+
+    def enqueue(paths):
+        with pending_lock:
+            if not startup_done.is_set():
+                pending_paths.extend(paths)
+                return
+        dispatch(paths)
 
     class _Handler(FileSystemEventHandler):
         def on_modified(self, event):
             if not event.is_directory:
                 ext = os.path.splitext(event.src_path)[1].lower()
                 if ext in _WATCHED_EXTENSIONS:
-                    callback([event.src_path])
+                    enqueue([event.src_path])
 
         def on_created(self, event):
             self.on_modified(event)
@@ -133,19 +153,26 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
                 if os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
             ]
             if paths:
-                callback(paths)
+                enqueue(paths)
 
     observer = Observer()
     observer.schedule(_Handler(), str(root), recursive=True)
     observer.start()
     logger.info("watchdog observer started on %s", root)
     try:
+        if not startup_reconcile():
+            return 1
+        with pending_lock:
+            startup_done.set()
+            startup_paths = list(pending_paths)
+            pending_paths.clear()
+        dispatch(startup_paths)
         while not stop_event.is_set():
             stop_event.wait(timeout=1.0)
     finally:
         observer.stop()
         observer.join()
-    return True
+    return 0
 
 
 def _run(args, engine) -> int:
@@ -201,12 +228,9 @@ def _run(args, engine) -> int:
         )
         return True
 
-    # Reconcile persisted code state before establishing any in-process watcher
-    # baseline. This catches edits, renames, and deletions made while the watcher
-    # was stopped and works for both one-shot and continuous modes.
-    if not reindex([], fail_full=True):
-        return 1
     if args.no_watch:
+        if not reindex([], fail_full=True):
+            return 1
         print("Reindex complete.")
         return 0
 
@@ -220,12 +244,23 @@ def _run(args, engine) -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    if _try_watchdog_watcher(root, reindex, stop_event):
-        return 0
+    watchdog_status = _try_watchdog_watcher(
+        root, reindex, stop_event,
+        lambda: reindex([], fail_full=True),
+    )
+    if watchdog_status is not None:
+        return watchdog_status
 
     logger.info("watchdog not available; using polling (interval=%.1fs)", args.interval)
     watcher = _PollingWatcher(root, interval=args.interval)
+    # Establish the polling baseline before the full startup reconciliation so
+    # edits made during the scan are replayed after it completes.
     watcher.poll()
+    if not reindex([], fail_full=True):
+        return 1
+    changed_during_startup = watcher.poll()
+    if changed_during_startup:
+        reindex(changed_during_startup)
     print(f"Watching {root} (poll every {args.interval}s, Ctrl+C to stop)...")
 
     while not stop_event.is_set():

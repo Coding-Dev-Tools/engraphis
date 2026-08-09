@@ -544,8 +544,6 @@ def _parse_text_format(
         return content, title, {"config_kind": name}, []
     if name == "ini":
         return _ini_body(content, fallback)
-    if name == "xml":
-        return _xml_body(content, fallback)
     if name == "rtf":
         return _rtf_body(content, fallback)
     return content, fallback, {}, []

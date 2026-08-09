@@ -6017,20 +6017,29 @@ class MemoryService:
             )
             base["group_by"] = gb
             base["by_group"] = rows
-            if fmt == "csv":
-                import csv as _csv
-                import io as _io
-                buf = _io.StringIO()
+        if fmt == "csv":
+            import csv as _csv
+            import io as _io
+            buf = _io.StringIO()
+            if gb:
                 fields = [
                     "group_key", "token_counter", "receipt_count", "source_tokens",
                     "context_tokens", "saved_tokens", "budget_tokens",
                     "packed_count", "omitted_count", "savings_ratio",
                 ]
-                writer = _csv.DictWriter(buf, fieldnames=fields)
-                writer.writeheader()
-                for row in rows:
-                    writer.writerow({k: row.get(k, "") for k in fields})
-                base["csv"] = buf.getvalue()
+                rows = base.get("by_group", [])
+            else:
+                fields = [
+                    "token_counter", "receipt_count", "source_tokens", "context_tokens",
+                    "saved_tokens", "budget_tokens", "packed_count", "omitted_count",
+                    "savings_ratio",
+                ]
+                rows = base.get("by_token_counter", [])
+            writer = _csv.DictWriter(buf, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fields})
+            base["csv"] = buf.getvalue()
         return base
 
     def verify_receipts(self, *, workspace: str, expected_head: str = "",
