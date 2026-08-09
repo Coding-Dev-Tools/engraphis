@@ -3522,13 +3522,15 @@ class MemoryService:
             repo_id=rid, symbol_id=symbol["id"], memory_id=memory_id,
             relation=relation, confidence=confidence,
         )
+        principal = _authenticated_principal()
+        actor = principal["id"] if principal is not None else "agent"
         receipt = self.store.record_receipt(
-            "link", workspace_id=wid, repo_id=rid, actor="agent",
+            "link", workspace_id=wid, repo_id=rid, actor=actor,
             target_count=1, status="ok",
             metadata={"relation": relation, "result_count": 1},
         )
         self.store.audit(
-            "agent", "link_symbol", link_id,
+            actor, "link_symbol", link_id,
             f"symbol_id={symbol['id']}; memory_id={memory_id}; "
             f"relation={relation}; confidence={confidence:.6f}",
         )

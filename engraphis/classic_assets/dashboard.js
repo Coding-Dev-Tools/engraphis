@@ -1264,8 +1264,9 @@ function graphRender(fit=true,reheat=true){
    .onRenderFramePre((ctx,scale)=>{try{graphStyleBackground(ctx,scale)}catch(e){}})
    .onNodeClick(node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.id)})
    .onNodeHover(node=>{graphSetHighlight(node&&node.id);element.classList.toggle('cursor-pointer',!!node);element.classList.toggle('cursor-grab',!node)})
+   .onNodeDragEnd(node=>{node.vx=0;node.vy=0})
    .onEngineStop(()=>graphSetSimulationStatus('Layout settled',false));
- }
+  }
  FG.width(element.clientWidth).height(element.clientHeight)
   .cooldownTime(GPERF.large?1100:2200)
   .cooldownTicks(GPERF.large?80:160)
