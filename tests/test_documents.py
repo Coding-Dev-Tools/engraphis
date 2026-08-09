@@ -279,6 +279,15 @@ def test_markup_and_markdown_code_cannot_create_discovery_records():
     assert markdown.tags == ["visible"]
 
 
+def test_html_uses_declared_non_utf8_charset_before_parsing():
+    html = parse_document(
+        b'<meta charset="windows-1252"><title>Caf\xe9</title><p>Caf\xe9</p>',
+        "page.html",
+    )
+    assert html.title == "Café"
+    assert html.body == "Café"
+
+
 def test_unreadable_directory_is_reported_and_marks_scan_incomplete(monkeypatch, tmp_path):
     blocked = tmp_path / "blocked"
     blocked.mkdir()

@@ -325,7 +325,12 @@ def parse_document(
     elif spec.container:
         content, body, title, metadata, warnings = _parse_container(spec.name, raw)
     else:
-        content, decode_warnings = _decode_rtf(raw) if spec.name == "rtf" else _decode_text(raw)
+        if spec.name == "rtf":
+            content, decode_warnings = _decode_rtf(raw)
+        elif spec.name == "html":
+            content, decode_warnings = _decode_html(raw)
+        else:
+            content, decode_warnings = _decode_text(raw)
         content = _canonical(content)
         if len(content) > MAX_DOCUMENT_CHARS:
             raise DocumentParseError("document exceeds 100000 character safety limit")
@@ -517,7 +522,36 @@ def _decode_text(raw: bytes) -> Tuple[str, List[str]]:
         return raw.decode("utf-8-sig", errors="replace"), ["invalid UTF-8 was replaced with U+FFFD"]
 
 
+def _decode_html(raw: bytes) -> Tuple[str, List[str]]:
+    """Decode HTML using an early in-document charset declaration when present."""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return _decode_text(raw)
+    head = raw[:65536]
+    match = _HTML_CHARSET_RE.search(head) or _HTML_CONTENT_CHARSET_RE.search(head)
+    if match is None:
+        return _decode_text(raw)
+    try:
+        encoding = codecs.lookup(match.group(1).decode("ascii")).name
+    except (LookupError, UnicodeDecodeError):
+        return _decode_text(raw)
+    try:
+        return raw.decode(encoding), []
+    except UnicodeDecodeError:
+        return raw.decode(encoding, errors="replace"), [
+            "invalid %s was replaced with U+FFFD" % encoding.upper(),
+        ]
+
+
 _RTF_ANSI_CODE_PAGE_RE = re.compile(rb"\\ansicpg([0-9]+)")
+_HTML_CHARSET_RE = re.compile(
+    rb"<meta\b[^>]*\bcharset\s*=\s*['\"]?\s*([A-Za-z0-9._:-]+)",
+    re.IGNORECASE,
+)
+_HTML_CONTENT_CHARSET_RE = re.compile(
+    rb"<meta\b[^>]*\bcontent\s*=\s*['\"][^'\"]*?\bcharset\s*=\s*"
+    rb"([A-Za-z0-9._:-]+)[^'\"]*['\"]",
+    re.IGNORECASE,
+)
 
 
 def _decode_rtf(raw: bytes) -> Tuple[str, List[str]]:
