@@ -29,6 +29,7 @@ from engraphis.core.store import Store
 _INDEX_FORMAT_VERSION = 3
 _VISIBILITY_BATCH_SIZE = 8
 _COVERAGE_BATCH_SIZE = 500
+_DELETE_BATCH_SIZE = 500
 _COVERAGE_RTOL = 1e-6
 _COVERAGE_ATOL = 1e-7
 
@@ -413,8 +414,12 @@ class SqliteVecVectorIndex:
             # database. Delete the batch first, then insert the replacement rows in
             # the same transaction so restart hydration remains idempotent and
             # failures roll back to the previous index state.
-            marks = ",".join("?" for _ in ids)
-            conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+            for offset in range(0, count, _DELETE_BATCH_SIZE):
+                batch = ids[offset:offset + _DELETE_BATCH_SIZE]
+                marks = ",".join("?" for _ in batch)
+                conn.execute(
+                    f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", batch
+                )
             for mid, vector, keep in zip(ids, normalized, nonzero):
                 if not keep:
                     continue
@@ -432,13 +437,17 @@ class SqliteVecVectorIndex:
     def delete(self, ids: list[str], *, commit: bool = True) -> None:
         if not ids:
             return
-        marks = ",".join("?" for _ in ids)
         conn = self.store.conn
         owns_transaction = not conn.transaction_owned_by_current_thread()
         try:
             if owns_transaction:
                 conn.execute("BEGIN IMMEDIATE")
-            conn.execute(f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", ids)
+            for offset in range(0, len(ids), _DELETE_BATCH_SIZE):
+                batch = ids[offset:offset + _DELETE_BATCH_SIZE]
+                marks = ",".join("?" for _ in batch)
+                conn.execute(
+                    f"DELETE FROM mem_vec_ann WHERE id IN ({marks})", batch
+                )
             if commit and owns_transaction and conn.transaction_owned_by_current_thread():
                 conn.commit()
         except BaseException:

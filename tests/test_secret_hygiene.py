@@ -197,7 +197,7 @@ def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     ).fetchone()[0]
     # Ensure temporal separation so the historical_at anchor is strictly before
     # the valid_to stamped by retire() → invalidate_edges_for_memory().
-    # Without this, both can land on the same microsecond and the strict < 
+    # Without this, both can land on the same microsecond and the strict <
     # predicate in _temporal_visibility_sql excludes the support.
     import time
     time.sleep(0.05)  # 50ms for CI/load robustness (was 10ms)

@@ -474,6 +474,20 @@ def test_native_upsert_replaces_existing_rows_after_reopen():
         second.store.close()
 
 
+def test_native_upsert_and_delete_chunk_batches_above_sqlite_variable_limit():
+    store, _wid, _rid, emb, index = _fixture()
+    ids = [f"mem_batch_{position:04d}" for position in range(1_205)]
+    vector = emb.embed(["large native vector batch"])[0]
+    vectors = np.repeat(vector.reshape(1, -1), len(ids), axis=0)
+
+    index.upsert(ids, vectors)
+
+    assert store.conn.execute("SELECT COUNT(*) FROM mem_vec_ann").fetchone()[0] == len(ids)
+    index.delete(ids)
+    assert store.conn.execute("SELECT COUNT(*) FROM mem_vec_ann").fetchone()[0] == 0
+    store.close()
+
+
 def test_native_upsert_does_not_commit_a_caller_owned_transaction():
     store, wid, rid, emb, index = _fixture()
     vector = emb.embed(["caller-owned native batch"])[0]

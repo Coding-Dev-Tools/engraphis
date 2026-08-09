@@ -584,16 +584,26 @@ def parse_provider_chain(env_var: str = "ENGRAPHIS_LLM_PROVIDERS") -> LLMProvide
         last_colon = remainder.rfind(":")
         if last_colon >= 0:
             candidate = remainder[last_colon + 1:].strip()
-            # Only treat as ceiling if it looks numeric and cannot be a URL port.
-            # A bare port like ":8080" at end-of-string has no "/" but follows a
-            # host segment; detect this by checking whether the text before the
-            # colon ends with a digit (port pattern) or contains "://" (scheme).
+            # Only treat an integer as a URL port when it follows the authority
+            # directly. Once the URL has a path, a numeric suffix is the documented
+            # cost ceiling (for example ``https://api.example/v1:1``). Decimal
+            # suffixes cannot be ports and are always parsed as ceilings.
             prefix = remainder[:last_colon]
-            is_port = (
-                candidate.isdigit()
-                and not prefix.endswith("/")
-                and "://" in prefix
-            )
+            is_port = False
+            if candidate.isdigit() and "://" in prefix:
+                try:
+                    prefix_parts = prefix.split(":", 3)
+                    url_before_suffix = urlsplit(
+                        prefix_parts[3] if len(prefix_parts) == 4 else ""
+                    )
+                    is_port = bool(
+                        url_before_suffix.scheme
+                        and url_before_suffix.hostname
+                        and url_before_suffix.path in {"", "/"}
+                    )
+                except ValueError:
+                    # Leave malformed URL handling to LLMClient's normal validator.
+                    is_port = False
             if (
                 candidate
                 and not candidate.startswith("//")

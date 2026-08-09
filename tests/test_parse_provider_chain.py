@@ -35,6 +35,18 @@ class TestParseProviderChainPortPreservation:
         assert chain._cost_ceilings is not None
         assert chain._cost_ceilings[0] == pytest.approx(0.50)
 
+    def test_integer_ceiling_after_url_path_is_not_mistaken_for_port(self):
+        chain = _parse("openai:gpt-4o:sk-test:https://api.example/v1:1")
+
+        assert chain._clients[0].base_url == "https://api.example/v1"
+        assert chain._cost_ceilings == {0: pytest.approx(1.0)}
+
+    def test_low_bare_port_is_preserved(self):
+        chain = _parse("openai:gpt-4o:sk-test:http://localhost:1")
+
+        assert chain._clients[0].base_url == "http://localhost:1"
+        assert not (chain._cost_ceilings or {})
+
     def test_https_api_url_with_ceiling(self):
         """Standard HTTPS API URL with trailing ceiling."""
         chain = _parse("openai:gpt-4o-mini:sk-abc:https://api.openai.com/v1:0.75")
