@@ -322,7 +322,7 @@ class PrivateHostedLedger:
             before = private_file_stat(self.path, allow_missing=True, owner_only=True)
             payload = read_private_text(
                 self.path, max_bytes=MAX_PRIVATE_LEDGER_BYTES, allow_missing=True,
-                owner_only=True, check_parent=True,
+                owner_only=True, expected_version=before,
             )
             after = private_file_stat(self.path, allow_missing=True, owner_only=True)
         except (OSError, UnsafeStateFile) as exc:
