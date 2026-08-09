@@ -41,6 +41,7 @@ MAX_DOCUMENT_FILES = 10_000
 MAX_DOCUMENT_TREE_BYTES = 250_000_000
 MAX_CONTAINER_MEMBERS = 2_000
 MAX_CONTAINER_XML_BYTES = 20_000_000
+MAX_XML_ATTRIBUTE_METADATA_CHARS = 8_000
 MAX_SOURCE_PATH_CHARS = 4_096
 MAX_CONTAINER_TEXT_CHARS = MAX_DOCUMENT_CHARS
 MAX_JSON_NESTING = 128
@@ -646,12 +647,35 @@ def _xml_body(raw: bytes, fallback: str) -> Tuple[str, str, Dict[str, Any], List
         raise DocumentParseError("document produced no readable text")
     title = str(root.attrib.get("title") or root.attrib.get("name") or fallback)[:300]
     links = []
+    attributes: List[Dict[str, str]] = []
+    attribute_chars = 0
+    omitted_attributes = 0
     for element in root.iter():
+        for name, raw_value in element.attrib.items():
+            value = str(raw_value)
+            # XML text extraction intentionally excludes attributes, so inspect the
+            # complete attribute map before applying the bounded metadata projection.
+            if secret_kind({str(name): value}) is not None:
+                raise DocumentParseError("source appears to contain a secret")
+            name_text = str(name)[:200]
+            value_text = value[:1000]
+            entry_size = len(name_text) + len(value_text) + 4
+            if attribute_chars + entry_size <= MAX_XML_ATTRIBUTE_METADATA_CHARS:
+                attributes.append({"name": name_text, "value": value_text})
+                attribute_chars += entry_size
+            else:
+                omitted_attributes += 1
         for name in ("href", "src"):
             value = element.attrib.get(name)
             if value:
                 links.append(value)
-    return body, title, {"xml_root": root.tag, "document_links": _dedupe(links)}, []
+    metadata: Dict[str, Any] = {
+        "xml_root": root.tag, "document_links": _dedupe(links),
+        "xml_attributes": attributes,
+    }
+    if omitted_attributes:
+        metadata["xml_attributes_omitted"] = omitted_attributes
+    return body, title, metadata, []
 
 
 def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], List[str]]:
@@ -1136,7 +1160,7 @@ class _ReadableHTMLParser(HTMLParser):
         self.parts: List[str] = []
         self.limit = limit
         self.size = 0
-        self._ignored = 0
+        self._ignored_tags: List[str] = []
         self._code_depth = 0
         self._title = False
         self._heading_depth = 0
@@ -1147,12 +1171,12 @@ class _ReadableHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
         lower = tag.casefold()
-        if self._ignored:
+        if self._ignored_tags:
             if lower in {"script", "style", "noscript", "template"}:
-                self._ignored += 1
+                self._ignored_tags.append(lower)
             return
         if lower in {"script", "style", "noscript", "template"}:
-            self._ignored += 1
+            self._ignored_tags.append(lower)
         elif lower == "title":
             self._title = True
         elif lower in {"pre", "code"}:
@@ -1178,9 +1202,9 @@ class _ReadableHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         lower = tag.casefold()
-        if self._ignored:
-            if lower in {"script", "style", "noscript", "template"}:
-                self._ignored -= 1
+        if self._ignored_tags:
+            if lower == self._ignored_tags[-1]:
+                self._ignored_tags.pop()
             return
         if lower in {"h1", "h2", "h3", "h4", "h5", "h6"} and self._heading_depth:
             self._heading_depth -= 1
@@ -1188,9 +1212,7 @@ class _ReadableHTMLParser(HTMLParser):
                 heading = "".join(self._heading_parts).strip()
                 if heading:
                     self.headings.append(heading[:300])
-        if lower in {"script", "style", "noscript", "template"} and self._ignored:
-            self._ignored -= 1
-        elif lower == "title":
+        if lower == "title":
             self._title = False
         elif lower in {"pre", "code"} and self._code_depth:
             self._code_depth -= 1
@@ -1204,7 +1226,7 @@ class _ReadableHTMLParser(HTMLParser):
             self.title = (self.title + data).strip()[:300]
         if self._heading_depth:
             self._heading_parts.append(data)
-        if not self._ignored and not self._title:
+        if not self._ignored_tags and not self._title:
             self._add(data)
 
     def _add(self, value: str) -> None:

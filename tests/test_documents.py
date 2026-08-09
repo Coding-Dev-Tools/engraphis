@@ -217,6 +217,21 @@ def test_xml_honors_the_declared_encoding():
     assert record.body == "café"
 
 
+def test_xml_attributes_are_preserved_and_secrets_are_rejected():
+    record = parse_document(
+        b'<config title="Settings" host="prod"><item>readable</item></config>',
+        "config.xml",
+    )
+    assert {item["name"] for item in record.metadata["xml_attributes"]} == {
+        "title", "host",
+    }
+    with pytest.raises(DocumentParseError, match="secret"):
+        parse_document(
+            b'<server api_key="sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ">ok</server>',
+            "secret.xml",
+        )
+
+
 def test_rtf_and_additional_office_containers_are_dependency_free():
     rtf = parse_document(b"{\\rtf1\\ansi Hello\\par world}", "notes.rtf")
     assert "Hello" in rtf.body and "world" in rtf.body
@@ -277,6 +292,14 @@ def test_markup_and_markdown_code_cannot_create_discovery_records():
     assert [link.target for link in markdown.links] == ["Visible", "../metrics.csv"]
     assert [item.path for item in markdown.attachments] == ["images/plot.png"]
     assert markdown.tags == ["visible"]
+
+
+def test_mismatched_ignored_html_closing_tags_stay_hidden():
+    html = parse_document(
+        b"<noscript></style>hidden fallback</noscript><p>visible</p>",
+        "page.html",
+    )
+    assert html.body == "visible"
 
 
 def test_html_uses_declared_non_utf8_charset_before_parsing():
