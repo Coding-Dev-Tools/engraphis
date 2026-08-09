@@ -86,7 +86,7 @@
   const MAX_AUTO_FIT_ZOOM = 4;
   const SETTINGS_ALPHA_TARGET = 0.12;
   const ALPHA_TARGET_HOLD_MS = 180;
-  const DRAG_ALPHA_TARGET = 0.18;
+  const DRAG_ALPHA_TARGET = 0.04;
   const DRAG_SETTLE_DELAY_MS = 80;
 
   /* Physics is allowed to respond live, but one bad force update must never turn a
@@ -933,6 +933,7 @@
     const api = {};
 
     let activeDragNode = null, activeDragLinks = [], dragFollowForce = null;
+    let dragIsolated = false, dragCenterForce = null;
 
     function setActiveDragNode(node) {
       activeDragNode = node || null;
@@ -945,6 +946,28 @@
         const source = linkEndpoint(link, 'source'), target = linkEndpoint(link, 'target');
         return source === activeId || target === activeId;
       });
+      isolateDragPhysics();
+    }
+
+    /* A pinned node is a local interaction. Keeping charge, centering, radial, and collision
+       forces active while that pin jumps makes every unrelated node respond to the pointer.
+       Leave only link attraction, the bounded one-hop follow force, and the final velocity
+       guard active until pointer-up. Settings renders can reinstall the normal forces; the
+       final isolation pass in applyForces() removes them again while the gesture is live. */
+    function isolateDragPhysics() {
+      if (!dragIsolated) {
+        dragIsolated = true;
+        dragCenterForce = fg.d3Force('center');
+      }
+      ['charge', 'x', 'y', 'radial', 'collide', 'center'].forEach(name => fg.d3Force(name, null));
+    }
+
+    function restoreDragPhysics() {
+      if (!dragIsolated) return;
+      dragIsolated = false;
+      if (dragCenterForce) fg.d3Force('center', dragCenterForce);
+      dragCenterForce = null;
+      applyForces();
     }
 
     function makeDragFollowForce() {
@@ -1310,6 +1333,7 @@
          per node on every tick, and a large store pays that on the initial layout and on every
          reheat, which is exactly where it is least affordable. */
       if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
+      if (dragIsolated) isolateDragPhysics();
     }
 
     function clearPinnedPositions(data) {
@@ -1590,8 +1614,10 @@
     }
     function setDragSimulationBudget(active) {
       if (active && !staticFullLayout && !state.settings.frozen) {
-        if (fg.cooldownTime) fg.cooldownTime(Infinity);
-        if (fg.cooldownTicks) fg.cooldownTicks(Infinity);
+        /* Never use an unbounded drag budget. The scoped forces above keep the gesture
+           responsive without allowing a long pointer hold to become an infinite reheat. */
+        if (fg.cooldownTime) fg.cooldownTime(5000);
+        if (fg.cooldownTicks) fg.cooldownTicks(260);
         if (fg.warmupTicks) fg.warmupTicks(0);
         if (fg.d3AlphaDecay) fg.d3AlphaDecay(0.08);
         return;
@@ -1785,6 +1811,15 @@
       if (!dragging || supportsSoftAlpha()) softReheat(dragging);
     }
 
+    function beginNodeDrag(node) {
+      if (destroyed || state.settings.frozen || staticFullLayout) return;
+      setActiveDragNode(node);
+      setDragSimulationBudget(true);
+      prepareReheat();
+      if (fg.d3AlphaDecay) fg.d3AlphaDecay(0.08);
+      if (supportsSoftAlpha()) softReheat(true);
+    }
+
     function finishNodeDrag(node) {
       if (!node) return;
       const retainAnchor = state.settings.frozen || staticFullLayout;
@@ -1793,6 +1828,7 @@
         node.fy = undefined;
       }
       setActiveDragNode(null);
+      restoreDragPhysics();
       setDragSimulationBudget(false);
       node.vx = 0;
       node.vy = 0;
@@ -1867,8 +1903,7 @@
        remains the primary controller, but register vendor callbacks when available. */
     if (typeof fg.onNodeDragStart === 'function') {
       fg.onNodeDragStart(node => {
-        setActiveDragNode(node);
-        reheatLiveLayout(true);
+        beginNodeDrag(node);
       });
     }
     if (typeof fg.onNodeDragEnd === 'function') {
@@ -1922,7 +1957,7 @@
           manualDrag.dragged = true;
           started = true;
         }
-        if (started) setActiveDragNode(manualDrag.node);
+        if (started) beginNodeDrag(manualDrag.node);
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;
