@@ -7070,8 +7070,10 @@ class Store:
         Supported dimensions: ``workspace`` (single bucket), ``repo``,
         ``agent`` (actor digest), ``day`` (UTC date from receipt ts).
         Returns a list of dicts each containing the group key and the same
-        token counters as :meth:`context_savings`.  Receipts are privacy-safe:
-        actor is a one-way digest, no query or memory content is exposed.
+        token counters as :meth:`context_savings`. Each dimension bucket is
+        additionally partitioned by token-counter identity so incompatible
+        units are never added together. Receipts are privacy-safe: actor is a
+        one-way digest, no query or memory content is exposed.
         """
         valid_dims = {"workspace", "repo", "agent", "day"}
         if group_by not in valid_dims:
@@ -7103,7 +7105,7 @@ class Store:
             params,
         ).fetchall()
         import time as _time
-        groups: dict[str, dict] = {}
+        groups: dict[tuple[str, str], dict] = {}
 
         def _bucket() -> dict:
             return {
@@ -7153,6 +7155,16 @@ class Store:
                 for k in required
             ):
                 continue
+            expected_saved = max(
+                0.0, float(usage["source_tokens"]) - float(usage["context_tokens"])
+            )
+            if not math.isclose(
+                float(usage["saved_tokens"]),
+                expected_saved,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                continue
             if group_by == "workspace":
                 key = workspace_id
             elif group_by == "repo":
@@ -7167,11 +7179,16 @@ class Store:
                 key = day
             else:
                 key = workspace_id
-            grp = groups.setdefault(key, _bucket())
+            token_counter = str(usage.get("token_counter") or "unknown")
+            grp = groups.setdefault((key, token_counter), _bucket())
             _add(grp, usage)
         result = []
-        for key in sorted(groups):
-            entry = {"group_key": key, **groups[key]}
+        for key, token_counter in sorted(groups):
+            entry = {
+                "group_key": key,
+                "token_counter": token_counter,
+                **groups[(key, token_counter)],
+            }
             entry["savings_ratio"] = (
                 entry["saved_tokens"] / entry["source_tokens"]
                 if entry["source_tokens"] else 0.0

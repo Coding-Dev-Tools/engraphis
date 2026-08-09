@@ -236,11 +236,13 @@ def test_grouped_context_savings_uses_the_same_time_and_release_filters():
         from_ts=90,
         to_ts=150,
         release_version="1.5",
+        format="csv",
     )
 
     assert summary["receipt_count"] == 1
     assert summary["by_group"] == [{
         "group_key": rid,
+        "token_counter": "engraphis.regex.v1",
         "receipt_count": 1,
         "source_tokens": 100,
         "context_tokens": 40,
@@ -250,6 +252,53 @@ def test_grouped_context_savings_uses_the_same_time_and_release_filters():
         "omitted_count": 0,
         "savings_ratio": 0.6,
     }]
+    assert summary["csv"].splitlines()[0].startswith("group_key,token_counter,")
+
+
+def test_grouped_context_savings_separates_counters_and_rejects_invalid_saved():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("grouped-counters")
+    valid = (
+        _usage(100, 40, counter="engraphis.regex.v1"),
+        _usage(80, 20, counter="estimate_tokens"),
+    )
+    invalid = _usage(70, 30, counter="engraphis.regex.v1")
+    invalid["saved_tokens"] = 999
+    for usage in (*valid, invalid):
+        store.record_receipt(
+            "recall",
+            workspace_id=wid,
+            metadata={"token_usage": usage},
+        )
+
+    assert store.context_savings_grouped(
+        workspace_id=wid, group_by="workspace"
+    ) == [
+        {
+            "group_key": wid,
+            "token_counter": "engraphis.regex.v1",
+            "receipt_count": 1,
+            "source_tokens": 100,
+            "context_tokens": 40,
+            "saved_tokens": 60,
+            "budget_tokens": 100,
+            "packed_count": 1,
+            "omitted_count": 0,
+            "savings_ratio": 0.6,
+        },
+        {
+            "group_key": wid,
+            "token_counter": "estimate_tokens",
+            "receipt_count": 1,
+            "source_tokens": 80,
+            "context_tokens": 20,
+            "saved_tokens": 60,
+            "budget_tokens": 80,
+            "packed_count": 1,
+            "omitted_count": 0,
+            "savings_ratio": 0.75,
+        },
+    ]
 
 
 def test_context_savings_ignores_gateway_copies_and_rejects_noncanonical_estimates():

@@ -5065,7 +5065,7 @@ class MemoryService:
                 import io as _io
                 buf = _io.StringIO()
                 fields = [
-                    "group_key", "receipt_count", "source_tokens",
+                    "group_key", "token_counter", "receipt_count", "source_tokens",
                     "context_tokens", "saved_tokens", "budget_tokens",
                     "packed_count", "omitted_count", "savings_ratio",
                 ]
