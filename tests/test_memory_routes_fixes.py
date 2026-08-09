@@ -6,6 +6,7 @@
 - POST /memory/conversations validates content and forwards the complete grounded history.
 - POST /memory/interactions recorded signals that never reinforced any memory.
 """
+import os
 import threading
 
 import numpy as np
@@ -238,6 +239,53 @@ def test_import_folder_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path
 
     assert response.status_code == 403
     assert response.json()["detail"].startswith("Import path must be under an allowed root")
+
+def test_import_folder_accepts_files_under_any_configured_root(monkeypatch, tmp_path):
+    """When ENGRAPHIS_IMPORT_ROOTS points outside home, files under ANY configured
+    root must be accepted (not rejected because they're not under ALL roots).
+    Regression for review thread #20: any(not _path_within_root(...)) required
+    every root to be an ancestor — should accept files under ANY configured root."""
+    from engraphis.routes import vault as vault_routes
+
+    # Two disjoint allowed roots
+    root_a = tmp_path / "data" / "root_a"
+    root_b = tmp_path / "data" / "root_b"
+    fake_home = tmp_path / "fake-home"
+    root_a.mkdir(parents=True)
+    root_b.mkdir(parents=True)
+    fake_home.mkdir()
+
+    # File under root_b (not under root_a or fake_home)
+    (root_b / "note.md").write_text("# Disjoint Root Test", encoding="utf-8")
+
+    # Configure both roots (disjoint from each other and from home)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", f"{root_a}{os.pathsep}{root_b}")
+    monkeypatch.setattr(
+        vault_routes.Path,
+        "home",
+        classmethod(lambda _cls: fake_home),
+    )
+    monkeypatch.setattr(
+        vault_routes.ingest_engine,
+        "ingest_document",
+        lambda **_kwargs: {"document_id": "disjoint-test"},
+    )
+
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/memory/vaults/import-folder",
+            json={
+                "path": str(root_b),
+                "namespace": "ns",
+                "file_pattern": "*.md",
+            },
+        )
+
+    # Must succeed (file is under root_b, one of the configured roots)
+    assert response.status_code == 200
+    result = response.json()["data"]
+    assert result["imported"] == 1
+    assert result["files"][0]["status"] == "ok"
 
 
 def test_safe_call_classifies_and_sanitizes_legacy_failures():
