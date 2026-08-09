@@ -499,6 +499,7 @@
     const detail = byId('sidebar-pro-detail');
     const link = byId('sidebar-pro-cta');
     if (!copy || !detail || !link || !state.license) return;
+    const canonicalProCtaLabel = 'Subscribe to Pro';
     const renderFeatureCtas = () => {
       [
         ['analytics-pro-cta', 'analytics', 'pro'],
@@ -531,6 +532,7 @@
     link.textContent = cta.label;
     link.href = cta.href || '#';
     link.setAttribute('aria-disabled', cta.href ? 'false' : 'true');
+    link.dataset.proCtaLabel = canonicalProCtaLabel;
     link.dataset.proCta = 'sidebar';
     renderFeatureCtas();
   }
