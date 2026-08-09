@@ -263,6 +263,32 @@ def test_adapter_contract_is_bounded_and_redacts_failures():
     assert parse_document(raw, "report.pdf", adapter=adapter).body == "extracted document"
 
 
+def test_malformed_adapter_text_is_rejected_without_an_internal_exception():
+    def adapter(data, path, mtime):
+        return DocumentRecord(
+            relative_path=path, format="pdf", media_type="application/pdf", title="Report",
+            content=object(), body="text",  # type: ignore[arg-type]
+            raw_sha256=__import__("hashlib").sha256(data).hexdigest(),
+            canonical_sha256="not-reached", source_size=len(data), source_mtime_ns=mtime,
+        )
+
+    with pytest.raises(DocumentParseError, match="adapter returned invalid text"):
+        parse_document(b"%PDF", "report.pdf", adapter=adapter)
+
+    def invalid_unicode_adapter(data, path, mtime):
+        content = "otherwise valid"
+        return DocumentRecord(
+            relative_path=path, format="pdf", media_type="application/pdf", title="Report",
+            content=content, body="bad \ud800 body",
+            raw_sha256=__import__("hashlib").sha256(data).hexdigest(),
+            canonical_sha256=__import__("hashlib").sha256(content.encode()).hexdigest(),
+            source_size=len(data), source_mtime_ns=mtime,
+        )
+
+    with pytest.raises(DocumentParseError, match="adapter returned invalid text"):
+        parse_document(b"%PDF", "report.pdf", adapter=invalid_unicode_adapter)
+
+
 def test_every_registered_extension_has_a_stable_dispatch_and_adapter_contract():
     for spec in DOCUMENT_FORMATS.values():
         for extension in spec.extensions:

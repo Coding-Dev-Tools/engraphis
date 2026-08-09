@@ -272,16 +272,28 @@ def parse_document(
             raise DocumentParseError("optional document adapter failed") from None
         if not isinstance(record, DocumentRecord):
             raise DocumentParseError("document adapter returned an invalid record")
+        # Validate text before deriving its canonical hash.  Adapters are an
+        # extension boundary; a malformed third-party adapter must produce the
+        # same content-free per-file error as every other parser failure rather
+        # than leaking an AttributeError/UnicodeEncodeError to a caller.
+        if not isinstance(record.content, str) or not isinstance(record.body, str):
+            raise DocumentParseError("document adapter returned invalid text")
+        try:
+            canonical_sha256 = hashlib.sha256(record.content.encode("utf-8")).hexdigest()
+            # Validate both writable strings, not only the canonical content.
+            # A lone surrogate in ``body`` otherwise escapes this boundary and
+            # can fail later while serialising preview or memory metadata.
+            record.body.encode("utf-8")
+        except UnicodeEncodeError:
+            raise DocumentParseError("document adapter returned invalid text") from None
         if (
             record.relative_path != relative_path or record.format != spec.name
             or record.source_size != len(raw)
             or record.raw_sha256 != hashlib.sha256(raw).hexdigest()
-            or record.canonical_sha256 != hashlib.sha256(record.content.encode("utf-8")).hexdigest()
+            or record.canonical_sha256 != canonical_sha256
             or record.source_mtime_ns != source_mtime_ns
         ):
             raise DocumentParseError("document adapter returned an invalid source identity")
-        if not isinstance(record.content, str) or not isinstance(record.body, str):
-            raise DocumentParseError("document adapter returned invalid text")
         if not record.body.strip():
             raise DocumentParseError("document produced no readable text")
         if len(record.content) > MAX_DOCUMENT_CHARS or len(record.body) > MAX_DOCUMENT_CHARS:

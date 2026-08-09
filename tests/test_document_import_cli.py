@@ -10,6 +10,7 @@ import pytest
 
 from engraphis.service import MemoryService, ValidationError
 from engraphis.core.interfaces import Scope
+from engraphis.document_import import scan_document_upload
 from scripts import importer
 
 
@@ -176,24 +177,55 @@ def test_documents_noninteractive_write_requires_confirmation(monkeypatch, tmp_p
     assert "require --yes" in capsys.readouterr().err
 
 
-def test_generic_upload_validation_accepts_mixed_files_and_rejects_traversal(tmp_path):
+def test_generic_upload_validation_accepts_mixed_files_and_rejects_traversal(tmp_path, monkeypatch):
     service = MemoryService.create(
         str(tmp_path / "memory.db"), embed_dim=32, extractor="none",
         graph_extractor="none", retention_supervisor="none",
     )
     try:
+        monkeypatch.setattr("engraphis.service.MAX_IMPORT_RESOURCE_BYTES", 10)
+        monkeypatch.setattr("engraphis.service.MAX_IMPORT_TOTAL_BYTES", 15)
         uploads, attachments = service._document_upload_inputs(
             [("notes/readme.md", b"# Hello"), ("reports/q1.pdf", b"%PDF")],
-            [{"path": "images/chart.png", "size": 123}],
+            [{"path": "images/chart.png", "size": 10}],
         )
         assert [path for path, _raw in uploads] == [
             "notes/readme.md", "reports/q1.pdf",
         ]
-        assert attachments == [{"path": "images/chart.png", "size": 123}]
+        assert attachments == [{"path": "images/chart.png", "size": 10}]
         with pytest.raises(ValidationError, match="invalid path"):
             service._document_upload_inputs([("../secret.txt", b"x")], [])
+        with pytest.raises(ValidationError, match="duplicate path"):
+            service._document_upload_inputs(
+                [("Notes/Readme.md", b"a"), ("notes/readme.md", b"b")], [],
+            )
+        with pytest.raises(ValidationError, match="paths overlap"):
+            service._document_upload_inputs(
+                [("notes/readme.md", b"a")],
+                [{"path": "notes/readme.md", "size": 1}],
+            )
+        with pytest.raises(ValidationError, match="invalid size"):
+            service._document_upload_inputs(
+                [("notes/readme.md", b"a")],
+                [{"path": "assets/big.bin", "size": 11}],
+            )
+        with pytest.raises(ValidationError, match="too large"):
+            service._document_upload_inputs(
+                [("notes/big.md", b"x" * 11)], [],
+            )
+        with pytest.raises(ValidationError, match="total size"):
+            service._document_upload_inputs(
+                [("notes/one.md", b"x" * 8), ("notes/two.md", b"y" * 8)], [],
+            )
     finally:
         service.close()
+
+
+def test_document_browser_label_identity_is_nfc() -> None:
+    files = [("note.txt", b"local note")]
+    assert scan_document_upload(files, source_label="Caf\u00e9").source_id == (
+        scan_document_upload(files, source_label="Cafe\u0301").source_id
+    ) == scan_document_upload(files, source_label="CAF\u00c9").source_id
 
 
 def test_import_help_presents_documents_as_primary_and_obsidian_as_compatibility():
@@ -314,7 +346,7 @@ def test_universal_upload_job_reports_adapter_and_registered_source(tmp_path):
                 ("notes/context.md", b"# Context\n\nOffline and repeatable."),
             ],
             attachment_manifest=[], workspace="acme",
-            source_label="Loose documents", confirmed=True,
+            source_label="Caf\u00e9 documents", confirmed=True,
         )
         assert started["adapter"] == "documents"
         worker = service._obsidian_job_threads[started["job_id"]]
@@ -333,15 +365,27 @@ def test_universal_upload_job_reports_adapter_and_registered_source(tmp_path):
         sources = service.list_document_sources("acme")
         assert len(sources) == 1
         assert sources[0]["id"] == started["source_id"]
-        assert sources[0]["label"] == "Loose documents"
+        assert sources[0]["label"] == "Caf\u00e9 documents"
         assert sources[0]["kind"] == "documents"
         assert sources[0]["adapter"] == "documents"
+        with pytest.raises(ValidationError, match="select its source_id"):
+            service.preview_document_upload(
+                files=[("other.txt", b"A separate collection")],
+                attachment_manifest=[], workspace="acme",
+                source_label="Cafe\u0301 DOCUMENTS",
+            )
+        with pytest.raises(ValidationError, match="select its source_id"):
+            service.import_document_upload(
+                files=[("other.txt", b"A separate collection")],
+                attachment_manifest=[], workspace="acme",
+                source_label="Cafe\u0301 documents", confirmed=True,
+            )
         resumed_preview = service.preview_document_upload(
             files=[("brief.txt", b"Local release brief.")],
             attachment_manifest=[], workspace="acme",
             source_id=started["source_id"],
         )
         assert resumed_preview["source_id"] == started["source_id"]
-        assert resumed_preview["source_label"] == "Loose documents"
+        assert resumed_preview["source_label"] == "Caf\u00e9 documents"
     finally:
         service.close()

@@ -174,7 +174,8 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > memory crossed a sync boundary. Schema 14 adds the Obsidian collection and import manifests;
 > schema 15 generalizes them to source-neutral local documents, preserves temporal source lineage
 > across re-imports, binds adapters and target scopes, and retains only bounded, content-free
-> per-job format/result metadata. See the
+> per-job format/result metadata. The schema 16 migration persists each import job's optional session target
+> and requires source lineage and job-item attachments to remain in that exact session. See the
 > [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
 
 ---

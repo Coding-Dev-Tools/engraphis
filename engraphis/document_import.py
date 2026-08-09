@@ -14,6 +14,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import re
 from typing import Any, Iterable, Optional
+import unicodedata
 
 from engraphis.core.documents import (
     IMPORTER_VERSION,
@@ -107,11 +108,11 @@ def scan_document_upload(
     files: Iterable[tuple[str, bytes]], *, source_label: str,
 ) -> DocumentScan:
     """Parse browser-selected document bytes without creating an upload copy."""
-    label = str(source_label or "").strip()[:200]
+    label = unicodedata.normalize("NFC", str(source_label or "").strip()[:200])
     if not label:
         raise ValueError("source_label is required for a browser source")
     source_id = hashlib.sha256(
-        ("documents-browser\0" + label).encode("utf-8", "surrogatepass")
+        ("documents-browser\0" + label.casefold()).encode("utf-8", "surrogatepass")
     ).hexdigest()
     scan = DocumentScan(root_path="", source_id=source_id)
     total = 0

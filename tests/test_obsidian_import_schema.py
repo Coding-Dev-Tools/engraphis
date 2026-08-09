@@ -227,6 +227,52 @@ def test_source_manifest_rejects_cross_adapter_jobs():
         store.close()
 
 
+def test_source_manifest_rejects_cross_session_jobs_and_keeps_generic_jobs_compatible():
+    store = Store(":memory:")
+    try:
+        workspace_id = store.get_or_create_workspace("session-job-binding")
+        repo_id = store.get_or_create_repo(workspace_id, "repo")
+        session_a = store.start_session(workspace_id, repo_id)
+        session_b = store.start_session(workspace_id, repo_id)
+        vault_id = store.register_source_vault(
+            kind="documents", root_digest="a" * 64, workspace_id=workspace_id,
+            repo_id=repo_id, session_id=session_a, scope="session",
+        )
+        job_a, job_b, generic = ids.new_id("job"), ids.new_id("job"), ids.new_id("job")
+        store.conn.executemany(
+            "INSERT INTO jobs(id,workspace_id,repo_id,session_id,kind,state,created_at) "
+            "VALUES (?,?,?,?,?,'running',0)",
+            (
+                (job_a, workspace_id, repo_id, session_a, "document_import"),
+                (job_b, workspace_id, repo_id, session_b, "document_import"),
+                (generic, workspace_id, repo_id, None, "graph_index"),
+            ),
+        )
+        store.conn.commit()
+        source_id = store.upsert_source_import_item(
+            vault_id=vault_id, source_key="b" * 64, relative_path="One.txt",
+            import_id=job_a,
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="seen-job scope mismatch"):
+            store.upsert_source_import_item(
+                vault_id=vault_id, source_key="b" * 64, relative_path="One.txt",
+                import_id=job_b,
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="job scope mismatch"):
+            store.record_source_import_job_item(
+                job_id=job_b, source_id=source_id, relative_path="One.txt",
+                planned_action="imported",
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="job session scope mismatch"):
+            store.conn.execute(
+                "INSERT INTO jobs(id,workspace_id,repo_id,session_id,kind,state,created_at) "
+                "VALUES (?,?,?,?,?,'running',0)",
+                (ids.new_id("job"), workspace_id, None, session_b, "document_import"),
+            )
+    finally:
+        store.close()
+
+
 def test_concurrent_null_scoped_vault_registration_has_one_winner(tmp_path):
     db = tmp_path / "vault-race.db"
     initial = Store(str(db))
@@ -451,7 +497,7 @@ def test_v13_writable_upgrade_creates_durable_current_manifest_schema(tmp_path):
     workspace_id = _prepare_v13_database(db)
     upgraded = Store(str(db))
     try:
-        assert upgraded.schema_version == SCHEMA_VERSION == 15
+        assert upgraded.schema_version == SCHEMA_VERSION == 16
         assert upgraded.conn.execute(
             "SELECT id FROM workspaces WHERE id=?", (workspace_id,)
         ).fetchone() is not None
@@ -504,7 +550,7 @@ def test_v13_read_only_refuses_without_writing_then_accepts_upgraded_db(tmp_path
     writable.close()
     readonly = Store(str(db), read_only=True)
     try:
-        assert readonly.schema_version == 15
+        assert readonly.schema_version == 16
         with pytest.raises(sqlite3.OperationalError):
             readonly.conn.execute(
                 "INSERT INTO workspaces(id,name) VALUES ('ws_nope','nope')"
@@ -558,7 +604,7 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
 
     upgraded = Store(str(db))
     try:
-        assert upgraded.schema_version == 15
+        assert upgraded.schema_version == 16
         assert upgraded.get_source_vault(vault_id)["kind"] == "obsidian"
         assert upgraded.get_source_import(source_id)["relative_path"] == "Legacy.md"
         assert upgraded.list_source_import_job_items(job_id=job_id)[0]["source_id"] == source_id
@@ -571,5 +617,34 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
         assert upgraded.conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert upgraded.conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert Path(f"{db}.pre-migration-v15.bak").is_file()
+    finally:
+        upgraded.close()
+
+
+def test_v15_upgrade_adds_nullable_job_session_scope(tmp_path):
+    db = tmp_path / "v15-jobs.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at REAL);"
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (15, 0);"
+        "CREATE TABLE jobs("
+        "id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, repo_id TEXT, kind TEXT NOT NULL,"
+        "state TEXT NOT NULL DEFAULT 'queued', dry_run INTEGER NOT NULL DEFAULT 1,"
+        "total_items INTEGER NOT NULL DEFAULT 0, processed_items INTEGER NOT NULL DEFAULT 0,"
+        "counts TEXT NOT NULL DEFAULT '{}', errors TEXT NOT NULL DEFAULT '[]',"
+        "request TEXT NOT NULL DEFAULT '{}', cancel_requested INTEGER NOT NULL DEFAULT 0,"
+        "runner_id TEXT, heartbeat_at REAL, created_at REAL NOT NULL, started_at REAL, finished_at REAL"
+        ");"
+    )
+    conn.commit()
+    conn.close()
+
+    upgraded = Store(str(db))
+    try:
+        assert upgraded.schema_version == 16
+        assert "session_id" in {
+            row["name"] for row in upgraded.conn.execute("PRAGMA table_info(jobs)")
+        }
+        assert Path(f"{db}.pre-migration-v16.bak").is_file()
     finally:
         upgraded.close()

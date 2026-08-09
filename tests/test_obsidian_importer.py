@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from engraphis.core.interfaces import Scope, SearchFilter
+from engraphis.core.obsidian import ObsidianNote, ObsidianVaultScan, scan_obsidian_vault
+from engraphis.obsidian_import import ObsidianImportCancelled, ObsidianImporter
 from engraphis.service import MemoryService
 from scripts import importer as importer_cli
 
@@ -196,6 +200,64 @@ def test_cancelled_import_resumes_without_duplicates(tmp_path: Path):
         service.close()
 
 
+def test_link_reconciliation_cancels_and_rolls_back_only_the_open_batch(tmp_path: Path):
+    vault = _vault(tmp_path)
+    service = _service(tmp_path / "memory.db")
+    try:
+        report = service.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+        service.store.conn.execute("DELETE FROM mem_links")
+        service.store.conn.commit()
+        checks = 0
+
+        def cancel_after_first_source() -> bool:
+            nonlocal checks
+            checks += 1
+            return checks >= 2
+
+        with pytest.raises(ObsidianImportCancelled):
+            ObsidianImporter(service)._reconcile_links(
+                scan_obsidian_vault(str(vault)), vault_id=report["vault_id"],
+                job_id=report["job_id"], cancel_check=cancel_after_first_source,
+            )
+        assert service.store.conn.execute("SELECT COUNT(*) FROM mem_links").fetchone()[0] == 0
+    finally:
+        service.close()
+
+
+def test_rename_planner_indexes_hashes_once_for_large_sources():
+    class CountingItems(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    notes = [
+        ObsidianNote(
+            relative_path=f"current/{index}.md", title=str(index), content="body", body="body",
+            raw_sha256=f"{index:064x}", canonical_sha256=f"{index:064x}",
+        )
+        for index in range(128)
+    ]
+    items = CountingItems([
+        {
+            "id": f"src_{index}", "source_key": f"{index + 1000:064x}",
+            "relative_path": f"archived/{index}.md", "content_sha256": f"{index:064x}",
+            "state": "imported", "last_seen_at": index,
+        }
+        for index in range(128)
+    ])
+    plans, missing = ObsidianImporter()._plan(
+        ObsidianVaultScan(vault_path="", vault_id="a" * 64, notes=notes),
+        "a" * 64, items, inspect_memories=False,
+    )
+    assert not missing
+    assert {plan.action for plan in plans} == {"renamed"}
+    # The prior implementation iterated the full historical item collection once
+    # per unmatched note. The indexed planner has only setup/final missing passes.
+    assert items.iterations <= 3
+
+
 def test_conflict_new_branch_and_atomic_note_failure(tmp_path: Path, monkeypatch):
     vault = tmp_path / "Vault"
     vault.mkdir()
@@ -283,6 +345,9 @@ def test_repo_and_session_scope_mapping(tmp_path: Path):
             session_id=sid, scope="session", confirmed=True,
         )
         assert session_report["target"]["session_id"] == sid
+        assert service.store.conn.execute(
+            "SELECT session_id FROM jobs WHERE id=?", (session_report["job_id"],)
+        ).fetchone()["session_id"] == sid
         record = service.store.get_memory(next(
             row["memory_id"] for row in service.store.list_source_import_items(
                 vault_id=session_report["vault_id"]

@@ -13,7 +13,8 @@ from pathlib import PurePosixPath
 import posixpath
 import re
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
+import unicodedata
 from urllib.parse import unquote, urlsplit
 
 from engraphis.core.ids import new_id
@@ -24,7 +25,6 @@ from engraphis.core.obsidian import (
     MAX_VAULT_BYTES,
     MAX_VAULT_FILES,
     ObsidianFileIssue,
-    ObsidianNote,
     ObsidianVaultScan,
     normalize_obsidian_path,
     parse_obsidian_note,
@@ -42,13 +42,118 @@ _SENSITIVE_NAMES = {
 }
 
 
+class _ImportLink(Protocol):
+    """The source-neutral link shape consumed by the import planner."""
+
+    @property
+    def target(self) -> str: ...
+
+    @property
+    def display_text(self) -> Optional[str]: ...
+
+    @property
+    def heading(self) -> Optional[str]: ...
+
+    @property
+    def block_id(self) -> Optional[str]: ...
+
+    @property
+    def embedded(self) -> bool: ...
+
+
+class _ImportAttachment(Protocol):
+    """The source-neutral attachment shape consumed by the import planner."""
+
+    @property
+    def path(self) -> str: ...
+
+
+class _ImportNote(Protocol):
+    """Readable source record accepted by the temporal import planner.
+
+    Both ``ObsidianNote`` and the universal ``DocumentRecord`` deliberately
+    implement this narrow, read-only shape.  Keeping it structural prevents the
+    document adapter from inheriting an Obsidian-only type contract while keeping
+    the runtime planner entirely source-neutral.
+    """
+
+    @property
+    def relative_path(self) -> str: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def body(self) -> str: ...
+
+    @property
+    def raw_sha256(self) -> str: ...
+
+    @property
+    def canonical_sha256(self) -> str: ...
+
+    @property
+    def source_size(self) -> int: ...
+
+    @property
+    def source_mtime_ns(self) -> Optional[int]: ...
+
+    @property
+    def title_source(self) -> str: ...
+
+    @property
+    def aliases(self) -> Sequence[str]: ...
+
+    @property
+    def tags(self) -> Sequence[str]: ...
+
+    @property
+    def dates(self) -> dict[str, str]: ...
+
+    @property
+    def headings(self) -> Sequence[str]: ...
+
+    @property
+    def links(self) -> Sequence[_ImportLink]: ...
+
+    @property
+    def attachments(self) -> Sequence[_ImportAttachment]: ...
+
+    @property
+    def warnings(self) -> Sequence[str]: ...
+
+
+class _ImportIssue(Protocol):
+    @property
+    def relative_path(self) -> str: ...
+
+    @property
+    def reason(self) -> str: ...
+
+
+class _ImportScan(Protocol):
+    """Minimal source collection shape needed for plan/report execution."""
+
+    @property
+    def vault_id(self) -> str: ...
+
+    @property
+    def notes(self) -> Sequence[_ImportNote]: ...
+
+    @property
+    def rejected(self) -> Sequence[_ImportIssue]: ...
+
+    @property
+    def skipped(self) -> Sequence[_ImportIssue]: ...
+
+
 class ObsidianImportCancelled(Exception):
     """Raised at a note boundary after a caller requests cancellation."""
 
 
 @dataclass
 class _Plan:
-    note: ObsidianNote
+    note: _ImportNote
     action: str
     item: Optional[dict] = None
     reason: str = ""
@@ -58,11 +163,11 @@ def scan_obsidian_upload(
     files: Iterable[tuple[str, bytes]], *, vault_label: str,
 ) -> ObsidianVaultScan:
     """Parse browser-selected Markdown bytes without persisting an upload copy."""
-    label = str(vault_label or "").strip()[:200]
+    label = unicodedata.normalize("NFC", str(vault_label or "").strip()[:200])
     if not label:
         raise ValueError("vault_label is required for a browser source")
     root_digest = hashlib.sha256(
-        ("obsidian-browser\0" + label).encode("utf-8", "surrogatepass")
+        ("obsidian-browser\0" + label.casefold()).encode("utf-8", "surrogatepass")
     ).hexdigest()
     scan = ObsidianVaultScan(vault_path="", vault_id=root_digest)
     total = 0
@@ -159,7 +264,7 @@ class ObsidianImporter:
         self.store: Any = service.store if service is not None else None
 
     def preview(
-        self, scan: ObsidianVaultScan, *, workspace_id: Optional[str],
+        self, scan: _ImportScan, *, workspace_id: Optional[str],
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, vault_id: Optional[str] = None,
         vault_label: str = "", on_conflict: str = "error",
@@ -184,7 +289,7 @@ class ObsidianImporter:
         )
 
     def import_scan(
-        self, scan: ObsidianVaultScan, *, workspace_id: str,
+        self, scan: _ImportScan, *, workspace_id: str,
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, vault_id: Optional[str] = None,
         vault_label: str = "", on_conflict: str = "error",
@@ -260,7 +365,9 @@ class ObsidianImporter:
                     planned_action="missing", result_state="missing",
                 )
             # Link reconciliation happens after every note has a durable current id.
-            link_warnings = self._reconcile_links(scan, vault_id=vault_id)
+            link_warnings = self._reconcile_links(
+                scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
+            )
             outcomes.extend(link_warnings)
             if scan.rejected or any(
                 row["status"] in {"error", "conflict", "rejected"} for row in outcomes
@@ -287,7 +394,7 @@ class ObsidianImporter:
         return report
 
     def prepare_import(
-        self, scan: ObsidianVaultScan, *, workspace_id: str,
+        self, scan: _ImportScan, *, workspace_id: str,
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, vault_id: Optional[str] = None,
         vault_label: str = "", on_conflict: str = "error",
@@ -304,7 +411,7 @@ class ObsidianImporter:
         )
         selected_vault_id = str(vault["id"])
         job_id = self._create_job(
-            workspace_id, repo_id,
+            workspace_id, repo_id, session_id=session_id,
             total=len(scan.notes) + len(scan.rejected) + len(scan.skipped),
             policy=policy, scope=scope, memory_type=memory_type,
         )
@@ -322,7 +429,7 @@ class ObsidianImporter:
         return policy
 
     def _preview_manifest(
-        self, scan: ObsidianVaultScan, *, workspace_id: Optional[str],
+        self, scan: _ImportScan, *, workspace_id: Optional[str],
         repo_id: Optional[str], session_id: Optional[str], vault_id: Optional[str],
         scope: Scope, memory_type: MemoryType, manifest: Optional[dict],
         strict_root: bool,
@@ -369,7 +476,7 @@ class ObsidianImporter:
         return vault, items
 
     def _resolve_or_register_vault(
-        self, scan: ObsidianVaultScan, *, workspace_id: str,
+        self, scan: _ImportScan, *, workspace_id: str,
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, vault_id: Optional[str], label: str,
         strict_root: bool,
@@ -413,13 +520,25 @@ class ObsidianImporter:
             raise ValueError("selected path does not match the registered vault")
 
     def _plan(
-        self, scan: ObsidianVaultScan, vault_identity: str, items: list[dict], *,
+        self, scan: _ImportScan, vault_identity: str, items: list[dict], *,
         inspect_memories: bool,
     ) -> tuple[list[_Plan], list[dict]]:
         scan_paths = {note.relative_path for note in scan.notes}
         by_path: dict[str, list[dict]] = {}
         for item in items:
             by_path.setdefault(str(item.get("relative_path") or ""), []).append(item)
+        # Exact-content rename detection stays conservative but must remain
+        # linear for a full 10k-file source. Index eligible historical paths once.
+        renames_by_hash: dict[str, list[dict]] = {}
+        for item in items:
+            relative_path = str(item.get("relative_path") or "")
+            content_hash = str(item.get("content_sha256") or "")
+            if (
+                relative_path not in scan_paths
+                and content_hash
+                and item.get("state") != "conflict"
+            ):
+                renames_by_hash.setdefault(content_hash, []).append(item)
         used: set[str] = set()
         plans: list[_Plan] = []
         for note in sorted(scan.notes, key=lambda entry: entry.relative_path.casefold()):
@@ -448,11 +567,8 @@ class ObsidianImporter:
                 plans.append(_Plan(note, action, selected, reason))
                 continue
             rename_candidates = [
-                row for row in items
-                if row.get("relative_path") not in scan_paths
-                and row.get("content_sha256") == note.raw_sha256
-                and row.get("source_key") not in used
-                and row.get("state") != "conflict"
+                row for row in renames_by_hash.get(note.raw_sha256, ())
+                if row.get("source_key") not in used
             ]
             if len(rename_candidates) == 1:
                 selected = rename_candidates[0]
@@ -682,7 +798,7 @@ class ObsidianImporter:
         return stamp
 
     @staticmethod
-    def _keywords(note: ObsidianNote) -> list[str]:
+    def _keywords(note: _ImportNote) -> list[str]:
         values = [*note.tags, *note.aliases]
         out: list[str] = []
         for value in values:
@@ -695,7 +811,7 @@ class ObsidianImporter:
 
     @classmethod
     def _metadata(
-        cls, note: ObsidianNote, *, vault_id: str, source_id: str,
+        cls, note: _ImportNote, *, vault_id: str, source_id: str,
         imported_at: float, actor: str, branch: str,
     ) -> dict:
         folder = str(PurePosixPath(note.relative_path).parent)
@@ -752,7 +868,11 @@ class ObsidianImporter:
             },
         }
 
-    def _reconcile_links(self, scan: ObsidianVaultScan, *, vault_id: str) -> list[dict]:
+    def _reconcile_links(
+        self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> list[dict]:
+        """Resolve derived links in bounded, cancellable, replay-safe batches."""
         items = self.store.list_source_import_items(
             vault_id=vault_id, states=["imported", "unchanged", "renamed", "skipped"],
         )
@@ -773,41 +893,74 @@ class ObsidianImporter:
             for key in keys:
                 names.setdefault(key, []).append(path)
         warnings: list[dict] = []
-        for source_path, note in note_by_path.items():
-            source_id = memory_by_path.get(source_path)
-            if not source_id:
-                continue
-            source_folder = PurePosixPath(source_path).parent
-            for raw_reference, embedded in self._note_references(note):
-                paths, ignored = self._reference_paths(source_folder, raw_reference)
-                if ignored:
+        batch_open = False
+        writes_in_batch = 0
+        references_seen = 0
+
+        def check_cancel() -> None:
+            if job_id is not None:
+                self._check_cancel(job_id, cancel_check)
+            elif cancel_check is not None and cancel_check():
+                raise ObsidianImportCancelled
+
+        def flush() -> None:
+            nonlocal batch_open, writes_in_batch
+            if batch_open and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.commit()
+            batch_open = False
+            writes_in_batch = 0
+
+        try:
+            for source_path, note in note_by_path.items():
+                check_cancel()
+                source_id = memory_by_path.get(source_path)
+                if not source_id:
                     continue
-                candidates: list[str] = []
-                for candidate in paths:
-                    key = candidate.casefold()
-                    if key in exact:
-                        candidates = [exact[key]]
-                        break
-                if not candidates and paths:
-                    candidates = sorted(set(
-                        names.get(PurePosixPath(paths[-1]).stem.casefold(), [])
-                    ))
-                if len(candidates) != 1:
-                    warnings.append(self._outcome(
-                        note, "warning",
-                        "ambiguous_wikilink" if candidates else "unresolved_wikilink",
-                    ))
-                    continue
-                target_id = memory_by_path.get(candidates[0])
-                if not target_id or target_id == source_id:
-                    continue
-                self.store.add_link(
-                    source_id, target_id, "embeds" if embedded else "references",
-                    layer=GraphLayer.SEMANTIC, reason=self.LINK_REASON,
-                )
+                source_folder = PurePosixPath(source_path).parent
+                for raw_reference, embedded in self._note_references(note):
+                    references_seen += 1
+                    if references_seen % 64 == 0:
+                        check_cancel()
+                    paths, ignored = self._reference_paths(source_folder, raw_reference)
+                    if ignored:
+                        continue
+                    candidates: list[str] = []
+                    for candidate in paths:
+                        key = candidate.casefold()
+                        if key in exact:
+                            candidates = [exact[key]]
+                            break
+                    if not candidates and paths:
+                        candidates = sorted(set(
+                            names.get(PurePosixPath(paths[-1]).stem.casefold(), [])
+                        ))
+                    if len(candidates) != 1:
+                        warnings.append(self._outcome(
+                            note, "warning",
+                            "ambiguous_wikilink" if candidates else "unresolved_wikilink",
+                        ))
+                        continue
+                    target_id = memory_by_path.get(candidates[0])
+                    if not target_id or target_id == source_id:
+                        continue
+                    if not batch_open:
+                        self.store.conn.execute("BEGIN IMMEDIATE")
+                        batch_open = True
+                    self.store.add_link(
+                        source_id, target_id, "embeds" if embedded else "references",
+                        layer=GraphLayer.SEMANTIC, reason=self.LINK_REASON, commit=False,
+                    )
+                    writes_in_batch += 1
+                    if writes_in_batch >= 128:
+                        flush()
+        except BaseException:
+            if batch_open and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            raise
+        flush()
         return warnings
 
-    def _note_references(self, note: ObsidianNote) -> list[tuple[str, bool]]:
+    def _note_references(self, note: _ImportNote) -> list[tuple[str, bool]]:
         """Return source references while preserving Obsidian attachment semantics."""
         attachments = {str(item.path) for item in note.attachments}
         result: list[tuple[str, bool]] = []
@@ -862,7 +1015,7 @@ class ObsidianImporter:
 
     @staticmethod
     def _outcome(
-        note: ObsidianNote, status: str, reason: str, *, memory_id: str = "",
+        note: _ImportNote, status: str, reason: str, *, memory_id: str = "",
     ) -> dict:
         row = {
             "relative_path": note.relative_path, "status": status, "action": status,
@@ -875,7 +1028,7 @@ class ObsidianImporter:
         return row
 
     def _report(
-        self, plans: list[_Plan], missing: list[dict], scan: ObsidianVaultScan, *,
+        self, plans: list[_Plan], missing: list[dict], scan: _ImportScan, *,
         state: str, vault_id: Optional[str], workspace_id: Optional[str],
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, policy: str, vault_label: str,
@@ -903,7 +1056,7 @@ class ObsidianImporter:
 
     def _final_report(
         self, plans: list[_Plan], outcomes: list[dict], missing: list[dict],
-        scan: ObsidianVaultScan, *, state: str, vault_id: str, job_id: str,
+        scan: _ImportScan, *, state: str, vault_id: str, job_id: str,
         import_id: str, workspace_id: str, repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
@@ -949,7 +1102,7 @@ class ObsidianImporter:
         }
 
     def _report_payload(
-        self, files: list[dict], scan: ObsidianVaultScan, *, state: str,
+        self, files: list[dict], scan: _ImportScan, *, state: str,
         vault_id: Optional[str], workspace_id: Optional[str], repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
@@ -994,17 +1147,17 @@ class ObsidianImporter:
         }
 
     def _create_job(
-        self, workspace_id: str, repo_id: Optional[str], *, total: int,
+        self, workspace_id: str, repo_id: Optional[str], *, session_id: Optional[str], total: int,
         policy: str, scope: Scope, memory_type: MemoryType,
     ) -> str:
         job_id = new_id("job")
         stamp = time.time()
         self.store.conn.execute(
-            "INSERT INTO jobs(id, workspace_id, repo_id, kind, state, dry_run, total_items, "
+            "INSERT INTO jobs(id, workspace_id, repo_id, session_id, kind, state, dry_run, total_items, "
             "processed_items, counts, errors, request, cancel_requested, created_at, started_at) "
-            "VALUES (?,?,?,?, 'running',0,?,0,'{}','[]',?,0,?,?)",
+            "VALUES (?,?,?,?,?,'running',0,?,0,'{}','[]',?,0,?,?)",
             (
-                job_id, workspace_id, repo_id, self.JOB_KIND, int(total),
+                job_id, workspace_id, repo_id, session_id, self.JOB_KIND, int(total),
                 json.dumps({
                     "scope": scope.value, "memory_type": memory_type.value,
                     "on_conflict": policy,

@@ -121,6 +121,13 @@ def test_oversized_note_bytes_are_rejected_before_read(tmp_path: Path):
     assert report.rejected[0].reason == "note exceeds 2000000 byte safety limit"
 
 
+def test_direct_parser_enforces_its_byte_and_type_contract_before_decode():
+    with pytest.raises(ValueError, match="note data must be bytes"):
+        parse_obsidian_note("# not bytes", "note.md")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="2000000 byte safety limit"):
+        parse_obsidian_note(b"\xff" * 2_000_001, "note.md")
+
+
 @pytest.mark.parametrize("path", [
     "../note.md", "/note.md", "C:/note.md", r"C:\note.md", "C:note.md",
     r"\\server\share\note.md", "//server/share/note.md",

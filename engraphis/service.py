@@ -25,6 +25,7 @@ import math
 import copy
 import time
 import threading
+import unicodedata
 import numpy as np
 from collections import Counter, OrderedDict
 from dataclasses import asdict
@@ -2084,9 +2085,9 @@ class MemoryService:
         return clean_id
 
     def _document_label(self, value: str, *, source_id: Optional[str] = None) -> str:
-        label = _clean_text(
+        label = unicodedata.normalize("NFC", _clean_text(
             value, field="source_label", max_chars=MAX_NAME_CHARS, required=False,
-        )
+        ))
         if not label and source_id:
             source = self.store.get_source_vault(source_id)
             label = str(source.get("display_name") or "") if source else ""
@@ -2094,6 +2095,60 @@ class MemoryService:
             raise ValidationError("source_label is required for a new browser source")
         _reject_secret_capture((("source_label", label),))
         return label
+
+    def _require_new_browser_source_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+        source_kind: str, source_noun: str,
+    ) -> None:
+        """Keep independently selected browser uploads from sharing a label lineage.
+
+        Browser uploads intentionally have no stable filesystem root.  A new upload
+        therefore cannot safely infer that an existing same-label collection is the
+        same source.  Require the owner to select that registered ``vlt_`` identity
+        explicitly; disk imports retain their root-digest auto-selection path.
+        """
+        _ws, wid, rid, sid, _selected_scope, _selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None:
+            return
+        # Browser source roots are deliberately derived only from the normalized
+        # owner label: source bytes change on every edit. Query that exact,
+        # indexed identity rather than a capped presentation list; otherwise a
+        # 101st registered source could silently reuse a live lineage.
+        root_digest = hashlib.sha256(
+            f"{source_kind}-browser\0{label.casefold()}".encode("utf-8", "surrogatepass"),
+        ).hexdigest()
+        source = self.store.get_source_vault_by_root_digest(
+            kind=source_kind, root_digest=root_digest, workspace_id=wid,
+            repo_id=rid, session_id=sid,
+        )
+        if source is not None:
+            raise ValidationError(
+                f"a {source_noun} with this label already exists; select its source_id to resume"
+            )
+
+    def _require_new_document_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> None:
+        self._require_new_browser_source_label(
+            label, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, source_kind="documents",
+            source_noun="source",
+        )
+
+    def _require_new_obsidian_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> None:
+        self._require_new_browser_source_label(
+            label, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, source_kind="obsidian",
+            source_noun="vault",
+        )
 
     @staticmethod
     def _document_report(report: dict) -> dict:
@@ -2112,6 +2167,8 @@ class MemoryService:
         from engraphis.core.documents import normalize_document_path
 
         uploads: list[tuple[str, bytes]] = []
+        upload_paths: set[str] = set()
+        total_bytes = 0
         for entry in files:
             if not isinstance(entry, tuple) or len(entry) != 2:
                 raise ValidationError("each upload must contain a path and bytes")
@@ -2122,12 +2179,22 @@ class MemoryService:
                 path = normalize_document_path(relative_path)
             except ValueError:
                 raise ValidationError("upload contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in upload_paths:
+                raise ValidationError("upload contains a duplicate path")
+            upload_paths.add(path_key)
+            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+                raise ValidationError("upload contains a file that is too large")
+            total_bytes += len(raw)
+            if total_bytes > MAX_IMPORT_TOTAL_BYTES:
+                raise ValidationError("uploads exceed the total size limit")
             uploads.append((path, raw))
 
         manifest = [] if attachment_manifest is None else attachment_manifest
         if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
             raise ValidationError("attachment_manifest is invalid")
         attachments: list[dict] = []
+        attachment_paths: set[str] = set()
         for entry in manifest:
             if not isinstance(entry, dict):
                 raise ValidationError("attachment_manifest is invalid")
@@ -2138,10 +2205,19 @@ class MemoryService:
                 path = normalize_document_path(raw_path)
             except ValueError:
                 raise ValidationError("attachment_manifest contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in attachment_paths:
+                raise ValidationError("attachment_manifest contains a duplicate path")
+            attachment_paths.add(path_key)
             size = entry.get("size")
-            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            if (
+                isinstance(size, bool) or not isinstance(size, int)
+                or not 0 <= size <= MAX_IMPORT_RESOURCE_BYTES
+            ):
                 raise ValidationError("attachment_manifest contains an invalid size")
             attachments.append({"path": path, "size": size})
+        if upload_paths.intersection(attachment_paths):
+            raise ValidationError("upload and attachment paths overlap")
         return uploads, attachments
 
     def preview_document_tree(
@@ -2239,6 +2315,11 @@ class MemoryService:
         )
         uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
         label = self._document_label(source_label, source_id=source_id)
+        if source_id is None:
+            self._require_new_document_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
         scan = scan_document_upload(uploads, source_label=label)
         report = DocumentImporter(self).preview(
             scan, workspace_id=wid, repo_id=rid, session_id=sid,
@@ -2270,6 +2351,11 @@ class MemoryService:
         )
         uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
         label = self._document_label(source_label, source_id=source_id)
+        if source_id is None:
+            self._require_new_document_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
         scan = scan_document_upload(uploads, source_label=label)
         ws, wid, rid, sid, sc, mt = self._obsidian_target(
             workspace=workspace, repo=repo, session_id=session_id,
@@ -2491,9 +2577,9 @@ class MemoryService:
         return clean_id
 
     def _obsidian_label(self, value: str, *, vault_id: Optional[str] = None) -> str:
-        label = _clean_text(
+        label = unicodedata.normalize("NFC", _clean_text(
             value, field="vault_label", max_chars=MAX_NAME_CHARS, required=False,
-        )
+        ))
         if not label and vault_id:
             vault = self.store.get_source_vault(vault_id)
             label = str(vault.get("display_name") or "") if vault else ""
@@ -2519,21 +2605,46 @@ class MemoryService:
         """Apply transport-independent upload bounds and manifest validation."""
         if not isinstance(files, list) or not files or len(files) > MAX_IMPORT_FILES:
             raise ValidationError(f"files must contain 1 to {MAX_IMPORT_FILES} uploads")
+        from engraphis.core.obsidian import (
+            MAX_NOTE_BYTES,
+            MAX_VAULT_BYTES,
+            normalize_obsidian_path,
+        )
+
         uploads: list[tuple[str, bytes]] = []
+        upload_paths: set[str] = set()
+        total_bytes = 0
         for entry in files:
             if not isinstance(entry, tuple) or len(entry) != 2:
                 raise ValidationError("each upload must contain a path and bytes")
             relative_path, raw = entry
             if not isinstance(relative_path, str) or not isinstance(raw, bytes):
                 raise ValidationError("each upload must contain a path and bytes")
-            uploads.append((relative_path, raw))
+            if len(raw) > MAX_NOTE_BYTES:
+                raise ValidationError("upload contains a file that is too large")
+            total_bytes += len(raw)
+            if total_bytes > MAX_VAULT_BYTES:
+                raise ValidationError("uploads exceed the total size limit")
+            # Retain an unsafe path for the scanner to put in the content-free
+            # per-file preview report; only valid paths participate in the
+            # transport-level duplicate/overlap check.
+            try:
+                path = normalize_obsidian_path(relative_path)
+            except ValueError:
+                uploads.append((relative_path, raw))
+                continue
+            path_key = path.casefold()
+            if path_key in upload_paths:
+                raise ValidationError("upload contains a duplicate path")
+            upload_paths.add(path_key)
+            uploads.append((path, raw))
 
         manifest = [] if attachment_manifest is None else attachment_manifest
         if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
             raise ValidationError("attachment_manifest is invalid")
-        from engraphis.core.obsidian import normalize_obsidian_path
 
         attachments: list[dict] = []
+        attachment_paths: set[str] = set()
         for entry in manifest:
             if not isinstance(entry, dict):
                 raise ValidationError("attachment_manifest is invalid")
@@ -2544,10 +2655,19 @@ class MemoryService:
                 path = normalize_obsidian_path(raw_path)
             except ValueError:
                 raise ValidationError("attachment_manifest contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in attachment_paths:
+                raise ValidationError("attachment_manifest contains a duplicate path")
+            attachment_paths.add(path_key)
             size = entry.get("size")
-            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            if (
+                isinstance(size, bool) or not isinstance(size, int)
+                or not 0 <= size <= MAX_IMPORT_RESOURCE_BYTES
+            ):
                 raise ValidationError("attachment_manifest contains an invalid size")
             attachments.append({"path": path, "size": size})
+        if upload_paths.intersection(attachment_paths):
+            raise ValidationError("upload and attachment paths overlap")
         return uploads, attachments
 
     def preview_obsidian_vault(self, path: str, *, workspace: str,
@@ -2653,6 +2773,11 @@ class MemoryService:
         )
         uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
         label = self._obsidian_label(vault_label, vault_id=vault_id)
+        if vault_id is None:
+            self._require_new_obsidian_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
         scan = scan_obsidian_upload(uploads, vault_label=label)
         report = ObsidianImporter(self).preview(
             scan, workspace_id=wid, repo_id=rid, session_id=sid,
@@ -2686,6 +2811,11 @@ class MemoryService:
         )
         uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
         label = self._obsidian_label(vault_label, vault_id=vault_id)
+        if vault_id is None:
+            self._require_new_obsidian_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
         scan = scan_obsidian_upload(uploads, vault_label=label)
         ws, wid, rid, sid, sc, mt = self._obsidian_target(
             workspace=workspace, repo=repo, session_id=session_id,

@@ -232,10 +232,10 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
     erasure = _read("docs/SECURE_ERASURE.md")
     schema = _read("engraphis/core/schema.py")
 
-    assert "SCHEMA_VERSION = 15" in schema
-    assert agents.count("`SCHEMA_VERSION = 15`") == 2
-    assert "schema 15" in readme
-    assert "schema 15" in changelog
+    assert "SCHEMA_VERSION = 16" in schema
+    assert agents.count("`SCHEMA_VERSION = 16`") == 2
+    assert "schema 16" in readme
+    assert "schema 16" in changelog
 
     for document in (agents, readme, changelog, sync, erasure):
         normalized = " ".join(document.split())
@@ -266,7 +266,7 @@ def test_document_import_docs_describe_the_source_neutral_contract() -> None:
         assert format_name in guide
     for safety_term in ("symlink", "secret", "unsupported", "resumable", "temporal", "conflict"):
         assert safety_term in guide
-    assert "SCHEMA_VERSION = 15" in agents
+    assert "SCHEMA_VERSION = 16" in agents
     assert "source-neutral" in agents
     assert "rich Markdown adapter" in obsidian
     assert "DOCUMENT_IMPORT.md" in obsidian

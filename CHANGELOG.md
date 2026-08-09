@@ -7,7 +7,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [1.6] - 2026-08-08
 
-Minor release advancing the v2 engine through schema 15 with deterministic sync state, trusted
+Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
 local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
 stronger release and evaluation evidence.
 
@@ -46,7 +46,8 @@ stronger release and evaluation evidence.
   schema 14 adds Obsidian collection and import manifests; schema 15 generalizes them to
   source-neutral `documents` and `obsidian` adapters, preserves temporal source lineage, enforces
   adapter/job and target-scope integrity, and retains only bounded, content-free per-job
-  format/result metadata.
+  format/result metadata. Schema 16 persists the optional session target on import jobs and
+  enforces exact session equality for source lineage and job items.
 - Bind each trusted-owner dashboard document or Obsidian run to an expiring, owner-session-bound,
   one-time preview token over the exact note/document bytes, attachment manifest, target, source,
   and conflict policy; invalidate changed client previews and keep job polling and cancellation

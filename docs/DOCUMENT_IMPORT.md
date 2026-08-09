@@ -105,6 +105,8 @@ rather than silently split. Containers are additionally capped at 2,000 members 
 declared decompressed content. Invalid UTF-8/UTF-16 in permitted text is replaced explicitly and
 reported as a parsing warning.
 
+Markdown uses the Obsidian adapter's stricter 2 MB raw-note limit before decoding.
+
 Review a preview before importing sensitive material. The local importer makes no network request
 and does not copy source folders or attachments into a hidden second collection.
 

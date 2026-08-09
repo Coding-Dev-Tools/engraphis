@@ -21,7 +21,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 15`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 16`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -198,7 +198,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 15`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 16`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -215,7 +215,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **Local document sources:** source collections are scope-bound, resumable manifests. Their
   paths, digests, and import state are provenance; source folders never create implicit memory
   scopes. `kind="documents"` is the source-neutral adapter, while `kind="obsidian"` retains
-  the rich Markdown adapter and its existing lineage.
+  the rich Markdown adapter and its existing lineage. Import jobs persist the optional session
+  target, and schema checks keep source-job lineage and per-job items in that exact session.
 - **Erasure markers contain no memory content.** `memory_tombstones.export_class` is strictly
   `never_export|remote_erasure`; only `remote_erasure` may cross a sync boundary.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.

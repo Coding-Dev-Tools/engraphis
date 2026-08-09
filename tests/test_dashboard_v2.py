@@ -196,9 +196,19 @@ def test_document_dashboard_endpoints_use_generic_service_and_reject_unknown_bin
             seen["run"] = kwargs
             return {"job_id": "job_document", "state": "queued"}
 
+        def preview_obsidian_upload(**kwargs):
+            seen["obsidian_preview"] = kwargs
+            return {"counts": {"markdown": 1}, "files": []}
+
+        def import_obsidian_upload(**kwargs):
+            seen["obsidian_run"] = kwargs
+            return {"job_id": "job_obsidian_via_wizard", "state": "queued"}
+
         monkeypatch.setattr(client.app.state.service, "list_source_vaults", lambda workspace: [{"id": "vlt_1", "label": workspace}], raising=False)
         monkeypatch.setattr(client.app.state.service, "preview_document_upload", preview_document_upload, raising=False)
         monkeypatch.setattr(client.app.state.service, "import_document_upload", import_document_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "preview_obsidian_upload", preview_obsidian_upload, raising=False)
+        monkeypatch.setattr(client.app.state.service, "import_obsidian_upload", import_obsidian_upload, raising=False)
         monkeypatch.setattr(client.app.state.service, "get_document_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "state": "completed"}, raising=False)
         monkeypatch.setattr(client.app.state.service, "cancel_document_import_job", lambda job_id, workspace: {"id": job_id, "workspace": workspace, "cancel_requested": True}, raising=False)
         payload = {
@@ -277,6 +287,29 @@ def test_document_dashboard_endpoints_use_generic_service_and_reject_unknown_bin
             data={"workspace": "demo"}, headers=headers,
         ).json()["cancel_requested"] is True
 
+        # The source-neutral wizard keeps an explicit Obsidian mode. It must
+        # call the compatibility adapter so an ``obsidian`` vlt_ identity and
+        # its rich Markdown lineage remain resumable instead of being treated
+        # as a generic ``documents`` source.
+        obsidian_payload = {
+            **payload, "source_id": "vlt_obsidian", "source_label": "Vault",
+            "source_mode": "obsidian",
+        }
+        markdown = [("files", ("notes/readme.md", b"# Note\n", "text/markdown"))]
+        obsidian_preview = client.post(
+            "/api/workspaces/import-documents/preview", data=obsidian_payload,
+            files=markdown, headers=headers,
+        )
+        assert obsidian_preview.status_code == 200
+        assert seen["obsidian_preview"]["vault_id"] == "vlt_obsidian"
+        obsidian_run = client.post(
+            "/api/workspaces/import-documents/run",
+            data={**obsidian_payload, "review_token": obsidian_preview.json()["review_token"]},
+            files=markdown, headers=headers,
+        )
+        assert obsidian_run.status_code == 200
+        assert seen["obsidian_run"]["vault_id"] == "vlt_obsidian"
+
 
 def test_document_import_review_binds_owner_target_policy_manifest_and_exact_bytes(
         monkeypatch, tmp_path):
@@ -293,6 +326,12 @@ def test_document_import_review_binds_owner_target_policy_manifest_and_exact_byt
             client.app.state.service,
             "preview_document_upload",
             lambda **kwargs: {"counts": {"documents": len(kwargs["files"])}},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            client.app.state.service,
+            "preview_obsidian_upload",
+            lambda **kwargs: {"counts": {"markdown": len(kwargs["files"])}},
             raising=False,
         )
 

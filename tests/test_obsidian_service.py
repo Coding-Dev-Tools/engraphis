@@ -43,7 +43,7 @@ def _import(service: MemoryService, files: list[tuple[str, bytes]], **kwargs) ->
     return started, _await_job(service, started)
 
 
-def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guards():
+def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guards(monkeypatch):
     service = _service()
     try:
         with pytest.raises(ValueError, match="vault_label is required"):
@@ -105,6 +105,56 @@ def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guar
                 files=[("One.md", b"# One\n")], attachment_manifest=[],
                 workspace="alpha", vault_label=_SECRET,
             )
+        monkeypatch.setattr("engraphis.core.obsidian.MAX_NOTE_BYTES", 10)
+        monkeypatch.setattr("engraphis.core.obsidian.MAX_VAULT_BYTES", 15)
+        with pytest.raises(ValidationError, match="duplicate path"):
+            service._obsidian_upload_inputs(
+                [("Notes/One.md", b"a"), ("notes/one.md", b"b")], [],
+            )
+        with pytest.raises(ValidationError, match="paths overlap"):
+            service._obsidian_upload_inputs(
+                [("notes/one.md", b"a")],
+                [{"path": "notes/one.md", "size": 1}],
+            )
+        with pytest.raises(ValidationError, match="invalid size"):
+            service._obsidian_upload_inputs(
+                [("notes/one.md", b"a")],
+                [{"path": "assets/large.png", "size": 100_000_001}],
+            )
+        with pytest.raises(ValidationError, match="too large"):
+            service._obsidian_upload_inputs([("notes/big.md", b"x" * 11)], [])
+        with pytest.raises(ValidationError, match="total size"):
+            service._obsidian_upload_inputs(
+                [("notes/one.md", b"x" * 8), ("notes/two.md", b"y" * 8)], [],
+            )
+    finally:
+        service.close()
+
+
+def test_obsidian_browser_label_identity_is_nfc_and_requires_registered_vault():
+    service = _service()
+    try:
+        first = service.import_obsidian_upload(
+            files=[("One.md", b"# One\nLocal note.\n")], attachment_manifest=[],
+            workspace="alpha", vault_label="Caf\u00e9", confirmed=True,
+        )
+        assert _await_job(service, first)["state"] == "completed"
+        assert scan_obsidian_upload(
+            [("One.md", b"# One\n")], vault_label="Caf\u00e9",
+        ).vault_id == scan_obsidian_upload(
+            [("One.md", b"# One\n")], vault_label="Cafe\u0301",
+        ).vault_id
+        with pytest.raises(ValidationError, match="select its source_id"):
+            service.preview_obsidian_upload(
+                files=[("One.md", b"# One\nChanged selection.\n")],
+                attachment_manifest=[], workspace="alpha", vault_label="Cafe\u0301",
+            )
+        resumed = service.preview_obsidian_upload(
+            files=[("One.md", b"# One\nLocal note.\n")],
+            attachment_manifest=[], workspace="alpha", vault_id=first["vault_id"],
+        )
+        assert resumed["vault_id"] == first["vault_id"]
+        assert resumed["vault_label"] == "Caf\u00e9"
     finally:
         service.close()
 

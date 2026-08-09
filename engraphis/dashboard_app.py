@@ -892,24 +892,38 @@ def create_app() -> FastAPI:
         attachments = _document_attachments(attachment_manifest, source_mode=source_mode)
         _reject_document_path_overlap(uploads, attachments)
         try:
-            report = _document_service_call(
-                "preview_document_upload", "preview_obsidian_upload",
-                generic_kwargs={
-                    "files": uploads, "attachment_manifest": attachments,
-                    "workspace": workspace, "repo": repo or None,
-                    "session_id": session_id or None, "scope": scope,
-                    "memory_type": memory_type, "source_id": source_id or None,
-                    "source_label": source_label, "on_conflict": on_conflict,
-                },
-                legacy_kwargs={
-                    "files": uploads, "attachment_manifest": attachments,
-                    "workspace": workspace, "repo": repo or None,
-                    "session_id": session_id or None, "scope": scope,
-                    "memory_type": memory_type, "vault_id": source_id or None,
-                    "vault_label": source_label, "on_conflict": on_conflict,
-                    "confirmed": confirmed.strip().lower() == "true",
-                },
-            )
+            if source_mode == "obsidian":
+                # Obsidian mode must preserve its existing vlt_ identity, rich
+                # Markdown provenance, and ``obsidian_import`` job lineage.  The
+                # source-neutral document adapter parses Markdown too, but its
+                # ``documents`` identity cannot resume an Obsidian source.
+                report = svc.preview_obsidian_upload(
+                    files=uploads, attachment_manifest=attachments,
+                    workspace=workspace, repo=repo or None,
+                    session_id=session_id or None, scope=scope,
+                    memory_type=memory_type, vault_id=source_id or None,
+                    vault_label=source_label, on_conflict=on_conflict,
+                    confirmed=confirmed.strip().lower() == "true",
+                )
+            else:
+                report = _document_service_call(
+                    "preview_document_upload", "preview_obsidian_upload",
+                    generic_kwargs={
+                        "files": uploads, "attachment_manifest": attachments,
+                        "workspace": workspace, "repo": repo or None,
+                        "session_id": session_id or None, "scope": scope,
+                        "memory_type": memory_type, "source_id": source_id or None,
+                        "source_label": source_label, "on_conflict": on_conflict,
+                    },
+                    legacy_kwargs={
+                        "files": uploads, "attachment_manifest": attachments,
+                        "workspace": workspace, "repo": repo or None,
+                        "session_id": session_id or None, "scope": scope,
+                        "memory_type": memory_type, "vault_id": source_id or None,
+                        "vault_label": source_label, "on_conflict": on_conflict,
+                        "confirmed": confirmed.strip().lower() == "true",
+                    },
+                )
         except (ValueError, KeyError):
             raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
         digest = _document_review_digest(
@@ -954,6 +968,15 @@ def create_app() -> FastAPI:
             review_token, owner_binding=owner_binding, digest=digest,
         )
         try:
+            if source_mode == "obsidian":
+                return svc.import_obsidian_upload(
+                    files=uploads, attachment_manifest=attachments,
+                    workspace=workspace, repo=repo or None,
+                    session_id=session_id or None, scope=scope,
+                    memory_type=memory_type, vault_id=source_id or None,
+                    vault_label=source_label, on_conflict=on_conflict,
+                    confirmed=True,
+                )
             return _document_service_call(
                 "import_document_upload", "import_obsidian_upload",
                 generic_kwargs={

@@ -146,6 +146,13 @@ def parse_obsidian_note(
 ) -> ObsidianNote:
     """Parse one Markdown file without evaluating any Obsidian/plugin content."""
     relative_path = normalize_obsidian_path(relative_path)
+    if not isinstance(raw, bytes):
+        raise ValueError("note data must be bytes")
+    # Keep the direct parser as bounded as the filesystem and browser scanners.
+    # Otherwise a caller that uses this public core API directly can force a very
+    # large UTF-8 replacement decode before the character limit is reached.
+    if len(raw) > MAX_NOTE_BYTES:
+        raise ValueError("note exceeds 2000000 byte safety limit")
     warnings: List[str] = []
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     try:

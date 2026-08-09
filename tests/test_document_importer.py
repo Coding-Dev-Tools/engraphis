@@ -9,6 +9,7 @@ import types
 import pytest
 
 from engraphis.core.documents import (
+    DOCUMENT_FORMATS,
     DocumentFileIssue,
     DocumentRecord,
     DocumentScan,
@@ -321,5 +322,35 @@ def test_format_metadata_and_rejected_items_stay_bounded_and_complete():
         persisted = service.store.list_source_import_job_items(job_id=report["job_id"])
         imported = next(row for row in persisted if row["relative_path"] == "bounded.txt")
         assert imported["source_format"] == "text"
+    finally:
+        service.close()
+
+
+def test_every_registered_format_survives_the_generic_import_handoff():
+    """Dispatch is parser-tested; this covers the shared v2 persistence contract."""
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("all-formats")
+        scan = DocumentScan(root_path="", source_id="a" * 64)
+        for index, spec in enumerate(DOCUMENT_FORMATS.values()):
+            raw = ("source-%d" % index).encode("ascii")
+            text = "Readable %s source" % spec.name
+            scan.documents.append(DocumentRecord(
+                relative_path="format_%d%s" % (index, spec.extensions[0]),
+                format=spec.name, media_type=spec.media_type, title=spec.name,
+                content=text, body=text,
+                raw_sha256=hashlib.sha256(raw).hexdigest(),
+                canonical_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                source_size=len(raw), title_source="fixture",
+            ))
+        report = DocumentImporter(service).import_scan(
+            scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_label="Format contract", confirmed=True,
+        )
+        assert report["state"] == "completed"
+        assert report["counts"]["imported"] == len(DOCUMENT_FORMATS)
+        rows = service.store.list_source_import_job_items(job_id=report["job_id"])
+        assert {row["source_format"] for row in rows} == set(DOCUMENT_FORMATS)
     finally:
         service.close()

@@ -1241,6 +1241,8 @@ class Store:
             ).fetchall()
         }
         required_source_security_objects = {
+            "trg_job_session_scope_insert",
+            "trg_job_session_scope_update",
             "idx_source_vaults_identity",
             "trg_source_vault_scope_insert",
             "trg_source_vault_scope_update",
@@ -1258,6 +1260,14 @@ class Store:
             raise RuntimeError(
                 "read-only Store requires a complete current schema; missing "
                 + ", ".join(missing_source_security)
+            )
+        job_columns = {
+            str(item["name"])
+            for item in self.conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "session_id" not in job_columns:
+            raise RuntimeError(
+                "read-only Store requires jobs.session_id for source import scope isolation"
             )
         source_vault_foreign_keys = {
             (str(row["from"]), str(row["table"]), str(row["to"]))
@@ -1832,6 +1842,29 @@ class Store:
         self.conn.execute("DROP TABLE source_vaults")
         return True
 
+    def _prepare_job_session_scope_v16(self) -> None:
+        """Install the nullable job session target before v16 triggers compile.
+
+        ``CREATE TABLE IF NOT EXISTS`` cannot add the column to an existing v15
+        jobs table, while the current source-manifest triggers reference it.  Do
+        the additive, idempotent repair inside the surrounding migration
+        transaction before executing :data:`SCHEMA_SQL`.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()
+        if row is None:
+            return
+        columns = {
+            str(item["name"])
+            for item in self.conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "session_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE jobs ADD COLUMN session_id TEXT "
+                "REFERENCES sessions(id) ON DELETE SET NULL"
+            )
+
     def _restore_source_manifest_v15(self) -> None:
         """Restore source identities staged by :meth:`_prepare_source_manifest_v15`."""
         self.conn.execute(
@@ -1952,6 +1985,18 @@ class Store:
             ).fetchall()
         )
         restore_source_manifest = self._prepare_source_manifest_v15(previous_version)
+        self._prepare_job_session_scope_v16()
+        if previous_version < 16:
+            # v15 source-job triggers bound only workspace/repo because generic
+            # jobs did not yet persist a session target. Recreate them through
+            # SCHEMA_SQL after installing ``jobs.session_id`` above.
+            for name in (
+                "trg_source_import_seen_job_insert",
+                "trg_source_import_seen_job_update",
+                "trg_source_import_job_insert",
+                "trg_source_import_job_update",
+            ):
+                self.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
         self._execute_script_transactional(SCHEMA_SQL)
         if restore_source_manifest:
             self._restore_source_manifest_v15()
@@ -2000,6 +2045,7 @@ class Store:
             "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
+            "ALTER TABLE jobs ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
             "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
             "ALTER TABLE memory_tombstones ADD COLUMN export_class TEXT NOT NULL "
             "DEFAULT 'never_export' CHECK("
