@@ -107,6 +107,25 @@ def test_stdlib_container_formats_extract_docx_odt_and_epub():
     assert epub_record.title == "Book" and "EPUB body" in epub_record.body
 
 
+def test_epub_decodes_manifest_urls_before_archive_lookup():
+    epub = _zip({
+        "META-INF/container.xml": (
+            '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="EPUB/book.opf"/></rootfiles></container>'
+        ),
+        "EPUB/book.opf": (
+            '<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Book</dc:title></metadata>'
+            '<manifest><item id="one" href="one%20chapter.xhtml#intro"/></manifest>'
+            '<spine><itemref idref="one"/></spine></package>'
+        ),
+        "EPUB/one chapter.xhtml": "<html><body><p>Encoded chapter path</p></body></html>",
+    })
+
+    record = parse_document(epub, "book.epub")
+
+    assert record.body == "Encoded chapter path"
+
+
 def test_scan_is_safe_and_continues_after_per_file_errors(tmp_path):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "good.txt").write_text("good", encoding="utf-8")
