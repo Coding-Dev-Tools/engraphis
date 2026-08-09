@@ -106,6 +106,33 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert "Estimated context saved" in page.text
 
 
+def test_dashboard_memory_reads_use_the_active_store_for_memory_databases(monkeypatch):
+    monkeypatch.setattr(settings, "db_path", ":memory:")
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "api_token", "")
+    from engraphis.dashboard_app import create_app
+
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+        service = client.app.state.service
+        workspace_id = service.store.get_or_create_workspace("memory-db")
+        service.engine.remember(
+            "The dashboard must show this in-memory record.",
+            workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            title="Visible in memory",
+        )
+
+        listed = client.get("/api/memories", params={"workspace": "memory-db"})
+        assert listed.status_code == 200
+        assert listed.json()["count"] == 1
+        assert listed.json()["memories"][0]["title"] == "Visible in memory"
+
+        fallback = v2_api._keyword_search("memory-db", "dashboard in-memory")
+        assert len(fallback) == 1
+
+
 def test_dashboard_exposes_accessible_document_import_preview_and_job_contract(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         page = client.get("/")
