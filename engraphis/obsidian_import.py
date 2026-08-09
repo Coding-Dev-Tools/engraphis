@@ -1099,6 +1099,20 @@ class ObsidianImporter:
                     writes_in_batch += 1
                     if writes_in_batch >= 128:
                         flush()
+            current_source_ids = {
+                memory_by_path[path] for path in note_by_path if memory_by_path.get(path)
+            }
+            for source_id in current_source_ids:
+                existing = self.store.conn.execute(
+                    "SELECT a, b FROM mem_links "
+                    "WHERE reason=? AND valid_to IS NULL AND expired_at IS NULL "
+                    "AND (a=? OR b=?)",
+                    (self.LINK_REASON, source_id, source_id),
+                ).fetchall()
+                for row in existing:
+                    pair = pair_key(str(row["a"]), str(row["b"]))
+                    if pair not in desired_pairs:
+                        retire_pairs.add(pair)
             retire_unsupported_links()
         except BaseException:
             if batch_open and self.store.conn.transaction_owned_by_current_thread():

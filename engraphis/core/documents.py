@@ -341,7 +341,12 @@ def parse_document(
         raise DocumentParseError("document exceeds 100000 character safety limit")
     if not body.strip():
         raise DocumentParseError("document produced no readable text")
-    if secret_kind(content) is not None or secret_kind(body) is not None:
+    if (
+        secret_kind(content) is not None
+        or secret_kind(body) is not None
+        or secret_kind(title) is not None
+        or secret_kind(metadata) is not None
+    ):
         raise DocumentParseError("source appears to contain a secret")
     return _record(
         relative_path, spec, raw, content, body, title, metadata, warnings,
@@ -919,7 +924,9 @@ def _parse_container(name: str, raw: bytes) -> Tuple[str, str, str, Dict[str, An
             _validate_archive(archive)
             if name == "docx":
                 body, meta = _office_body(archive, "word/document.xml", "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}", ("p",), "t")
-            elif name in {"odt", "ods", "odp"}:
+            elif name == "ods":
+                body, meta = _ods_body(archive)
+            elif name in {"odt", "odp"}:
                 body, meta = _office_body(archive, "content.xml", "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}", ("h", "p"), None)
             elif name == "xlsx":
                 body, meta = _xlsx_body(archive)
@@ -995,6 +1002,66 @@ def _office_body(
             values.append(text)
             total += separator + len(text)
     return "\n\n".join(values), {"paragraphs": len(values)}
+
+
+def _ods_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
+    """Extract displayed and attribute-backed values from an ODS worksheet."""
+    raw = archive.read("content.xml")
+    root = _xml_root(raw, "ODS document")
+    rows: List[str] = []
+    cell_count = 0
+    total = 0
+    for row in (item for item in root.iter() if item.tag.endswith("table-row")):
+        cells: List[str] = []
+        for cell in (item for item in row if item.tag.endswith("table-cell")):
+            repeated_raw = next(
+                (
+                    value for key, value in cell.attrib.items()
+                    if str(key).endswith("number-columns-repeated")
+                ),
+                "1",
+            )
+            try:
+                repeated = max(1, min(int(repeated_raw), 10_000))
+            except (TypeError, ValueError):
+                repeated = 1
+            value = _bounded_join(
+                cell.itertext(), limit=MAX_CONTAINER_TEXT_CHARS - total,
+            ).strip()
+            if not value:
+                value = next(
+                    (
+                        str(raw_value) for key, raw_value in cell.attrib.items()
+                        if (
+                            str(key).endswith("value")
+                            or str(key).endswith("date-value")
+                            or str(key).endswith("time-value")
+                            or str(key).endswith("boolean-value")
+                            or str(key).endswith("string-value")
+                        )
+                    ),
+                    "",
+                ).strip()
+            if not value:
+                continue
+            for _ in range(repeated):
+                cells.append(value)
+                cell_count += 1
+        text = "\t".join(cells).strip()
+        if text:
+            if total + len(text) + (1 if rows else 0) > MAX_CONTAINER_TEXT_CHARS:
+                raise DocumentParseError("document exceeds 100000 character safety limit")
+            rows.append(text)
+            total += len(text) + (1 if rows else 0)
+    if not rows:
+        body, metadata = _office_body(
+            archive, "content.xml",
+            "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}",
+            ("h", "p"), None,
+        )
+        metadata.update({"rows": 0, "cells": cell_count})
+        return body, metadata
+    return "\n".join(rows), {"rows": len(rows), "cells": cell_count}
 
 
 def _bounded_join(values: Iterable[str], *, limit: int) -> str:

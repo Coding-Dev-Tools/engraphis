@@ -140,6 +140,41 @@ def test_epub_decodes_manifest_urls_before_archive_lookup():
     assert record.body == "Encoded chapter path"
 
 
+def test_epub_titles_are_checked_for_secrets():
+    epub = _zip({
+        "META-INF/container.xml": (
+            '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="EPUB/book.opf"/></rootfiles></container>'
+        ),
+        "EPUB/book.opf": (
+            '<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
+            '<dc:title>api_key=sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</dc:title>'
+            '</metadata><manifest><item id="one" href="one.xhtml"/></manifest>'
+            '<spine><itemref idref="one"/></spine></package>'
+        ),
+        "EPUB/one.xhtml": "<html><body><p>Safe chapter</p></body></html>",
+    })
+    with pytest.raises(DocumentParseError, match="secret"):
+        parse_document(epub, "secret-title.epub")
+
+
+def test_ods_extracts_attribute_backed_cells():
+    ods = _zip({
+        "content.xml": (
+            '<office:document-content '
+            'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">'
+            '<office:body><office:spreadsheet><table:table><table:table-row>'
+            '<table:table-cell office:value-type="float" office:value="42"/>'
+            '<table:table-cell office:value-type="boolean" office:boolean-value="true"/>'
+            '</table:table-row></table:table></office:spreadsheet></office:body>'
+            '</office:document-content>'
+        ),
+    })
+    record = parse_document(ods, "values.ods")
+    assert record.body == "42\ttrue"
+
+
 def test_scan_is_safe_and_continues_after_per_file_errors(tmp_path):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "good.txt").write_text("good", encoding="utf-8")

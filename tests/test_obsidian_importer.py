@@ -456,6 +456,51 @@ def test_missing_wikilink_retires_previous_derived_edge(tmp_path: Path):
         service.close()
 
 
+def test_exact_target_retires_previous_basename_fallback_link(tmp_path: Path):
+    vault = _vault(tmp_path)
+    (vault / "projects" / "Plan.md").write_text("# Plan\n\nNo backlink.\n", encoding="utf-8")
+    home = vault / "Home.md"
+    home.write_text(
+        home.read_text(encoding="utf-8").replace("projects/Plan|the plan", "Plan"),
+        encoding="utf-8",
+    )
+    service = _service(tmp_path / "memory.db")
+    try:
+        service.import_obsidian_vault(str(vault), workspace="acme", confirmed=True)
+        home_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Home base",)
+        ).fetchone()[0]
+        fallback_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Plan",)
+        ).fetchone()[0]
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, fallback_id),
+        ).fetchone()[0] == 1
+
+        (vault / "Plan.md").write_text("# Exact Plan\n", encoding="utf-8")
+        second = service.import_obsidian_vault(
+            str(vault), workspace="acme", confirmed=True,
+        )
+        exact_id = service.store.conn.execute(
+            "SELECT id FROM memories WHERE title=? LIMIT 1", ("Exact Plan",)
+        ).fetchone()[0]
+        assert second["state"] == "completed"
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, fallback_id),
+        ).fetchone()[0] == 0
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM mem_links WHERE reason=? AND a=? AND b=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (ObsidianImporter.LINK_REASON, home_id, exact_id),
+        ).fetchone()[0] == 1
+    finally:
+        service.close()
+
+
 def test_incomplete_scan_preserves_derived_links(tmp_path: Path):
     vault = _vault(tmp_path)
     service = _service(tmp_path / "memory.db")
