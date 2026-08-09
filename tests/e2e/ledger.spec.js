@@ -177,6 +177,29 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/health') return ok({ status: 'ok' });
+    if (path === '/context-savings') return ok({
+      format: 'engraphis-context-savings/1',
+      scope: { workspace },
+      period: { from_ts: null, to_ts: null },
+      release_version: null,
+      estimated: {
+        eligible_receipt_count: 2,
+        baseline_tokens: 4096,
+        emitted_tokens: 2048,
+        saved_tokens: 2048,
+        savings_ratio: 0.5,
+        confidence: 'high',
+        by_basis: [{
+          basis: 'adaptive_history',
+          confidence: 'high',
+          baseline_tokens: 4096,
+          emitted_tokens: 2048,
+          saved_tokens: 2048,
+          receipt_count: 2,
+        }],
+        by_token_counter: [{ token_counter: 'test-counter', receipt_count: 2, saved_tokens: 2048 }],
+      },
+    });
     if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
       return ok({
@@ -279,6 +302,11 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   expect(response.headers()['content-security-policy']).not.toContain("'unsafe-inline'");
   await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  await expect(page.locator('#context-savings-summary-body .savings-number')).toHaveText('2,048');
+  await expect(page.locator('#context-savings-summary-body .savings-unit')).toHaveText('tokens avoided');
+  await expect(page.locator('#context-savings-summary-body .savings-rate-value')).toHaveText('50.0%');
+  await expect(page.locator('#context-savings-summary-body .savings-progress'))
+    .toHaveAttribute('aria-label', '50.0% estimated context reduction');
   await expect(page.locator('#decision-list').getByText('Postgres 16 is the main database.'))
     .toBeVisible();
   await expect(page.locator('#proactive-list').getByText(/<img src=x onerror=/)).toBeVisible();
@@ -653,7 +681,29 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
             id: `receipt_${selected}`, operation: `${selected} receipt`,
             created_at: Date.now() / 1000, verified: true,
           }] }
-          : { estimate: { excluded_or_unclassified_delivery: 0 } };
+          : {
+            format: 'engraphis-context-savings/1',
+            scope: { workspace: selected },
+            period: { from_ts: null, to_ts: null },
+            release_version: null,
+            estimated: {
+              eligible_receipt_count: 2,
+              baseline_tokens: 4096,
+              emitted_tokens: 2048,
+              saved_tokens: 2048,
+              savings_ratio: 0.5,
+              confidence: 'high',
+              by_basis: [{
+                basis: 'adaptive_history',
+                confidence: 'high',
+                baseline_tokens: 4096,
+                emitted_tokens: 2048,
+                saved_tokens: 2048,
+                receipt_count: 2,
+              }],
+              by_token_counter: [{ token_counter: 'test-counter', receipt_count: 2, saved_tokens: 2048 }],
+            },
+          };
       return route.fulfill({
         status: 200,
         contentType: 'application/json',

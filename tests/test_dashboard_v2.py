@@ -82,7 +82,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'" in ledger_js.text
-        assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
+        assert "/v2-assets/ledger.css?v=20260809-pin-only-physics" in page.text
         assert "/v2-assets/ledger.js?v=20260809-pin-only-physics" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
@@ -117,8 +117,8 @@ def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch,
         for path in (
             "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics",
             "/v2-assets/ledger.js?v=20260809-pin-only-physics",
-            "/v2-assets/ledger.css?v=20260728-connected-memories",
-            "/classic-assets/dashboard.js?v=20260728-reference-materials",
+            "/v2-assets/ledger.css?v=20260809-pin-only-physics",
+            "/classic-assets/dashboard.js?v=20260809-pin-only-physics",
         ):
             response = client.get(path)
             assert response.status_code == 200

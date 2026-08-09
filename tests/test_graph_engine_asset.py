@@ -138,7 +138,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260728-reference-materials" in eager
+    assert "/static/dashboard.js?v=20260809-pin-only-physics" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
