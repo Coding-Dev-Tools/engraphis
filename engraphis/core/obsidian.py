@@ -107,6 +107,7 @@ class ObsidianVaultScan:
     notes: List[ObsidianNote] = field(default_factory=list)
     rejected: List[ObsidianFileIssue] = field(default_factory=list)
     skipped: List[ObsidianFileIssue] = field(default_factory=list)
+    complete: bool = True
 
 
 def canonical_vault_id(vault_path: Union[os.PathLike[str], str]) -> str:
@@ -220,6 +221,8 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
             continue
         if issue:
             result.skipped.append(ObsidianFileIssue(relative, issue))
+            if issue == "unreadable directory":
+                result.complete = False
             continue
         if relative in normalized_paths or relative.casefold() in portable_paths:
             result.rejected.append(ObsidianFileIssue(relative, "duplicate normalized source path"))
@@ -233,6 +236,7 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
             result.rejected.append(
                 ObsidianFileIssue(relative, "vault exceeds 10000 Markdown file safety limit")
             )
+            result.complete = False
             break
         if _sensitive_filename(path.name):
             result.rejected.append(ObsidianFileIssue(relative, "sensitive filename"))
@@ -244,6 +248,7 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
                 result.rejected.append(
                     ObsidianFileIssue(relative, "vault exceeds 250000000 byte safety limit")
                 )
+                result.complete = False
                 break
             result.notes.append(
                 parse_obsidian_note(
@@ -329,6 +334,7 @@ def _walk_vault(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[st
             ),
         )
     except OSError:
+        yield directory, "unreadable directory"
         return
     for entry in entries:
         try:

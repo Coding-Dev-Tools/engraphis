@@ -189,6 +189,7 @@ class DocumentScan:
     documents: List[DocumentRecord] = field(default_factory=list)
     rejected: List[DocumentFileIssue] = field(default_factory=list)
     skipped: List[DocumentFileIssue] = field(default_factory=list)
+    complete: bool = True
 
     @property
     def vault_path(self) -> str:
@@ -261,6 +262,7 @@ def parse_document(
     spec = document_format_for_path(relative_path)
     if spec is None:
         raise DocumentParseError("unsupported document format")
+    fallback = Path(relative_path).stem or "document"
     if spec.requires_adapter:
         if adapter is None:
             raise DocumentParseError("document format requires an optional local adapter")
@@ -313,7 +315,10 @@ def parse_document(
         if not record.body.strip():
             raise DocumentParseError("document produced no readable text")
         return record
-    if spec.container:
+    if spec.name == "xml":
+        body, title, metadata, warnings = _xml_body(raw, fallback)
+        content = body
+    elif spec.container:
         content, body, title, metadata, warnings = _parse_container(spec.name, raw)
     else:
         content, decode_warnings = _decode_text(raw)
@@ -361,6 +366,8 @@ def scan_document_tree(
             continue
         if issue:
             result.skipped.append(DocumentFileIssue(relative, issue))
+            if issue == "unreadable directory":
+                result.complete = False
             continue
         if relative in normalized_paths or relative.casefold() in portable_paths:
             result.rejected.append(DocumentFileIssue(relative, "duplicate normalized source path"))
@@ -370,6 +377,7 @@ def scan_document_tree(
         scanned_files += 1
         if scanned_files > MAX_DOCUMENT_FILES:
             result.rejected.append(DocumentFileIssue(relative, "source exceeds 10000 file safety limit"))
+            result.complete = False
             break
         if _sensitive_filename(path.name):
             result.rejected.append(DocumentFileIssue(relative, "sensitive filename"))
@@ -382,6 +390,7 @@ def scan_document_tree(
             scanned_bytes += len(raw)
             if scanned_bytes > MAX_DOCUMENT_TREE_BYTES:
                 result.rejected.append(DocumentFileIssue(relative, "source exceeds 250000000 byte safety limit"))
+                result.complete = False
                 break
             result.documents.append(parse_document(
                 raw, relative, source_mtime_ns=mtime_ns, adapter=adapter,
@@ -552,8 +561,8 @@ def _ini_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
     return content, str(title)[:300], {"config_kind": "ini", "sections": parser.sections()[:100]}, []
 
 
-def _xml_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], List[str]]:
-    root = _xml_root(content.encode("utf-8"), "XML document")
+def _xml_body(raw: bytes, fallback: str) -> Tuple[str, str, Dict[str, Any], List[str]]:
+    root = _xml_root(raw, "XML document")
     body = "\n".join(part.strip() for part in root.itertext() if part.strip())
     if not body:
         raise DocumentParseError("document produced no readable text")

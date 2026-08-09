@@ -41,6 +41,26 @@ def _live(service: MemoryService, workspace: str = "acme"):
     return service.store.list_memories(SearchFilter(workspace_id=wid))
 
 
+def test_unreadable_directory_is_reported_and_marks_vault_scan_incomplete(monkeypatch, tmp_path: Path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "note.md").write_text("# note", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fail_blocked(path):
+        if path == blocked:
+            raise OSError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_blocked)
+    scan = scan_obsidian_vault(tmp_path)
+    assert scan.complete is False
+    assert any(
+        item.relative_path == "blocked" and item.reason == "unreadable directory"
+        for item in scan.skipped
+    )
+
+
 def test_import_reimport_revision_rename_and_missing(tmp_path: Path):
     vault = _vault(tmp_path)
     service = _service(tmp_path / "memory.db")

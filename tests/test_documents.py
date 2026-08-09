@@ -174,6 +174,16 @@ def test_config_xml_and_source_formats_are_safe_and_readable(name, raw, expected
         assert record.tags == [] and record.links == [] and record.attachments == []
 
 
+def test_xml_honors_the_declared_encoding():
+    raw = (
+        '<?xml version="1.0" encoding="iso-8859-1"?>'
+        '<root title="Café"><item>café</item></root>'
+    ).encode("iso-8859-1")
+    record = parse_document(raw, "accented.xml")
+    assert record.title == "Café"
+    assert record.body == "café"
+
+
 def test_rtf_and_additional_office_containers_are_dependency_free():
     rtf = parse_document(b"{\\rtf1\\ansi Hello\\par world}", "notes.rtf")
     assert "Hello" in rtf.body and "world" in rtf.body
@@ -229,6 +239,26 @@ def test_markup_and_markdown_code_cannot_create_discovery_records():
     assert [link.target for link in markdown.links] == ["Visible", "../metrics.csv"]
     assert [item.path for item in markdown.attachments] == ["images/plot.png"]
     assert markdown.tags == ["visible"]
+
+
+def test_unreadable_directory_is_reported_and_marks_scan_incomplete(monkeypatch, tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "note.txt").write_text("durable", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fail_blocked(path):
+        if path == blocked:
+            raise OSError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_blocked)
+    scan = scan_document_tree(tmp_path)
+    assert scan.complete is False
+    assert any(
+        issue.relative_path == "blocked" and issue.reason == "unreadable directory"
+        for issue in scan.skipped
+    )
 
 
 def test_xml_and_container_attacks_and_invalid_rtf_fail_closed():

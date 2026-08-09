@@ -146,6 +146,9 @@ class _ImportScan(Protocol):
     @property
     def skipped(self) -> Sequence[_ImportIssue]: ...
 
+    @property
+    def complete(self) -> bool: ...
+
 
 class ObsidianImportCancelled(Exception):
     """Raised at a note boundary after a caller requests cancellation."""
@@ -177,6 +180,7 @@ def scan_obsidian_upload(
             scan.rejected.append(ObsidianFileIssue(
                 "(vault)", "vault exceeds Markdown file safety limit",
             ))
+            scan.complete = False
             break
         try:
             relative_path = normalize_obsidian_path(raw_path)
@@ -210,6 +214,7 @@ def scan_obsidian_upload(
             scan.rejected.append(ObsidianFileIssue(
                 relative_path, "vault exceeds total byte safety limit",
             ))
+            scan.complete = False
             break
         try:
             scan.notes.append(parse_obsidian_note(raw, relative_path))
@@ -343,6 +348,7 @@ class ObsidianImporter:
         finalized_missing: list[dict] = []
         pending_missing = list(missing)
         unreadable_directories = self._unreadable_directories(scan)
+        can_finalize_missing = scan.complete and not unreadable_directories
         terminal_state = "completed"
         try:
             for index, plan in enumerate(plans, 1):
@@ -358,7 +364,7 @@ class ObsidianImporter:
                 if progress is not None:
                     progress(dict(outcome))
             self._check_cancel(job_id, cancel_check)
-            if not unreadable_directories:
+            if can_finalize_missing:
                 self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
@@ -376,7 +382,7 @@ class ObsidianImporter:
                 scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
             )
             outcomes.extend(link_warnings)
-            if scan.rejected or unreadable_directories or any(
+            if scan.rejected or not scan.complete or unreadable_directories or any(
                 row["status"] in {"error", "conflict", "rejected"} for row in outcomes
             ):
                 terminal_state = "partial"

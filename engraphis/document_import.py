@@ -122,6 +122,7 @@ def scan_document_upload(
             scan.rejected.append(DocumentFileIssue(
                 "(collection)", "source exceeds document file safety limit",
             ))
+            scan.complete = False
             break
         try:
             relative_path = normalize_document_path(raw_path)
@@ -158,6 +159,7 @@ def scan_document_upload(
             scan.rejected.append(DocumentFileIssue(
                 relative_path, "source exceeds total byte safety limit",
             ))
+            scan.complete = False
             break
         try:
             scan.documents.append(parse_document(

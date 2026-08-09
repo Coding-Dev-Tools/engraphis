@@ -323,6 +323,35 @@ def test_unreadable_directory_does_not_finalize_descendants_as_missing():
         service.close()
 
 
+def test_incomplete_document_scan_defers_missing_reconciliation():
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("incomplete-scan")
+        importer = DocumentImporter(service)
+        first = importer.import_scan(
+            _scan(("keep.txt", b"Keep me."), ("gone.txt", b"Gone later.")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            confirmed=True,
+        )
+        scan = _scan(("keep.txt", b"Keep me."))
+        scan.complete = False
+        report = importer.import_scan(
+            scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_id=first["source_id"], confirmed=True,
+        )
+        assert report["state"] == "partial"
+        assert report["counts"].get("missing", 0) == 0
+        assert report["counts"].get("pending", 0) == 1
+        item = service.store.conn.execute(
+            "SELECT state FROM source_imports WHERE relative_path='gone.txt'"
+        ).fetchone()
+        assert item["state"] == "imported"
+    finally:
+        service.close()
+
+
 def test_document_importer_rejects_an_obsidian_source_identity():
     service = _service()
     try:
