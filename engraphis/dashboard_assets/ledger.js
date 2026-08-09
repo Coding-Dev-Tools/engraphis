@@ -369,7 +369,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics',
+        '/v2-assets/engraphis-graph.js?v=20260809-physics-guard',
         'EngraphisGraph',
       ));
       graphAssetsPromise = attempt;
@@ -491,7 +491,28 @@
   }
 
   function updatePlanBadge() {
-    // The side-menu header intentionally has no plan or upgrade badge.
+    const badge = byId('plan-badge');
+    if (!badge || !state.license) return;
+    const access = licenseAccessState();
+    const plan = licensePlanKey();
+    const trial = licenseTrialAvailable();
+    const label = access === 'active' ? plan.toUpperCase()
+      : access === 'trial' ? 'TRIAL'
+        : access === 'lapsed' ? 'BILLING'
+          : trial ? 'TRY PRO' : 'GET PRO';
+    const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
+      : access === 'lapsed' ? 'Update billing in Plans and billing'
+        : trial ? 'Start the 3-day Pro trial in Plans and billing'
+          : 'Subscribe to Pro in Plans and billing';
+    badge.textContent = label;
+    badge.setAttribute('aria-label', aria);
+    badge.title = aria;
+    const cta = hostedCta(plan || 'pro', 'header');
+    const opensAccount = cta.kind === 'account' && Boolean(cta.href);
+    badge.href = opensAccount ? cta.href : '#';
+    badge.target = opensAccount ? '_blank' : '';
+    badge.rel = opensAccount ? 'noopener' : '';
+    badge.dataset.opensAccount = String(opensAccount);
   }
 
   function renderSidebarCta() {
@@ -499,7 +520,7 @@
     const detail = byId('sidebar-pro-detail');
     const link = byId('sidebar-pro-cta');
     if (!copy || !detail || !link || !state.license) return;
-    const canonicalProCtaLabel = 'Subscribe to Pro';
+
     const renderFeatureCtas = () => {
       [
         ['analytics-pro-cta', 'analytics', 'pro'],
@@ -532,7 +553,6 @@
     link.textContent = cta.label;
     link.href = cta.href || '#';
     link.setAttribute('aria-disabled', cta.href ? 'false' : 'true');
-    link.dataset.proCtaLabel = canonicalProCtaLabel;
     link.dataset.proCta = 'sidebar';
     renderFeatureCtas();
   }
@@ -667,7 +687,7 @@
 
   function savingsQuery(workspace, preset = 'all') {
     const base = query(workspace);
-    if (preset === 'current') return `${base}&release_version=1.5.0`;
+    if (preset === 'current') return `${base}&release_version=1.6`;
     if (preset === '7d') return `${base}&from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
     return base;
   }
