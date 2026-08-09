@@ -85,6 +85,50 @@ def test_memoryagentbench_accepts_official_nested_answers_and_metadata(tmp_path)
     assert question["category"] == "factconsolidation_sh_32k"
 
 
+def test_memoryagentbench_scores_any_accepted_answer_variant(tmp_path):
+    path = _write_json(tmp_path / "mab-variants.json", [{
+        "context": "The deployment office is called NYC.",
+        "questions": ["Which deployment office is used?"],
+        "answers": [["New York", "NYC"]],
+        "metadata": {"qa_pair_ids": ["variant-q"]},
+    }])
+
+    report = run(load_memoryagentbench(path), k=1)
+
+    assert report["answer_token_recall"] == 1.0
+
+
+def test_memoryagentbench_no_gold_is_answer_scored_but_retrieval_excluded(
+    tmp_path, capsys,
+):
+    path = _write_json(tmp_path / "mab-no-gold.json", [{
+        "context": "The deployment note contains no region name.",
+        "questions": ["Which region is preferred?"],
+        "answers": [["us-east-1", "US East"]],
+        "metadata": {"qa_pair_ids": ["no-gold-q"]},
+    }])
+    artifact_path = tmp_path / "no-gold-artifact.json"
+
+    assert main([
+        "--dataset", path,
+        "--format", "memoryagentbench",
+        "--artifact", str(artifact_path),
+    ]) == 0
+    capsys.readouterr()
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    metrics = artifact["metrics"]
+    record = artifact["records"][0]
+
+    assert metrics["retrieval_scored_questions"] == 0
+    assert all(
+        metrics[field] is None
+        for field in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k")
+    )
+    assert record["retrieval_excluded"] == "no_gold_evidence"
+    assert record["answer_scored"] is True
+    assert record["answer_token_recall"] == 0.0
+
+
 def test_memoryagentbench_accepts_hugging_face_rows_envelope(tmp_path):
     path = _write_json(tmp_path / "mab-hf-rows.json", {
         "rows": [{
@@ -254,7 +298,7 @@ def test_cli_writes_redacted_immutable_artifact(tmp_path, capsys):
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     serialized = json.dumps(artifact)
     assert query not in serialized
-    assert len(artifact["records"][0]["query_sha256"]) == 64
+    assert "query_sha256" not in artifact["records"][0]
     assert artifact["suite"]["sources"][0]["name"] == "plus.json"
     assert artifact["metrics"]["claim_boundary"].startswith("Cue-evidence retrieval")
     assert artifact["protocol"]["config"]["limit"] is None

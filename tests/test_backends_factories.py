@@ -1,6 +1,8 @@
 import hashlib
 import logging
+import os
 import sys
+import traceback
 from types import SimpleNamespace
 
 import numpy as np
@@ -62,8 +64,14 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
     class _PinnedEmbedder:
         dim = 128
 
-        def __init__(self, model_name, *, revision=None):
-            captured.update(model_name=model_name, revision=revision)
+        def __init__(
+            self, model_name, *, revision=None, require_immutable_models=None
+        ):
+            captured.update(
+                model_name=model_name,
+                revision=revision,
+                require_immutable_models=require_immutable_models,
+            )
 
     monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _PinnedEmbedder)
     result = get_embedder(
@@ -71,7 +79,11 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
     )
 
     assert isinstance(result, _PinnedEmbedder)
-    assert captured == {"model_name": "Qwen/example", "revision": "a" * 40}
+    assert captured == {
+        "model_name": "Qwen/example",
+        "revision": "a" * 40,
+        "require_immutable_models": True,
+    }
 
 
 @pytest.mark.parametrize("revision", [None, "main", "A" * 40, "a" * 39])
@@ -104,7 +116,9 @@ def test_embedder_default_mode_keeps_mutable_remote_tag_compatibility(monkeypatc
     class _Embedder:
         dim = 128
 
-        def __init__(self, model_name, *, revision=None):
+        def __init__(
+            self, model_name, *, revision=None, require_immutable_models=None
+        ):
             captured.update(model_name=model_name, revision=revision)
 
     monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _Embedder)
@@ -114,31 +128,42 @@ def test_embedder_default_mode_keeps_mutable_remote_tag_compatibility(monkeypatc
     assert captured == {"model_name": "organization/remote-model", "revision": "main"}
 
 
-def test_embedder_strict_mode_permits_existing_local_selector(monkeypatch):
+def test_embedder_strict_mode_permits_existing_local_selector(monkeypatch, tmp_path):
     import engraphis.backends.embedder_st as embedder_st
 
     captured = {}
+    model_dir = tmp_path / "cached-model"
+    model_dir.mkdir()
 
     class _Embedder:
         dim = 128
 
-        def __init__(self, model_name, *, revision=None, local_files_only=False):
+        def __init__(
+            self,
+            model_name,
+            *,
+            revision=None,
+            local_files_only=False,
+            require_immutable_models=None,
+        ):
             captured.update(
                 model_name=model_name,
                 revision=revision,
                 local_files_only=local_files_only,
+                require_immutable_models=require_immutable_models,
             )
 
     monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _Embedder)
     result = get_embedder(
-        "local:C:/models/bge-small", 128, require_immutable_models=True,
+        str(model_dir), 128, require_immutable_models=True,
     )
 
     assert isinstance(result, _Embedder)
     assert captured == {
-        "model_name": "C:/models/bge-small",
+        "model_name": str(model_dir),
         "revision": None,
         "local_files_only": True,
+        "require_immutable_models": True,
     }
 
 
@@ -173,6 +198,59 @@ def test_sentence_transformer_disables_remote_code(monkeypatch):
     SentenceTransformerEmbedder("organization/remote-model", revision="a" * 40)
 
     assert captured == {"trust_remote_code": False, "revision": "a" * 40}
+
+
+def test_sentence_transformer_strict_local_cache_selector_never_requires_remote_revision(
+    monkeypatch,
+):
+    captured = {}
+
+    class _Model:
+        commit_hash = "a" * 40
+
+        def __init__(self, _name, **kwargs):
+            captured.update(kwargs)
+
+        def get_embedding_dimension(self):
+            return 128
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_Model),
+    )
+
+    embedder = SentenceTransformerEmbedder(
+        "organization/cached-model",
+        local_files_only=True,
+        require_immutable_models=True,
+    )
+
+    assert embedder.embedding_version
+    assert captured == {"trust_remote_code": False, "local_files_only": True}
+
+
+def test_sentence_transformer_identity_uses_loader_resolved_commit(monkeypatch):
+    commits = iter(("a" * 40, "b" * 40))
+
+    class _Model:
+        def __init__(self, _name, **_kwargs):
+            self.commit_hash = next(commits)
+
+        def get_embedding_dimension(self):
+            return 128
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_Model),
+    )
+
+    first = SentenceTransformerEmbedder("organization/model", revision="main")
+    second = SentenceTransformerEmbedder("organization/model", revision="main")
+
+    assert first.embedding_version
+    assert first.embedding_version != second.embedding_version
 
 
 def test_cross_encoder_reranker_pins_revision_and_disables_remote_code(monkeypatch):
@@ -290,19 +368,82 @@ def test_memory_service_forwards_model_provenance_to_the_engine(monkeypatch):
     assert captured["rerank_revision"] == "b" * 40
 
 
-def test_sentence_transformer_identity_changes_with_model_or_revision():
+def test_sentence_transformer_local_identity_changes_with_artifact_manifest(
+    monkeypatch, tmp_path
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    weights = model_dir / "weights.bin"
+    weights.write_bytes(b"weights-v1")
+
+    class _Model:
+        def __init__(self, _name, **_kwargs):
+            pass
+
+        def get_embedding_dimension(self):
+            return 128
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_Model),
+    )
+
+    original = weights.stat()
+    first = SentenceTransformerEmbedder(str(model_dir), local_files_only=True)
+    weights.write_bytes(b"weights-v2")
+    os.utime(
+        weights,
+        ns=(original.st_atime_ns, original.st_mtime_ns),
+    )
+    changed = SentenceTransformerEmbedder(str(model_dir), local_files_only=True)
+
+    assert first.embedding_version
+    assert first.embedding_version != changed.embedding_version
+
+
+def test_sentence_transformer_identity_uses_loaded_artifact_not_mutable_selector():
     first = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
     first.model_name = "Qwen/example"
-    first.revision = "a" * 40
-    second = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
-    second.model_name = "Qwen/example"
-    second.revision = "b" * 40
-    other = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
-    other.model_name = "BGE/example"
-    other.revision = "a" * 40
+    first._artifact_version = "hf-commit:" + "a" * 40
+    same = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    same.model_name = "Qwen/example"
+    same._artifact_version = "hf-commit:" + "a" * 40
+    changed = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    changed.model_name = "Qwen/example"
+    changed._artifact_version = "hf-commit:" + "b" * 40
+    unversioned = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    unversioned.model_name = "Qwen/example"
+    unversioned._artifact_version = ""
 
     assert first.embedding_identity == "sentence_transformers"
-    assert len({first.embedding_version, second.embedding_version, other.embedding_version}) == 3
+    assert first.embedding_version == same.embedding_version
+    assert first.embedding_version != changed.embedding_version
+    assert unversioned.embedding_version == ""
+
+
+def test_sentence_transformer_embedding_failure_is_redacted():
+    marker = "private-model-or-input-detail"
+
+    class _Model:
+        def encode(self, *_args, **_kwargs):
+            raise RuntimeError(marker)
+
+    embedder = SentenceTransformerEmbedder.__new__(SentenceTransformerEmbedder)
+    embedder.model = _Model()
+    embedder._dim = 2
+
+    with pytest.raises(RuntimeError, match="returned malformed embeddings") as exc_info:
+        embedder.embed(["secret input"])
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert marker not in rendered
 
 
 def test_embedder_factory_local_selector_requires_only_local_model_files(monkeypatch):
@@ -316,7 +457,14 @@ def test_embedder_factory_local_selector_requires_only_local_model_files(monkeyp
         supports_semantic_search = True
         embedding_mode = "semantic"
 
-        def __init__(self, model_name, *, revision=None, local_files_only=False):
+        def __init__(
+            self,
+            model_name,
+            *,
+            revision=None,
+            local_files_only=False,
+            require_immutable_models=None,
+        ):
             captured.update(
                 model_name=model_name,
                 revision=revision,

@@ -83,7 +83,7 @@ def embed_dim() -> int:
     """Return the embedding dimension (loads model if needed)."""
     if _dim is None:
         _get_model()
-    return _dim or settings.embed_dim or 384
+    return _dim if _dim is not None else (settings.embed_dim if settings.embed_dim is not None else 384)
 
 
 def embed(text: str) -> np.ndarray:

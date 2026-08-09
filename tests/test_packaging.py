@@ -1,6 +1,8 @@
+import csv
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -61,6 +63,9 @@ def test_http_mcp_cli_rejects_non_loopback_host():
 
 
 def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
+    pytest.importorskip(
+        "mcp", reason="MCP packaging transport requires the optional mcp dependency"
+    )
     from engraphis import mcp_http_cli
 
     calls = []
@@ -212,6 +217,8 @@ def test_distribution_configuration_includes_public_evidence_tools():
         "include docs/images/context-efficiency.svg",
         "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
+        "include deploy/force-graph-1.51.4.licenses.json",
+        "include deploy/force-graph-1.51.4.yarn.lock",
         "include eval/BASELINES.md",
         "include eval/EVIDENCE.md",
         "recursive-include eval/configs *.json",
@@ -220,6 +227,10 @@ def test_distribution_configuration_includes_public_evidence_tools():
     ):
         assert rule in manifest
     assert "docker-compose.lan.yml" in REQUIRED_SDIST
+    assert "deploy/force-graph-1.51.4.licenses.json" in REQUIRED_SDIST
+    assert "deploy/force-graph-1.51.4.yarn.lock" in REQUIRED_SDIST
+    assert '"deploy/force-graph-1.51.4.licenses.json"' in pyproject
+    assert '"deploy/force-graph-1.51.4.yarn.lock"' in pyproject
 
 
 def test_distribution_archive_verifier_requires_evidence_and_rejects_internal_material(
@@ -246,6 +257,86 @@ def test_distribution_archive_verifier_requires_evidence_and_rejects_internal_ma
             path.write_bytes(b"public")
             archive.add(path, arcname=f"engraphis-1.0.0/{name}")
     verify_distribution(sdist)
+
+
+def _yarn_v1_runtime_closure(
+        lock_text: str, direct_dependencies: dict[str, str]) -> set[tuple[str, str]]:
+    selectors = {}
+    current = None
+    in_dependencies = False
+    for raw in lock_text.splitlines():
+        if raw and not raw.startswith((" ", "#")) and raw.endswith(":"):
+            names = next(csv.reader([raw[:-1]], skipinitialspace=True))
+            current = {"dependencies": {}}
+            for selector in names:
+                selectors[selector] = current
+            in_dependencies = False
+        elif current is not None and raw.startswith("  version "):
+            current["version"] = shlex.split(raw.strip())[1]
+            in_dependencies = False
+        elif current is not None and raw == "  dependencies:":
+            in_dependencies = True
+        elif current is not None and in_dependencies and raw.startswith("    "):
+            parts = shlex.split(raw.strip())
+            if len(parts) == 2:
+                current["dependencies"][parts[0]] = parts[1]
+        elif raw and not raw.startswith("    "):
+            in_dependencies = False
+
+    closure = set()
+    pending = list(direct_dependencies.items())
+    while pending:
+        name, version_range = pending.pop()
+        package = selectors[f"{name}@{version_range}"]
+        identity = (name, package["version"])
+        if identity in closure:
+            continue
+        closure.add(identity)
+        pending.extend(package["dependencies"].items())
+    return closure
+
+
+def test_force_graph_bundle_has_exact_locked_license_closure():
+    report_path = ROOT / "deploy" / "force-graph-1.51.4.licenses.json"
+    lock_path = ROOT / "deploy" / "force-graph-1.51.4.yarn.lock"
+    bundle_path = ROOT / "engraphis" / "static" / "vendor" / "force-graph.min.js"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    root_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
+
+    assert report["format"] == "engraphis-bundled-license-report/v1"
+    assert report["bundle"]["sha256"] == hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    assert report["source_lock"]["sha256"] == hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    assert report["source_lock"]["canonical_lf_sha256"] == hashlib.sha256(
+        lock_path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+    ).hexdigest()
+    assert report["bundle"]["upstream_commit"] == (
+        "baa20a92bbe5628034d771abaf33a2dbb65d22eb"
+    )
+
+    closure = _yarn_v1_runtime_closure(
+        lock_path.read_text(encoding="utf-8"),
+        report["bundle"]["direct_dependencies"],
+    )
+    closure.add(("force-graph", "1.51.4"))
+    package_entries = root_lock["packages"]
+    expected = {
+        (
+            name,
+            version,
+            package_entries[f"node_modules/{name}"]["license"],
+        )
+        for name, version in closure
+    }
+    actual = {
+        (item["name"], item["version"], item["license"])
+        for item in report["dependencies"]
+    }
+    assert actual == expected
+    assert all(item["copyright"] for item in report["dependencies"])
+    assert all(len(item["license_text"]) > 500 for item in report["dependencies"])
+    force_graph = package_entries["node_modules/force-graph"]
+    assert force_graph["version"] == "1.51.4"
+    assert force_graph["integrity"] == report["bundle"]["npm_integrity"]
 
 
 def test_every_vendored_browser_library_has_redistribution_notice():

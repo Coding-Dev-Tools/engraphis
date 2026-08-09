@@ -83,7 +83,12 @@ def _top_k_indices(scores: np.ndarray, ids: list[str], k: int) -> list[int]:
 
 
 class NumpyVectorIndex:
-    """Store-backed brute-force cosine index. Vectors are stored normalized."""
+    """Store-backed brute-force cosine index.
+
+    Vectors are stored normalized. A zero vector has no cosine direction, so zero
+    queries return no hits and zero corpus rows are omitted rather than assigned an
+    arbitrary score. Native backends implement the same contract.
+    """
 
     shares_store_vector_table = True
 
@@ -173,8 +178,9 @@ class NumpyVectorIndex:
             n = float(np.linalg.norm(q))
         if not np.isfinite(n):
             raise ValueError("query vector norm must be finite")
-        if n > 0:
-            q = q / n
+        if n == 0:
+            return []
+        q = q / n
         ids, mat = self.store.vector_matrix(
             filter, dim=self.dim if self.dim is not None else int(q.shape[0])
         )
@@ -182,6 +188,12 @@ class NumpyVectorIndex:
             return []
         # Store filters by both the declared dimension and blob width, so legacy
         # rows from another embedding space cannot break this exact matrix scan.
+        nonzero = np.any(mat != 0, axis=1)
+        if not np.all(nonzero):
+            ids = [memory_id for memory_id, keep in zip(ids, nonzero) if keep]
+            mat = mat[nonzero]
+            if not ids:
+                return []
         scores = mat @ q                                # cosine == dot for unit vectors
         k = min(k, len(ids))
         top = _top_k_indices(scores, ids, k)

@@ -42,6 +42,19 @@ def _loopback_host(value: str) -> str:
     )
 
 
+def _transport_security(host: str, port: int):
+    """Build the SDK's Host/Origin allowlist for the address this launcher binds."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    address = ipaddress.ip_address(host)
+    authority = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[authority, f"{authority}:{port}"],
+        allowed_origins=[f"http://{authority}", f"http://{authority}:{port}"],
+    )
+
+
 def _port(value: str) -> int:
     try:
         port = int(value)
@@ -83,7 +96,7 @@ def main(argv=None) -> None:
         "--classic",
         action="store_true",
         help=(
-            "serve the legacy 33 direct-tool surface; normal use defaults to the compact "
+            "serve the legacy 34 direct-tool surface; normal use defaults to the compact "
             "Smart gateway"
         ),
     )
@@ -106,6 +119,7 @@ def main(argv=None) -> None:
         server = classic_mcp
     server.settings.host = args.host
     server.settings.port = args.port
+    server.settings.transport_security = _transport_security(args.host, args.port)
     server.run(transport=args.transport)
 
 

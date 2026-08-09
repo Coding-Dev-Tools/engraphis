@@ -29,7 +29,8 @@ def test_sync_apply_preserves_future_world_validity():
                           "valid_from": future - 86400})
     assert rec is not None
     assert rec.valid_to > time.time() + 365 * 86400    # NOT truncated to now+skew
-    # System timestamps are still clamped near now (they feed the version key / anti-poison).
+    # Supplied system timestamps beyond the skew window are rejected row-locally;
+    # clamping them relative to each receiver would make replicas diverge.
     poisoned = dict_to_record({"id": "mem_y", "content": "c", "ingested_at": future,
                                "last_access": future})
-    assert poisoned.ingested_at <= time.time() + 10 * 86400
+    assert poisoned is None

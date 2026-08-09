@@ -6,6 +6,7 @@ memory object with the same two public methods for use inside that harness.
 """
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 import json
 from pathlib import Path
@@ -377,20 +378,20 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
         writes continue to enter the review gate through ``MemoryService``.
         """
         trajectory_id = str(trajectory.get("trajectory_id") or trajectory.get("id") or self._counter)
-        segments = _trajectory_segments(trajectory)
+        segments = _typed_trajectory_segments(trajectory)
         if not segments:
             return
         workspace_id = self.service.store.get_or_create_workspace(self.workspace)
         repo_id = self.service.store.get_or_create_repo(workspace_id, self.repo)
         sequence = 0
-        for state_index, text in segments:
+        for state_index, mtype, text in segments:
             for chunk_index, chunk in enumerate(_split_trajectory_text(text), start=1):
                 sequence += 1
                 self.service.engine.remember(
                     chunk,
                     workspace_id=workspace_id,
                     repo_id=repo_id,
-                    mtype=MemoryType.EPISODIC,
+                    mtype=mtype,
                     scope=Scope.REPO,
                     title=f"trajectory:{trajectory_id}:state:{state_index}:part:{chunk_index}",
                     metadata={
@@ -457,6 +458,8 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             ),
             "context_revision": response.get("context_revision"),
             "source_ids": source_ids,
+            "inserted_memory_type_counts": self._stored_memory_type_counts(),
+            "retrieved_memory_type_counts": self._source_memory_type_counts(source_ids),
             "usage": response.get("usage", {}),
             "returned_context_tokens": sum(
                 self._count_tokens(item["value"]) for item in items
@@ -471,6 +474,35 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             "budget_curve_status": "single_operating_point",
         }
         return items
+
+    def _stored_memory_type_counts(self) -> dict[str, int]:
+        # Scope to the current evaluation's workspace/repo to avoid counting
+        # memories from other workspaces in shared databases.
+        conn = self.service.store.conn
+        scope = conn.execute(
+            "SELECT w.id AS workspace_id, r.id AS repo_id "
+            "FROM workspaces w JOIN repos r ON r.workspace_id=w.id "
+            "WHERE w.name=? AND r.name=?",
+            (self.workspace, self.repo),
+        ).fetchone()
+        if scope is None:
+            return {}
+        rows = conn.execute(
+            "SELECT mtype, COUNT(*) FROM memories "
+            "WHERE workspace_id=? AND repo_id=? "
+            "GROUP BY mtype ORDER BY mtype",
+            (scope["workspace_id"], scope["repo_id"]),
+        ).fetchall()
+        return {str(row[0]): int(row[1]) for row in rows if int(row[1]) > 0}
+
+    def _source_memory_type_counts(self, source_ids: Sequence[str]) -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        for memory_id in source_ids:
+            record = self.service.store.get_memory(memory_id)
+            if record is not None:
+                counts[record.mtype.value] += 1
+        return dict(sorted(counts.items()))
+
 
     def post_query_hook(
         self,
@@ -615,6 +647,28 @@ def _trajectory_segments(trajectory: dict[str, Any]) -> list[tuple[int, str]]:
     if isinstance(content, str) and content.strip():
         return [(0, content.strip())]
     return []
+
+
+def _typed_trajectory_segments(
+    trajectory: dict[str, Any],
+) -> list[tuple[int, MemoryType, str]]:
+    """Split state observations from actions so type-cap ablations are real.
+
+    Observed state remains episodic. Explicit ``action:`` lines are procedural.
+    This partitions, rather than duplicates, the official trajectory text.
+    """
+    result: list[tuple[int, MemoryType, str]] = []
+    for state_index, text in _trajectory_segments(trajectory):
+        episodic_lines: list[str] = []
+        procedural_lines: list[str] = []
+        for line in text.splitlines():
+            target = procedural_lines if line.casefold().startswith("action:") else episodic_lines
+            target.append(line)
+        if episodic_lines:
+            result.append((state_index, MemoryType.EPISODIC, "\n".join(episodic_lines)))
+        if procedural_lines:
+            result.append((state_index, MemoryType.PROCEDURAL, "\n".join(procedural_lines)))
+    return result
 
 
 def _split_trajectory_text(text: str, *, max_chars: int = _MAX_TRAJECTORY_CHUNK_CHARS) -> list[str]:

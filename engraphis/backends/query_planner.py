@@ -14,7 +14,13 @@ from engraphis.core.interfaces import (
     RetrievalPlan,
     SearchFilter,
 )
-from engraphis.core.query_planner import MAX_PLANNED_PRIORITY
+from engraphis.core.query_planner import MAX_PLANNED_PRIORITY, MAX_PLANNED_QUERIES
+
+
+_PLANNING_PROFILES = frozenset({"balanced", "fast", "lexical", "graph", "code"})
+_MAX_PLANNED_QUERY_CHARS = 2_048
+_MAX_REASON_CODES = 8
+_MAX_REASON_CODE_CHARS = 80
 
 
 class LLMQueryPlanner:
@@ -39,12 +45,16 @@ class LLMQueryPlanner:
             "properties": {
                 "queries": {
                     "type": "array",
-                    "maxItems": 3,
+                    "maxItems": MAX_PLANNED_QUERIES,
                     "items": {
                         "type": "object",
                         "required": ["text", "priority", "profile"],
                         "properties": {
-                            "text": {"type": "string"},
+                            "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": _MAX_PLANNED_QUERY_CHARS,
+                            },
                             "priority": {
                                 "type": "integer",
                                 "minimum": 1,
@@ -57,12 +67,22 @@ class LLMQueryPlanner:
                             "mtypes": {
                                 "type": "array",
                                 "items": {"enum": [item.value for item in MemoryType]},
+                                "maxItems": len(MemoryType),
+                                "uniqueItems": True,
                             },
                         },
                     },
                 },
-                "mtype_limits": {"type": "object"},
-                "reason_codes": {"type": "array", "items": {"type": "string"}},
+                "mtype_limits": {
+                    "type": "object",
+                    "maxProperties": len(MemoryType),
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+                "reason_codes": {
+                    "type": "array",
+                    "maxItems": _MAX_REASON_CODES,
+                    "items": {"type": "string", "maxLength": _MAX_REASON_CODE_CHARS},
+                },
             },
         }
         prompt = (
@@ -75,19 +95,57 @@ class LLMQueryPlanner:
         raw = self.llm.extract_json(prompt, schema, **kwargs)
         if not isinstance(raw, dict):
             raise ValueError("planner output must be an object")
+        raw_queries = raw.get("queries", [])
+        if not isinstance(raw_queries, list) or len(raw_queries) > MAX_PLANNED_QUERIES:
+            raise ValueError("planner queries must be a bounded array")
         queries = []
-        for item in raw.get("queries", []):
+        for item in raw_queries:
             if not isinstance(item, dict):
-                continue
+                raise ValueError("planner query entries must be objects")
+            text = item.get("text")
+            priority = item.get("priority", 1)
+            profile = item.get("profile", "balanced")
+            raw_mtypes = item.get("mtypes", [])
+            if (
+                not isinstance(text, str)
+                or not text.strip()
+                or len(text) > _MAX_PLANNED_QUERY_CHARS
+            ):
+                raise ValueError("planner query text must be a bounded string")
+            if isinstance(priority, bool) or not isinstance(priority, int):
+                raise ValueError("planner query priority must be an integer")
+            if not 1 <= priority <= MAX_PLANNED_PRIORITY:
+                raise ValueError("planner query priority is outside the supported range")
+            if not isinstance(profile, str) or profile not in _PLANNING_PROFILES:
+                raise ValueError("planner query profile is unsupported")
+            if not isinstance(raw_mtypes, list) or len(raw_mtypes) > len(MemoryType):
+                raise ValueError("planner memory types must be a bounded array")
             queries.append(PlannedQuery(
-                text=str(item.get("text") or ""),
-                priority=item.get("priority", 1),
-                profile=str(item.get("profile") or "balanced"),
-                mtypes=tuple(MemoryType(value) for value in item.get("mtypes", [])),
+                text=text,
+                priority=priority,
+                profile=profile,
+                mtypes=tuple(MemoryType(value) for value in raw_mtypes),
             ))
-        limits = {
-            MemoryType(key): value
-            for key, value in (raw.get("mtype_limits") or {}).items()
-        }
-        reasons = tuple(str(value) for value in raw.get("reason_codes", []))
-        return RetrievalPlan(tuple(queries), limits, reasons)
+
+        raw_limits = raw.get("mtype_limits", {})
+        if raw_limits is None:
+            raw_limits = {}
+        if not isinstance(raw_limits, dict) or len(raw_limits) > len(MemoryType):
+            raise ValueError("planner memory-type limits must be a bounded object")
+        limits = {}
+        for key, value in raw_limits.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("planner memory-type limits must be non-negative integers")
+            limits[MemoryType(key)] = value
+
+        raw_reasons = raw.get("reason_codes", [])
+        if raw_reasons is None:
+            raw_reasons = []
+        if not isinstance(raw_reasons, list) or len(raw_reasons) > _MAX_REASON_CODES:
+            raise ValueError("planner reason codes must be a bounded array")
+        if any(
+            not isinstance(value, str) or len(value) > _MAX_REASON_CODE_CHARS
+            for value in raw_reasons
+        ):
+            raise ValueError("planner reason codes must be bounded strings")
+        return RetrievalPlan(tuple(queries), limits, tuple(raw_reasons))

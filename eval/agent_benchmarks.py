@@ -506,6 +506,7 @@ def public_artifact(
         dataset_path=dataset,
         source_paths=source_paths,
         config={
+            "measurement_scope": "retrieval_only",
             "format": fmt,
             "k": k,
             "limit": limit,

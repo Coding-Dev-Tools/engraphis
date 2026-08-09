@@ -106,6 +106,42 @@ def test_code_fence_is_kept_intact():
     assert body.count("```") == 2  # both fences landed in the same chunk
 
 
+def test_oversized_fenced_code_is_split_balanced_without_data_loss():
+    payload = "".join(
+        f"value_{index:05d} = {index}\n"
+        for index in range(10_000)
+    )
+    text = f"```python\n{payload}```"
+
+    facts = ChunkingExtractor(
+        target_tokens=256,
+        overlap_tokens=0,
+        max_chunks=10,
+    ).extract(text)
+
+    assert len(facts) > 1
+    assert all(fact.content.startswith("```python\n") for fact in facts)
+    assert all(fact.content.endswith("\n```") for fact in facts)
+    assert all(len(fact.content) <= 100_000 for fact in facts)
+    recovered = "".join(
+        fact.content.split("\n", 1)[1].rsplit("\n```", 1)[0]
+        for fact in facts
+    )
+    assert recovered == payload
+
+
+def test_oversized_fenced_code_rejects_instead_of_truncating_at_chunk_cap():
+    payload = "value = 1\n" * 10_000
+    extractor = ChunkingExtractor(
+        target_tokens=256,
+        overlap_tokens=0,
+        max_chunks=1,
+    )
+
+    with pytest.raises(ValueError, match="exceeds the chunk limit"):
+        extractor.extract(f"```python\n{payload}```")
+
+
 def test_long_prose_splits_into_multiple_budgeted_chunks():
     # Ten ~equal sentences; a tight budget must produce several chunks, none absurdly
     # larger than the target (single sentences are never split mid-sentence).
@@ -326,3 +362,7 @@ def test_structured_llm_extractor_falls_back_to_chunking_on_failure():
     assert len(facts) == 1
     assert facts[0].title == "Title"
     assert "pnpm" in facts[0].content
+    assert facts[0].metadata["extraction_fallback"] == {
+        "mode": "llm_structured",
+        "reason": "provider_or_output_error",
+    }

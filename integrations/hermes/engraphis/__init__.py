@@ -104,7 +104,7 @@ class EngraphisMemoryProvider(MemoryProvider):
             "Use engraphis_search before relying on past decisions or preferences, and use "
             "engraphis_store for durable facts, decisions with rationale, and reusable "
             "procedures. Never store passwords, tokens, API keys, private keys, or other "
-            "credentials. Use engraphis_erase only when a record must be permanently removed."
+            "credentials."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -182,14 +182,6 @@ class EngraphisMemoryProvider(MemoryProvider):
                     "importance": {"type": "number", "default": 0.6},
                 }, "required": ["text"]},
             },
-            {
-                "name": "engraphis_erase",
-                "description": "Irreversibly remove a leaked or unwanted Engraphis record "
-                "by its memory id. Use only for a deliberate permanent deletion.",
-                "parameters": {"type": "object", "properties": {
-                    "memory_id": {"type": "string"},
-                }, "required": ["memory_id"]},
-            },
         ]
 
     @staticmethod
@@ -218,12 +210,6 @@ class EngraphisMemoryProvider(MemoryProvider):
                     keywords=values.get("keywords"),
                     importance=float(values.get("importance", 0.6)),
                     source="agent", trusted=False,
-                )
-                return json.dumps(result, default=str)
-            if tool_name == "engraphis_erase":
-                result = service.secure_erase(
-                    str(values["memory_id"]), workspace=self._workspace(), repo=self._repo(),
-                    actor="hermes",
                 )
                 return json.dumps(result, default=str)
             return json.dumps({"error": "unknown_tool"})

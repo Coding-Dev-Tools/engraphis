@@ -168,6 +168,45 @@ def test_semantic_index_runtime_failure_preserves_lexical_recall_and_is_redacted
     assert "credentialed-provider-detail" not in caplog.text
 
 
+def test_semantic_query_embedding_failure_preserves_lexical_recall_and_is_redacted(caplog):
+    class RuntimeFailingSemanticEmbedder(_SemanticTestEmbedder):
+        def embed(self, texts, **kwargs):
+            if len(texts) == 1 and texts[0] == "package manager":
+                raise RuntimeError("embedding-provider-secret")
+            return super().embed(texts, **kwargs)
+
+    store = Store(":memory:")
+    emb = RuntimeFailingSemanticEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    memory_id = _add(
+        store, emb, wid, None,
+        "pnpm is the package manager for frontend projects.",
+    )
+    eng = RecallEngine(
+        store,
+        emb,
+        NumpyVectorIndex(store),
+        IdentityReranker(),
+    )
+
+    with caplog.at_level("WARNING", logger="engraphis.core.recall"):
+        result = eng.recall(
+            "package manager",
+            SearchFilter(workspace_id=wid),
+            k=1,
+            diagnostics=True,
+        )
+
+    assert result.chunks[0]["id"] == memory_id
+    assert result.degraded_mode is True
+    assert result.semantic_support is False
+    assert result.vector_search_ready is False
+    assert result.retrieval_trace is not None
+    assert result.retrieval_trace[0]["raw"]["semantic"] is None
+    assert "RuntimeError" in caplog.text
+    assert "embedding-provider-secret" not in caplog.text
+
+
 def test_reranker_mutate_then_raise_uses_pristine_fused_fallback(caplog):
     class MutatingFailingReranker:
         def rerank(self, query, candidates, k):
@@ -803,6 +842,80 @@ def test_graph_arm_does_not_match_entity_names_inside_other_words():
         now=10**12)
 
     assert related not in scores
+
+
+def test_graph_arms_drop_zero_weight_edges_and_zero_confidence_incidence():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    atlas = store.upsert_entity(Node(
+        id="", name="Atlas", ntype="service", workspace_id=wid, repo_id=rid,
+    ))
+    beacon = store.upsert_entity(Node(
+        id="", name="Beacon", ntype="service", workspace_id=wid, repo_id=rid,
+    ))
+    store.upsert_edge(Edge(
+        id="", src=atlas, dst=beacon, relation="related",
+        weight=0.0, workspace_id=wid, repo_id=rid,
+    ))
+    behind_zero_edge = _add(
+        store, emb, wid, rid, "Beacon owns an unrelated archive.",
+    )
+    direct_zero = _add(
+        store, emb, wid, rid, "An unrelated Atlas note.",
+    )
+    store.link_memory_entity(
+        memory_id=behind_zero_edge,
+        entity_id=beacon,
+        workspace_id=wid,
+        repo_id=rid,
+        source_kind="test",
+        confidence=1.0,
+    )
+    store.link_memory_entity(
+        memory_id=direct_zero,
+        entity_id=atlas,
+        workspace_id=wid,
+        repo_id=rid,
+        source_kind="test",
+        confidence=0.0,
+    )
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+
+    for graph_arm in (eng._graph_arm_ppr, eng._graph_arm_1hop):
+        scores = graph_arm("Atlas", flt, now=10**12)
+        assert behind_zero_edge not in scores
+        assert direct_zero not in scores
+
+
+def test_entity_seed_cap_prioritizes_exact_names_deterministically(tmp_path):
+    from engraphis.core.interfaces import Node
+
+    store = Store(str(tmp_path / "bounded-entity-seeds.db"))
+    emb = DeterministicEmbedder(256)
+    eng = RecallEngine(store, emb, NumpyVectorIndex(store), IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    for index in range(2048):
+        store.upsert_entity(Node(
+            id="",
+            name=f"Atlas Archive {index:04d}",
+            ntype="document",
+            workspace_id=wid,
+            repo_id=rid,
+        ))
+    target = store.upsert_entity(Node(
+        id="", name="Atlas", ntype="service", workspace_id=wid, repo_id=rid,
+    ))
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+
+    first = eng._seed_entity_map("What is Atlas?", flt)
+    second = eng._seed_entity_map("What is Atlas?", flt)
+
+    assert first == second == {target: "Atlas"}
+    store.close()
 
 # ── regression: batched candidate lookup + deterministic tie ordering ─────────
 

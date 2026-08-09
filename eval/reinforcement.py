@@ -21,6 +21,20 @@ def _trajectory(events: int, boost: float) -> tuple[float, list[float]]:
     return stability, gains
 
 
+def _gain_checks(gains: list[float], *, tolerance: float = 1e-12) -> dict[str, bool]:
+    finite = all(math.isfinite(gain) for gain in gains)
+    nonnegative = finite and all(gain >= -tolerance for gain in gains)
+    nonincreasing = finite and all(
+        later <= earlier + tolerance
+        for earlier, later in zip(gains, gains[1:])
+    )
+    return {
+        "finite": finite,
+        "nonnegative": nonnegative,
+        "nonincreasing": nonincreasing,
+    }
+
+
 def run() -> dict:
     recall_stability, recall_gains = _trajectory(
         1000, scoring.INTERACTION_BOOST["recall"]
@@ -32,13 +46,22 @@ def run() -> dict:
     retention_90d = scoring.retention(
         recall_stability, now - 90 * 86_400, now
     )
+    recall_gain_checks = _gain_checks(recall_gains)
+    create_gain_checks = _gain_checks(create_gains)
     checks = {
-        "finite": math.isfinite(recall_stability) and math.isfinite(create_stability),
+        "finite": (
+            math.isfinite(recall_stability)
+            and math.isfinite(create_stability)
+            and recall_gain_checks["finite"]
+            and create_gain_checks["finite"]
+        ),
         "recall_1000_under_5_days": recall_stability < 5.0,
         "create_1000_under_10_days": create_stability < 10.0,
         "within_policy_cap": max(recall_stability, create_stability) <= MAX_STABILITY_DAYS,
-        "diminishing_recall_gain": recall_gains[99] < recall_gains[0],
-        "diminishing_create_gain": create_gains[99] < create_gains[0],
+        "nonnegative_recall_gain": recall_gain_checks["nonnegative"],
+        "nonnegative_create_gain": create_gain_checks["nonnegative"],
+        "diminishing_recall_gain": recall_gain_checks["nonincreasing"],
+        "diminishing_create_gain": create_gain_checks["nonincreasing"],
         "recall_burst_90d_retention_below_1e_6": retention_90d < 1e-6,
     }
     return {

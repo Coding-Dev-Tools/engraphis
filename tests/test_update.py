@@ -119,6 +119,42 @@ def test_pipx_update_without_tag_preserves_safe_extras(monkeypatch):
     ]]
 
 
+@pytest.mark.parametrize("method", ["pypi", "pipx"])
+def test_check_only_package_resolution_failure_exits_nonzero(
+    monkeypatch, capsys, method
+):
+    monkeypatch.setattr(update, "_detect_install", lambda: method)
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[server]")
+    monkeypatch.setattr(
+        update.subprocess,
+        "Popen",
+        _spawner(lambda _cmd: _FakeProcess(returncode=1), []),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update.main(["--check"])
+
+    assert exc.value.code == 1
+    assert "update failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("method", ["pypi", "pipx"])
+def test_check_only_package_resolution_success_returns_normally(monkeypatch, method):
+    calls = []
+    monkeypatch.setattr(update, "_detect_install", lambda: method)
+    monkeypatch.setattr(update, "_installed_extras", lambda: "[server]")
+    monkeypatch.setattr(
+        update.subprocess,
+        "Popen",
+        _spawner(lambda _cmd: _FakeProcess(), calls),
+    )
+
+    update.main(["--check"])
+
+    assert calls
+    assert calls[0][1].get("stdin") is update.subprocess.DEVNULL
+
+
 def test_installed_extras_uses_explicit_override(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", "server,code,server")
     assert update._installed_extras() == "[code,server]"

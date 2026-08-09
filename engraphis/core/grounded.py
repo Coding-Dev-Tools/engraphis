@@ -31,6 +31,7 @@ being the nearest vector.
 from __future__ import annotations
 
 import math
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -42,6 +43,8 @@ from engraphis.core.interfaces import LLM, embedder_capabilities
 from engraphis.core.poisoning import detect_payload_signals, prompt_eligible
 from engraphis.core.recall import RecallResult
 from engraphis.core.textutil import jaccard, tokenize
+
+logger = logging.getLogger("engraphis.core.grounded")
 
 # Absolute support floor (max of declared semantic cosine / lexical Jaccard, both in [0, 1])
 # below which we abstain. Feature hashing deliberately contributes no cosine: its lexical
@@ -202,7 +205,7 @@ def _lexical_support(query_tokens: set[str], content_tokens: set[str]) -> float:
     # A long question sharing one noun (``bake sourdough bread`` vs. a note that
     # merely mentions sourdough) is not evidence.  Short, specific questions may
     # have one decisive identifier and are handled by directional query coverage.
-    if len(normalized_query) >= 3 and matched < 2:
+    if len(normalized_query) >= 2 and matched < 2:
         return 0.0
     if not normalized_query:
         return 0.0
@@ -227,29 +230,48 @@ def support_scores(query: str, contents: list[str], embedder) -> list[float]:
     if not contents:
         return []
     q_tokens = tokenize(query) - _QUERY_FRAMING_TERMS
-    semantic_support = embedder_capabilities(embedder)["semantic_support"]
-    qn = None
-    vecs = None
-    if semantic_support:
+    semantic_scores = [0.0] * len(contents)
+    if embedder_capabilities(embedder)["semantic_support"]:
         texts = [_filtered_text(query)] + [_filtered_text(c) for c in contents]
-        vecs = embedder.embed(texts)
-        qn = np.asarray(vecs[0], dtype=float)
-        qn = qn / (float(np.linalg.norm(qn)) or 1.0)
+        try:
+            vectors = embedder.embed(texts)
+            if len(vectors) != len(texts):
+                raise ValueError("semantic embedder returned an unexpected vector count")
+            query_vector = np.asarray(vectors[0], dtype=float)
+            if query_vector.ndim != 1 or not np.isfinite(query_vector).all():
+                raise ValueError("semantic embedder returned an invalid query vector")
+            query_norm = float(np.linalg.norm(query_vector))
+            normalized_query_vector = query_vector / (query_norm or 1.0)
+            for index, raw_vector in enumerate(vectors[1:]):
+                content_vector = np.asarray(raw_vector, dtype=float)
+                if (
+                    content_vector.shape != normalized_query_vector.shape
+                    or not np.isfinite(content_vector).all()
+                ):
+                    raise ValueError("semantic embedder returned an invalid content vector")
+                content_norm = float(np.linalg.norm(content_vector))
+                normalized_content_vector = content_vector / (content_norm or 1.0)
+                semantic_scores[index] = max(
+                    0.0,
+                    float(np.dot(normalized_query_vector, normalized_content_vector)),
+                )
+        except Exception as exc:
+            semantic_scores = [0.0] * len(contents)
+            logger.warning(
+                "semantic support scoring failed (%s); using lexical evidence",
+                type(exc).__name__,
+            )
     out: list[float] = []
     for i, content in enumerate(contents):
         content_tokens = tokenize(content)
-        cos = 0.0
-        if qn is not None and vecs is not None:
-            cv = np.asarray(vecs[i + 1], dtype=float)
-            cn = cv / (float(np.linalg.norm(cv)) or 1.0)
-            cos = max(0.0, float(np.dot(qn, cn)))
+        cos = semantic_scores[i]
         lex = _lexical_support(q_tokens, content_tokens)
         related_terms = _related_term_count(q_tokens, content_tokens)
         # A declared dense embedder can consider two texts topically similar when they
         # share one salient noun but make unrelated claims. Require a
         # second predicate/qualifier match for ordinary multi-term questions,
         # while allowing genuinely strong semantic paraphrases to stand alone.
-        if len(q_tokens) >= 3 and related_terms < 2 and cos < 0.6:
+        if len(q_tokens) >= 2 and related_terms < 2 and cos < 0.6:
             cos *= related_terms / 2.0
         out.append(max(cos, lex))
     return out

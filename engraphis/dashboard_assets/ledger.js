@@ -41,6 +41,8 @@
     consolidationReview: null,
     reviewCsrf: '',
     hostedLoaded: new Set(),
+    scopedRequests: Object.create(null),
+    syncStatus: null,
     license: null,
   };
 
@@ -79,6 +81,25 @@
     return item;
   };
   const query = (name = state.workspace) => `workspace=${encodeURIComponent(name || '')}`;
+  const beginScopedRequest = kind => {
+    const generation = number(state.scopedRequests[kind]) + 1;
+    state.scopedRequests[kind] = generation;
+    return {
+      kind,
+      generation,
+      workspace: state.workspace,
+      epoch: state.refreshEpoch,
+    };
+  };
+  const isCurrentScopedRequest = request => Boolean(request
+    && request.workspace === state.workspace
+    && request.epoch === state.refreshEpoch
+    && state.scopedRequests[request.kind] === request.generation);
+  const invalidateScopedRequests = () => {
+    Object.keys(state.scopedRequests).forEach(kind => {
+      state.scopedRequests[kind] = number(state.scopedRequests[kind]) + 1;
+    });
+  };
   const GRAPH_INITIAL_NODE_LIMIT = 320;
   const GRAPH_FULL_NODE_LIMIT = 20_000;
   const GRAPH_LOAD_TIMEOUT_MS = 12_000;
@@ -184,24 +205,88 @@
     return payload;
   }
 
+  function promptBrowserToken(message = '') {
+    const dialog = byId('browser-auth-dialog');
+    const form = byId('browser-auth-form');
+    const input = byId('browser-auth-token');
+    const error = byId('browser-auth-error');
+    const cancel = byId('browser-auth-cancel');
+    if (!dialog || !form || !input || !error || !cancel) return Promise.resolve('');
+
+    error.textContent = message;
+    error.hidden = !message;
+    input.value = '';
+    const returnFocus = document.activeElement;
+
+    return new Promise(resolve => {
+      let settled = false;
+      const cleanup = () => {
+        form.removeEventListener('submit', submit);
+        cancel.removeEventListener('click', dismiss);
+        dialog.removeEventListener('cancel', dismiss);
+        dialog.removeEventListener('close', closed);
+      };
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        input.value = '';
+        if (dialog.open) dialog.close();
+        if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+        resolve(value);
+      };
+      const submit = event => {
+        event.preventDefault();
+        const value = input.value.trim();
+        if (!value) {
+          error.textContent = 'Enter the deployment token.';
+          error.hidden = false;
+          input.focus();
+          return;
+        }
+        finish(value);
+      };
+      const dismiss = event => {
+        if (event) event.preventDefault();
+        finish('');
+      };
+      const closed = () => finish('');
+
+      form.addEventListener('submit', submit);
+      cancel.addEventListener('click', dismiss);
+      dialog.addEventListener('cancel', dismiss);
+      dialog.addEventListener('close', closed);
+      if (!dialog.open) dialog.showModal();
+      input.focus();
+    });
+  }
+
   async function authenticateBrowser() {
     let token = '';
+    let failure = '';
     try {
       const fragment = new URLSearchParams(location.hash.slice(1));
       token = fragment.get('token') || '';
       if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
     } catch (_) {}
-    if (!token) token = window.prompt('Enter this deployment’s ENGRAPHIS_API_TOKEN:') || '';
-    if (!token) return false;
-    try {
-      const session = await api('/auth/session', { method: 'POST', body: { token } });
-      state.reviewCsrf = text(session && session.review_csrf_token);
+    while (true) {
+      if (!token) token = await promptBrowserToken(failure);
+      if (!token) return false;
+      let submitted = token;
       token = '';
-      return true;
-    } catch (error) {
-      token = '';
-      showNotice(`Authentication failed: ${error.message}`);
-      return false;
+      try {
+        const session = await api('/auth/session', {
+          method: 'POST',
+          body: { token: submitted },
+        });
+        state.reviewCsrf = text(session && session.review_csrf_token);
+        submitted = '';
+        return true;
+      } catch (error) {
+        submitted = '';
+        failure = error.message;
+        showNotice(`Authentication failed: ${failure}`);
+      }
     }
   }
 
@@ -277,17 +362,20 @@
   function ensureGraphAssets() {
     if (window.ForceGraph && window.EngraphisGraph) return Promise.resolve();
     if (!graphAssetsPromise) {
-      graphAssetsPromise = loadScript(
+      const attempt = loadScript(
         '/v2-assets/vendor/d3.min.js?v=20260727-final',
         'd3',
       ).then(() => loadScript(
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260730-drag-stability',
+        '/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics',
         'EngraphisGraph',
       ));
-      graphAssetsPromise.catch(() => {});
+      graphAssetsPromise = attempt;
+      attempt.catch(() => {
+        if (graphAssetsPromise === attempt) graphAssetsPromise = null;
+      });
     }
     return graphAssetsPromise;
   }
@@ -403,28 +491,7 @@
   }
 
   function updatePlanBadge() {
-    const badge = byId('plan-badge');
-    if (!badge || !state.license) return;
-    const access = licenseAccessState();
-    const plan = licensePlanKey();
-    const trial = licenseTrialAvailable();
-    const label = access === 'active' ? plan.toUpperCase()
-      : access === 'trial' ? 'TRIAL'
-        : access === 'lapsed' ? 'BILLING'
-          : trial ? 'TRY PRO' : 'GET PRO';
-    const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
-      : access === 'lapsed' ? 'Update billing in Plans and billing'
-        : trial ? 'Start the 3-day Pro trial in Plans and billing'
-          : 'Subscribe to Pro in Plans and billing';
-    badge.textContent = label;
-    badge.setAttribute('aria-label', aria);
-    badge.title = aria;
-    const cta = hostedCta(plan || 'pro', 'header');
-    const opensAccount = cta.kind === 'account' && Boolean(cta.href);
-    badge.href = opensAccount ? cta.href : '#';
-    badge.target = opensAccount ? '_blank' : '';
-    badge.rel = opensAccount ? 'noopener' : '';
-    badge.dataset.opensAccount = String(opensAccount);
+    // The side-menu header intentionally has no plan or upgrade badge.
   }
 
   function renderSidebarCta() {
@@ -432,6 +499,7 @@
     const detail = byId('sidebar-pro-detail');
     const link = byId('sidebar-pro-cta');
     if (!copy || !detail || !link || !state.license) return;
+    const canonicalProCtaLabel = 'Subscribe to Pro';
     const renderFeatureCtas = () => {
       [
         ['analytics-pro-cta', 'analytics', 'pro'],
@@ -464,6 +532,7 @@
     link.textContent = cta.label;
     link.href = cta.href || '#';
     link.setAttribute('aria-disabled', cta.href ? 'false' : 'true');
+    link.dataset.proCtaLabel = canonicalProCtaLabel;
     link.dataset.proCta = 'sidebar';
     renderFeatureCtas();
   }
@@ -607,6 +676,32 @@
     return Math.max(0, Math.round(number(value))).toLocaleString();
   }
 
+  function savingsRatio(value) {
+    return Math.max(0, Math.min(1, number(value)));
+  }
+
+  function savingsMetric(estimate) {
+    const ratio = savingsRatio(estimate.savings_ratio);
+    const hero = node('div', 'savings-hero');
+    const value = node('div', 'savings-value');
+    value.append(
+      node('strong', 'savings-number', formatSavingsTokens(estimate.saved_tokens)),
+      node('span', 'savings-unit', 'tokens avoided'),
+    );
+    const rate = node('div', 'savings-rate');
+    rate.append(
+      node('strong', 'savings-rate-value', `${(ratio * 100).toFixed(1)}%`),
+      node('span', 'savings-rate-label', 'estimated reduction'),
+    );
+    hero.append(value, rate);
+    const progress = document.createElement('progress');
+    progress.className = 'savings-progress';
+    progress.max = 1;
+    progress.value = ratio;
+    progress.setAttribute('aria-label', `${(ratio * 100).toFixed(1)}% estimated context reduction`);
+    return { hero, progress };
+  }
+
   function savingsCounts(payload) {
     const estimate = payload && payload.estimated ? payload.estimated : {};
     return {
@@ -626,15 +721,17 @@
     if (!eligible) {
       target.append(
         empty('No receipt-backed context savings yet.'),
-        node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'} so far.`),
+        node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'} so far.`),
       );
       return;
     }
+    const metric = savingsMetric(estimate);
     target.append(
-      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
-      node('p', '', `Across ${eligible} eligible context deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(0)}% estimated reduction`),
+      metric.hero,
+      metric.progress,
+      node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
       node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
-      node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}.`),
+      node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'}.`),
     );
   }
 
@@ -643,13 +740,8 @@
     if (!target) return;
     const { estimate, eligible, excluded } = savingsCounts(payload);
     target.replaceChildren();
+    const metric = eligible ? savingsMetric(estimate) : null;
     const header = node('div', 'savings-detail-header');
-    header.append(
-      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
-      node('span', '', eligible
-        ? `${eligible} eligible deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(1)}% estimated reduction`
-        : 'No eligible estimates in this range.'),
-    );
     const presets = node('div', 'savings-presets');
     [
       ['since', 'Since tracking started'],
@@ -665,7 +757,11 @@
       presets.append(control);
     });
     header.append(presets);
+    if (metric) target.append(metric.hero, metric.progress);
     target.append(header);
+    target.append(node('p', 'savings-summary', eligible
+      ? `${eligible} eligible deliveries`
+      : 'No eligible estimates in this range.'));
     if (eligible) {
       target.append(node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`));
       target.append(node('p', 'field-note', 'Packed context is packing savings; adaptive history is estimated avoided prompt context.'));
@@ -845,11 +941,29 @@
   function workspaceName(item) {
     return typeof item === 'string' ? item : item.name;
   }
+  function resetScopedPanels() {
+    const messages = {
+      'answer-panel': 'Ask a question to receive a grounded answer with citations.',
+      'retrieval-list': 'Retrieved memories will appear here.',
+      'why-result': 'Trace a claim to inspect live and superseded support.',
+      'timeline-result': 'Search a topic to inspect its temporal history.',
+      'supersession-list': 'Search a topic to compare closed and current records.',
+      'audit-list': 'Open Audit to load this workspace’s records and receipts.',
+      'analytics-result': 'Open this tab to check availability.',
+      'automation-result': 'Open this tab to check availability.',
+      'team-result': 'Open this tab to check connection state.',
+    };
+    Object.entries(messages).forEach(([id, message]) => {
+      const target = byId(id);
+      if (target) target.replaceChildren(empty(message));
+    });
+  }
 
   async function selectWorkspace(name) {
     if (!name) return;
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
+    invalidateScopedRequests();
     closeGraphConnections();
     state.workspace = name;
     state.graphWorkspace = '';
@@ -865,6 +979,8 @@
     const memoryDetail = byId('memory-detail');
     memoryDetail.replaceChildren();
     memoryDetail.hidden = true;
+    resetScopedPanels();
+    state.syncStatus = null;
     if (state.graphEngine) {
       state.graphEngine.destroy();
       state.graphEngine = null;
@@ -1252,6 +1368,8 @@
       showNotice('Choose a workspace before requesting a grounded answer.');
       return;
     }
+    const request = beginScopedRequest('ask');
+    const workspace = request.workspace;
     showNotice('');
     const k = number(byId('ask-k').value) || 5;
     byId('answer-panel').replaceChildren(empty('Searching, checking support and building citations…'));
@@ -1260,13 +1378,14 @@
       const [answer, retrieval] = await Promise.all([
         api('/answer', {
           method: 'POST',
-          body: { query: question, workspace: state.workspace, k: Math.max(8, k), max_citations: k },
+          body: { query: question, workspace, k: Math.max(8, k), max_citations: k },
         }),
         // The dashboard /recall route is deliberately read-only (reinforce=False).
         // Keep it alongside /answer for uncited raw candidates without a second
         // reinforcement of the memories that answer already cited.
-        api(`/recall?q=${encodeURIComponent(question)}&${query()}&k=${Math.max(8, k)}`),
+        api(`/recall?q=${encodeURIComponent(question)}&${query(workspace)}&k=${Math.max(8, k)}`),
       ]);
+      if (!isCurrentScopedRequest(request)) return;
       renderAnswer(answer);
       const target = byId('retrieval-list');
       target.replaceChildren();
@@ -1274,6 +1393,7 @@
       if (!memories.length) target.append(empty('No raw candidates were returned.'));
       else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       byId('answer-panel').replaceChildren(empty(`Grounded Ask is unavailable: ${error.message}`));
       byId('retrieval-list').replaceChildren(empty('Raw retrieval did not complete.'));
     }
@@ -2155,6 +2275,7 @@
         target.append(button(`${item.name} · ${item.degree}`, 'search-result', () => {
           revealGraphNode(item.id, item.name);
           target.replaceChildren();
+          openGraphConnections(item);
         }));
       });
   }
@@ -2187,11 +2308,13 @@
       byId('why-input').focus();
       return;
     }
+    const request = beginScopedRequest('why');
     showNotice('');
     const target = byId('why-result');
     target.replaceChildren(empty('Tracing the live belief and supersession chain…'));
     try {
-      const payload = await api(`/why?q=${encodeURIComponent(question)}&${query()}&k=8`);
+      const payload = await api(`/why?q=${encodeURIComponent(question)}&${query(request.workspace)}&k=8`);
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren();
       const live = payload.answer || [];
       const superseded = payload.supersedes || [];
@@ -2202,6 +2325,7 @@
       if (!superseded.length) target.append(empty('No superseded versions were found.'));
       else superseded.forEach(memory => target.append(simpleMemoryCard(memory, 'timeline-card')));
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Could not trace belief: ${error.message}`));
     }
   }
@@ -2216,14 +2340,17 @@
       input.focus();
       return;
     }
+    const request = beginScopedRequest(supersessionsOnly ? 'supersessions' : 'timeline');
     showNotice('');
     target.replaceChildren(empty('Loading temporal history…'));
     try {
-      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query()}&limit=50`);
+      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query(request.workspace)}&limit=50`);
+      if (!isCurrentScopedRequest(request)) return;
       let history = payload.history || [];
       if (supersessionsOnly) history = history.filter(item => item.valid_to || item.expired_at);
       renderMemoryCollection(target, history, supersessionsOnly ? 'No closed versions were found for this topic.' : 'No temporal history was found.');
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Could not load history: ${error.message}`));
     }
   }
@@ -2253,17 +2380,20 @@
   }
 
   async function loadAudit() {
+    const request = beginScopedRequest('audit');
     const target = byId('audit-list');
     target.replaceChildren(empty('Loading audit records and receipts…'));
     try {
       const [audit, receipts, savings] = await Promise.all([
-        api(`/audit?${query()}&limit=100`),
-        api(`/receipts?${query()}&limit=100`),
-        api(`/context-savings?${savingsQuery(undefined, state.savingsPreset)}`),
+        api(`/audit?${query(request.workspace)}&limit=100`),
+        api(`/receipts?${query(request.workspace)}&limit=100`),
+        api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
       ]);
+      if (!isCurrentScopedRequest(request)) return;
       renderSavingsDetail(savings);
       renderAuditCards(auditItems(audit), receiptItems(receipts));
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Could not load provenance records: ${error.message}`));
     }
   }
@@ -2314,6 +2444,7 @@
     if (tab === 'analytics') await loadHosted('analytics');
     if (tab === 'automation') await loadHosted('automation');
     if (tab === 'team') await loadHosted('team');
+    if (tab === 'sync') await loadSync();
   }
 
   function renderWorkspaceList() {
@@ -2413,7 +2544,6 @@
       workspace: state.workspace,
       infer: false,
       structured: byId('consolidate-structured').checked,
-      supersede_sources: byId('consolidate-supersede').checked,
     };
   }
 
@@ -2421,8 +2551,7 @@
     return Boolean(left && right)
       && left.workspace === right.workspace
       && left.infer === right.infer
-      && left.structured === right.structured
-      && left.supersede_sources === right.supersede_sources;
+      && left.structured === right.structured;
   }
 
   function invalidateConsolidationReview() {
@@ -2506,12 +2635,26 @@
     return field;
   }
 
-  function renderAutomationPolicy(policy) {
+  function renderAutomationPolicy(policy, workspace = state.workspace) {
     const target = byId('automation-result');
     if (!target) return;
     target.replaceChildren();
     const form = node('form', 'automation-policy-form');
+    form.dataset.workspace = workspace;
     form.dataset.lastRun = String(policy.last_run || '');
+    if (policy.bootstrap_required) {
+      form.append(
+        node('p', 'automation-policy-note', 'Hosted automation is not initialized for this workspace. Initializing it uploads one bounded workspace snapshot and saves the default Cloud policy. No upload occurs until you choose this action.'),
+      );
+      const actions = node('div', 'automation-policy-actions');
+      const bootstrap = node('button', 'primary-button', 'Initialize hosted automation');
+      bootstrap.type = 'button';
+      bootstrap.addEventListener('click', () => bootstrapAutomation(workspace, bootstrap));
+      actions.append(bootstrap);
+      form.append(actions);
+      target.append(form);
+      return;
+    }
     const enabled = Boolean(policy.enabled);
     const dreamEnabled = policy.dream_enabled != null ? policy.dream_enabled : policy.dream;
     const lastRun = policy.last_run ? ` Last managed run: ${relative(policy.last_run)}.` : '';
@@ -2536,9 +2679,39 @@
     target.append(form);
   }
 
+  async function bootstrapAutomation(workspace, control) {
+    if (!workspace || workspace !== state.workspace) return;
+    if (!window.confirm(
+      `Initialize hosted automation for ${workspace}? Engraphis will upload one bounded snapshot of that workspace's normal and sensitive memory content and save the default Cloud policy.`,
+    )) return;
+    const request = beginScopedRequest('automation-bootstrap');
+    control.disabled = true;
+    control.textContent = 'Initializing…';
+    try {
+      const policy = await api(`/automation/bootstrap?${query(workspace)}`, { method: 'POST' });
+      if (!isCurrentScopedRequest(request) || !control.isConnected) return;
+      state.hostedLoaded.add(`automation:${workspace}`);
+      renderAutomationPolicy(policy, workspace);
+      showNotice('Hosted automation initialized.');
+    } catch (error) {
+      if (!isCurrentScopedRequest(request) || !control.isConnected) return;
+      control.disabled = false;
+      control.textContent = 'Initialize hosted automation';
+      showNotice(`Could not initialize hosted automation: ${error.message}`);
+    }
+  }
+
   async function saveAutomationPolicy(event) {
     event.preventDefault();
     const form = event.currentTarget;
+    const workspace = form.dataset.workspace || '';
+    if (!workspace || workspace !== state.workspace) {
+      showNotice('This policy belongs to a different workspace. Reloading the active workspace policy.');
+      state.hostedLoaded.delete(`automation:${state.workspace}`);
+      await loadHosted('automation');
+      return;
+    }
+    const request = beginScopedRequest('automation-save');
     const policy = {
       enabled: byId('automation-enabled').checked,
       cadence_hours: Math.max(1, Number(byId('automation-cadence').value) || 1),
@@ -2548,7 +2721,7 @@
       infer: byId('automation-infer').checked,
     };
     if (policy.enabled && !window.confirm(
-      `Save this hosted policy for ${state.workspace}? Engraphis will submit a bounded snapshot of that workspace’s normal and sensitive memory content to Cloud for managed compute.\n\nCloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE}`,
+      `Save this hosted policy for ${workspace}? Engraphis will submit a bounded snapshot of that workspace’s normal and sensitive memory content to Cloud for managed compute.\n\nCloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE}`,
     )) return;
     const save = form.querySelector('button[type="submit"]');
     if (save) {
@@ -2556,10 +2729,13 @@
       save.textContent = 'Saving…';
     }
     try {
-      const saved = await api(`/automation?${query()}`, { method: 'POST', body: policy });
-      renderAutomationPolicy({ ...saved, last_run: form.dataset.lastRun });
+      const saved = await api(`/automation?${query(workspace)}`, { method: 'POST', body: policy });
+      if (!isCurrentScopedRequest(request) || !form.isConnected) return;
+      state.hostedLoaded.add(`automation:${workspace}`);
+      renderAutomationPolicy({ ...saved, last_run: form.dataset.lastRun }, workspace);
       showNotice('Hosted maintenance policy saved to Engraphis Cloud.');
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || !form.isConnected) return;
       if (save) {
         save.disabled = false;
         save.textContent = policy.enabled ? 'Save & send policy to Cloud' : 'Save hosted policy';
@@ -2569,12 +2745,16 @@
   }
 
   async function loadHosted(kind) {
+    const request = beginScopedRequest(`hosted-${kind}`);
+    const workspace = request.workspace;
+    const cacheKey = `${kind}:${workspace}`;
     const target = byId(`${kind}-result`);
-    if (state.hostedLoaded.has(`${kind}:${state.workspace}`)) return;
+    if (state.hostedLoaded.has(cacheKey)) return;
     target.replaceChildren(empty(`Checking ${kind} availability…`));
     try {
       if (kind === 'team') {
         const [auth, license] = await Promise.all([api('/auth/state'), api('/license')]);
+        if (!isCurrentScopedRequest(request)) return;
         state.license = license;
         updatePlanBadge();
         renderSidebarCta();
@@ -2585,13 +2765,104 @@
           plan: license.plan || 'local',
         }, 'Connection state');
       } else {
-        const result = await api(`/${kind}?${query()}`);
-        if (kind === 'automation') renderAutomationPolicy(result);
+        const result = await api(`/${kind}?${query(workspace)}`);
+        if (!isCurrentScopedRequest(request)) return;
+        if (kind === 'automation') renderAutomationPolicy(result, workspace);
         else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
       }
-      state.hostedLoaded.add(`${kind}:${state.workspace}`);
+      if (isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+    }
+  }
+  function syncSummaryMessage(summary) {
+    if (!summary) return 'No sync has run in this dashboard process.';
+    const attempted = number(summary.attempted);
+    const succeeded = number(summary.succeeded);
+    const errors = Array.isArray(summary.errors) ? summary.errors : [];
+    const complete = summary.complete === true
+      || (summary.complete !== false && errors.length === 0 && succeeded >= attempted);
+    const counts = `${succeeded}/${attempted} eligible workspaces completed`;
+    const changes = `${number(summary.added)} added · ${number(summary.updated)} updated · ${number(summary.exported)} exported`;
+    return `${complete ? 'Last sync complete' : 'Last sync incomplete'} · ${counts} · ${changes}${errors.length ? ` · ${errors.length} ${errors.length === 1 ? 'error' : 'errors'}` : ''}.`;
+  }
+
+  function renderSyncStatus(status, message = '') {
+    state.syncStatus = status || {};
+    const target = byId('sync-result');
+    if (!target) return;
+    target.replaceChildren();
+    if (message) target.append(empty(message, 'form-error'));
+    target.append(
+      node('p', 'automation-policy-note', syncSummaryMessage(state.syncStatus.last)),
+      definitionList([
+        ['Connection', state.syncStatus.available ? 'Connected' : 'Not connected'],
+        ['Mode', state.syncStatus.read_only ? 'Read only · pull without upload' : 'Push and pull'],
+        ['Credential', state.syncStatus.has_cloud_session
+          ? 'Managed Cloud session'
+          : (state.syncStatus.has_user_token ? 'Local sync token' : 'None')],
+      ]),
+      node('p', 'automation-policy-note', CLOUD_SYNC_PRIVACY_NOTICE),
+    );
+    const actions = node('div', 'automation-policy-actions');
+    const run = button('Sync now', 'primary-button', runCloudSync);
+    run.id = 'sync-now';
+    run.disabled = !state.syncStatus.available;
+    actions.append(run);
+    if (!state.syncStatus.available) {
+      const url = safeUrl(state.syncStatus.upgrade_url) || hostedAccountUrl('sync');
+      if (url) {
+        const connect = node('a', 'secondary-button', 'Connect Engraphis Cloud');
+        connect.href = url;
+        connect.target = '_blank';
+        connect.rel = 'noopener';
+        actions.append(connect);
+      }
+    }
+    target.append(actions);
+  }
+
+  async function loadSync() {
+    const request = beginScopedRequest('sync-status');
+    const target = byId('sync-result');
+    if (!target) return;
+    target.replaceChildren(empty('Checking Cloud Sync connection…'));
+    try {
+      const status = await api('/sync/status');
+      if (!isCurrentScopedRequest(request)) return;
+      renderSyncStatus(status);
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      target.replaceChildren(empty(`Could not load Cloud Sync status: ${error.message}`, 'form-error'));
+    }
+  }
+
+  async function runCloudSync() {
+    const request = beginScopedRequest('sync-run');
+    const buttonNode = byId('sync-now');
+    if (buttonNode) {
+      buttonNode.disabled = true;
+      buttonNode.textContent = 'Syncing…';
+    }
+    try {
+      const result = await api('/sync/run', { method: 'POST' });
+      if (!isCurrentScopedRequest(request)) return;
+      const summary = result && result.summary ? result.summary : {};
+      const responseOk = Boolean(result) && result.ok !== false;
+      const displayedSummary = responseOk ? summary : { ...summary, complete: false };
+      renderSyncStatus({ ...(state.syncStatus || {}), last: displayedSummary });
+      const errors = Array.isArray(summary.errors) ? summary.errors : [];
+      const complete = responseOk && (summary.complete === true
+        || (summary.complete !== false && errors.length === 0
+          && number(summary.succeeded) >= number(summary.attempted)));
+      showNotice(complete
+        ? 'Cloud Sync completed for every eligible workspace.'
+        : 'Cloud Sync is incomplete. Review the status before retrying.');
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      renderSyncStatus(state.syncStatus || {}, `Cloud Sync failed: ${error.message}`);
+      showNotice(`Cloud Sync failed: ${error.message}`);
     }
   }
 
@@ -2651,9 +2922,13 @@
   }
 
   async function loadPlans() {
+    const request = beginScopedRequest('plans');
     try {
-      state.license = state.license || await api('/license');
+      const license = await api(`/license?${query(request.workspace)}`);
+      if (!isCurrentScopedRequest(request)) return;
+      state.license = license;
     } catch (_) {
+      if (!isCurrentScopedRequest(request)) return;
       state.license = { plan: 'free' };
     }
     updatePlanBadge();
@@ -2924,12 +3199,6 @@
     switchView('manage');
     switchManageTab(control.dataset.manage);
   }));
-  byId('plan-badge').addEventListener('click', event => {
-    if (event.currentTarget.dataset.opensAccount === 'true') return;
-    event.preventDefault();
-    switchView('manage');
-    switchManageTab('plans');
-  });
   all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
     switchView('provenance');
     switchProvenanceTab(control.dataset.provenance);
@@ -3133,7 +3402,7 @@
   byId('create-workspace-form').addEventListener('submit', createWorkspace);
   byId('consolidate-form').addEventListener('submit', previewConsolidation);
   byId('consolidate-commit').addEventListener('click', commitConsolidation);
-  ['consolidate-structured', 'consolidate-supersede'].forEach(id => {
+  ['consolidate-structured'].forEach(id => {
     byId(id).addEventListener('change', invalidateConsolidationReview);
   });
   byId('billing-select').addEventListener('change', renderPlans);

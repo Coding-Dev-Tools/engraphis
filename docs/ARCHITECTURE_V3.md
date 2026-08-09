@@ -7,7 +7,7 @@ retention-supervision, and privacy-receipt additions introduced with schema vers
 flowchart LR
     Agent["Agent / host LLM"] --> Intent["remember · link · recall_context (compact) · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["Smart MCP (9 tools) / Classic MCP (33 tools)"] --> Service
+    MCP["Smart MCP (9 tools) / Classic MCP (34 tools)"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service
@@ -84,6 +84,12 @@ Engraphis falls back to NumPy; an explicit `vector_backend="sqlite-vec"` fails w
 error. Packaged dashboard, REST, and MCP entrypoints use the `auto` setting, so an installed
 `vector` extra is selected without changing the deterministic constructor contract. Run accelerated
 search in a fresh process when using the SQLCipher extra.
+
+The active vector space also needs a durable, secret-free identity. Sentence Transformers use the
+resolved Hub commit or a manifest of local artifacts; an unresolved mutable model leaves persistent
+vector recall gated rather than mixing embeddings. `ApiEmbedder` remains valid for ephemeral calls
+without identity, but persistent use requires an operator/provider `space_version`. Its provider
+root and `/v1` base forms normalize to one `/v1/embeddings` endpoint.
 
 ## Query planning
 

@@ -9,11 +9,11 @@
 #   bash scripts/design-lint.sh --strict              # exit 1 if any *error*-severity issue
 #   bash scripts/design-lint.sh path/to/file.html     # lint a different file
 #
-# Requires only Node (for `npx`). If Node is missing or the machine is offline,
-# the script skips cleanly (exit 0) so it never blocks work.
+# Requires the repository-pinned impeccable package installed by `npm ci`.
+# Missing dependencies and invalid detector output fail explicitly instead of silently passing.
 set -uo pipefail
 
-TARGET="engraphis/static/index.html"
+TARGET="engraphis/dashboard_assets/index.html"
 STRICT=0
 for a in "$@"; do
   case "$a" in
@@ -23,25 +23,30 @@ for a in "$@"; do
   esac
 done
 
-command -v node >/dev/null 2>&1 || { echo "design-lint: node not found — skipping"; exit 0; }
-[ -f "$TARGET" ] || { echo "design-lint: $TARGET not found — skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "design-lint: node not found" >&2; exit 2; }
+[ -f "$TARGET" ] || { echo "design-lint: $TARGET not found"; exit 2; }
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+IMPECCABLE="$ROOT/node_modules/.bin/impeccable"
+if [ ! -x "$IMPECCABLE" ]; then
+  echo "design-lint: pinned local impeccable dependency unavailable; run npm ci" >&2
+  exit 2
+fi
 
 TMP="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/design-lint.$$.json")"
 trap 'rm -f "$TMP"' EXIT
 
-if ! timeout 120 npx -y impeccable@latest detect --fast --json "$TARGET" >"$TMP" 2>/dev/null; then
-  # npx returns non-zero both when the tool is unavailable AND when issues are
-  # found; distinguish by whether we got parseable JSON back.
-  if ! node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$TMP" >/dev/null 2>&1; then
-    echo "design-lint: detector unavailable (offline / install failed) — skipping"
-    exit 0
+if ! timeout 120 "$IMPECCABLE" detect --json "$TARGET" >"$TMP" 2>/dev/null; then
+  if ! node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!Array.isArray(d))process.exit(1)' "$TMP" >/dev/null 2>&1; then
+    echo "design-lint: detector failed without valid JSON output" >&2
+    exit 2
   fi
 fi
 
 node -e '
 const fs = require("fs");
-let d; try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(0); }
-if (!Array.isArray(d)) process.exit(0);
+let d; try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); }
+catch (error) { console.error(`design-lint: invalid detector output: ${error.message}`); process.exit(2); }
+if (!Array.isArray(d)) { console.error("design-lint: detector output must be an array"); process.exit(2); }
 const target = process.argv[2], strict = process.argv[3] === "1";
 if (d.length === 0) { console.log(`design-lint: ✔ 0 issues (${target})`); process.exit(0); }
 const by = {}; let errors = 0;

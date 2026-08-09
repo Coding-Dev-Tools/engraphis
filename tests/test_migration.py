@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import sqlite3
 import sys
 
@@ -99,6 +100,18 @@ def test_migration_writes_scoped_v2(tmp_path):
     assert any(m.provenance.get("v1_namespace") == "preferences" for m in mems)
     assert all(m.provenance.get("trusted") is False for m in mems)
     assert all(m.provenance.get("trust_origin") == "v1_migration" for m in mems)
+    memory_lineage = {
+        m.provenance.get("v1_memory_id")
+        for m in mems
+        if m.provenance.get("source") == "v1"
+    }
+    thought_lineage = {
+        m.provenance.get("v1_thought_id")
+        for m in mems
+        if m.provenance.get("source") == "v1:thought"
+    }
+    assert memory_lineage == {1, 2}
+    assert thought_lineage == {1}
     edge = store.conn.execute(
         "SELECT e.src, e.dst, e.provenance, src.name AS src_name, dst.name AS dst_name "
         "FROM edges e JOIN entities src ON src.id=e.src "
@@ -106,6 +119,12 @@ def test_migration_writes_scoped_v2(tmp_path):
     ).fetchone()
     assert {edge["src_name"], edge["dst_name"]} == {"staging", "PostgreSQL"}
     assert json.loads(edge["provenance"])["trusted"] is False
+    edge_provenance = json.loads(edge["provenance"])
+    assert edge_provenance["v1_edge_id"] == 1
+    entity_lineage = store.conn.execute(
+        "SELECT detail FROM audit WHERE actor='v1_migration' AND action='lineage'"
+    ).fetchall()
+    assert any(row["detail"] == "v1_entity_id=1" for row in entity_lineage)
     # vector carried across for the row that had one
     vrows = store.conn.execute("SELECT COUNT(*) AS c FROM mem_vectors").fetchone()["c"]
     assert vrows >= 1
@@ -233,3 +252,157 @@ def test_migration_failure_never_publishes_a_partial_target(tmp_path, monkeypatc
     assert list(tmp_path.glob(f".{target.name}.migration-*.db*")) == []
     with sqlite3.connect(old) as source:
         assert source.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
+
+
+def test_migration_dry_run_is_side_effect_free_and_runs_the_apply_transform(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    target = tmp_path / "engraphis_v2.db"
+    _build_v1_db(str(old))
+    with sqlite3.connect(old) as connection:
+        connection.execute(
+            "UPDATE memories SET metadata=?, created_at=?, last_access=?, "
+            "stability=?, surprise=?, access_count=? WHERE id=1",
+            ("[1,2]", "not-a-time", "not-a-time", -1.0, "bad", -3),
+        )
+        connection.execute(
+            "UPDATE edges SET weight=?, created_at=? WHERE id=1",
+            ("bad", "not-a-time"),
+        )
+        connection.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, namespace TEXT, "
+            "event_type TEXT, description TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO events(namespace, event_type, description) "
+            "VALUES ('events-only', 'deploy', 'release observed')"
+        )
+
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    dry_counts = migrate(str(old), str(target), dry_run=True)
+
+    assert not target.exists()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+    assert dry_counts["memories"] == 2
+    assert dry_counts["repaired_fields"] >= 8
+
+    applied_counts = migrate(str(old), str(target))
+    assert applied_counts == dry_counts
+    store = Store(str(target))
+    records = store.list_memories(include_invalid=True)
+    migrated = next(
+        record for record in records
+        if record.provenance.get("v1_memory_id") == 1
+    )
+    assert math.isfinite(migrated.valid_from)
+    assert math.isfinite(migrated.last_access)
+    assert migrated.stability == 1.0
+    assert migrated.surprise == 1.0
+    assert migrated.access_count == 0
+    assert {
+        "metadata",
+        "created_at",
+        "last_access",
+        "stability",
+        "surprise",
+        "access_count",
+    } <= set(migrated.provenance["v1_normalized_fields"])
+    edge = store.conn.execute(
+        "SELECT weight, valid_from, provenance FROM edges ORDER BY id LIMIT 1"
+    ).fetchone()
+    assert edge is not None
+    assert math.isfinite(float(edge["weight"]))
+    assert math.isfinite(float(edge["valid_from"]))
+    assert {"weight", "created_at"} <= set(
+        json.loads(edge["provenance"])["v1_normalized_fields"]
+    )
+    event = store.conn.execute(
+        "SELECT events.kind, events.content, repos.name AS repo_name "
+        "FROM events JOIN repos ON repos.id=events.repo_id "
+        "WHERE events.kind='deploy'"
+    ).fetchone()
+    assert event is not None
+    assert (event["content"], event["repo_name"]) == (
+        "release observed",
+        "events-only",
+    )
+    quick_check = store.conn.execute("PRAGMA quick_check").fetchone()
+    assert quick_check is not None and quick_check[0] == "ok"
+    store.close()
+
+
+def test_migration_dry_run_rejects_an_uncheckpointed_wal_without_sidecars(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    _build_v1_db(str(old))
+    writer = sqlite3.connect(old)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute(
+            "INSERT INTO entities (namespace, name, entity_type, created_at) "
+            "VALUES ('infra', 'WAL resident', 'state', 1003.0)"
+        )
+        writer.commit()
+        before_entries = sorted(path.name for path in tmp_path.iterdir())
+
+        with pytest.raises(RuntimeError, match="checkpointed.*WAL"):
+            migrate(str(old), str(tmp_path / "target.db"), dry_run=True)
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == before_entries
+    finally:
+        writer.close()
+
+
+def test_migration_reads_one_source_snapshot_while_a_wal_writer_commits(
+    tmp_path, monkeypatch
+):
+    old = tmp_path / "engraphis_v1.db"
+    target = tmp_path / "engraphis_v2.db"
+    _build_v1_db(str(old))
+    with sqlite3.connect(old) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+
+    real_connect = sqlite3.connect
+    source_uri = old.resolve().as_uri()
+    mutation_committed = False
+
+    def traced_connect(database, *args, **kwargs):
+        nonlocal mutation_committed
+        connection = real_connect(database, *args, **kwargs)
+        if str(database).startswith(source_uri):
+            def trace(statement):
+                nonlocal mutation_committed
+                if (
+                    mutation_committed
+                    or not statement.strip().casefold().startswith(
+                        "select * from memories"
+                    )
+                ):
+                    return
+                writer = real_connect(str(old))
+                try:
+                    writer.execute(
+                        "INSERT INTO entities "
+                        "(namespace, name, entity_type, created_at) "
+                        "VALUES ('infra', 'Committed later', 'state', 1004.0)"
+                    )
+                    writer.commit()
+                    mutation_committed = True
+                finally:
+                    writer.close()
+
+            connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(migrate_to_v2.sqlite3, "connect", traced_connect)
+
+    counts = migrate(str(old), str(target))
+
+    assert mutation_committed is True
+    assert counts["entities"] == 1
+    with real_connect(target) as migrated:
+        assert migrated.execute(
+            "SELECT COUNT(*) FROM entities WHERE name='Committed later'"
+        ).fetchone()[0] == 0
+    with real_connect(old) as source:
+        assert source.execute(
+            "SELECT COUNT(*) FROM entities WHERE name='Committed later'"
+        ).fetchone()[0] == 1

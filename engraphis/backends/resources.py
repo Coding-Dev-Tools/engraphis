@@ -17,9 +17,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 import zipfile
 from html.parser import HTMLParser
@@ -106,6 +108,76 @@ def _base_metadata(name: str, data: bytes) -> dict:
     }
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+def _snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    identity = (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
+    # Windows st_ctime is creation time and may be reported at different precision
+    # before and after opening a descriptor. POSIX st_ctime remains a useful
+    # mutation signal for this snapshot check.
+    return identity if os.name == "nt" else identity + (int(info.st_ctime_ns),)
+
+
+def _read_path_snapshot(source: Path) -> bytes:
+    """Read one bounded regular-file snapshot without following links or swaps."""
+    try:
+        before = os.lstat(source)
+    except FileNotFoundError:
+        raise ResourceExtractionError("resource path not found") from None
+    except OSError:
+        raise ResourceExtractionError("resource path could not be inspected") from None
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or _is_reparse_point(before)
+    ):
+        raise ResourceExtractionError("resource path is not a regular file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(source, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse_point(opened)
+            or _snapshot_identity(opened) != _snapshot_identity(before)
+        ):
+            raise ResourceExtractionError("resource path changed before it was opened")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            raw = stream.read(MAX_RESOURCE_BYTES + 1)
+            after = os.fstat(stream.fileno())
+    except ResourceExtractionError:
+        raise
+    except OSError:
+        raise ResourceExtractionError("resource path could not be read safely") from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if len(raw) > MAX_RESOURCE_BYTES:
+        raise ResourceExtractionError(
+            f"resource exceeds the {MAX_RESOURCE_BYTES}-byte extraction limit"
+        )
+    if _snapshot_identity(after) != _snapshot_identity(opened):
+        raise ResourceExtractionError("resource changed while it was being read")
+    return raw
+
+
 def _title(text: str, fallback: str) -> str:
     for line in (text or "").splitlines():
         clean = line.strip().lstrip("#").strip()
@@ -143,16 +215,18 @@ def _docx_text(data: bytes) -> tuple[str, dict]:
                     "DOCX document.xml is too large after decompression"
                 )
             raw = archive.read(info)
-    except (KeyError, zipfile.BadZipFile) as exc:
-        raise ResourceExtractionError(f"invalid DOCX: {exc}") from exc
+    except ResourceExtractionError:
+        raise
+    except Exception:
+        raise ResourceExtractionError("invalid DOCX archive") from None
     if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", raw, flags=re.IGNORECASE):
         raise ResourceExtractionError("DOCX XML declarations and entities are not allowed")
     try:
         # The size cap and explicit DTD/entity rejection above make stdlib parsing
         # appropriate here without adding a hard XML dependency to the offline core.
         root = ElementTree.fromstring(raw)  # nosec B314
-    except ElementTree.ParseError as exc:
-        raise ResourceExtractionError(f"invalid DOCX XML: {exc}") from exc
+    except ElementTree.ParseError:
+        raise ResourceExtractionError("invalid DOCX XML") from None
     namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     paragraphs = []
     for paragraph in root.iter(namespace + "p"):
@@ -165,10 +239,10 @@ def _docx_text(data: bytes) -> tuple[str, dict]:
 def _pdf_text(data: bytes) -> tuple[str, dict, list[str]]:
     try:
         from pypdf import PdfReader
-    except ImportError as exc:
+    except ImportError:
         raise ResourceExtractionError(
             "PDF extraction needs pypdf: pip install \"engraphis[documents]\""
-        ) from exc
+        ) from None
     try:
         reader = PdfReader(io.BytesIO(data))
         total_pages = len(reader.pages)
@@ -196,8 +270,10 @@ def _pdf_text(data: bytes) -> tuple[str, dict, list[str]]:
             text_chars += separator_chars + len(page_text)
             if text_truncated:
                 break
-    except Exception as exc:
-        raise ResourceExtractionError(f"PDF extraction failed: {exc}") from exc
+    except ResourceExtractionError:
+        raise
+    except Exception:
+        raise ResourceExtractionError("PDF extraction failed") from None
     warnings = []
     if total_pages > MAX_PDF_PAGES:
         warnings.append(
@@ -220,22 +296,24 @@ def _image_text(data: bytes) -> tuple[str, dict]:
     try:
         from PIL import Image
         import pytesseract
-    except ImportError as exc:
+    except ImportError:
         raise ResourceExtractionError(
             "Image OCR needs Pillow + pytesseract and the local Tesseract binary: "
             "pip install \"engraphis[documents]\""
-        ) from exc
+        ) from None
     try:
         image = Image.open(io.BytesIO(data))
         if image.width * image.height > MAX_IMAGE_PIXELS:
             raise ResourceExtractionError(
                 f"image is too large for OCR ({image.width}x{image.height})"
             )
-        text = pytesseract.image_to_string(image)
+        text = str(pytesseract.image_to_string(image) or "").strip()
         meta = {"width": image.width, "height": image.height, "format": image.format or ""}
-    except Exception as exc:
-        raise ResourceExtractionError(f"image OCR failed: {exc}") from exc
-    return text.strip(), meta
+    except ResourceExtractionError:
+        raise
+    except Exception:
+        raise ResourceExtractionError("image OCR failed") from None
+    return text, meta
 
 
 def _transcribe_path(path: str) -> tuple[str, dict]:
@@ -247,11 +325,11 @@ def _transcribe_path(path: str) -> tuple[str, dict]:
         )
     try:
         from faster_whisper import WhisperModel
-    except ImportError as exc:
+    except ImportError:
         raise ResourceExtractionError(
             "Audio/video transcription needs faster-whisper: "
             "pip install \"engraphis[transcription]\""
-        ) from exc
+        ) from None
     try:
         model = WhisperModel(
             model_name,
@@ -260,13 +338,36 @@ def _transcribe_path(path: str) -> tuple[str, dict]:
         )
         segments, info = model.transcribe(path, vad_filter=True)
         parts = [segment.text.strip() for segment in segments if segment.text.strip()]
-    except Exception as exc:
-        raise ResourceExtractionError(f"transcription failed: {exc}") from exc
-    return "\n".join(parts), {
-        "language": getattr(info, "language", ""),
-        "language_probability": float(getattr(info, "language_probability", 0.0) or 0.0),
-        "duration": float(getattr(info, "duration", 0.0) or 0.0),
-    }
+        language = str(getattr(info, "language", "") or "")
+        language_probability = float(
+            getattr(info, "language_probability", 0.0) or 0.0
+        )
+        duration = float(getattr(info, "duration", 0.0) or 0.0)
+        if not math.isfinite(language_probability) or not math.isfinite(duration):
+            raise ValueError("non-finite transcription metadata")
+        metadata = {
+            "language": language,
+            "language_probability": language_probability,
+            "duration": duration,
+        }
+    except ResourceExtractionError:
+        raise
+    except Exception:
+        raise ResourceExtractionError("transcription failed") from None
+    return "\n".join(parts), metadata
+
+
+def _transcribe_bytes(data: bytes, suffix: str) -> tuple[str, dict]:
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp:
+        temp.write(data)
+        temp_path = temp.name
+    try:
+        return _transcribe_path(temp_path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
 
 class LocalResourceExtractor:
@@ -296,16 +397,7 @@ class LocalResourceExtractor:
             text, extra = _image_text(raw)
             kind = "image_ocr"
         elif suffix in AUDIO_EXTENSIONS | VIDEO_EXTENSIONS:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp:
-                temp.write(raw)
-                temp_path = temp.name
-            try:
-                text, extra = _transcribe_path(temp_path)
-            finally:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
+            text, extra = _transcribe_bytes(raw, suffix)
             kind = "transcript"
         else:
             if suffix not in SUPPORTED_EXTENSIONS and _looks_binary(raw):
@@ -349,40 +441,8 @@ class LocalResourceExtractor:
 
     def extract_path(self, path: str) -> ResourceDocument:
         source = Path(path)
-        if not source.exists():
-            raise ResourceExtractionError(f"resource path not found: {path}")
-        if not source.is_file():
-            raise ResourceExtractionError(f"resource path is not a file: {path}")
-        if source.stat().st_size > MAX_RESOURCE_BYTES:
-            raise ResourceExtractionError(
-                f"resource exceeds the {MAX_RESOURCE_BYTES}-byte extraction limit"
-            )
-        suffix = source.suffix.lower()
-        if suffix in AUDIO_EXTENSIONS | VIDEO_EXTENSIONS:
-            text, extra = _transcribe_path(str(source))
-            stat = source.stat()
-            digest = hashlib.sha256()
-            with source.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            metadata = {
-                "resource_name": source.name,
-                "resource_extension": suffix,
-                "resource_bytes": stat.st_size,
-                "resource_sha256": digest.hexdigest(),
-                **extra,
-            }
-            warnings = []
-            if len(text) > MAX_EXTRACTED_TEXT_CHARS:
-                warnings.append(
-                    f"extracted text truncated to {MAX_EXTRACTED_TEXT_CHARS} characters"
-                )
-                text = text[:MAX_EXTRACTED_TEXT_CHARS]
-            return ResourceDocument(
-                text=text.strip(), title=_title(text, source.stem), kind="transcript",
-                media_type=_media_type(source.name), metadata=metadata, warnings=warnings,
-            )
-        return self.extract_bytes(source.name, source.read_bytes())
+        raw = _read_path_snapshot(source)
+        return self.extract_bytes(source.name, raw)
 
 
 def get_resource_extractor():

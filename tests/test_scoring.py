@@ -110,6 +110,26 @@ def test_score_rewards_semantic_penalizes_stale():
     assert scoring.score_memory(stale, now=now, weights=w, semantic=1.0) < hi
 
 
+def test_historical_score_ignores_a_closure_before_it_was_known():
+    rec = MemoryRecord(
+        id="retroactive",
+        content="The production endpoint was alpha.",
+        mtype=MemoryType.SEMANTIC,
+        valid_to=200.0,
+        valid_to_recorded_at=300.0,
+        last_access=250.0,
+    )
+    only_staleness = scoring.Weights(
+        r=0.0, s=0.0, l=0.0, g=0.0, i=0.0, x=1.0,
+    )
+    assert scoring.score_memory(
+        rec, now=250.0, known_at=250.0, weights=only_staleness,
+    ) == 0.0
+    assert scoring.score_memory(
+        rec, now=350.0, known_at=350.0, weights=only_staleness,
+    ) < 0.0
+
+
 def test_ordinary_recall_does_not_double_weight_fact_age():
     """Validity/ingestion age is not a second decay curve in query recall."""
     now = 1_000_000.0

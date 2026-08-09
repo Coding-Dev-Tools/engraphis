@@ -1,0 +1,29 @@
+{
+  "schema": "engraphis-vendored-assets/v1",
+  "assets": [
+    {
+      "path": "d3.min.js",
+      "package": "d3",
+      "version": "7.9.0",
+      "source": "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js",
+      "license": "ISC",
+      "license_file": "d3.LICENSE",
+      "sha256": "ee642a75d6c8f3e2cecb2253a44cdb3d4be336adead191376cb272810ad44522",
+      "local_modifications": [
+        "Replaced d3-dsv's Function-constructor CSV row converter with an equivalent closure for the production CSP."
+      ]
+    },
+    {
+      "path": "force-graph.min.js",
+      "package": "force-graph",
+      "version": "1.51.4",
+      "source": "https://cdn.jsdelivr.net/npm/force-graph@1.51.4/dist/force-graph.min.js",
+      "license": "MIT",
+      "license_file": "force-graph.LICENSE",
+      "sha256": "5b71387a1ebbe99a2e8c845cd6ac40f776e363dbcb6a4dd200001b70e7b7271e",
+      "local_modifications": [
+        "Neutralized two runtime stylesheet-node insertions; equivalent static rules live in ../ledger.css for the production CSP."
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ This produces a silent 56-second MP4 showing the three proof points requested:
 3. Retrieval evidence sits next to the Timeline chain, showing the retrieval arm, fused score, retention, provenance, and current/past validity.
 
 The payload is generated from a real in-memory `MemoryService` run before recording. No credentials, live services, or external APIs are used.
+The HTML preview labels its built-in sample fallback when generated evidence is unavailable. The recorder waits for hydration and refuses to capture unless the generated payload was loaded successfully.
 
 Install the repository's Node dependencies and Chromium once, and ensure `ffmpeg` is on `PATH`:
 

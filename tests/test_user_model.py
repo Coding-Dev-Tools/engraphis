@@ -1,3 +1,5 @@
+import math
+
 from engraphis.core.user_model import Feedback, UserModel
 
 
@@ -66,3 +68,59 @@ def test_user_model_round_trips_to_dict():
     assert restored.mtypes == model.mtypes
     assert restored.sources == model.sources
     assert 0.0 <= restored.detail_level <= 1.0
+
+
+
+def test_user_model_rejects_nonfinite_persisted_and_runtime_scores():
+    model = UserModel.from_dict({
+        "topics": {"auth": float("nan")},
+        "mtypes": {"semantic": float("inf")},
+        "sources": {"manual": float("-inf")},
+        "detail_level": float("nan"),
+        "interactions": float("inf"),
+    })
+    model.update_from_interaction(
+        "auth",
+        [{"content": "Auth fact.", "mtype": "semantic"}],
+        Feedback(rating=float("nan")),
+    )
+    ranked = model.bias_recall(
+        "auth",
+        [{"id": "bad", "content": "Auth fact.", "score": float("inf")}],
+        strength=float("nan"),
+    )
+
+    assert all(math.isfinite(value) for value in model.topics.values())
+    assert all(math.isfinite(value) for value in model.mtypes.values())
+    assert all(math.isfinite(value) for value in model.sources.values())
+    assert math.isfinite(model.detail_level)
+    assert model.interactions == 1
+    assert math.isfinite(ranked[0]["base_score"])
+    assert math.isfinite(ranked[0]["score"])
+
+
+def test_unrelated_learned_topic_cannot_overwhelm_current_query_relevance():
+    model = UserModel()
+    for _ in range(30):
+        model.update_from_interaction(
+            "authentication tokens",
+            [{"content": "Authentication token rotation.", "mtype": "semantic",
+              "provenance": {"source": "manual"}}],
+            Feedback(rating=1.0),
+        )
+
+    ranked = model.bias_recall(
+        "database migration",
+        [
+            {"id": "database", "content": "Database migration checklist.",
+             "score": 0.51, "mtype": "semantic",
+             "provenance": {"source": "manual"}},
+            {"id": "favorite", "content": "Authentication token rotation.",
+             "score": 0.50, "mtype": "semantic",
+             "provenance": {"source": "manual"}},
+        ],
+        strength=1.0,
+    )
+
+    assert ranked[0]["id"] == "database"
+    assert ranked[1]["personalization"]["query_topic_hits"] == []

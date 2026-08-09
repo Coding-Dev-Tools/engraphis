@@ -2,7 +2,7 @@
 
 `@engraphis/pi` is the first-party [Pi](https://pi.dev) extension for durable,
 local-first Engraphis memory. It lazily launches the existing `engraphis-mcp`
-server on stdio when a memory tool is used, and exposes the same six-tool Smart
+server on stdio when a memory tool is used, and exposes the same nine-tool Smart
 MCP surface as native Pi tools. This keeps the extension zero-configuration:
 routine memory work is direct, while advanced capabilities are discovered and
 executed automatically through the gateway.
@@ -15,6 +15,9 @@ It exposes the Smart MCP tools as direct Pi tools:
 - `engraphis_discover_actions`
 - `engraphis_execute_read`
 - `engraphis_execute_action`
+- `engraphis_get_memory`
+- `engraphis_update_memory`
+- `engraphis_conflict_review`
 
 For an advanced need, Pi calls `engraphis_discover_actions` and then uses the
 returned capability ID and schema digest with `engraphis_execute_read` or
@@ -24,11 +27,11 @@ runs it.
 
 ## Install
 
-Install Engraphis 1.4.x with Python 3.10 or later. Version 1.4.0 introduced the
-six-tool Smart MCP contract required by this extension:
+Install Engraphis 1.5.x with Python 3.10 or later. Version 1.5 introduced the
+nine-tool Smart MCP contract required by this extension:
 
 ```bash
-python -m pip install --upgrade "engraphis[mcp]>=1.4.0,<2"
+python -m pip install --upgrade "engraphis[mcp]>=1.5,<2"
 ```
 
 When published, install the Pi package:
@@ -38,14 +41,14 @@ pi install npm:@engraphis/pi
 ```
 
 The extension is tested with Pi 0.83.x, Node 22.19 or later, and Engraphis
-1.4.x. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
+1.5.x. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
 contract; the extension checks the required Smart MCP tool names when it opens
 the local server and reports an actionable compatibility error if they are absent.
 
 Pin, update, or remove the npm package with Pi's package manager:
 
 ```bash
-pi install npm:@engraphis/pi@0.1.0
+pi install npm:@engraphis/pi@0.2.0
 pi update npm:@engraphis/pi
 pi remove npm:@engraphis/pi
 ```

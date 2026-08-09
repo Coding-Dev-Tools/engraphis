@@ -28,7 +28,6 @@ import math
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -40,7 +39,12 @@ from urllib.parse import urlsplit
 # Stdlib-only itself (see the module docstring): importing it keeps this module free of
 # the config/server stack while giving the probe the package's vetted HTTPS connector.
 from engraphis.hosted_client import build_pinned_https_opener
-from engraphis.private_state import UnsafeStateFile, atomic_private_text, read_private_text
+from engraphis.private_state import (
+    UnsafeStateFile,
+    atomic_private_text,
+    ensure_owner_private_dir,
+    read_private_text,
+)
 
 try:  # installed distribution → real version; source tree → pinned fallback
     from engraphis import __version__ as CURRENT_VERSION
@@ -53,9 +57,11 @@ CACHE_TTL_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT = 3.5          # keep short: never stall an interactive request
 _MAX_BYTES = 512 * 1024        # cap the response body we are willing to read
 _MAX_CACHE_BYTES = 64 * 1024
+_MAX_CACHE_TTL_SECONDS = 366 * 24 * 3600
 _MAX_VERSION_TEXT = 256
 _MAX_VERSION_PARTS = 16
 _MAX_VERSION_DIGITS = 9
+_MAX_RELEASE_URL = 2048
 _TRUTHY = {"1", "true", "yes", "on", "enable", "enabled"}
 
 _CACHE_LOCK = threading.Lock()
@@ -75,6 +81,18 @@ def enabled() -> bool:
     return os.environ.get("ENGRAPHIS_UPDATE_CHECK", "0").strip().lower() in _TRUTHY
 
 
+def _cache_ttl_seconds() -> int:
+    """Return the documented bounded cache duration, never a pathname."""
+    raw = os.environ.get("ENGRAPHIS_UPDATE_CACHE", "").strip()
+    if not raw:
+        return CACHE_TTL_SECONDS
+    try:
+        value = int(raw, 10)
+    except (TypeError, ValueError, OverflowError):
+        return CACHE_TTL_SECONDS
+    return value if 1 <= value <= _MAX_CACHE_TTL_SECONDS else CACHE_TTL_SECONDS
+
+
 def _endpoint() -> str:
     override = os.environ.get("ENGRAPHIS_UPDATE_URL", "").strip()
     if override:
@@ -84,22 +102,13 @@ def _endpoint() -> str:
 
 
 def _cache_path() -> Optional[str]:
-    """A per-user cache file. Prefer sitting next to the DB (already a writable user-data
-    dir); fall back to the OS temp dir. Returns ``None`` only if nothing is writable."""
-    override = os.environ.get("ENGRAPHIS_UPDATE_CACHE", "").strip()
-    if override:
-        return override
-    candidates = []
-    try:  # optional: keep the cache with the rest of the user's engraphis state
-        from engraphis.config import settings
-
-        db_dir = os.path.dirname(os.path.abspath(settings.db_path))
-        if db_dir:
-            candidates.append(os.path.join(db_dir, ".engraphis_update_check.json"))
-    except Exception:  # noqa: BLE001 - config unavailable/misconfigured → temp dir
-        pass
-    candidates.append(os.path.join(tempfile.gettempdir(), "engraphis_update_check.json"))
-    return candidates[0] if candidates else None
+    """Return the fixed owner-private update cache leaf."""
+    configured = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+    try:
+        base = Path(configured).expanduser() if configured else Path.home() / ".engraphis"
+    except (OSError, RuntimeError):
+        return None
+    return str(base / "update_check.json")
 
 
 # ── version comparison (pure, offline-testable) ───────────────────────────────
@@ -124,6 +133,73 @@ def parse_version(text: object) -> Optional[tuple]:
     return tuple(int(part) for part in parts)
 
 
+_RELEASE_VERSION = re.compile(
+    r"[vV]?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?"
+)
+
+
+def _safe_release_version(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > _MAX_VERSION_TEXT
+        or _RELEASE_VERSION.fullmatch(normalized) is None
+        or parse_version(normalized) is None
+    ):
+        return None
+    return normalized
+
+
+def _safe_release_url(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > _MAX_RELEASE_URL
+        or "\\" in normalized
+        or any(
+            ord(character) < 0x21 or ord(character) > 0x7E
+            for character in normalized
+        )
+    ):
+        return ""
+    try:
+        parts = urlsplit(normalized)
+        _ = parts.port
+    except ValueError:
+        return ""
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return ""
+    return normalized
+
+
+def _safe_display_text(value: object, *, max_chars: int = 256) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if len(normalized) > max_chars or any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in normalized
+    ):
+        return ""
+    return normalized
+
+
+def _normalized_release(version: object, url: object) -> Optional[dict]:
+    normalized = _safe_release_version(version)
+    if normalized is None:
+        return None
+    return {"version": normalized, "url": _safe_release_url(url)}
+
+
 def is_newer(latest: object, current: object) -> bool:
     """True iff *latest* is a strictly greater release than *current* (zero-padded compare)."""
     lv, cv = parse_version(latest), parse_version(current)
@@ -144,31 +220,33 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _parse_release_payload(data: dict) -> Optional[dict]:
-    """Normalize a GitHub-release / PyPI / generic JSON payload to ``{version, url}``.
-
-    Returns ``None`` for drafts, pre-releases, or payloads without a usable version.
-    """
+def _parse_release_payload(data: object) -> Optional[dict]:
+    """Normalize a GitHub-release / PyPI / generic JSON payload safely."""
     if not isinstance(data, dict):
         return None
-    # GitHub releases/latest
     if "tag_name" in data:
         if data.get("draft") or data.get("prerelease"):
             return None
-        version = data.get("tag_name") or data.get("name") or ""
-        url = data.get("html_url") or ""
-        return {"version": str(version), "url": str(url)}
-    # PyPI /pypi/<pkg>/json
+        return _normalized_release(
+            data.get("tag_name") or data.get("name") or "",
+            data.get("html_url") or "",
+        )
     info = data.get("info")
     if isinstance(info, dict) and info.get("version"):
-        version = str(info["version"])
-        url = info.get("project_url") or info.get("home_page") \
+        version = _safe_release_version(info["version"])
+        if version is None:
+            return None
+        url = (
+            info.get("project_url")
+            or info.get("home_page")
             or ("https://pypi.org/project/engraphis/%s/" % version)
-        return {"version": version, "url": str(url)}
-    # generic {"version": ..., "url": ...}
+        )
+        return _normalized_release(version, url)
     if data.get("version"):
-        return {"version": str(data["version"]),
-                "url": str(data.get("url") or data.get("html_url") or "")}
+        return _normalized_release(
+            data["version"],
+            data.get("url") or data.get("html_url") or "",
+        )
     return None
 
 
@@ -239,12 +317,24 @@ def _write_cache(latest: str, url: str, error: str = "") -> None:
     path = _cache_path()
     if not path:
         return
-    payload = {"latest": latest, "url": url, "error": error, "checked_at": time.time()}
+    payload = {
+        "latest": _safe_release_version(latest) or "",
+        "url": _safe_release_url(url),
+        "error": _safe_display_text(error),
+        "checked_at": time.time(),
+    }
     try:
         with _CACHE_LOCK:
+            cache_path = Path(path)
+            ensure_owner_private_dir(cache_path.parent)
             atomic_private_text(
-                Path(path),
-                json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                cache_path,
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
                 + "\n",
             )
     except (UnsafeStateFile, OSError, ValueError):
@@ -260,23 +350,29 @@ def _checked_at(cache: dict) -> float:
 
 
 def _snapshot_from_cache(cache: dict) -> dict:
-    """Build a public snapshot, recomputing ``update_available`` against the *live*
-    installed version so an upgrade clears the banner immediately (no TTL wait)."""
-    latest = str(cache.get("latest") or "")
+    """Build a sanitized snapshot against the live installed version."""
+    latest = _safe_release_version(cache.get("latest")) or ""
     return {
         "enabled": True,
-        "current": CURRENT_VERSION,
+        "current": _safe_release_version(CURRENT_VERSION) or "",
         "latest": latest,
         "update_available": bool(latest) and is_newer(latest, CURRENT_VERSION),
-        "url": str(cache.get("url") or ""),
+        "url": _safe_release_url(cache.get("url")),
         "checked_at": _checked_at(cache),
-        "error": str(cache.get("error") or ""),
+        "error": _safe_display_text(cache.get("error")),
     }
 
 
 def _disabled_snapshot() -> dict:
-    return {"enabled": False, "current": CURRENT_VERSION, "latest": "",
-            "update_available": False, "url": "", "checked_at": 0.0, "error": ""}
+    return {
+        "enabled": False,
+        "current": _safe_release_version(CURRENT_VERSION) or "",
+        "latest": "",
+        "update_available": False,
+        "url": "",
+        "checked_at": 0.0,
+        "error": "",
+    }
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -286,7 +382,7 @@ def check(force: bool = False, timeout: float = DEFAULT_TIMEOUT) -> dict:
     if not enabled():
         return _disabled_snapshot()
     cache = _read_cache()
-    fresh = (time.time() - _checked_at(cache)) < CACHE_TTL_SECONDS
+    fresh = (time.time() - _checked_at(cache)) < _cache_ttl_seconds()
     if cache and fresh and not force:
         return _snapshot_from_cache(cache)
     try:
@@ -312,7 +408,7 @@ def snapshot() -> dict:
     if not enabled():
         return _disabled_snapshot()
     cache = _read_cache()
-    fresh = cache and (time.time() - _checked_at(cache)) < CACHE_TTL_SECONDS
+    fresh = cache and (time.time() - _checked_at(cache)) < _cache_ttl_seconds()
     if not fresh:
         refresh_in_background()
     return _snapshot_from_cache(cache)
@@ -342,15 +438,20 @@ def refresh_in_background(timeout: float = DEFAULT_TIMEOUT) -> None:
 
 
 def notice_line(snap: Optional[dict] = None) -> Optional[str]:
-    """One-line human notice, or ``None`` when no update is available / checks are off."""
+    """One control-free human notice, or ``None`` when no safe update is known."""
     snap = snap if snap is not None else snapshot()
     if not snap.get("enabled") or not snap.get("update_available"):
         return None
-    latest, current = snap.get("latest") or "?", snap.get("current") or "?"
-    url = snap.get("url") or ""
+    latest = _safe_release_version(snap.get("latest"))
+    current = _safe_release_version(snap.get("current"))
+    if latest is None or current is None:
+        return None
+    url = _safe_release_url(snap.get("url"))
     tail = " — %s" % url if url else ""
-    return ("Engraphis %s is available (you have %s). Upgrade: pip install -U engraphis%s"
-            % (latest, current, tail))
+    return (
+        "Engraphis %s is available (you have %s). Upgrade: pip install -U engraphis%s"
+        % (latest, current, tail)
+    )
 
 
 def emit_startup_notice(emit: Optional[Callable[[str], None]] = None,

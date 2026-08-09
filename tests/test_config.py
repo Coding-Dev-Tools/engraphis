@@ -5,7 +5,10 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -215,3 +218,160 @@ def test_private_service_modes_are_not_available_in_the_public_package(monkeypat
         monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
         with pytest.raises(SystemExit):
             Settings()
+
+
+def _isolated_config_probe(
+    tmp_path: Path,
+    environment: dict[str, str],
+    code: str = (
+        "import os; import engraphis.config; "
+        "print(os.environ.get('ENGRAPHIS_CLOUD_CONTROL_URL', ''))"
+    ),
+):
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    probe_environment = dict(environment)
+    probe_environment["HOME"] = str(home)
+    probe_environment["USERPROFILE"] = str(home)
+    probe_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            code,
+        ],
+        cwd=tmp_path,
+        env=probe_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_arbitrary_working_directory_dotenv_is_not_loaded(tmp_path) -> None:
+    (tmp_path / ".env").write_text(
+        "ENGRAPHIS_CLOUD_CONTROL_URL=https://attacker.example.test\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment.pop("ENGRAPHIS_ENV_FILE", None)
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    completed = _isolated_config_probe(tmp_path, environment)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == ""
+
+
+def test_explicit_owner_private_env_file_loads_without_overriding_process_env(
+    tmp_path,
+) -> None:
+    pytest.importorskip(
+        "dotenv", reason="explicit env-file config tests require python-dotenv"
+    )
+    trusted = tmp_path / "trusted.env"
+    trusted.write_text(
+        "ENGRAPHIS_CLOUD_CONTROL_URL=https://trusted.example.test\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        os.chmod(trusted, 0o600)
+    environment = dict(os.environ)
+    environment["ENGRAPHIS_ENV_FILE"] = str(trusted)
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    loaded = _isolated_config_probe(tmp_path, environment)
+    assert loaded.returncode == 0, loaded.stderr
+    assert loaded.stdout.strip() == "https://trusted.example.test"
+
+    environment["ENGRAPHIS_CLOUD_CONTROL_URL"] = "https://operator.example.test"
+    overridden = _isolated_config_probe(tmp_path, environment)
+    assert overridden.returncode == 0, overridden.stderr
+    assert overridden.stdout.strip() == "https://operator.example.test"
+
+
+def test_explicit_env_file_path_must_be_absolute(tmp_path) -> None:
+    environment = dict(os.environ)
+    environment["ENGRAPHIS_ENV_FILE"] = "relative.env"
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    completed = _isolated_config_probe(tmp_path, environment)
+
+    assert completed.returncode != 0
+    assert completed.stdout.strip() == ""
+    assert "must be an absolute path" in completed.stderr
+
+
+def test_explicit_env_file_must_be_owner_private_on_posix(tmp_path) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits are not authoritative on Windows")
+    public = tmp_path / "public.env"
+    public.write_text(
+        "ENGRAPHIS_CLOUD_CONTROL_URL=https://attacker.example.test\n",
+        encoding="utf-8",
+    )
+    os.chmod(public, 0o644)
+    environment = dict(os.environ)
+    environment["ENGRAPHIS_ENV_FILE"] = str(public)
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    completed = _isolated_config_probe(tmp_path, environment)
+
+    assert completed.returncode != 0
+    assert completed.stdout.strip() == ""
+    assert "owner-only permissions" in completed.stderr
+
+
+def test_explicit_env_file_rejects_linked_leaves(tmp_path) -> None:
+    victim = tmp_path / "victim.env"
+    victim.write_text(
+        "ENGRAPHIS_CLOUD_CONTROL_URL=https://attacker.example.test\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        os.chmod(victim, 0o600)
+    linked = tmp_path / "linked.env"
+    try:
+        linked.symlink_to(victim)
+    except (NotImplementedError, OSError):
+        try:
+            os.link(victim, linked)
+        except OSError:
+            pytest.skip("this platform cannot create an adversarial config link")
+    environment = dict(os.environ)
+    environment["ENGRAPHIS_ENV_FILE"] = str(linked)
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    completed = _isolated_config_probe(tmp_path, environment)
+
+    assert completed.returncode != 0
+    assert completed.stdout.strip() == ""
+    assert "unsafe private state file" in completed.stderr
+
+
+def test_default_settings_persistence_uses_trusted_home_not_working_directory(
+    tmp_path,
+) -> None:
+    working_env = tmp_path / ".env"
+    working_env.write_text("KEEP=1\n", encoding="utf-8")
+    environment = dict(os.environ)
+    environment.pop("ENGRAPHIS_ENV_FILE", None)
+    environment.pop("ENGRAPHIS_CLOUD_CONTROL_URL", None)
+
+    completed = _isolated_config_probe(
+        tmp_path,
+        environment,
+        (
+            "from engraphis.config import persist_project_env; "
+            "print(persist_project_env({'ENGRAPHIS_LOOP_INTERVAL': '7'}))"
+        ),
+    )
+
+    trusted = tmp_path / "home" / ".engraphis" / "config.env"
+    assert completed.returncode == 0, completed.stderr
+    assert Path(completed.stdout.strip()) == trusted
+    assert working_env.read_text(encoding="utf-8") == "KEEP=1\n"
+    assert trusted.read_text(encoding="utf-8") == "ENGRAPHIS_LOOP_INTERVAL=7\n"
+    if os.name != "nt":
+        assert trusted.stat().st_mode & 0o077 == 0

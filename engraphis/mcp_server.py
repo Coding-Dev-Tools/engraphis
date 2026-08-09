@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import math
 
@@ -47,7 +48,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
 
@@ -103,7 +104,7 @@ def service() -> MemoryService:
             embed_model=settings.embed_model or None,
             embed_revision=getattr(settings, "embed_revision", "") or None,
             require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-            embed_dim=settings.embed_dim or 384,
+            embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
             allowed_workspaces=settings.allowed_workspaces,
             vector_backend=settings.vector_backend,
             rerank_model=getattr(settings, "rerank_model", "") or None,
@@ -119,12 +120,212 @@ def _ok(payload: dict) -> str:
 
 
 def _err(exc: Exception) -> str:
-    """Actionable, safe error string (never leaks internals)."""
+    """Actionable, safe error string (never leaks internals or credentials)."""
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
-    logger.error("MCP tool operation failed (%s)", type(exc).__name__)
+    exc_type = type(exc).__name__
+    # Redact exception messages to prevent credential/path/memory leakage.
+    # Log only a safe class marker and never attach exc_info/tracebacks.
+    logger.error("MCP tool operation failed", extra={"error_class": exc_type})
     return "Error: operation failed. Check the Engraphis server logs for details."
 
+
+
+def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) -> dict:
+    """Reduce response bodies from the end until the serialized payload fits.
+
+    Source identities are retained whenever the budget can hold them.  If even
+    empty bodies and source identities cannot fit, trailing source records are
+    removed and, as a last resort, only the accounting envelope is returned.
+    """
+    counter = RegexTokenCounter()
+    usage = payload.get("usage") or {}
+    payload["usage"] = usage
+
+    if max_response_tokens is not None and max_response_tokens > 0:
+        usage["response_budget"] = max_response_tokens
+
+    def measure() -> int:
+        # Include the accounting fields themselves in the reported total.  The
+        # regex counter treats every integer as one token, so one correction is
+        # sufficient even when the numeric value changes width.
+        usage["actual_response_tokens"] = 0
+        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        tokens = counter(serialized)
+        usage["actual_response_tokens"] = tokens
+        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        return counter(serialized)
+
+    current_tokens = measure()
+
+    if max_response_tokens is None or max_response_tokens <= 0:
+        return payload
+
+    if current_tokens <= max_response_tokens:
+        return payload
+
+    def citation_number(value: object) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def fit_text(container: dict, key: str, *, citation_safe: bool = False) -> None:
+        """Keep the longest prefix that fits, always reducing a non-empty value."""
+        nonlocal current_tokens
+        original = str(container.get(key) or "")
+        if not original or current_tokens <= max_response_tokens:
+            return
+
+        # Empty first so a one-character value cannot get stuck at len == 1.
+        container[key] = ""
+        current_tokens = measure()
+        if current_tokens > max_response_tokens and not citation_safe:
+            return
+
+        if citation_safe:
+            cited_numbers = set()
+            for citation in payload.get("citations") or []:
+                number = citation_number(citation.get("n"))
+                if number is not None:
+                    cited_numbers.add(number)
+            candidates = {""}
+            if cited_numbers:
+                for match in re.finditer(r"\[(\d+)\]", original):
+                    number = citation_number(match.group(1))
+                    if number in cited_numbers:
+                        candidates.add(original[:match.end()].rstrip())
+            best = ""
+            for candidate in sorted(candidates, key=len, reverse=True):
+                container[key] = candidate
+                if measure() <= max_response_tokens:
+                    best = candidate
+                    break
+            container[key] = best
+            current_tokens = measure()
+            if not best:
+                # A grounded answer without a complete citation is no longer a
+                # grounded answer. The empty response is an explicit abstention.
+                payload["grounded"] = False
+                payload["abstained"] = True
+                container[key] = ""
+                current_tokens = measure()
+            return
+
+        best = ""
+        low, high = 1, len(original)
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = original[:middle].rstrip()
+            container[key] = candidate
+            candidate_tokens = measure()
+            if candidate_tokens <= max_response_tokens:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        container[key] = best
+        current_tokens = measure()
+
+    # --- over budget: truncate body content from the end -----------------
+    # 1. Shrink the packed ``context`` string chunk-by-chunk (last first).
+    context = payload.get("context", "")
+    context_parts = context.split("\n\n") if context else []
+
+    while current_tokens > max_response_tokens and context_parts:
+        context_parts.pop()
+        payload["context"] = "\n\n".join(context_parts)
+        current_tokens = measure()
+
+    # 2. Reduce full-mode memory bodies. Grounded answers are handled after their
+    # citation bodies so the answer can be fitted against the actual evidence
+    # envelope rather than being emptied just because a citation body was large.
+    if current_tokens > max_response_tokens:
+        memories = payload.get("memories", [])
+        for mem in reversed(memories):
+            if current_tokens <= max_response_tokens:
+                break
+            fit_text(mem, "content")
+
+    if current_tokens > max_response_tokens:
+        citations = payload.get("citations", [])
+        for citation in reversed(citations):
+            if current_tokens <= max_response_tokens:
+                break
+            fit_text(citation, "content")
+
+    if current_tokens > max_response_tokens:
+        fit_text(
+            payload, "answer", citation_safe=payload.get("grounded") is True
+        )
+
+    # Post-processing: ensure grounded answers always end with a citation marker
+    if payload.get("grounded") is True and current_tokens <= max_response_tokens:
+        answer = str(payload.get("answer") or "")
+        if answer and not re.search(r"\[\d+\]$", answer.rstrip()):
+            # Answer doesn't end with citation - truncate to last complete citation
+            matches = list(re.finditer(r"\[\d+\]", answer))
+            if matches:
+                last_match = matches[-1]
+                payload["answer"] = answer[:last_match.end()].rstrip()
+                current_tokens = measure()
+            else:
+                # No citations - grounded answer without citations is an abstention
+                payload["grounded"] = False
+                payload["abstained"] = True
+                payload["answer"] = ""
+                current_tokens = measure()
+
+    # Source records can themselves exceed a very small response budget even
+    # after their bodies are empty. Remove only whole trailing records so IDs and
+    # citation metadata are never partially serialized.
+    def remove_trailing_record(records: list, key: str) -> bool:
+        if payload.get("grounded") is not True or key not in {
+            "citations", "sources", "packed_sources"
+        }:
+            records.pop()
+            return True
+        cited_numbers = set()
+        for number in re.findall(r"\[(\d+)\]", str(payload.get("answer") or "")):
+            parsed = citation_number(number)
+            if parsed is not None:
+                cited_numbers.add(parsed)
+        for index in range(len(records) - 1, -1, -1):
+            try:
+                number = int(records[index].get("n"))
+            except (AttributeError, TypeError, ValueError):
+                number = None
+            if number not in cited_numbers:
+                records.pop(index)
+                return True
+        return False
+
+    for key in ("memories", "citations", "sources", "packed_sources"):
+        records = payload.get(key)
+        while (
+            current_tokens > max_response_tokens
+            and isinstance(records, list)
+            and records
+        ):
+            if not remove_trailing_record(records, key):
+                break
+            current_tokens = measure()
+
+    if current_tokens > max_response_tokens:
+        # Existing usage blocks may contain detailed retrieval accounting that
+        # cannot fit a tiny transport envelope. Preserve the two response-budget
+        # fields when possible; an empty JSON object is the two-token floor.
+        usage = {
+            "actual_response_tokens": 0,
+            "response_budget": max_response_tokens,
+        }
+        payload.clear()
+        payload["usage"] = usage
+        current_tokens = measure()
+        if current_tokens > max_response_tokens:
+            payload.clear()
+
+    return payload
 
 _READ_ONLY_TOOLS = frozenset({
     "engraphis_recall",
@@ -149,6 +350,7 @@ _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
     "engraphis_index_repo",
     "engraphis_ingest_postgres_schema",
+    "engraphis_link_symbol",
 })
 _SMART_GATEWAY_ROLES = {
     "engraphis_discover_actions": "viewer",
@@ -327,6 +529,12 @@ def engraphis_recall(
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type; limits never boost "
                     "relevance.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context and memory bodies from the end; citations and "
+                    "source references are preserved when the budget can hold them. "
+                    "Minimum 2 (the JSON object floor); None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Retrieve the memories most relevant to a query (semantic vector + lexical + graph).
 
@@ -348,7 +556,7 @@ def engraphis_recall(
         Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
     try:
-        return _ok(service().recall(
+        payload = service().recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
@@ -357,7 +565,9 @@ def engraphis_recall(
             diagnostics=diagnostics,
             planning=planning,
             mtype_limits=mtype_limits,
-        ))
+        )
+        payload = _apply_response_budget(payload, max_response_tokens)
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -399,6 +609,11 @@ def engraphis_recall_context(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context from the end; citations and source references "
+                    "are preserved when the budget can hold them. Minimum 2; None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -458,6 +673,7 @@ def engraphis_recall_context(
                 source["reason"] = reason
             sources.append(source)
         payload["sources"] = sources
+        payload = _apply_response_budget(payload, max_response_tokens)
         return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -514,6 +730,11 @@ def engraphis_recall_grounded(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (regex counter). "
+                    "Truncates packed context and citation bodies from the end; source references "
+                    "are preserved when the budget can hold them. Minimum 2; None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -544,7 +765,7 @@ def engraphis_recall_grounded(
                 llm = LLMClient()
             except Exception:
                 llm = None
-        return _ok(service().grounded_recall(
+        payload = service().grounded_recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
@@ -552,7 +773,9 @@ def engraphis_recall_grounded(
             response_mode=response_mode,
             diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
             min_support=min_support, llm=llm,
-        ))
+        )
+        payload = _apply_response_budget(payload, max_response_tokens)
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
     finally:
@@ -600,6 +823,9 @@ def engraphis_answer(
         description="off preserves single-query recall; auto enables bounded planning.")] = "off",
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
+    max_response_tokens: Annotated[Optional[int], Field(
+        description="Cap the total serialized response to this many tokens (minimum 2).",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Backward-compatible alias for ``engraphis_recall_grounded``.
 
@@ -614,6 +840,7 @@ def engraphis_answer(
         response_mode=response_mode, diagnostics=diagnostics,
         planning=planning, mtype_limits=mtype_limits,
         min_support=min_support, synthesize=synthesize,
+        max_response_tokens=max_response_tokens,
     )
 
 
@@ -1210,6 +1437,48 @@ def engraphis_export_code_graph(
 
 
 @mcp.tool(
+    name="engraphis_link_symbol",
+    annotations={"title": "Link a code symbol to a memory", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_link_symbol(
+    symbol_id: Annotated[str, Field(description="Symbol ID, short name, or fully-qualified "
+                                    "name from an indexed repo.",
+                                    min_length=1, max_length=500)],
+    memory_id: Annotated[str, Field(description="Memory ID to link to the symbol.",
+                                    min_length=1, max_length=500)],
+    workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[str, Field(description="Indexed repo containing the symbol.",
+                               min_length=1, max_length=200)],
+    relation: Annotated[str, Field(description="Relationship type (e.g. 'mentions', "
+                                   "'implements', 'fixes'). Defaults to 'mentions'.",
+                                   max_length=100)] = "mentions",
+    confidence: Annotated[float, Field(description="Link confidence 0..1.",
+                          ge=0.0, le=1.0)] = 1.0,
+    reason: Annotated[str, Field(description="Optional reason or context for this link.",
+                                 max_length=500)] = "",
+) -> str:
+    """Manually create a link between a code symbol and a memory.
+
+    Use this when automatic indexing misses a relationship you know about — for example,
+    linking a deployment function to the incident memory it resolved, or connecting a
+    config constant to the decision that set its value. The link is idempotent: repeating
+    the same call returns the existing link without duplication.
+
+    Returns:
+        str: JSON ``{"link_id","symbol_id","memory_id","relation","workspace","repo","receipt"}``.
+    """
+    try:
+        return _ok(service().link_symbol(
+            symbol_id, memory_id, workspace=workspace, repo=repo,
+            relation=relation, confidence=confidence, reason=reason,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1320,6 +1589,10 @@ def engraphis_context_savings(
     to_ts: Annotated[Optional[float], Field(description="Optional exclusive Unix timestamp.")] = None,
     release_version: Annotated[Optional[str], Field(description="Optional semantic release filter.",
                                                      max_length=64)] = None,
+    format: Annotated[Optional[str], Field(description="Output format: 'json' (default) or 'csv'.",
+                                            max_length=16)] = None,
+    group_by: Annotated[Optional[str], Field(description="Group results by dimension: workspace, repo, agent, or day.",
+                                              max_length=32)] = None,
 ) -> str:
     """Summarize receipt-backed context savings with optional time/release filters."""
     try:
@@ -1329,6 +1602,8 @@ def engraphis_context_savings(
             from_ts=from_ts,
             to_ts=to_ts,
             release_version=release_version,
+            format=format,
+            group_by=group_by,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1499,9 +1774,9 @@ def engraphis_ingest_postgres_schema(
     )] = None,
 ) -> str:
     """Convert tables, columns, constraints, and foreign keys into a schema memory and
-    entity graph. Requires the optional psycopg backend. Each invocation stores a new
-    point-in-time schema snapshot and appends audit/receipt records, so it is not
-    idempotent."""
+    entity graph. Requires the optional psycopg backend. An exact retry reuses its live
+    point-in-time schema snapshot, but every invocation appends audit/receipt records,
+    so the tool as a whole is not idempotent."""
     try:
         return _ok(service().import_postgres_schema(
             dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
@@ -1529,9 +1804,6 @@ def engraphis_consolidate(
     structured: Annotated[bool, Field(description="If true, use configured LLM for "
                           "schema-validated consolidation facts/entities/relations; "
                           "falls back to deterministic digest on any failure.")] = False,
-    supersede_sources: Annotated[bool, Field(description="Only with structured=True: "
-                                "bi-temporally close source episodes after validated "
-                                "facts are written. Defaults false for safety.")] = False,
 ) -> str:
     """Run one sleep-time consolidation sweep: recurring episodic memories on the same
     subject are distilled into one durable semantic digest (linked to its sources), and
@@ -1551,9 +1823,10 @@ def engraphis_consolidate(
         added (``entities_considered``, ``profiles_created``, ``compaction``).
     """
     try:
-        return _ok(service().consolidate(workspace=workspace, repo=repo, dry_run=dry_run,
-                                         profiles=profiles, structured=structured,
-                                         supersede_sources=supersede_sources))
+        return _ok(service().consolidate(
+            workspace=workspace, repo=repo, dry_run=dry_run,
+            profiles=profiles, structured=structured,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1638,6 +1911,7 @@ _ACTION_PREREQUISITES = {
     "engraphis_code_path": "Run index_repo for the repository first.",
     "engraphis_code_impact": "Run index_repo for the repository first.",
     "engraphis_export_code_graph": "Run index_repo for the repository first.",
+    "engraphis_link_symbol": "Run index_repo for the repository first.",
     "engraphis_secure_erase": "Requires the host's destructive-action approval.",
 }
 
@@ -2455,7 +2729,7 @@ def engraphis_get_memory(
 @smart_mcp.tool(
     name="engraphis_update_memory",
     annotations={"title": "Edit a memory's metadata fields", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     structured_output=False,
 )
 def engraphis_update_memory(
@@ -2471,17 +2745,23 @@ def engraphis_update_memory(
                                           max_length=50)] = None,
     importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
                                                  le=1.0)] = None,
-    actor: Annotated[str, Field(description="Optional actor label.", max_length=200)] = "user",
+    actor: Annotated[str, Field(
+        description="Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        max_length=200,
+    )] = "user",
 ) -> str:
-    """Edit a memory's metadata fields (title/type/importance). Content edits must go
-    through the governed correction path so bi-temporal history is preserved. Secret
-    capture is rejected; provenance/trust/sensitivity are never editable here."""
+    """Edit a memory's metadata fields (title/type/importance). An identical retry is an
+    atomic no-op. Content edits must go through the governed correction path so bi-temporal
+    history is preserved. Secret capture is rejected; provenance/trust/sensitivity are never
+    editable here."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
+        principal = _authenticated_principal()
+        effective_actor = principal["id"] if principal is not None else actor
         return _ok(service().update_memory(
             memory_id, workspace=workspace, repo=repo,
-            title=title, mtype=mtype, importance=importance, actor=actor,
+            title=title, mtype=mtype, importance=importance, actor=effective_actor,
         ))
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)

@@ -130,8 +130,88 @@ def test_digest_exposes_its_source_ids_as_citable_evidence():
     assert all("flaky" not in str(chunk["consolidation_source_ids"]) for chunk in res.chunks)
 
 
+def test_recall_resolves_consolidation_evidence_once(monkeypatch):
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(":memory:")
+    eng = _recall_engine(store)
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    approved = {"source": "test", "trusted": True, "review_state": "approved"}
+    source_ids = []
+    for run in (101, 202, 303):
+        content = f"Build failed on the flaky network integration test in CI run {run}."
+        source_ids.append(store.add_memory(MemoryRecord(
+            id="",
+            content=content,
+            mtype=MemoryType.EPISODIC,
+            scope=Scope.REPO,
+            workspace_id=wid,
+            repo_id=rid,
+            metadata={"provenance": approved},
+            provenance=approved,
+            embedding=eng.embedder.embed([content])[0],
+        )))
+    digest_content = "Flaky network integration test failures repeat in CI."
+    digest_id = store.add_memory(MemoryRecord(
+        id="",
+        content=digest_content,
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"provenance": {
+            "source": "consolidation",
+            "trusted": True,
+            "review_state": "approved",
+            "consolidates": source_ids,
+        }},
+        provenance={
+            "source": "consolidation",
+            "trusted": True,
+            "review_state": "approved",
+            "consolidates": source_ids,
+        },
+        embedding=eng.embedder.embed([digest_content])[0],
+    ))
+    for source_id in source_ids:
+        store.add_link(digest_id, source_id, "consolidates")
+    expected_sources = set(source_ids)
+    link_calls = []
+    memory_calls = []
+    real_get_links = store.get_links
+    real_get_memory = store.get_memory
+
+    def recording_get_links(memory_id, *, flt=None):
+        link_calls.append(memory_id)
+        return real_get_links(memory_id, flt=flt)
+
+    def recording_get_memory(memory_id):
+        memory_calls.append(memory_id)
+        return real_get_memory(memory_id)
+
+    monkeypatch.setattr(store, "get_links", recording_get_links)
+    monkeypatch.setattr(store, "get_memory", recording_get_memory)
+    result = eng.recall(
+        "flaky network integration test",
+        SearchFilter(workspace_id=wid, repo_id=rid),
+        k=4,
+        reinforce=False,
+    )
+    chunk = next(item for item in result.chunks if item["id"] == digest_id)
+
+    assert set(chunk["consolidation_source_ids"]) == expected_sources
+    assert set(result.source_metadata[digest_id]["consolidation_source_ids"]) == (
+        expected_sources
+    )
+    assert link_calls == [digest_id]
+    assert set(memory_calls) == expected_sources
+    assert len(memory_calls) == len(expected_sources)
+    store.close()
+
+
 def test_consolidation_evidence_stays_inside_the_active_repo_scope():
-    """Linked/provenance source ids must not cross a repo recall boundary."""
+    """Provenance source ids must not cross a repo recall boundary."""
     from engraphis.core.interfaces import MemoryRecord, Scope
 
     store = Store(":memory:")
@@ -167,7 +247,6 @@ def test_consolidation_evidence_stays_inside_the_active_repo_scope():
         },
     ))
     store.add_link(digest, source_a, "consolidates")
-    store.add_link(digest, source_b, "consolidates")
 
     evidence = _consolidation_evidence(
         store.get_memory(digest),
@@ -178,7 +257,7 @@ def test_consolidation_evidence_stays_inside_the_active_repo_scope():
     assert evidence == [source_a]
 
 
-def test_non_consolidated_memory_is_unchanged():
+def test_non_consolidated_memory_is_unchanged(monkeypatch):
     """Ordinary memories get no bonus and no evidence field."""
     from engraphis.core.interfaces import MemoryRecord, Scope
 
@@ -199,6 +278,14 @@ def test_non_consolidated_memory_is_unchanged():
         importance=0.5,
         embedding=_SemanticTestEmbedder(256).embed(["pnpm is our package manager."])[0],
     ))
+    link_calls = []
+    real_get_links = store.get_links
+
+    def recording_get_links(memory_id, *, flt=None):
+        link_calls.append(memory_id)
+        return real_get_links(memory_id, flt=flt)
+
+    monkeypatch.setattr(store, "get_links", recording_get_links)
     res = eng.recall("package manager", SearchFilter(workspace_id=wid, repo_id=rid), k=1,
                      reinforce=False)
     assert res.count == 1
@@ -206,3 +293,4 @@ def test_non_consolidated_memory_is_unchanged():
     assert chunk["id"] == mid
     assert chunk["consolidation_source_ids"] == []
     assert res.source_metadata.get(mid, {}).get("consolidation_source_ids") is None
+    assert link_calls == []

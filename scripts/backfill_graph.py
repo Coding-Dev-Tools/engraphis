@@ -42,11 +42,12 @@ from engraphis.core.poisoning import prompt_eligible
 
 def backfill(db_path: str, *, dry_run: bool = False,
              only_workspace: Optional[str] = None) -> dict:
-    """Extract entities/relations from every live memory and write them to the
-    graph. Returns a per-workspace summary. ``dry_run`` runs the extractor but
-    persists nothing (store writes auto-commit, so there is no transaction to roll
-    back -- we simply skip the write)."""
-    store = Store(db_path)
+    """Extract entities/relations from every live memory and write them to the graph.
+
+    ``dry_run`` opens the existing database read-only, runs the extractor, and invokes
+    no graph writes, so even connection setup cannot migrate or alter journal state.
+    """
+    store = Store(db_path, read_only=dry_run)
     conn = store.conn
     extractor = get_graph_extractor("regex")
 

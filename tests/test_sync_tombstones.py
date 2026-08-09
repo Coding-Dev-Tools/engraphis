@@ -1,6 +1,7 @@
 """Sync tombstones: secure-erase and unpin must propagate across devices."""
 from __future__ import annotations
 
+import json
 import pytest
 
 from engraphis.core.interfaces import MemoryRecord, Scope
@@ -16,6 +17,28 @@ def _two_devices():
     return a, b, aw, bw
 
 
+class _CaptureTransport:
+    def __init__(self):
+        self.payloads = []
+
+    def pull(self):
+        return []
+
+    def push(self, _name, data):
+        self.payloads.append(data)
+
+    def list_names(self):
+        return []
+
+
+def _push_bundle(syncer, workspace_id, *, repo_id=None):
+    transport = _CaptureTransport()
+    report = syncer.sync(transport, workspace_id, repo_id=repo_id)
+    assert report["complete"] is True
+    assert len(transport.payloads) == 1
+    return json.loads(transport.payloads[0])
+
+
 def test_secure_erase_propagates_tombstone_so_peer_does_not_resurrect():
     """Device A erases a memory; B's next bundle must not re-add it."""
     a, b, aw, bw = _two_devices()
@@ -24,7 +47,7 @@ def test_secure_erase_propagates_tombstone_so_peer_does_not_resurrect():
     # A writes, B receives it.
     mid = a.add_memory(MemoryRecord(id="", content="secret plan", workspace_id=aw,
                                     scope=Scope.WORKSPACE))
-    bundle = syncer_a.export_bundle(aw)
+    bundle = _push_bundle(syncer_a, aw)
     report = syncer_b.apply_bundle(bundle, into_workspace="w")
     assert report["added"] == 1
 
@@ -33,7 +56,7 @@ def test_secure_erase_propagates_tombstone_so_peer_does_not_resurrect():
     assert a.get_memory(mid) is None
 
     # The next bundle from A carries the tombstone.
-    bundle2 = syncer_a.export_bundle(aw)
+    bundle2 = _push_bundle(syncer_a, aw)
     assert any(t["id"] == mid for t in bundle2["tombstones"])
     erased = next(t for t in bundle2["tombstones"] if t["id"] == mid)
     assert erased["workspace_id"] == aw
@@ -49,6 +72,242 @@ def test_secure_erase_propagates_tombstone_so_peer_does_not_resurrect():
     assert any(t["id"] == mid for t in syncer_b.export_bundle(bw)["tombstones"])
 
 
+@pytest.mark.parametrize("protection", ["approved", "secret", "session"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_untrusted_tombstone_cannot_erase_protected_local_memory(
+        protection, dry_run):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    record = MemoryRecord(
+        id="mem_protected",
+        content="local protected payload",
+        workspace_id=workspace,
+        scope=Scope.SESSION if protection == "session" else Scope.WORKSPACE,
+        sensitivity="secret" if protection == "secret" else "normal",
+        provenance=(
+            {"source": "human", "trusted": True, "review_state": "approved"}
+            if protection == "approved"
+            else {"source": "sync", "trusted": False, "review_state": "pending"}
+        ),
+    )
+    store.add_memory(record)
+    assert store.conn.execute(
+        "SELECT 1 FROM mem_fts WHERE id=?", (record.id,)
+    ).fetchone() is not None
+    bundle = {
+        "format": "engraphis-sync",
+        "version": 1,
+        "device_id": "hostile-peer",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [],
+        "mem_links": [],
+        "tombstones": [{
+            "id": record.id,
+            "deleted_at": 10.0,
+            "device": "hostile-peer",
+            "export_class": "remote_erasure",
+        }],
+    }
+
+    report = SyncEngine(store).apply_bundle(
+        bundle, into_workspace="w", dry_run=dry_run
+    )
+
+    assert report["rejected"] == 1
+    assert report["tombstones_applied"] == 0
+    assert store.get_memory(record.id) is not None
+    assert store.list_memory_tombstones(workspace) == []
+    assert store.conn.execute(
+        "SELECT 1 FROM mem_fts WHERE id=?", (record.id,)
+    ).fetchone() is not None
+    audit = store.conn.execute(
+        "SELECT detail FROM audit WHERE action='sync_trust_conflict'"
+    ).fetchone()
+    if dry_run:
+        assert audit is None
+    else:
+        assert audit is not None
+        assert audit["detail"] == "peer erasure ignored because local record is protected"
+        assert "local protected payload" not in audit["detail"]
+
+
+def test_workspace_export_includes_only_remote_erasure_tombstones(monkeypatch):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    monkeypatch.setattr(
+        store,
+        "list_memory_tombstones",
+        lambda *_args, **_kwargs: [
+            {"id": "mem_private", "deleted_at": 1.0,
+             "export_class": "never_export"},
+            {"id": "mem_shared", "deleted_at": 2.0,
+             "export_class": "remote_erasure"},
+        ],
+    )
+
+    exported = SyncEngine(store).export_bundle(workspace)
+
+    assert exported["tombstones"] == [{
+        "id": "mem_shared",
+        "deleted_at": 2.0,
+        "export_class": "remote_erasure",
+    }]
+
+
+@pytest.mark.parametrize(
+    "export_class",
+    [pytest.param(None, id="missing"), "never_export", "unknown"],
+)
+def test_imported_tombstone_requires_remote_erasure_classification(export_class):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_local",
+        content="ordinary local payload",
+        workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "sync", "trusted": False},
+    ))
+    tombstone = {
+        "id": "mem_local",
+        "deleted_at": 1.0,
+        "device": "peer",
+    }
+    if export_class is not None:
+        tombstone["export_class"] = export_class
+
+    report = SyncEngine(store).apply_bundle({
+        "format": "engraphis-sync",
+        "version": 1,
+        "device_id": "peer",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [],
+        "mem_links": [],
+        "tombstones": [tombstone],
+    }, into_workspace="w")
+
+    assert report["rejected"] == 1
+    assert store.get_memory("mem_local") is not None
+    assert store.list_memory_tombstones(workspace) == []
+
+
+def test_peer_cannot_upgrade_local_never_export_tombstone():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    store.add_memory_tombstone(
+        "mem_private",
+        deleted_at=1.0,
+        workspace_id=workspace,
+        export_class="never_export",
+    )
+    store.conn.commit()
+
+    report = SyncEngine(store).apply_bundle({
+        "format": "engraphis-sync",
+        "version": 1,
+        "device_id": "peer",
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [],
+        "mem_links": [],
+        "tombstones": [{
+            "id": "mem_private",
+            "deleted_at": 2.0,
+            "device": "peer",
+            "export_class": "remote_erasure",
+        }],
+    }, into_workspace="w")
+
+    assert report["rejected"] == 1
+    assert store.list_memory_tombstones(workspace)[0]["export_class"] == "never_export"
+    assert SyncEngine(store).export_bundle(workspace)["tombstones"] == []
+
+
+def test_secure_erase_classifies_private_and_shared_tombstones():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    records = (
+        MemoryRecord(
+            id="mem_shared",
+            content="shared",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+        ),
+        MemoryRecord(
+            id="mem_secret",
+            content="secret",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+            sensitivity="secret",
+        ),
+        MemoryRecord(
+            id="mem_previously_shared",
+            content="shared before local reclassification",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+        ),
+        MemoryRecord(
+            id="mem_session",
+            content="session-local",
+            workspace_id=workspace,
+            scope=Scope.SESSION,
+        ),
+    )
+    for record in records:
+        store.add_memory(record)
+
+    class CaptureTransport:
+        def __init__(self):
+            self.pushed = []
+
+        def pull(self):
+            return []
+
+        def push(self, name, data):
+            self.pushed.append((name, data))
+
+        def list_names(self):
+            return []
+
+    transport = CaptureTransport()
+    report = SyncEngine(store).sync(transport, workspace)
+    assert report["complete"] is True
+    assert {item.id for item in records if item.scope == Scope.WORKSPACE
+            and item.sensitivity != "secret"} == {
+        item["id"] for item in SyncEngine(store).export_bundle(workspace)["memories"]
+    }
+    assert store.get_memory_sync_export("mem_shared") is not None
+    assert store.get_memory_sync_export("mem_previously_shared") is not None
+    assert store.get_memory_sync_export("mem_secret") is None
+    assert store.get_memory_sync_export("mem_session") is None
+
+    store.advance_memory_modified_hlc("mem_previously_shared", commit=False)
+    store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' "
+        "WHERE id='mem_previously_shared'"
+    )
+    store.conn.commit()
+    for record in records:
+        store.secure_erase_memory(record.id)
+
+    classifications = {
+        item["id"]: item["export_class"]
+        for item in store.list_memory_tombstones(workspace)
+    }
+    assert classifications == {
+        "mem_secret": "never_export",
+        "mem_previously_shared": "remote_erasure",
+        "mem_session": "never_export",
+        "mem_shared": "remote_erasure",
+    }
+    assert {
+        item["id"]
+        for item in SyncEngine(store).export_bundle(workspace)["tombstones"]
+    } == {"mem_previously_shared", "mem_shared"}
+
+
 def test_secure_erase_rolls_back_delete_when_tombstone_write_fails(monkeypatch):
     store = Store(":memory:")
     workspace = store.get_or_create_workspace("w")
@@ -56,7 +315,8 @@ def test_secure_erase_rolls_back_delete_when_tombstone_write_fails(monkeypatch):
         id="", content="secret plan", workspace_id=workspace,
         scope=Scope.WORKSPACE,
     ))
-    assert store.get_sync_state("device_id") is None
+    device_id = store.get_sync_state("device_id")
+    assert device_id
 
     def fail_tombstone(*args, **kwargs):
         raise RuntimeError("tombstone unavailable")
@@ -65,9 +325,9 @@ def test_secure_erase_rolls_back_delete_when_tombstone_write_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="tombstone unavailable"):
         store.secure_erase_memory(memory_id)
 
-    # The device marker may be minted before the destructive transaction, but the
-    # memory and its erase audit must remain intact when the terminal marker fails.
-    assert store.get_sync_state("device_id")
+    # HLC initialization already minted the durable device marker. The memory and
+    # its erase audit must remain intact when the terminal marker fails.
+    assert store.get_sync_state("device_id") == device_id
     assert store.get_memory(memory_id) is not None
     assert store.list_memory_tombstones() == []
     assert store.conn.in_transaction is False
@@ -144,6 +404,7 @@ def test_repo_export_keeps_repo_tombstones_in_the_selected_repo():
     mid_b = a.add_memory(MemoryRecord(
         id="", content="repo b", workspace_id=aw, repo_id=repo_b, scope=Scope.REPO,
     ))
+    _push_bundle(SyncEngine(a), aw)
     a.secure_erase_memory(mid_a)
     a.secure_erase_memory(mid_b)
 
@@ -186,7 +447,7 @@ def test_same_id_written_after_secure_erase_stays_tombstoned():
     syncer_a, syncer_b = SyncEngine(a), SyncEngine(b)
     mid = a.add_memory(MemoryRecord(id="", content="old", workspace_id=aw,
                                     scope=Scope.WORKSPACE))
-    syncer_b.apply_bundle(syncer_a.export_bundle(aw), into_workspace="w")
+    syncer_b.apply_bundle(_push_bundle(syncer_a, aw), into_workspace="w")
     a.secure_erase_memory(mid)
     a.add_memory(MemoryRecord(id=mid, content="reused", workspace_id=aw,
                               scope=Scope.WORKSPACE))
@@ -203,7 +464,10 @@ def test_scoped_tombstone_cannot_delete_same_id_in_another_workspace():
     foreign = MemoryRecord(id="shared-id", content="foreign", workspace_id=foreign_ws,
                            scope=Scope.WORKSPACE)
     b.add_memory(foreign)
-    a.add_memory_tombstone("shared-id", deleted_at=1.0, workspace_id=aw)
+    a.add_memory_tombstone(
+        "shared-id", deleted_at=1.0, workspace_id=aw,
+        export_class="remote_erasure",
+    )
     a.conn.commit()
 
     report = SyncEngine(b).apply_bundle(
@@ -217,7 +481,10 @@ def test_dry_run_applies_bundle_tombstone_to_rejection_simulation():
     """Dry-run reports the same terminal tombstone rejection without mutating."""
     a, b, aw, bw = _two_devices()
     mid = "dry-run-id"
-    a.add_memory_tombstone(mid, deleted_at=1.0, workspace_id=aw)
+    a.add_memory_tombstone(
+        mid, deleted_at=1.0, workspace_id=aw,
+        export_class="remote_erasure",
+    )
     a.add_memory(MemoryRecord(id=mid, content="reused", workspace_id=aw,
                               scope=Scope.WORKSPACE))
     bundle = SyncEngine(a).export_bundle(aw)
@@ -244,10 +511,14 @@ def test_tombstone_order_and_duplicate_events_are_safe():
         "memories": [{"id": "erased", "content": "stale payload",
                       "workspace_id": "remote", "scope": "workspace"}],
         "tombstones": [
-            {"id": "erased", "deleted_at": 20.0, "device": "late"},
-            {"id": "erased", "deleted_at": 10.0, "device": "early"},
-            {"id": "", "deleted_at": 5.0, "device": "malformed"},
-            {"id": "bad-time", "deleted_at": "not-a-number", "device": "malformed"},
+            {"id": "erased", "deleted_at": 20.0, "device": "late",
+             "export_class": "remote_erasure"},
+            {"id": "erased", "deleted_at": 10.0, "device": "early",
+             "export_class": "remote_erasure"},
+            {"id": "", "deleted_at": 5.0, "device": "malformed",
+             "export_class": "remote_erasure"},
+            {"id": "bad-time", "deleted_at": "not-a-number",
+             "device": "malformed", "export_class": "remote_erasure"},
         ],
         "mem_links": [],
     }
@@ -257,10 +528,12 @@ def test_tombstone_order_and_duplicate_events_are_safe():
     assert first["rejected"] == 1
     assert store.get_memory("erased") is None
     tombstones = store.list_memory_tombstones(workspace)
-    assert tombstones == [{
-        "id": "erased", "deleted_at": 10.0, "device": "early",
-        "workspace_id": workspace, "repo_id": None,
-    }]
+    assert len(tombstones) == 1
+    assert tombstones[0]["id"] == "erased"
+    assert tombstones[0]["deleted_at"] == 10.0
+    assert tombstones[0]["device"].startswith("legacy_")
+    assert tombstones[0]["workspace_id"] == workspace
+    assert tombstones[0]["repo_id"] is None
 
     # Replaying the same events cannot create a row or move the earliest marker.
     second = syncer.apply_bundle(bundle, into_workspace="w")
@@ -301,6 +574,7 @@ def test_repo_tombstone_cannot_delete_same_id_in_a_sibling_repo():
     shared_id = "same-id-different-repo"
     a.add_memory_tombstone(
         shared_id, deleted_at=1.0, workspace_id=aw, repo_id=source_repo,
+        export_class="remote_erasure",
     )
     b.add_memory(MemoryRecord(
         id=shared_id, content="repo B fact", workspace_id=bw,
@@ -324,12 +598,16 @@ def test_legacy_repo_less_tombstone_stays_global_against_sibling_reuse():
     store.add_memory(MemoryRecord(
         id="legacy-global", content="repo B fact", workspace_id=workspace,
         repo_id=repo_b, scope=Scope.REPO,
+        provenance={"source": "sync", "trusted": False},
     ))
 
     SyncEngine(store).apply_bundle({
         "format": "engraphis-sync", "version": 1, "workspace_name": "w",
         "repos": {}, "memories": [],
-        "tombstones": [{"id": "legacy-global", "deleted_at": 1.0}],
+        "tombstones": [{
+            "id": "legacy-global", "deleted_at": 1.0,
+            "export_class": "remote_erasure",
+        }],
         "mem_links": [],
     }, into_workspace="w")
 
@@ -361,6 +639,7 @@ def test_same_id_tombstones_keep_sibling_repository_scopes_independent():
     store.add_memory(MemoryRecord(
         id="scoped-sibling", content="repo B fact", workspace_id=workspace,
         repo_id=repo_b, scope=Scope.REPO,
+        provenance={"source": "sync", "trusted": False},
     ))
 
     report = SyncEngine(store).apply_bundle({
@@ -369,9 +648,9 @@ def test_same_id_tombstones_keep_sibling_repository_scopes_independent():
         "memories": [],
         "tombstones": [
             {"id": "scoped-sibling", "deleted_at": 1.0,
-             "repo_id": "remote-a"},
+             "repo_id": "remote-a", "export_class": "remote_erasure"},
             {"id": "scoped-sibling", "deleted_at": 2.0,
-             "repo_id": "remote-b"},
+             "repo_id": "remote-b", "export_class": "remote_erasure"},
         ],
         "mem_links": [],
     }, into_workspace="w")

@@ -8,9 +8,9 @@ shipped entry point could drive it. These tests lock the wiring in place.
 """
 from __future__ import annotations
 
+import base64
 import json
 import socket
-import base64
 
 import pytest
 
@@ -126,6 +126,12 @@ def db_with_workspace(tmp_path):
 def _capture_transport(monkeypatch):
     """Provide a cloud session and capture how the CLI builds its transport."""
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "cloud-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "user-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://sync.test")
+    monkeypatch.setenv(
+        "ENGRAPHIS_SYNC_E2EE_KEY",
+        base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("="),
+    )
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
     from engraphis.config import settings
     monkeypatch.setattr(settings, "allowed_workspaces", [])
@@ -143,20 +149,43 @@ def _capture_transport(monkeypatch):
 
 def test_cli_selects_relay_and_namespaces_by_workspace_name(db_with_workspace, _capture_transport):
     rc = sync_main(["--db", db_with_workspace, "--workspace", "acme",
-                    "--relay", "https://sync.test", "--relay-token", "user-token-value"])
+                    "--relay", "https://sync.test"])
     assert rc == 0
     assert _capture_transport["kind"] == "relay"
     kw = _capture_transport["kw"]
     assert kw["base_url"] == "https://sync.test"
     # Namespace MUST be the workspace name, not a per-device id, or two devices never meet.
     assert kw["workspace_id"] == "acme"
-    assert kw["access_token"] == "user-token-value"
+    assert kw["access_token"] == "user-token-" + "x" * 32
+
+
+def test_cli_secret_values_are_not_accepted_as_argv_flags(capsys):
+    with pytest.raises(SystemExit) as caught:
+        sync_main(["--help"])
+    assert caught.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--relay-token" not in help_text
+    assert "--relay-e2ee-key" not in help_text
+
+
+@pytest.mark.parametrize("flag", ["--relay-token", "--relay-e2ee-key"])
+def test_cli_rejects_legacy_secret_flags_without_echoing_value(flag, capsys):
+    secret = "must-not-reach-terminal"
+
+    rc = sync_main([flag, secret])
+
+    assert rc == 2
+    output = capsys.readouterr()
+    assert secret not in output.out
+    assert secret not in output.err
 
 
 def test_cli_reports_relay_error_while_opening_transport(
         db_with_workspace, monkeypatch, capsys):
     from engraphis.config import settings
     monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "test-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://sync.test")
 
     def fail_open(*_args, **_kwargs):
         raise RelayError("credential exchange is temporarily unavailable", status=503)
@@ -165,7 +194,7 @@ def test_cli_reports_relay_error_while_opening_transport(
 
     rc = sync_main([
         "--db", db_with_workspace, "--workspace", "acme",
-        "--relay", "https://sync.test", "--relay-token", "user-token-value",
+        "--relay", "https://sync.test",
     ])
 
     assert rc == 2
@@ -175,6 +204,8 @@ def test_cli_reports_relay_error_while_opening_transport(
 def test_cli_reports_relay_error_during_sync(db_with_workspace, monkeypatch, capsys):
     from engraphis.config import settings
     monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "test-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://sync.test")
 
     class _FailingTransport(_FakeTransport):
         def push(self, name, data):
@@ -187,7 +218,7 @@ def test_cli_reports_relay_error_during_sync(db_with_workspace, monkeypatch, cap
 
     rc = sync_main([
         "--db", db_with_workspace, "--workspace", "acme",
-        "--relay", "https://sync.test", "--relay-token", "user-token-value",
+        "--relay", "https://sync.test",
     ])
 
     assert rc == 2
@@ -201,7 +232,6 @@ def test_cli_viewer_token_pulls_without_pushing(db_with_workspace, _capture_tran
         "--db", db_with_workspace,
         "--workspace", "acme",
         "--relay", "https://sync.test",
-        "--relay-token", "viewer-token-value",
         "--read-only",
     ])
     assert rc == 0
@@ -217,7 +247,6 @@ def test_cli_honors_saved_device_read_only_policy(
         "--db", db_with_workspace,
         "--workspace", "acme",
         "--relay", "https://sync.test",
-        "--relay-token", "member-token-value",
     ])
 
     assert rc == 0
@@ -231,6 +260,29 @@ def test_cli_selects_folder(db_with_workspace, _capture_transport, tmp_path):
     assert _capture_transport["kind"] == "folder"
     assert _capture_transport["kw"]["root"] == share
     assert _capture_transport["kw"]["create"] is True
+
+
+def test_cli_returns_nonzero_and_labels_incomplete_folder_round(
+        db_with_workspace, monkeypatch, capsys):
+    class IncompleteTransport(_FakeTransport):
+        def pull(self):
+            raise RuntimeError("folder pull incomplete")
+            yield
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_folder.get_transport",
+        lambda *_args, **_kwargs: IncompleteTransport(),
+    )
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--remote", "unused-share",
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert '"complete": false' in captured.out
+    assert "incomplete:" in captured.err
 
 
 def test_cli_folder_dry_run_does_not_create_missing_remote(db_with_workspace, tmp_path):
@@ -247,11 +299,15 @@ def test_cli_folder_dry_run_does_not_create_missing_remote(db_with_workspace, tm
     assert not share.exists()
     engine = MemoryEngine.create(db_with_workspace)
     assert engine.store.get_sync_state("device_id") is None
+    assert engine.store.conn.execute(
+        "SELECT 1 FROM sync_state WHERE key LIKE 'sync_snapshot:%'"
+    ).fetchone() is None
 
 
 def test_cli_bare_relay_falls_back_to_config(db_with_workspace, _capture_transport, monkeypatch):
     from engraphis.config import settings
     monkeypatch.setattr(settings, "relay_url", "https://env-default.test")
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://env-default.test")
     rc = sync_main(["--db", db_with_workspace, "--workspace", "acme", "--relay"])
     assert rc == 0
     assert _capture_transport["kw"]["base_url"] == "https://env-default.test"
@@ -265,10 +321,96 @@ def test_cli_bare_relay_without_config_is_an_error(db_with_workspace, monkeypatc
     assert rc == 2
 
 
+def test_cli_never_acquires_managed_bearer_for_custom_origin(
+        db_with_workspace, monkeypatch, capsys):
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "test-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://trusted.test")
+
+    def must_not_acquire(*_args, **_kwargs):
+        raise AssertionError("managed bearer acquisition must not run for a custom origin")
+
+    monkeypatch.setattr(
+        "engraphis.cloud_session.access_for_workspace", must_not_acquire
+    )
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", "https://hostile.test",
+    ])
+
+    assert rc == 2
+    assert "not bound to this relay origin" in capsys.readouterr().err
+
+
+def test_cli_never_acquires_managed_bearer_for_environment_relay_override(
+        db_with_workspace, monkeypatch, capsys):
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "relay_url", "https://hostile-env.test")
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", raising=False)
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay.has_sync_token", lambda: False
+    )
+
+    def must_not_acquire(*_args, **_kwargs):
+        raise AssertionError("managed bearer acquisition must not run for an env override")
+
+    monkeypatch.setattr(
+        "engraphis.cloud_session.access_for_workspace", must_not_acquire
+    )
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay",
+    ])
+
+    assert rc == 2
+    assert "custom relay needs" in capsys.readouterr().err
+
+
+def test_cli_acquires_managed_bearer_for_canonical_origin_only(
+        db_with_workspace, _capture_transport, monkeypatch):
+    from engraphis.config import DEFAULT_RELAY_URL
+
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", raising=False)
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay.has_sync_token", lambda: False
+    )
+    acquired = []
+
+    def acquire(workspace, *, require_compute):
+        acquired.append((workspace, require_compute))
+        return "managed-scoped-token", "member", {}
+
+    monkeypatch.setattr(
+        "engraphis.cloud_session.access_for_workspace", acquire
+    )
+
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", DEFAULT_RELAY_URL,
+    ])
+
+    assert rc == 0
+    assert acquired == [("acme", False)]
+    assert _capture_transport["kw"]["access_token"] == "managed-scoped-token"
+
+
 def test_cli_invalid_relay_does_not_echo_custom_url_secrets(
         db_with_workspace, monkeypatch, capsys):
     from engraphis.config import settings
     monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "safe-user-token-value")
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://relay.test")
+    monkeypatch.setenv(
+        "ENGRAPHIS_SYNC_E2EE_KEY",
+        base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("="),
+    )
     endpoint_marker = "private-owner@example.com"
     token_marker = "query-token-secret"
     relay = "https://relay.test/%s?token=%s" % (endpoint_marker, token_marker)
@@ -277,7 +419,6 @@ def test_cli_invalid_relay_does_not_echo_custom_url_secrets(
         "--db", db_with_workspace,
         "--workspace", "acme",
         "--relay", relay,
-        "--relay-token", "safe-user-token-value",
     ])
 
     assert rc == 2

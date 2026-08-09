@@ -23,6 +23,9 @@ module.exports = defineConfig({
     timeout: 120_000,
     reuseExistingServer: false,
     env: {
+      // Never migrate or mutate the developer's configured database during browser tests.
+      // The single Playwright web server owns this process-local database for the run.
+      ENGRAPHIS_DB_PATH: ':memory:',
       ENGRAPHIS_EMBED_MODEL: '',
       ENGRAPHIS_LOOP_INTERVAL: '0',
       ENGRAPHIS_HOST: '127.0.0.1',

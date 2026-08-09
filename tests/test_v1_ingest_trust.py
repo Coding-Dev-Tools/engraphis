@@ -8,14 +8,22 @@ recall — mirroring the v2 prompt gate without breaking the primary v1 UX.
 from __future__ import annotations
 
 import json
+import math
 import threading
 
 import numpy as np
 import pytest
 
+pytest.importorskip("pydantic", reason="v1 ingest tests require the optional full-stack dependencies")
+
 from engraphis.engines import ingest as ingest_engine
 from engraphis.engines import recall as recall_engine
+from engraphis.engines import reweight, thoughts as thoughts_engine
 from engraphis.stores import get_conn, init_db
+from engraphis.stores import graph as graph_store
+from engraphis.stores import ledger as ledger_store
+from engraphis.stores import vaults as vault_store
+from engraphis.stores import vectors as mem_store
 
 
 @pytest.fixture()
@@ -149,3 +157,168 @@ def test_recall_limits_reject_negative_values(v1_store):
         recall_engine.recall_master(namespace="ns", max_chunks=-1)
     with pytest.raises(ValueError, match="non-negative integer"):
         recall_engine.recall_by_retention(namespace="ns", top_k=-1)
+
+
+def test_document_graph_evidence_tracks_edit_move_and_delete(v1_store, monkeypatch):
+    monkeypatch.setattr(
+        ingest_engine.embedder, "embed", lambda _text: np.ones(8, dtype=np.float32)
+    )
+    _ingest("source", "doc-1", "", "Alice works at Acme.")
+    first = graph_store.graph_snapshot("source")
+    assert {node["name"] for node in first["entities"]} == {"Alice", "Acme"}
+    assert first["edges"][0]["weight"] == 1.0
+    assert all(node["documents"] == ["doc-1"] for node in first["entities"])
+
+    ingest_engine.update_document(
+        namespace="source",
+        document_id="doc-1",
+        content="Carol works at Globex.",
+    )
+    edited = graph_store.graph_snapshot("source")
+    assert {node["name"] for node in edited["entities"]} == {"Carol", "Globex"}
+
+    assert mem_store.move_memory("doc-1", "source", "target") is True
+    assert graph_store.graph_snapshot("source")["entity_count"] == 0
+    moved = graph_store.graph_snapshot("target")
+    assert {node["name"] for node in moved["entities"]} == {"Carol", "Globex"}
+    assert all(node["documents"] == ["doc-1"] for node in moved["entities"])
+
+    assert mem_store.delete_memory_document("doc-1", "target") == 1
+    deleted = graph_store.graph_snapshot("target")
+    assert deleted["entity_count"] == 0
+    assert deleted["edge_count"] == 0
+
+
+def test_shared_graph_support_survives_until_last_document_is_deleted(v1_store):
+    _ingest("ns", "doc-1", "", "Alice works at Acme.")
+    _ingest("ns", "doc-2", "", "Alice works at Acme.")
+    assert graph_store.get_edges("ns")[0]["weight"] == 2.0
+
+    mem_store.delete_memory_document("doc-1", "ns")
+    remaining = graph_store.graph_snapshot("ns")
+    assert remaining["edge_count"] == 1
+    assert remaining["edges"][0]["weight"] == 1.0
+    assert all(node["documents"] == ["doc-2"] for node in remaining["entities"])
+
+    mem_store.delete_memory_document("doc-2", "ns")
+    assert graph_store.graph_snapshot("ns")["entity_count"] == 0
+
+
+def test_ingest_rolls_back_memory_graph_event_and_job_together(v1_store, monkeypatch):
+    def fail_graph(*_args, **_kwargs):
+        raise RuntimeError("graph failed")
+
+    monkeypatch.setattr(graph_store, "replace_document_evidence", fail_graph)
+    with pytest.raises(RuntimeError, match="graph failed"):
+        _ingest("ns", "doc-1", "", "Alice works at Acme.")
+
+    conn = get_conn()
+    for table in ("memories", "graph_documents", "events", "jobs"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_graph_snapshot_reports_full_totals_when_page_is_bounded(v1_store):
+    for index in range(5):
+        graph_store.upsert_entity("ns", f"Entity{index}", "concept")
+
+    snapshot = graph_store.graph_snapshot("ns", limit=2)
+
+    assert snapshot["entity_count"] == 5
+    assert snapshot["returned_entity_count"] == 2
+    assert snapshot["truncated"] is True
+
+
+def test_retention_recovers_corrupt_state_and_caps_reinforcement(v1_store):
+    from engraphis.core.retention_policy import MAX_ACCESS_COUNT, MAX_STABILITY_DAYS
+
+    memory = _ingest("ns", "doc-1", "", "bounded retention")
+    conn = get_conn()
+    conn.execute(
+        "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
+        (float("inf"), MAX_ACCESS_COUNT + 10, float("inf"), memory["id"]),
+    )
+    conn.commit()
+
+    assert 0.0 <= reweight.retention_score(
+        {"stability": float("nan"), "last_access": float("nan")}
+    ) <= 1.0
+    reweight.reinforce(memory["id"])
+    repaired = conn.execute(
+        "SELECT stability, access_count, last_access FROM memories WHERE id=?",
+        (memory["id"],),
+    ).fetchone()
+    assert math.isfinite(repaired["stability"])
+    assert repaired["stability"] <= MAX_STABILITY_DAYS
+    assert repaired["access_count"] == MAX_ACCESS_COUNT
+    assert math.isfinite(repaired["last_access"])
+
+
+def test_ledger_rejects_non_json_numbers_before_insert(v1_store):
+    with pytest.raises(ValueError):
+        ledger_store.append_event(
+            namespace="ns",
+            entity_name="Alice",
+            event_type="unsafe",
+            payload={"score": float("nan")},
+        )
+    with pytest.raises(ValueError):
+        ledger_store.create_job(
+            namespace="ns",
+            job_type="unsafe",
+            payload={"score": float("inf")},
+        )
+    conn = get_conn()
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_thought_persistence_records_real_document_ids(v1_store, monkeypatch):
+    monkeypatch.setattr(
+        thoughts_engine.recall_engine,
+        "recall_master",
+        lambda **_kwargs: {
+            "chunks": [
+                {"documentId": "doc-a", "id": 101, "content": "alpha"},
+                {"documentId": "doc-b", "id": 202, "content": "beta"},
+            ],
+            "count": 2,
+            "llmContextMessage": "context",
+        },
+    )
+
+    class _ThoughtLLM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def synthesize_thought(self, *_args, **_kwargs):
+            return {"inference": "combined"}
+
+    monkeypatch.setattr(thoughts_engine, "LLMClient", _ThoughtLLM)
+    result = thoughts_engine.synthesize_thoughts(namespace="ns", persist=True)
+
+    assert result["persisted"] is True
+    thoughts = ledger_store.get_thoughts("ns")
+    assert thoughts[0]["source_memory_ids"] == [
+        {"namespace": "ns", "document_id": "doc-a"},
+        {"namespace": "ns", "document_id": "doc-b"},
+    ]
+
+
+def test_active_vault_invariant_survives_invalid_activation_and_delete(v1_store):
+    vault_store.create_vault(namespace="second", name="Second")
+    vault_store.set_active_vault("second")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        vault_store.set_active_vault("missing")
+    assert vault_store.get_active_vault()["namespace"] == "second"
+
+    vault_store.delete_vault("second")
+    active = vault_store.get_active_vault()
+    assert active is not None
+    assert active["namespace"] == "default"
+    assert get_conn().execute(
+        "SELECT COUNT(*) FROM vaults WHERE is_active=1"
+    ).fetchone()[0] == 1
