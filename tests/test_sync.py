@@ -2672,6 +2672,52 @@ def test_sync_late_store_failure_does_not_publish_external_vector(monkeypatch):
     assert publications == []
 
 
+def test_hlc_conflict_variant_publishes_external_vector():
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, _vecs, meta=None, *, commit=True):
+            publications.extend(ids)
+
+        def delete(self, ids, *, commit=True):
+            del ids, commit
+
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+
+    def bundle(content, node):
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": node,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "same-hlc-id",
+                "content": content,
+                "ingested_at": 42.0,
+                "valid_from": 42.0,
+                "modified_hlc": format_modified_hlc(42, 1, node),
+            }],
+            "mem_links": [],
+        }
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=RecordingExternalIndex(),
+    )
+    syncer.apply_bundle(bundle("lower-node edit", lower_node), into_workspace="w")
+    publications.clear()
+    syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
+
+    conflict_id = engine.store.conn.execute(
+        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+    ).fetchone()["id"]
+    assert conflict_id in publications
+
+
 def test_sync_configured_embedder_failure_aborts_before_memory_write(caplog):
     engine = MemoryEngine.create(":memory:", vector_backend="numpy")
 

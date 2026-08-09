@@ -3162,6 +3162,8 @@ class MemoryService:
                 claim_kind="catalog_snapshot_chunk",
                 resolve_conflicts=True,
             ))
+        if not stored_rows:
+            return {"workspace": workspace, "stored": 0, "entities": 0, "relations": 0}
         stored = stored_rows[0]
         wid, rid = self._require_scope(workspace, repo)
         actual_ids: dict[str, str] = {}

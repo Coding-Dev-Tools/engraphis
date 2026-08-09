@@ -1350,9 +1350,11 @@ class SyncEngine:
         if existing is not None and provenance_is_approved(existing.provenance):
             content_changed = rec.content != existing.content
             self._rehome_external_record(rec, src_device=src_device)
-            self._preserve_hlc_conflict(
+            conflict_action = self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
+            if conflict_action is not None:
+                pending_index_actions.append(conflict_action)
             if not dry_run and content_changed:
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
@@ -1412,9 +1414,11 @@ class SyncEngine:
             rec.valid_to_recorded_at = now_ts()
             rec.embedding = None
         if existing is not None:
-            self._preserve_hlc_conflict(
+            conflict_action = self._preserve_hlc_conflict(
                 existing, rec, report=report, known=known, dry_run=dry_run,
             )
+            if conflict_action is not None:
+                pending_index_actions.append(conflict_action)
         if existing is None:
             if not dry_run:
                 index_action = self._write(rec, commit=False)
@@ -1743,11 +1747,11 @@ class SyncEngine:
         report: dict,
         known: dict,
         dry_run: bool,
-    ) -> None:
+    ) -> Optional[_VectorIndexAction]:
         """Keep the losing concurrent edit as one deterministic untrusted successor."""
         conflict = self._hlc_conflict(existing, incoming)
         if conflict is None:
-            return
+            return None
         physical, logical, existing_hash, incoming_hash = conflict
         winner = (
             existing
@@ -1844,9 +1848,10 @@ class SyncEngine:
                 or not _same_sync_payload(already_preserved, preserved)
             ):
                 raise SyncError("sync conflict identity collision")
-            return
+            return None
+        index_action = None
         if not dry_run:
-            self._write(preserved, commit=False)
+            index_action = self._write(preserved, commit=False)
             self.store.audit(
                 "sync",
                 "sync_conflict_preserved",
@@ -1860,6 +1865,7 @@ class SyncEngine:
             )
         known[conflict_id] = preserved
         report["conflicts_preserved"] += 1
+        return index_action
 
     def _write(
         self, rec: MemoryRecord, *, commit: bool = True,
