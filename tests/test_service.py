@@ -5,14 +5,21 @@ scope isolation, session lifecycle, input validation, and untrusted-content sani
 (the memory-poisoning guard), plus conflict resolution, governance, and the bi-temporal
 why/timeline/proactive tools.
 """
+import sqlite3
 import threading
 import time
 import numpy as np
 import pytest
 
+import engraphis.service as service_module
 from engraphis.core.interfaces import MemoryRecord, SchemaSnapshot, Scope
 from engraphis.core.poisoning import source_is_external
-from engraphis.service import MemoryService, ValidationError, set_current_user
+from engraphis.service import (
+    MemoryService,
+    ValidationError,
+    _warn_if_db_empty_with_populated_sibling,
+    set_current_user,
+)
 
 
 class _ReviewedLocalService:
@@ -54,6 +61,27 @@ class _ReviewedLocalService:
 
 def _svc() -> _ReviewedLocalService:
     return _ReviewedLocalService(MemoryService.create(":memory:"))
+
+
+def test_empty_configured_db_warns_about_populated_owner_db(tmp_path, monkeypatch, capsys):
+    """A stale ENGRAPHIS_DB_PATH must not look like lost local memories."""
+    configured = tmp_path / "stale" / "engraphis.db"
+    configured.parent.mkdir()
+    owner_db = tmp_path / ".engraphis" / "engraphis.db"
+    owner_db.parent.mkdir()
+    for path in (configured, owner_db):
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE memories (id TEXT)")
+    with sqlite3.connect(owner_db) as conn:
+        conn.execute("INSERT INTO memories (id) VALUES ('mem_present')")
+
+    monkeypatch.setattr(service_module.Path, "home", classmethod(lambda cls: tmp_path))
+    _warn_if_db_empty_with_populated_sibling(str(configured))
+
+    warning = capsys.readouterr().err
+    assert str(configured) in warning
+    assert str(owner_db) in warning
+    assert "1 memories" in warning
 
 
 def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
