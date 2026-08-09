@@ -7061,6 +7061,9 @@ class Store:
     def context_savings_grouped(
         self, *, workspace_id: str, repo_id: Optional[str] = None,
         group_by: str = "workspace",
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+        release_version: Optional[str] = None,
     ) -> list[dict]:
         """Aggregate context savings grouped by a dimension.
 
@@ -7073,11 +7076,28 @@ class Store:
         valid_dims = {"workspace", "repo", "agent", "day"}
         if group_by not in valid_dims:
             raise ValueError(f"group_by must be one of: {', '.join(sorted(valid_dims))}")
+        if from_ts is not None and not math.isfinite(float(from_ts)):
+            raise ValueError("from_ts must be finite")
+        if to_ts is not None and not math.isfinite(float(to_ts)):
+            raise ValueError("to_ts must be finite")
+        if from_ts is not None and to_ts is not None and from_ts > to_ts:
+            raise ValueError("from_ts must be less than or equal to to_ts")
+        if release_version is not None:
+            normalized_release = normalize_release_version(release_version)
+            if not normalized_release:
+                raise ValueError("release_version must be a semantic version")
+            release_version = normalized_release
         where = "workspace_id=?"
-        params: list = [workspace_id]
+        params: list[Any] = [workspace_id]
         if repo_id is not None:
             where += " AND repo_id=?"
             params.append(repo_id)
+        if from_ts is not None:
+            where += " AND ts>=?"
+            params.append(float(from_ts))
+        if to_ts is not None:
+            where += " AND ts<?"
+            params.append(float(to_ts))
         rows = self.conn.execute(
             "SELECT id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
@@ -7108,11 +7128,24 @@ class Store:
 
         for raw_row in rows:
             receipt = _public_receipt_row(dict(raw_row))
-            if receipt.get("invalid_payload"):
+            if (
+                receipt.get("invalid_payload")
+                or receipt.get("scope_digest")
+                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+            ):
                 continue
             metadata = receipt.get("metadata")
             usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+            operation = str(receipt["operation"])
+            if release_version is not None and (
+                operation == "smart_gateway"
+                or not isinstance(usage, dict)
+                or usage.get("release_version") != release_version
+            ):
+                continue
             if not isinstance(usage, dict):
+                continue
+            if operation == "smart_gateway":
                 continue
             required = ("source_tokens", "context_tokens", "saved_tokens")
             if not all(

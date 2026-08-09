@@ -478,15 +478,21 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
     def _stored_memory_type_counts(self) -> dict[str, int]:
         # Scope to the current evaluation's workspace/repo to avoid counting
         # memories from other workspaces in shared databases.
-        ws = getattr(self.service, "allowed_workspaces", None)
-        sql = "SELECT mtype, COUNT(*) FROM memories"
-        params: list[Any] = []
-        if ws:
-            placeholders = ",".join("?" for _ in ws)
-            sql += f" WHERE workspace_id IN ({placeholders})"
-            params.extend(ws)
-        sql += " GROUP BY mtype ORDER BY mtype"
-        rows = self.service.store.conn.execute(sql, params).fetchall()
+        conn = self.service.store.conn
+        scope = conn.execute(
+            "SELECT w.id AS workspace_id, r.id AS repo_id "
+            "FROM workspaces w JOIN repos r ON r.workspace_id=w.id "
+            "WHERE w.name=? AND r.name=?",
+            (self.workspace, self.repo),
+        ).fetchone()
+        if scope is None:
+            return {}
+        rows = conn.execute(
+            "SELECT mtype, COUNT(*) FROM memories "
+            "WHERE workspace_id=? AND repo_id=? "
+            "GROUP BY mtype ORDER BY mtype",
+            (scope["workspace_id"], scope["repo_id"]),
+        ).fetchall()
         return {str(row[0]): int(row[1]) for row in rows if int(row[1]) > 0}
 
     def _source_memory_type_counts(self, source_ids: Sequence[str]) -> dict[str, int]:

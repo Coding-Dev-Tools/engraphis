@@ -56,6 +56,42 @@ def _svc() -> _ReviewedLocalService:
     return _ReviewedLocalService(MemoryService.create(":memory:"))
 
 
+def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+
+    result = service.remember_batch(
+        [{"content": "Imported evidence awaiting review.",
+          "source": "web", "scope": "workspace"}],
+        workspace="acme",
+    )
+
+    assert result["succeeded"] == 1
+    record = service.store.get_memory(result["results"][0]["id"])
+    assert record is not None
+    assert record.provenance["trusted"] is False
+    assert record.provenance["review_state"] == "pending"
+    assert "trust_downgraded" not in record.provenance
+
+
+def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    alpha = service.remember(
+        "Alpha workspace health marker.", workspace="alpha", scope="workspace"
+    )
+    beta = service.remember(
+        "Beta workspace health marker.", workspace="beta", scope="workspace"
+    )
+    service.store.audit("test", "conflict_detected", alpha["id"])
+    service.store.audit("test", "sync_trust_conflict", beta["id"])
+    alpha_reader = MemoryService(service.engine, allowed_workspaces=["alpha"])
+
+    health = alpha_reader.memory_health(workspace="alpha")
+
+    assert sum(bucket["count"] for bucket in health["decay_distribution"]) == 1
+    assert health["orphan_count"] == 1
+    assert health["conflict_frequency"] == {"total": 1, "last_7d": 1}
+
+
 def test_remember_then_recall_roundtrip():
     s = _svc()
     out = s.remember("We use pnpm as the package manager for all frontend repos.",

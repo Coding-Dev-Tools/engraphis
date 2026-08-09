@@ -193,6 +193,65 @@ def test_service_context_savings_filters_and_new_receipts_are_versioned():
         service.context_savings(workspace="versioned", release_version="legacy")
 
 
+def test_grouped_context_savings_uses_the_same_time_and_release_filters():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    wid = service.store.get_or_create_workspace("grouped")
+    rid = service.store.get_or_create_repo(wid, "api")
+    included = service.store.record_receipt(
+        "recall",
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"token_usage": _usage(
+            100, 40, counter="engraphis.regex.v1", release="1.5"
+        )},
+    )
+    other_release = service.store.record_receipt(
+        "recall",
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"token_usage": _usage(
+            80, 20, counter="engraphis.regex.v1", release="1.4"
+        )},
+    )
+    outside_window = service.store.record_receipt(
+        "recall",
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"token_usage": _usage(
+            50, 10, counter="engraphis.regex.v1", release="1.5"
+        )},
+    )
+    for timestamp, receipt in (
+        (100.0, included), (120.0, other_release), (200.0, outside_window)
+    ):
+        service.store.conn.execute(
+            "UPDATE operation_receipts SET ts=? WHERE id=?", (timestamp, receipt["id"])
+        )
+    service.store.conn.commit()
+
+    summary = service.context_savings(
+        workspace="grouped",
+        repo="api",
+        group_by="repo",
+        from_ts=90,
+        to_ts=150,
+        release_version="1.5",
+    )
+
+    assert summary["receipt_count"] == 1
+    assert summary["by_group"] == [{
+        "group_key": rid,
+        "receipt_count": 1,
+        "source_tokens": 100,
+        "context_tokens": 40,
+        "saved_tokens": 60,
+        "budget_tokens": 100,
+        "packed_count": 1,
+        "omitted_count": 0,
+        "savings_ratio": 0.6,
+    }]
+
+
 def test_context_savings_ignores_gateway_copies_and_rejects_noncanonical_estimates():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("gateway-savings")

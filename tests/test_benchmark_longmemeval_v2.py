@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from engraphis.core.interfaces import MemoryType, Scope
 from eval.longmemeval_v2 import (
     EngraphisLongMemEvalV2Memory,
     _context_items_with_budget,
@@ -171,6 +172,38 @@ def test_v2_adapter_populates_distinct_episodic_and_procedural_types():
         "episodic": 1,
         "procedural": 1,
     }
+
+
+def test_v2_adapter_type_counts_exclude_other_workspaces_and_repos():
+    memory = EngraphisLongMemEvalV2Memory(context_k=3)
+    memory.insert({"trajectory_id": "target", "text": "The export button is blue."})
+
+    store = memory.service.store
+    unrelated_workspace = store.get_or_create_workspace("unrelated-eval")
+    unrelated_repo = store.get_or_create_repo(unrelated_workspace, memory.repo)
+    same_workspace = store.get_or_create_workspace(memory.workspace)
+    unrelated_same_workspace_repo = store.get_or_create_repo(same_workspace, "other-repo")
+    for workspace_id, repo_id in (
+        (unrelated_workspace, unrelated_repo),
+        (same_workspace, unrelated_same_workspace_repo),
+    ):
+        memory.service.engine.remember(
+            "Unrelated semantic benchmark record.",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            mtype=MemoryType.SEMANTIC,
+            scope=Scope.REPO,
+            resolve_conflicts=False,
+        )
+
+    context = memory.query("What color is the export button?")
+    metadata = memory.post_query_hook(
+        query="What color is the export button?",
+        query_image=None,
+        memory_context=context,
+    )
+
+    assert metadata["inserted_memory_type_counts"] == {"episodic": 1}
 
 
 def test_v2_adapter_reports_only_sources_in_reader_budgeted_items(monkeypatch):

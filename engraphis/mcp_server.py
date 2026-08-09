@@ -128,28 +128,65 @@ def _err(exc: Exception) -> str:
 
 
 def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) -> dict:
-    """Truncate packed context from the end until the serialized response fits.
+    """Reduce response bodies from the end until the serialized payload fits.
 
-    Only memory body content is truncated; citations and source references are
-    preserved intact.  Returns the payload with ``actual_response_tokens`` (and
-    optionally ``response_budget``) merged into the ``usage`` block.
+    Source identities are retained whenever the budget can hold them.  If even
+    empty bodies and source identities cannot fit, trailing source records are
+    removed and, as a last resort, only the accounting envelope is returned.
     """
     counter = RegexTokenCounter()
-    serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-    current_tokens = counter(serialized)
-
     usage = payload.get("usage") or {}
+    payload["usage"] = usage
+
+    if max_response_tokens is not None and max_response_tokens > 0:
+        usage["response_budget"] = max_response_tokens
+
+    def measure() -> int:
+        # Include the accounting fields themselves in the reported total.  The
+        # regex counter treats every integer as one token, so one correction is
+        # sufficient even when the numeric value changes width.
+        usage["actual_response_tokens"] = 0
+        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        tokens = counter(serialized)
+        usage["actual_response_tokens"] = tokens
+        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        return counter(serialized)
+
+    current_tokens = measure()
 
     if max_response_tokens is None or max_response_tokens <= 0:
-        usage["actual_response_tokens"] = current_tokens
-        payload["usage"] = usage
         return payload
 
     if current_tokens <= max_response_tokens:
-        usage["actual_response_tokens"] = current_tokens
-        usage["response_budget"] = max_response_tokens
-        payload["usage"] = usage
         return payload
+
+    def fit_text(container: dict, key: str) -> None:
+        """Keep the longest prefix that fits, always reducing a non-empty value."""
+        nonlocal current_tokens
+        original = str(container.get(key) or "")
+        if not original or current_tokens <= max_response_tokens:
+            return
+
+        # Empty first so a one-character value cannot get stuck at len == 1.
+        container[key] = ""
+        current_tokens = measure()
+        if current_tokens > max_response_tokens:
+            return
+
+        best = ""
+        low, high = 1, len(original)
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = original[:middle].rstrip()
+            container[key] = candidate
+            candidate_tokens = measure()
+            if candidate_tokens <= max_response_tokens:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        container[key] = best
+        current_tokens = measure()
 
     # --- over budget: truncate body content from the end -----------------
     # 1. Shrink the packed ``context`` string chunk-by-chunk (last first).
@@ -159,28 +196,54 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     while current_tokens > max_response_tokens and context_parts:
         context_parts.pop()
         payload["context"] = "\n\n".join(context_parts)
-        serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-        current_tokens = counter(serialized)
+        current_tokens = measure()
 
-    # 2. If still over, halve full-mode memory ``content`` fields (last first).
+    # 2. Reduce full-mode memory bodies, then grounded answers and citation
+    # bodies.  Each fit is bounded and makes progress for one-character strings.
     if current_tokens > max_response_tokens:
         memories = payload.get("memories", [])
         for mem in reversed(memories):
             if current_tokens <= max_response_tokens:
                 break
-            content = mem.get("content", "")
-            while content and current_tokens > max_response_tokens:
-                half = max(1, len(content) // 2)
-                content = content[:half].rstrip()
-                mem["content"] = content
-                serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-                current_tokens = counter(serialized)
-            if not content:
-                mem["content"] = ""
+            fit_text(mem, "content")
 
-    usage["actual_response_tokens"] = current_tokens
-    usage["response_budget"] = max_response_tokens
-    payload["usage"] = usage
+    if current_tokens > max_response_tokens:
+        fit_text(payload, "answer")
+
+    if current_tokens > max_response_tokens:
+        citations = payload.get("citations", [])
+        for citation in reversed(citations):
+            if current_tokens <= max_response_tokens:
+                break
+            fit_text(citation, "content")
+
+    # Source records can themselves exceed a very small response budget even
+    # after their bodies are empty. Remove only whole trailing records so IDs and
+    # citation metadata are never partially serialized.
+    for key in ("memories", "citations", "sources", "packed_sources"):
+        records = payload.get(key)
+        while (
+            current_tokens > max_response_tokens
+            and isinstance(records, list)
+            and records
+        ):
+            records.pop()
+            current_tokens = measure()
+
+    if current_tokens > max_response_tokens:
+        # Existing usage blocks may contain detailed retrieval accounting that
+        # cannot fit a tiny transport envelope. Preserve the two response-budget
+        # fields when possible; an empty JSON object is the two-token floor.
+        usage = {
+            "actual_response_tokens": 0,
+            "response_budget": max_response_tokens,
+        }
+        payload.clear()
+        payload["usage"] = usage
+        current_tokens = measure()
+        if current_tokens > max_response_tokens:
+            payload.clear()
+
     return payload
 
 _READ_ONLY_TOOLS = frozenset({
@@ -388,8 +451,9 @@ def engraphis_recall(
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
                     "Truncates packed context and memory bodies from the end; citations and "
-                    "source references are preserved. None means no cap.",
-        ge=1, le=1_000_000)] = None,
+                    "source references are preserved when the budget can hold them. "
+                    "Minimum 2 (the JSON object floor); None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Retrieve the memories most relevant to a query (semantic vector + lexical + graph).
 
@@ -467,8 +531,8 @@ def engraphis_recall_context(
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
                     "Truncates packed context from the end; citations and source references "
-                    "are preserved. None means no cap.",
-        ge=1, le=1_000_000)] = None,
+                    "are preserved when the budget can hold them. Minimum 2; None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -588,8 +652,8 @@ def engraphis_recall_grounded(
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
                     "Truncates packed context and citation bodies from the end; source references "
-                    "are preserved. None means no cap.",
-        ge=1, le=1_000_000)] = None,
+                    "are preserved when the budget can hold them. Minimum 2; None means no cap.",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -679,8 +743,8 @@ def engraphis_answer(
     mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
         description="Optional maximum returned count per memory type.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
-        description="Cap the total serialized response to this many tokens.",
-        ge=1, le=1_000_000)] = None,
+        description="Cap the total serialized response to this many tokens (minimum 2).",
+        ge=2, le=1_000_000)] = None,
 ) -> str:
     """Backward-compatible alias for ``engraphis_recall_grounded``.
 

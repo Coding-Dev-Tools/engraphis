@@ -1544,7 +1544,7 @@ class MemoryService:
                     importance=mem.get("importance", 0.0),
                     keywords=mem.get("keywords"),
                     source=mem.get("source", "agent"),
-                    trusted=mem.get("trusted", True),
+                    trusted=mem.get("trusted", False),
                     kind=mem.get("kind"),
                     resolve_conflicts=mem.get("dedupe", True),
                     valid_from=mem.get("valid_from"),
@@ -5051,7 +5051,12 @@ class MemoryService:
                     f"group_by must be one of: {', '.join(sorted(valid_dims))}"
                 )
             rows = self.store.context_savings_grouped(
-                workspace_id=wid, repo_id=rid, group_by=gb,
+                workspace_id=wid,
+                repo_id=rid,
+                group_by=gb,
+                from_ts=from_value,
+                to_ts=to_value,
+                release_version=release_version,
             )
             base["group_by"] = gb
             base["by_group"] = rows
@@ -8557,7 +8562,7 @@ class MemoryService:
                 "AND expired_at IS NULL")
         base_where = " WHERE workspace_id=? AND COALESCE(scope,'workspace')!='session'"
         live_where = f"{base_where} AND {live}"
-        live_params: list[Any] = [now, now, wid]
+        live_params: list[Any] = [wid, now, now]
         # ── Decay distribution (retention buckets) ──────────────────────────────
         # R(t) = exp(-Δt_days / S). Bucket into 5 bands: critical (<0.2), low
         # (0.2–0.4), medium (0.4–0.6), high (0.6–0.8), strong (>0.8).
@@ -8590,7 +8595,7 @@ class MemoryService:
         # A memory is an orphan when it has zero live rows in memory_entities.
         # The NOT EXISTS subquery uses the existing idx_memory_entity_memory
         # index on (memory_id, valid_to, expired_at).
-        orphan_params: list[Any] = [now, now, wid]
+        orphan_params: list[Any] = [wid, now, now]
         orphan_sql_clean = (
             "SELECT COUNT(*) AS n FROM memories m "
             "WHERE m.workspace_id=? AND COALESCE(m.scope,'workspace')!='session' "
@@ -8604,15 +8609,24 @@ class MemoryService:
         )
         orphan_count = int(conn.execute(orphan_sql_clean, orphan_params).fetchone()["n"])
         # ── Conflict frequency (audit actions in last 7 days + total) ───────────
-        # Conflicts are recorded as audit entries with action containing 'conflict'.
-        # idx_audit_target covers (target, ts); we filter by ts range only.
+        # Conflicts are recorded as audit entries whose target is the affected memory.
+        # Join that target back to the already-authorized workspace instead of exposing
+        # a process-global audit aggregate. Session-private memories stay out of this
+        # workspace-level diagnostic just as they do from the decay/orphan metrics.
         seven_days_ago = now - 7 * 86400
+        conflict_sql = (
+            "SELECT COUNT(*) AS n FROM audit a "
+            "JOIN memories m ON m.id=a.target "
+            "WHERE a.action LIKE '%conflict%' AND m.workspace_id=? "
+            "AND COALESCE(m.scope,'workspace')!='session'"
+        )
         conflict_total = int(conn.execute(
-            "SELECT COUNT(*) AS n FROM audit WHERE action LIKE '%conflict%'"
+            conflict_sql,
+            (wid,),
         ).fetchone()["n"])
         conflict_7d = int(conn.execute(
-            "SELECT COUNT(*) AS n FROM audit WHERE action LIKE '%conflict%' AND ts>=?",
-            (seven_days_ago,)
+            conflict_sql + " AND a.ts>=?",
+            (wid, seven_days_ago),
         ).fetchone()["n"])
         return {
             "workspace": workspace,

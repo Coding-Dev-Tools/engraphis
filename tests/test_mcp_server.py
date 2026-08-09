@@ -19,6 +19,67 @@ def test_stdio_server_default_log_level_is_quiet():
     assert mcp.settings.log_level == "WARNING"
 
 
+def _response_tokens(payload):
+    from engraphis.core.context import RegexTokenCounter
+
+    return RegexTokenCounter()(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+
+
+def test_response_budget_one_character_body_always_makes_progress():
+    from engraphis.mcp_server import _apply_response_budget
+
+    empty = _apply_response_budget(
+        {"memories": [{"id": "mem_1", "content": ""}]}, 1_000_000
+    )
+    budget = _response_tokens(empty)
+    result = _apply_response_budget(
+        {"memories": [{"id": "mem_1", "content": "x"}]}, budget
+    )
+
+    assert result["memories"][0]["content"] == ""
+    assert _response_tokens(result) <= budget
+    assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
+def test_response_budget_respects_two_token_json_floor():
+    from engraphis.mcp_server import _apply_response_budget
+
+    result = _apply_response_budget(
+        {"context": "far too much context", "memories": [{"content": "x"}]}, 2
+    )
+
+    assert result == {}
+    assert _response_tokens(result) == 2
+
+
+def test_response_budget_reduces_grounded_answer_and_citation_bodies():
+    from engraphis.mcp_server import _apply_response_budget
+
+    base = {
+        "grounded": True,
+        "answer": "",
+        "citations": [{"n": 1, "id": "mem_1", "content": ""}],
+    }
+    budget = _response_tokens(_apply_response_budget(base, 1_000_000))
+    result = _apply_response_budget(
+        {
+            "grounded": True,
+            "answer": "A deliberately oversized grounded answer. [1] " * 20,
+            "citations": [{
+                "n": 1,
+                "id": "mem_1",
+                "content": "The complete supporting citation body. " * 20,
+            }],
+        },
+        budget,
+    )
+
+    assert result["answer"] == ""
+    assert result["citations"] == [{"n": 1, "id": "mem_1", "content": ""}]
+    assert _response_tokens(result) <= budget
+    assert result["usage"]["actual_response_tokens"] == _response_tokens(result)
+
+
 
 @pytest.mark.parametrize(
     ("host", "host_header", "origin", "classic"),
@@ -303,6 +364,20 @@ def test_server_identity_and_tools_registered():
             "response_mode", "planning", "mtype_limits"} <= set(
         classic["engraphis_answer"].inputSchema.get("properties", {})
     )
+    for tool_name in (
+        "engraphis_recall",
+        "engraphis_recall_context",
+        "engraphis_recall_grounded",
+        "engraphis_answer",
+    ):
+        budget_schema = classic[tool_name].inputSchema["properties"][
+            "max_response_tokens"
+        ]
+        integer_schema = next(
+            choice for choice in budget_schema["anyOf"]
+            if choice.get("type") == "integer"
+        )
+        assert integer_schema["minimum"] == 2
     assert {"as_of", "valid_at", "known_at"} <= set(
         classic["engraphis_export_code_graph"].inputSchema.get("properties", {})
     )
