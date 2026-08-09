@@ -35,8 +35,11 @@ test("throws sanitized failures for MCP error flags and Engraphis error envelope
 test("does not expose arbitrary transport error details", () => {
 	assert.equal(
 		safeErrorMessage(new Error("spawn C:/Users/name/secret-token ENOENT")),
-		"Engraphis is unavailable. Verify `pip install \"engraphis[mcp]>=1.4.0,<2\"` and ENGRAPHIS_MCP_COMMAND.",
+		"Engraphis is unavailable. Verify `pip install \"engraphis[mcp]>=1.5,<2\"` and ENGRAPHIS_MCP_COMMAND.",
 	);
+	const aborted = new Error("cancelled while reading C:/Users/name/secret-token");
+	aborted.name = "AbortError";
+	assert.equal(safeErrorMessage(aborted), "Engraphis request was cancelled.");
 });
 
 test("extracts only bounded stateful capability metadata for the approval gate", () => {

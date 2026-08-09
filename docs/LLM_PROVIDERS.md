@@ -36,10 +36,12 @@ through MCP. Codex and Cohere Command are distinct products and use different se
 
 ## Configure once
 
-1. Add one provider's variables to `.env`.
+1. Add one provider's variables to the owner-private `~/.engraphis/config.env`, an absolute
+   owner-private file selected with `ENGRAPHIS_ENV_FILE`, or the process environment. Engraphis
+   does not search the working directory for `.env`.
 2. Restart the dashboard, server, or MCP process that owns the shared Engraphis database.
 3. In **Settings → Connect an LLM**, select **Test connection**. The dashboard picker offers the
-   named cloud modes; custom endpoints are configured directly in `.env`.
+   named cloud models; configure custom endpoints through the same trusted sources.
 4. Keep `ENGRAPHIS_EXTRACTOR=none` for fully local ingestion, or explicitly choose `llm` or
    `llm_structured` after the connection succeeds.
 

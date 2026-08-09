@@ -7,14 +7,13 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260728-connected-memories">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260809-pin-only-physics">
 </head>
 <body data-theme="slate">
   <div class="app-shell">
     <aside class="sidebar" aria-label="Ledger navigation">
       <div class="brand-row">
         <a class="brand" href="/" aria-label="Engraphis Ledger home">Engraphis</a>
-        <a id="plan-badge" class="plan-badge" href="#" aria-label="Subscribe to Pro in Plans and billing">GET PRO</a>
       </div>
 
       <label class="workspace-switcher">
@@ -90,7 +89,7 @@
 
             <div class="metrics" id="metrics" aria-live="polite">
               <div class="metric"><strong>—</strong><span>Memories</span></div>
-              <div class="metric"><strong>—</strong><span>Live rows</span></div>
+              <div class="metric"><strong>—</strong><span>Visible memories</span></div>
               <div class="metric"><strong>—</strong><span>Workspaces</span></div>
               <div class="metric"><strong>—</strong><span>Sessions</span></div>
             </div>
@@ -459,6 +458,7 @@
 
           <div class="tab-list manage-tabs" role="tablist" aria-label="Manage views">
             <button id="manage-workspaces-tab" class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true" aria-controls="manage-workspaces-panel">Workspaces</button>
+            <button id="manage-sync-tab" class="tab" type="button" role="tab" data-manage-tab="sync" aria-selected="false" aria-controls="manage-sync-panel">Cloud Sync</button>
             <button id="manage-consolidate-tab" class="tab" type="button" role="tab" data-manage-tab="consolidate" aria-selected="false" aria-controls="manage-consolidate-panel">Consolidate</button>
             <button id="manage-analytics-tab" class="tab" type="button" role="tab" data-manage-tab="analytics" aria-selected="false" aria-controls="manage-analytics-panel">Analytics</button>
             <button id="manage-automation-tab" class="tab" type="button" role="tab" data-manage-tab="automation" aria-selected="false" aria-controls="manage-automation-panel">Automation</button>
@@ -479,6 +479,14 @@
             </form>
             <div id="workspace-list" class="workspace-list"><p class="empty-state">Loading workspaces…</p></div>
           </section>
+          <section id="manage-sync-panel" class="tab-panel" data-manage-panel="sync" role="tabpanel" aria-labelledby="manage-sync-tab">
+            <div class="hosted-hero">
+              <p class="eyebrow">Pro · end-to-end encrypted</p>
+              <h2>Sync eligible shared workspaces</h2>
+              <p>Push this device’s changes and pull peer changes for every eligible shared workspace. Secret, session-scoped, and personal-workspace memories stay local.</p>
+              <div id="sync-result" class="result-card" aria-live="polite"><p class="empty-state">Open this tab to check the Cloud Sync connection.</p></div>
+            </div>
+          </section>
 
           <section id="manage-consolidate-panel" class="tab-panel" data-manage-panel="consolidate" role="tabpanel" aria-labelledby="manage-consolidate-tab">
             <div class="split-callout">
@@ -489,7 +497,6 @@
               </div>
               <form id="consolidate-form" class="control-card">
                 <label class="check-row"><input id="consolidate-structured" type="checkbox"> Structured relationship analysis</label>
-                <label class="check-row"><input id="consolidate-supersede" type="checkbox"> Close superseded source validity on commit</label>
                 <button class="primary-button" type="submit">Run dry preview</button>
                 <button id="consolidate-commit" class="danger-button" type="button" disabled>Commit reviewed result</button>
               </form>
@@ -594,7 +601,24 @@
     </main>
   </div>
 
-  <script src="/v2-assets/vendor/d3.min.js?v=20260727-final"></script>
+  <dialog id="browser-auth-dialog" class="graph-connections-dialog browser-auth-dialog" aria-labelledby="browser-auth-title" aria-describedby="browser-auth-description">
+    <form id="browser-auth-form" class="graph-connections-panel browser-auth-form" novalidate>
+      <header class="graph-connections-header">
+        <div>
+          <p class="eyebrow">Remote deployment</p>
+          <h2 id="browser-auth-title">Connect to this Engraphis deployment</h2>
+        </div>
+      </header>
+      <p id="browser-auth-description">Enter the deployment API token. It is exchanged for an HttpOnly browser session and is never stored in the page or URL.</p>
+      <label>Deployment token<input id="browser-auth-token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="browser-auth-error"></label>
+      <p id="browser-auth-error" class="form-error" role="alert" aria-live="assertive" hidden></p>
+      <div class="form-actions">
+        <button id="browser-auth-cancel" class="secondary-button" type="button">Cancel</button>
+        <button class="primary-button" type="submit">Connect</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="graph-connections-dialog" class="graph-connections-dialog" aria-labelledby="graph-connections-title">
     <div class="graph-connections-panel">
       <header class="graph-connections-header">
@@ -613,6 +637,6 @@
     </div>
   </dialog>
 
-  <script src="/v2-assets/ledger.js?v=20260728-connected-memories"></script>
+    <script src="/v2-assets/ledger.js?v=20260809-pin-only-physics"></script>
 </body>
 </html>

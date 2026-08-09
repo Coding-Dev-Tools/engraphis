@@ -54,9 +54,13 @@ ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=<secret>
 
 The refresh credential rotates. Refresh is serialized across threads and cooperating processes,
 and the client stores only the replacement needed for the next session in an owner-only file.
-After the first rotation, that saved replacement takes precedence over a still-present bootstrap
-environment credential. Do not place either value in source, documentation, container images,
-shell history, or support logs.
+After the first rotation, that saved replacement and its control/compute URLs are one credential
+family: they take precedence over environment bootstrap values, and environment URL changes
+cannot redirect that bearer credential. Reconnect with a fresh portal token to change endpoints.
+For unattended configuration, use process variables or the owner-private
+`~/.engraphis/config.env`; an explicit `ENGRAPHIS_ENV_FILE` must be an absolute owner-private
+regular file. Engraphis does not search the working directory for `.env`. Do not place credentials
+in source, documentation, container images, shell history, or support logs.
 
 The one-shot customer client remains available for explicit sync operations:
 
@@ -69,10 +73,13 @@ python -m scripts.sync \
 
 Cloud Sync is fail-closed: install `engraphis[cloud-sync]` on Python 3.10+ and provision a
 32-byte URL-safe-base64 workspace key as `ENGRAPHIS_SYNC_E2EE_KEY` on every authorized device
-before the first upload. Generate it once on a trusted device and transfer it only through your
-own secure channel; Engraphis Cloud never receives, derives, or recovers this key. For a
-one-off command, pass the same value with `--relay-e2ee-key`. A missing or malformed key stops
-Cloud Sync rather than uploading a plaintext bundle.
+through a secrets manager. Generate it once on a trusted device and transfer it only through your
+own secure channel; Engraphis Cloud never receives, derives, or recovers this key. Relay
+authorization normally comes from the owner-only saved cloud session. An unattended
+`ENGRAPHIS_SYNC_TOKEN` also requires `ENGRAPHIS_SYNC_TOKEN_ORIGIN` matching the relay origin, so a
+credential cannot be redirected. The CLI intentionally has no secret-valued `--relay-token` or
+`--relay-e2ee-key` flags. A missing or malformed key stops Cloud Sync rather than uploading a
+plaintext bundle.
 
 ```bash
 python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
@@ -80,10 +87,10 @@ python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_
 
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
-to the private service. If the relay denies every attempted shared workspace because the session
-is expired, revoked, or no longer entitled, the dashboard returns to the hosted Pro/Team recovery
-CTA instead of reporting a successful empty sync. A successful empty or read-only workspace keeps
-the result partial so another workspace's denial is not misreported as a total authorization loss.
+to the private service. A round with any incomplete workspace is a failure, even when other peers
+were applied successfully: the bounded report retains those good-peer totals, labels the result
+`incomplete`, and the CLI exits `1`. The dashboard therefore never presents a partial round as
+successful. An all-workspace entitlement denial still returns the hosted Pro/Team recovery CTA.
 
 ### Local folder transport
 
@@ -100,6 +107,8 @@ python -m scripts.sync \
 
 This is a customer-controlled file exchange primitive, not the official Cloud Sync service. It
 has no hosted identity, seat, availability, support, or managed-storage guarantees.
+Folder caps, oversize omissions, and snapshot races are observable incomplete failures rather than
+successful partial backups.
 
 ## Merge semantics
 
@@ -114,10 +123,24 @@ when both endpoints remain in the export. Inbound legacy or untrusted bundles ca
 relabel, or overwrite session-scoped state because the sync format carries no authenticated
 session owner or lifecycle contract.
 
-Bundle format v2 preserves durable claim identity and the system-time at which a
-world-time invalidation was learned. Current Engraphis accepts inbound v1 bundles for
-compatibility but exports v2. Older clients reject v2 instead of silently forwarding a
-downgraded bundle that loses those fields.
+Bundle format v3 preserves durable claim identity and the system-time at which a world-time
+invalidation was learned. It also carries a per-device `generation`, `previous_hash`,
+`state_hash`, and `tombstone_checkpoint`. Engraphis pulls its own device's remote snapshot before
+replacement and rejects an observed generation/hash-chain rollback. Current clients accept
+inbound v1 and v2 bundles for compatibility but export v3; older clients reject unknown versions
+instead of silently forwarding a downgraded snapshot.
+
+Erasure markers remain content-free and carry an `export_class`. Export includes only
+`remote_erasure` markers created for non-secret workspace/repo records that were eligible for
+sharing. Local `never_export` markers, including migrated legacy markers and erasures of secret,
+session, or reserved user-scope records, never leave the device. Bundle import rejects any
+tombstone not explicitly classified `remote_erasure`; a local `never_export` marker cannot later
+be upgraded to an exportable one.
+
+The first contact with a relay is deliberately `incomplete` and unanchored until the managed
+service supplies an authenticated workspace manifest/checkpoint. A local client can prove that an
+observed device chain did not roll back; it cannot prove that an untrusted relay did not withhold a
+device it has never observed.
 
 Bundle input is untrusted. The client validates schema and size limits before applying records,
 rechecks workspace scope, and retains provenance/audit evidence. Every inbound memory is re-homed

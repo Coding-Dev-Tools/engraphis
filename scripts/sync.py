@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from typing import Optional
+from urllib.parse import urlsplit
 
-from engraphis.config import settings
+from engraphis.config import DEFAULT_RELAY_URL, settings
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.sync import SyncEngine
+from engraphis.core.sync import SyncEngine, SyncError
 from engraphis.service import MemoryService
 
 
@@ -46,6 +47,19 @@ def _service(db_path: str) -> MemoryService:
     )
 
 
+def _relay_origin(value: object) -> str:
+    """Return a comparison-only canonical origin without reflecting a supplied URL."""
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return ""
+        # Force parsing of a malformed port before credentials are considered.
+        _ = parsed.port
+        return "%s://%s" % (parsed.scheme.lower(), parsed.netloc.lower())
+    except ValueError:
+        return ""
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Sync an Engraphis workspace across devices.")
     ap.add_argument("--db", required=True, help="Path to the v2 database file.")
@@ -57,18 +71,29 @@ def main(argv=None) -> int:
                     metavar="URL",
                     help="Managed cloud relay root (e.g. https://relay.engraphis.com). "
                          "Bare --relay uses ENGRAPHIS_RELAY_URL. Mutually exclusive with --remote.")
-    ap.add_argument("--relay-token", default=None, metavar="TOKEN",
-                    help="Scoped user token for the relay (defaults to ENGRAPHIS_SYNC_TOKEN "
-                          "or the token saved by the dashboard).")
-    ap.add_argument("--relay-e2ee-key", default=None, metavar="BASE64URL_KEY",
-                    help="32-byte URL-safe-base64 Cloud Sync key shared only with trusted "
-                         "devices (defaults to ENGRAPHIS_SYNC_E2EE_KEY; never sent to Cloud).")
+    # Credentials and the long-lived workspace E2EE key must not appear in argv,
+    # process listings, shell history, terminal scrollback, or exception reprs. Relay
+    # credentials come from owner-only state/cloud session or the origin-bound
+    # ENGRAPHIS_SYNC_TOKEN environment pair; the E2EE key comes from
+    # ENGRAPHIS_SYNC_E2EE_KEY (normally injected by a secrets manager).
     ap.add_argument("--read-only", action="store_true",
                     help="Pull only; required for a viewer token without sync:write.")
     ap.add_argument("--repo", default=None, help="Restrict the sync to one repo name.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report what would change; write nothing (locally or to the remote).")
-    args = ap.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if any(
+        item == flag or item.startswith(flag + "=")
+        for item in raw_argv
+        for flag in ("--relay-token", "--relay-e2ee-key")
+    ):
+        print(
+            "error: relay secrets must be provided through owner-only state or "
+            "the documented environment channels",
+            file=sys.stderr,
+        )
+        return 2
+    args = ap.parse_args(raw_argv)
 
     # Exactly one transport must be selected.
     use_relay = args.relay is not None
@@ -77,20 +102,20 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    relay_token = args.relay_token
 
     service = _service(args.db)
     try:
-        return _sync(args, service.engine, use_relay=use_relay, relay_token=relay_token)
+        return _sync(args, service.engine, use_relay=use_relay)
     finally:
-        service.store.close()
+        service.close()
 
 
 def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
-          use_relay: bool, relay_token: Optional[str]) -> int:
+          use_relay: bool) -> int:
     # Local folder sync needs no commercial authority. The managed relay checks its scoped
     # cloud token server-side for organization, workspace, expiry, scopes, and entitlement.
     from engraphis.backends.sync_relay import RelayError, has_sync_token, sync_read_only
+    relay_token = None
 
     wid_row = engine.store.conn.execute(
         "SELECT id, settings FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
@@ -140,7 +165,33 @@ def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
                 file=sys.stderr,
             )
             return 2
+        relay_url = args.relay or settings.relay_url
+        if not relay_url:
+            print("error: --relay needs a URL — pass --relay <url> or set ENGRAPHIS_RELAY_URL",
+                  file=sys.stderr)
+            return 2
+        target_origin = _relay_origin(relay_url)
+        canonical_origin = _relay_origin(DEFAULT_RELAY_URL)
+        env_token = os.environ.get("ENGRAPHIS_SYNC_TOKEN")
+        if env_token:
+            configured_origin = _relay_origin(
+                os.environ.get("ENGRAPHIS_SYNC_TOKEN_ORIGIN")
+            )
+            if not configured_origin or configured_origin != target_origin:
+                print(
+                    "error: configured relay credential is not bound to this relay origin",
+                    file=sys.stderr,
+                )
+                return 2
+            relay_token = env_token
         if not relay_token and not has_sync_token():
+            if not target_origin or target_origin != canonical_origin:
+                print(
+                    "error: custom relay needs ENGRAPHIS_SYNC_TOKEN and "
+                    "ENGRAPHIS_SYNC_TOKEN_ORIGIN",
+                    file=sys.stderr,
+                )
+                return 2
             from engraphis.cloud_session import CloudSessionError, access_for_workspace
             try:
                 relay_token, _, _ = access_for_workspace(
@@ -151,18 +202,13 @@ def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
         # Namespace the relay by workspace NAME (not the per-device local id) so every
         # device on the account lands in one bucket; account isolation is enforced
         # server-side by the scoped token owner through the hosted relay protocol.
-        relay_url = args.relay or settings.relay_url
-        if not relay_url:
-            print("error: --relay needs a URL — pass --relay <url> or set ENGRAPHIS_RELAY_URL",
-                  file=sys.stderr)
-            return 2
         try:
             transport = get_transport(
                 "relay",
                 base_url=relay_url,
                 workspace_id=args.workspace,
                 access_token=relay_token,
-                e2ee_key=args.relay_e2ee_key,
+                e2ee_key=os.environ.get("ENGRAPHIS_SYNC_E2EE_KEY"),
             )
         except (RelayError, ValueError) as exc:
             # A custom URL may contain credentials or signed query parameters. The
@@ -186,7 +232,10 @@ def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
         sync_device_id = engine.store.get_sync_state("device_id") or ids.new_id("device")
     engine_sync = SyncEngine(engine.store, embedder=engine.embedder,
                              vector_index=engine.index, device_id=sync_device_id,
-                             allowed_workspaces=settings.allowed_workspaces or None)
+                             allowed_workspaces=(
+                                 frozenset(settings.allowed_workspaces)
+                                 if settings.allowed_workspaces else None
+                             ))
     # Honor the same durable, fail-closed device policy as dashboard auto-sync. This
     # matters for member/admin tokens too: a device explicitly configured download-only
     # must not silently regain upload authority merely because this CLI runs after a
@@ -200,23 +249,31 @@ def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
             dry_run=args.dry_run,
             push=not read_only,
         )
-    except RelayError as exc:
+    except (RelayError, SyncError, ValueError) as exc:
         print(f"error: relay sync failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2))
 
     t = report["totals"]
-    verb = "would sync" if args.dry_run else "synced"
+    complete = report.get("complete") is not False
+    if complete:
+        verb = "would sync" if args.dry_run else "synced"
+    else:
+        verb = "would be incomplete" if args.dry_run else "incomplete"
     print(
         f"{verb}: {'read-only · ' if report.get('read_only') else ''}"
         f"exported {report['exported_memories']} memories · "
         f"pulled {report['peers_applied']} peer(s) · "
         f"+{t['added']} new, {t['updated']} updated, {t['unchanged']} unchanged, "
         f"+{t['links_added']} links"
+        + (
+            f" · {t['conflicts_preserved']} conflicts preserved"
+            if t.get("conflicts_preserved") else ""
+        )
         + (f" · {t['rejected']} rejected" if t.get("rejected") else ""),
         file=sys.stderr,
     )
-    return 0
+    return 0 if complete else 1
 
 
 if __name__ == "__main__":

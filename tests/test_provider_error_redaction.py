@@ -2,7 +2,6 @@
 # ruff: noqa: E402 -- optional-stack guard must run before HTTP-dependent modules
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 from types import SimpleNamespace
@@ -83,7 +82,7 @@ def test_legacy_config_status_does_not_reflect_custom_llm_base_url(monkeypatch):
     monkeypatch.setattr(
         settings, "llm_base_url", "https://provider.example/%s" % marker
     )
-    payload = asyncio.run(get_config())["data"]
+    payload = get_config()["data"]
 
     assert payload["llm_custom_base_url_set"] is True
     assert "llm_base_url" not in payload
@@ -147,6 +146,8 @@ def test_llm_deadline_is_forwarded_without_retry_or_provider_detail_leakage():
     assert len(timeout_client.calls) == 1
     assert timeout_client.calls[0][1]["timeout"] == 0.25
     assert "private provider timeout detail" not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
 
 
 def test_api_embedder_logs_no_model_endpoint_or_provider_index(monkeypatch, caplog):

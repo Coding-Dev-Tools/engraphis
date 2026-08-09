@@ -193,6 +193,7 @@ def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> dict[str, 
 
 def score_memory(rec: MemoryRecord, *, now: float, weights: Weights,
                  semantic: float = 0.0, lexical: float = 0.0, graph: float = 0.0,
+                 known_at: Optional[float] = None,
                  recency_tau_days: float = 30.0) -> float:
     """Score one ordinary query-recall candidate without age double-counting.
 
@@ -203,10 +204,20 @@ def score_memory(rec: MemoryRecord, *, now: float, weights: Weights,
 
     ``recency_tau_days`` is retained as an ignored compatibility parameter for
     callers that configured previous releases.
+
+    When ``known_at`` predates a retroactive closure's system-time record, that
+    closure cannot contribute a staleness penalty to the historical ranking.
     """
     w = weights
     r = retention(rec.stability, rec.last_access, now)
-    x = staleness_penalty(rec.valid_to, now)
+    known_valid_to = rec.valid_to
+    if (
+        known_at is not None
+        and rec.valid_to_recorded_at is not None
+        and known_at < rec.valid_to_recorded_at
+    ):
+        known_valid_to = None
+    x = staleness_penalty(known_valid_to, now)
     confidence = _confidence(getattr(rec, "confidence", 1.0))
     importance = _bounded(getattr(rec, "importance", 0.0))
     return (

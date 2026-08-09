@@ -177,16 +177,15 @@ def _normalized_answer(value: object) -> str:
 
 
 def _completed(response: str, question: dict, supporting_evidence: tuple[str, ...]) -> bool:
-    """Evaluate task success against a case's explicit answer and source evidence.
+    """Evaluate task success against explicit answerability and source evidence.
 
-    Productivity completion is a correctness metric, not a retrieval metric: token
-    containment lets statements such as ``the release manager does not approve``
-    count as a successful answer to ``release manager``. The offline oracle accepts
-    only a case's canonical answer, an explicitly listed acceptable answer, or an
-    exact supporting evidence sentence. Hosted or paraphrasing benchmarks can
-    inject an ``answer_evaluator`` into :func:`run` with richer semantics.
+    An explicitly unanswerable task succeeds only by abstaining. Answerable tasks
+    accept a canonical answer, an explicitly listed variant, or an exact supporting
+    evidence sentence. Hosted benchmarks can inject a richer ``answer_evaluator``.
     """
     normalized_response = _normalized_answer(response)
+    if question.get("answerable") is False:
+        return not normalized_response
     expected = str(question.get("answer", question.get("evidence", "")))
     acceptable = [expected, *supporting_evidence]
     configured = question.get("acceptable_answers", ())

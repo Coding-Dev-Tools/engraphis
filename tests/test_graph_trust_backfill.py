@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 
 from engraphis.core.engine import MemoryEngine
@@ -46,6 +47,28 @@ def test_cli_graph_backfill_uses_only_live_explicitly_approved_memories(tmp_path
     assert [memory_id for memory_id, _ in seen] == [approved_id]
     assert seen[0][1]["provenance"]["source"] == "backfill_graph"
     assert report["workspaces"][0]["memories_scanned"] == 1
+
+
+def test_cli_graph_backfill_dry_run_leaves_database_bytes_and_mode_unchanged(tmp_path):
+    path = tmp_path / "graph-backfill.db"
+    store = Store(str(path))
+    store.close()
+
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    assert conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    conn.close()
+    before = path.read_bytes()
+
+    report = backfill_graph.backfill(str(path), dry_run=True)
+
+    assert report["dry_run"] is True
+    assert path.read_bytes() == before
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        conn.close()
 
 
 def test_lazy_graph_backfill_never_feeds_pending_records(monkeypatch):

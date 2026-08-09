@@ -12,6 +12,9 @@ single-user use.
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import hashlib
 import logging
 import time
@@ -25,7 +28,6 @@ from pydantic import BaseModel, Field
 from engraphis import __version__, http_security
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
-from engraphis.logging_setup import configure_logging
 from engraphis.netutil import is_local_request
 from engraphis.service import MemoryService, ValidationError
 
@@ -88,9 +90,34 @@ def create_app(
     no longer exists in the published package.
     """
     del auth_store
-    configure_logging()
-    app = FastAPI(title="Engraphis Memory Inspector", docs_url=None, redoc_url=None)
-    app.state.service = service
+    owns_service = service is None
+    bound_service = service or MemoryService.create(
+        settings.db_path,
+        embed_model=settings.embed_model or None,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+        embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
+        allowed_workspaces=settings.allowed_workspaces,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
+        extractor=settings.extractor,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            if owns_service:
+                await asyncio.to_thread(bound_service.close)
+
+    app = FastAPI(
+        title="Engraphis Memory Inspector", docs_url=None, redoc_url=None,
+        lifespan=lifespan,
+    )
+    app.state.service = bound_service
+    app.state.owns_service = owns_service
 
     app.add_middleware(
         CORSMiddleware,
@@ -102,19 +129,6 @@ def create_app(
     )
 
     def svc() -> MemoryService:
-        if app.state.service is None:
-            app.state.service = MemoryService.create(
-                settings.db_path,
-                embed_model=settings.embed_model or None,
-                embed_revision=getattr(settings, "embed_revision", "") or None,
-                require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-                embed_dim=settings.embed_dim or 384,
-                allowed_workspaces=settings.allowed_workspaces,
-                vector_backend=settings.vector_backend,
-                rerank_model=getattr(settings, "rerank_model", "") or None,
-                rerank_revision=getattr(settings, "rerank_revision", "") or None,
-                extractor=settings.extractor,
-            )
         return app.state.service
 
     @app.middleware("http")
@@ -124,6 +138,8 @@ def create_app(
         from engraphis.service import set_current_user
 
         set_current_user(None)
+        if request.method == "OPTIONS":
+            return await call_next(request)
         path = request.url.path
         protected = path.startswith("/api/") and path not in _PUBLIC_API
         if protected and settings.api_token:
@@ -162,7 +178,7 @@ def create_app(
         return JSONResponse({"error": "internal error -- see server logs"}, status_code=500)
 
     @app.get("/api/auth/state")
-    async def auth_state():
+    def auth_state():
         """Describe the only local auth mode; Team identity is cloud-owned."""
         mode = "token" if settings.api_token else "open"
         return JSONResponse(
@@ -184,34 +200,34 @@ def create_app(
         "/api/auth/{operation:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     )
-    async def hosted_team(operation: str):
+    def hosted_team(operation: str):
         del operation
         return _cloud_only("team")
 
     @app.api_route("/api/license", methods=["GET", "POST"])
     @app.api_route("/api/license/{operation:path}", methods=["GET", "POST"])
-    async def hosted_license(operation: str = ""):
+    def hosted_license(operation: str = ""):
         del operation
         return _cloud_only("license")
 
     @app.api_route("/api/analytics", methods=["GET", "POST"])
     @app.api_route("/api/analytics/{operation:path}", methods=["GET", "POST"])
-    async def hosted_analytics(operation: str = ""):
+    def hosted_analytics(operation: str = ""):
         del operation
         return _cloud_only("analytics")
 
     @app.api_route("/api/automation", methods=["GET", "POST"])
     @app.api_route("/api/automation/{operation:path}", methods=["GET", "POST"])
-    async def hosted_automation(operation: str = ""):
+    def hosted_automation(operation: str = ""):
         del operation
         return _cloud_only("automation")
 
     @app.get("/api/health")
-    async def health():
+    def health():
         return {"status": "ok", "service": "engraphis-inspector"}
 
     @app.get("/api/ready")
-    async def ready():
+    def ready():
         checks = {"db": False, "embedder": False}
         try:
             local_service = svc()
@@ -227,53 +243,53 @@ def create_app(
         )
 
     @app.get("/api/workspaces")
-    async def workspaces():
+    def workspaces():
         return svc().list_workspaces()
 
     @app.get("/api/stats")
-    async def stats(workspace: Optional[str] = None):
+    def stats(workspace: Optional[str] = None):
         return svc().stats(workspace=workspace)
 
     @app.get("/api/recall")
-    async def recall(q: str, workspace: str, repo: Optional[str] = None, k: int = 12):
+    def recall(q: str, workspace: str, repo: Optional[str] = None, k: int = 12):
         return svc().recall(q, workspace=workspace, repo=repo, k=k, reinforce=False)
 
     @app.get("/api/why")
-    async def why(q: str, workspace: str, repo: Optional[str] = None, k: int = 5):
+    def why(q: str, workspace: str, repo: Optional[str] = None, k: int = 5):
         return svc().why(q, workspace=workspace, repo=repo, k=k)
 
     @app.get("/api/timeline")
-    async def timeline(
+    def timeline(
         q: str, workspace: str, repo: Optional[str] = None, limit: int = 20
     ):
         return svc().timeline(q, workspace=workspace, repo=repo, limit=limit)
 
     @app.get("/api/proactive")
-    async def proactive(workspace: str, repo: Optional[str] = None, k: int = 10):
+    def proactive(workspace: str, repo: Optional[str] = None, k: int = 10):
         return svc().recall_proactive(workspace=workspace, repo=repo, k=k)
 
     @app.get("/api/memory/{memory_id}")
-    async def memory(memory_id: str, workspace: str, repo: Optional[str] = None):
+    def memory(memory_id: str, workspace: str, repo: Optional[str] = None):
         return svc().inspect(memory_id, workspace=workspace, repo=repo)
 
     @app.get("/api/audit")
-    async def audit_log(workspace: str, limit: int = 100):
+    def audit_log(workspace: str, limit: int = 100):
         return svc().audit_log(workspace=workspace, limit=limit)
 
     @app.get("/api/receipts")
-    async def receipts(workspace: str, limit: int = 100):
+    def receipts(workspace: str, limit: int = 100):
         return svc().receipt_log(workspace=workspace, limit=limit)
 
     @app.get("/api/context-savings")
-    async def context_savings(workspace: str, repo: Optional[str] = None):
+    def context_savings(workspace: str, repo: Optional[str] = None):
         return svc().context_savings(workspace=workspace, repo=repo)
 
     @app.get("/api/receipts/verify")
-    async def receipts_verify(workspace: str):
+    def receipts_verify(workspace: str):
         return svc().verify_receipts(workspace=workspace)
 
     @app.get("/api/graph")
-    async def graph(
+    def graph(
         workspace: str,
         limit: int = 2000,
         layers: Optional[str] = None,
@@ -301,7 +317,7 @@ def create_app(
         )
 
     @app.get("/api/export")
-    async def export(workspace: str):
+    def export(workspace: str):
         # Local data portability is not a paid algorithm.  The compatibility API has
         # already applied its optional bearer boundary, so bypass the retired local
         # entitlement gate and let the owner recover their complete workspace.
@@ -316,7 +332,7 @@ def create_app(
         )
 
     @app.post("/api/pin")
-    async def pin(body: _GovernBody):
+    def pin(body: _GovernBody):
         return svc().pin(
             body.memory_id,
             workspace=body.workspace,
@@ -326,7 +342,7 @@ def create_app(
         )
 
     @app.post("/api/retire")
-    async def retire(body: _GovernBody):
+    def retire(body: _GovernBody):
         return svc().retire(
             body.memory_id,
             workspace=body.workspace,
@@ -336,7 +352,7 @@ def create_app(
         )
 
     @app.post("/api/forget", deprecated=True)
-    async def forget(body: _GovernBody):
+    def forget(body: _GovernBody):
         return svc().forget(
             body.memory_id,
             workspace=body.workspace,
@@ -346,7 +362,7 @@ def create_app(
         )
 
     @app.post("/api/secure-erase")
-    async def secure_erase(body: _GovernBody):
+    def secure_erase(body: _GovernBody):
         return svc().secure_erase(
             body.memory_id,
             workspace=body.workspace,
@@ -355,7 +371,7 @@ def create_app(
         )
 
     @app.post("/api/correct")
-    async def correct(body: _CorrectBody):
+    def correct(body: _CorrectBody):
         return svc().correct(
             body.memory_id,
             body.new_content,
@@ -366,7 +382,7 @@ def create_app(
         )
 
     @app.post("/api/promote")
-    async def promote(body: _PromoteBody):
+    def promote(body: _PromoteBody):
         return svc().promote(
             body.memory_id,
             body.target_scope,
@@ -380,7 +396,8 @@ def create_app(
     async def consolidate(body: _ConsolidateBody):
         # This is an explicit manual sweep. Scheduling, dreaming/inference, and
         # automatic consolidation belong to the hosted automation worker.
-        return svc().consolidate(
+        return await asyncio.to_thread(
+            svc().consolidate,
             workspace=body.workspace,
             repo=body.repo,
             dry_run=body.dry_run,

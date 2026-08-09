@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { CORE_DIRECT_TOOLS, buildEngraphisRuntimeConfig } from "../src/config.ts";
-import { applyScopeDefaults } from "../src/tool-schemas.ts";
+import {
+	CONFLICT_REVIEW_PARAMETERS,
+	GET_MEMORY_PARAMETERS,
+	UPDATE_MEMORY_PARAMETERS,
+	applyScopeDefaults,
+} from "../src/tool-schemas.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -72,7 +77,7 @@ test("ignores whitespace-only optional configuration", () => {
 	assert.equal(config.defaultWorkspace, undefined);
 });
 
-test("keeps exactly the six Smart MCP tools in the direct surface", () => {
+test("keeps exactly the nine Smart MCP tools in the direct surface", () => {
 	assert.deepEqual(CORE_DIRECT_TOOLS, [
 		"engraphis_session",
 		"engraphis_recall_context",
@@ -80,10 +85,35 @@ test("keeps exactly the six Smart MCP tools in the direct surface", () => {
 		"engraphis_discover_actions",
 		"engraphis_execute_read",
 		"engraphis_execute_action",
+		"engraphis_get_memory",
+		"engraphis_update_memory",
+		"engraphis_conflict_review",
 	]);
 });
 
-test("preserves Smart MCP's cross-workspace recall default unless scope is configured", () => {
+test("matches the three governed Smart tool schemas", () => {
+	const getMemory = GET_MEMORY_PARAMETERS as Record<string, any>;
+	const updateMemory = UPDATE_MEMORY_PARAMETERS as Record<string, any>;
+	const conflictReview = CONFLICT_REVIEW_PARAMETERS as Record<string, any>;
+
+	assert.deepEqual(Object.keys(getMemory.properties).sort(), ["memory_id", "repo", "workspace"]);
+	assert.deepEqual(getMemory.required, ["memory_id"]);
+	assert.deepEqual(
+		Object.keys(updateMemory.properties).sort(),
+		["actor", "importance", "memory_id", "mtype", "repo", "title", "workspace"],
+	);
+	assert.deepEqual(updateMemory.required, ["memory_id"]);
+	assert.deepEqual(
+		Object.keys(conflictReview.properties).sort(),
+		["limit", "repo", "workspace"],
+	);
+	assert.deepEqual(conflictReview.required ?? [], []);
+	assert.equal(getMemory.properties.workspace.default, "default");
+	assert.equal(updateMemory.properties.repo.default, null);
+	assert.equal(conflictReview.properties.limit.default, 50);
+});
+
+test("applies configured repo only inside its configured workspace", () => {
 	assert.deepEqual(
 		applyScopeDefaults({ query: "decision" }, { command: "engraphis-mcp", environment: {} }),
 		{ query: "decision" },
@@ -106,6 +136,18 @@ test("preserves Smart MCP's cross-workspace recall default unless scope is confi
 			{ command: "engraphis-mcp", defaultRepo: "backend", environment: {} },
 		),
 		{ query: "decision" },
+	);
+	assert.deepEqual(
+		applyScopeDefaults(
+			{ query: "decision", workspace: "other" },
+			{
+				command: "engraphis-mcp",
+				defaultRepo: "backend",
+				defaultWorkspace: "acme",
+				environment: {},
+			},
+		),
+		{ query: "decision", workspace: "other" },
 	);
 });
 

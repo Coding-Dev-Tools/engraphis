@@ -12,18 +12,12 @@ legacy FastAPI server (`app.py`, `routes/`, `stores/`, `engines/`, flat namespac
 capability on v2 behind the interfaces in `core/interfaces.py`. Decide which side a change
 belongs to before editing. Full table: AGENTS.md §0.
 
-## Before you say "done" — run the offline gate
+## Before you say "done" — run the canonical gate
 
-No network or API key required; this mirrors `.github/workflows/ci.yml` and must stay green:
-
-```bash
-python -m pytest tests/ -q && \
-python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5 && \
-python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5 && \
-python -m eval.ablation
-```
-
-If you changed retrieval, scoring, or ranking, add or update an eval — per AGENTS.md §3.7,
+Use the exact primary offline gate in `AGENTS.md` §1; do not maintain a smaller duplicate here.
+`.github/workflows/ci.yml` is authoritative for the current Python matrix and dedicated
+typecheck, encryption, and built-artifact jobs. No network or API key is required for the primary
+gate. If you changed retrieval, scoring, or ranking, add or update an eval—per AGENTS.md §3.7,
 "better" needs a number, not an assertion.
 
 ## Slash commands available here
@@ -38,12 +32,11 @@ If you changed retrieval, scoring, or ranking, add or update an eval — per AGE
 
 ## Working style in this repo
 
-- **Interface-first & dependency-light** (AGENTS.md §3): keep `core/` runnable on `numpy`
-  alone; gate heavy imports behind the backend factories; never import a concrete backend
-  inside `core/` — with one deliberate exception: `core/engine.py` is the composition
-  root and may import the backend *factories* (`get_embedder`/`get_vector_index`/…),
-  whose heavy libraries stay lazily gated inside `backends/`, so `import
-  engraphis.core.engine` still needs only numpy.
+- **Interface-first & dependency-light** (AGENTS.md §3): every `core/` module, including
+  `core/engine.py`, remains protocol-only and runnable on NumPy. Concrete backend selection lives
+  in the outer composition root `engraphis/factory.py`; `engraphis/__init__.py` registers it for
+  `MemoryEngine.create()`, and `engraphis.create_memory_engine()` exposes it directly. Gate heavy
+  imports behind backend factories and never import a concrete backend from `core/`.
 - **House style:** `ruff` line-length 100, Python 3.9-compatible syntax, pure/tested scoring
   functions, provenance and scope on every memory.
 - **Be concise and direct** in chat — explain the *why* of a change briefly, link the file,
@@ -70,7 +63,9 @@ If you changed retrieval, scoring, or ranking, add or update an eval — per AGE
 
 ## Memory typing for recurring events
 
-When writing to Engraphis memory: recurring operational events (ticks, no-ops, health checks)
-are **always `episodic`** via `engraphis_record_event` with a stable `kind` — never `working`,
-never `semantic` at write time; promotion is `engraphis_consolidate`'s job. Full deterministic
-decision test: `skills/engraphis-memory/references/CONVENTIONS.md` §Recurring operational events.
+Choose the contract before writing a recurring operational outcome (tick, no-op, health check).
+For an append-only occurrence ledger, use `engraphis_record_event` with a stable `kind`; event rows
+have no `mtype` and are not recalled or consolidated. When the outcome must enter memory recall or
+consolidation, use `engraphis_remember` with `mtype="episodic"`, low importance (≤0.2), and normal
+dedupe—never `working` and never `semantic` at write time. Full decision test:
+`skills/engraphis-memory/references/CONVENTIONS.md` §Recurring operational outcomes.

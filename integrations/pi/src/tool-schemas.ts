@@ -67,6 +67,37 @@ export const REMEMBER_PARAMETERS = Type.Object({
 	], { default: null })),
 });
 
+export const GET_MEMORY_PARAMETERS = Type.Object({
+	...WRITABLE_SCOPE,
+	memory_id: Type.String({ description: "Memory id to read.", minLength: 1, maxLength: 200 }),
+});
+
+export const UPDATE_MEMORY_PARAMETERS = Type.Object({
+	...WRITABLE_SCOPE,
+	memory_id: Type.String({ description: "Memory id to edit.", minLength: 1, maxLength: 200 }),
+	title: Type.Optional(Type.Union([
+		Type.String({ description: "Replacement title.", maxLength: 500 }),
+		Type.Null(),
+	], { default: null })),
+	mtype: Type.Optional(Type.Union([
+		Type.Literal("semantic"),
+		Type.Literal("episodic"),
+		Type.Literal("procedural"),
+		Type.Literal("working"),
+		Type.Null(),
+	], { default: null })),
+	importance: Type.Optional(Type.Union([
+		Type.Number({ description: "Replacement salience from 0 to 1.", minimum: 0, maximum: 1 }),
+		Type.Null(),
+	], { default: null })),
+	actor: Type.Optional(Type.String({ default: "user", description: "Audit actor label.", maxLength: 200 })),
+});
+
+export const CONFLICT_REVIEW_PARAMETERS = Type.Object({
+	...WRITABLE_SCOPE,
+	limit: Type.Optional(Type.Integer({ default: 50, description: "Maximum review items (1-100).", minimum: 1, maximum: 100 })),
+});
+
 export const DISCOVER_ACTIONS_PARAMETERS = Type.Object({
 	task: Type.String({ description: "Describe the advanced capability needed without pasting memory content.", minLength: 1, maxLength: 2_000 }),
 	category: Type.Optional(Type.Union([
@@ -106,7 +137,12 @@ export function applyScopeDefaults(
 	if (result.workspace === undefined && config.defaultWorkspace) {
 		result.workspace = config.defaultWorkspace;
 	}
-	if (result.repo === undefined && result.workspace != null && config.defaultRepo) {
+	if (
+		result.repo === undefined &&
+		config.defaultRepo &&
+		config.defaultWorkspace &&
+		result.workspace === config.defaultWorkspace
+	) {
 		result.repo = config.defaultRepo;
 	}
 	return result;

@@ -1,4 +1,4 @@
-"""Materialize the four-ablation, five-budget official LongMemEval-V2 config matrix."""
+"""Materialize six explicit LongMemEval-V2 variants at five token budgets."""
 from __future__ import annotations
 
 import argparse
@@ -14,8 +14,14 @@ from eval.run_longmemeval_v2 import PINNED_READER_MODEL, PINNED_READER_REVISION
 BASE_CONFIGS = {
     "balanced": "longmemeval_v2_engraphis.json",
     "planner": "longmemeval_v2_engraphis_planner.json",
-    "type_limits": "longmemeval_v2_engraphis_type_limits.json",
-    "planner_type_limits": "longmemeval_v2_engraphis_planner_type_limits.json",
+    "episodic_cap_2": "longmemeval_v2_engraphis_type_limits.json",
+    "planner_episodic_cap_2": "longmemeval_v2_engraphis_planner_type_limits.json",
+    "context_k_2": "longmemeval_v2_engraphis.json",
+    "planner_context_k_2": "longmemeval_v2_engraphis_planner.json",
+}
+_CONTEXT_K_OVERRIDES = {
+    "context_k_2": 2,
+    "planner_context_k_2": 2,
 }
 
 
@@ -39,6 +45,8 @@ def prepare(output_dir: str | Path) -> dict:
         for budget in CANONICAL_TOKEN_BUDGETS:
             config = json.loads(json.dumps(base))
             config["memory_params"]["max_context_tokens"] = budget
+            if ablation in _CONTEXT_K_OVERRIDES:
+                config["memory_params"]["context_k"] = _CONTEXT_K_OVERRIDES[ablation]
             content = _canonical(config)
             target = output / f"{ablation}-{budget}.json"
             if target.exists() and target.read_text(encoding="utf-8") != content:
@@ -47,15 +55,20 @@ def prepare(output_dir: str | Path) -> dict:
             rows.append({
                 "ablation": ablation,
                 "token_budget": budget,
+                "context_k": config["memory_params"]["context_k"],
                 "config": target.name,
                 "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             })
     manifest = {
-        "name": "engraphis-longmemeval-v2-planned-recall-matrix/v1",
+        "name": "engraphis-longmemeval-v2-planned-recall-matrix/v2",
         "reader_model": PINNED_READER_MODEL,
         "reader_revision": PINNED_READER_REVISION,
         "token_budgets": list(CANONICAL_TOKEN_BUDGETS),
         "ablations": list(BASE_CONFIGS),
+        "comparators": {
+            "episodic_cap_2": "context_k_2",
+            "planner_episodic_cap_2": "planner_context_k_2",
+        },
         "runs": rows,
     }
     manifest_content = _canonical(manifest)

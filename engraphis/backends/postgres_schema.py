@@ -9,6 +9,7 @@ import hashlib
 import importlib
 import ipaddress
 import os
+import shlex
 import socket
 from typing import Any, Optional, Union
 from urllib.parse import urlparse
@@ -22,6 +23,20 @@ _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CONNECT_TIMEOUT_SECONDS = 120
 _DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
 _MAX_STATEMENT_TIMEOUT_MS = 300_000
+
+
+def _catalog_id(kind: str, *components: object) -> str:
+    """Encode catalog coordinates without delimiter collisions."""
+    encoded = "".join(f"{len(value)}:{value}" for value in map(str, components))
+    return f"{kind}:{encoded}"
+
+
+def _qualified_name(*components: object) -> str:
+    """Render PostgreSQL identifiers without flattening distinct coordinates."""
+    return ".".join(
+        '"' + str(component).replace('"', '""') + '"'
+        for component in components
+    )
 
 
 class PostgresIntrospectionError(ValueError):
@@ -136,20 +151,41 @@ def _rows(cursor, query: str, params: tuple = ()) -> list[tuple]:
 def _source_digest(dsn: str) -> str:
     """Identify a database endpoint without turning its password into a verifier.
 
-    Hashing the complete DSN still preserves a stable, offline-testable oracle for a
-    low-entropy password. Userinfo, query parameters, and fragments are credentials or
-    connection policy, not source identity, so exclude them from provenance entirely.
+    Userinfo, passwords, query parameters, and fragments are credentials or connection
+    policy, not source identity, so exclude them from provenance entirely. URL and
+    libpq keyword/value DSNs both reduce to host/port/database coordinates.
     """
+    identity = "postgresql|unknown"
     try:
         parsed = urlparse(dsn)
-        if parsed.scheme.casefold() not in {"postgres", "postgresql"} or not parsed.hostname:
-            raise ValueError("non-URL PostgreSQL DSN")
-        hostname = (parsed.hostname or "").casefold()
-        port = parsed.port or 5432
-        database = parsed.path.lstrip("/")
-        identity = f"{parsed.scheme.casefold()}|{hostname}|{port}|{database}"
-    except (TypeError, ValueError):
-        identity = "postgresql|unknown"
+        if parsed.scheme.casefold() in {"postgres", "postgresql"} and parsed.hostname:
+            hostname = (parsed.hostname or "").casefold()
+            port = parsed.port or 5432
+            database = parsed.path.lstrip("/")
+            identity = f"postgresql|{hostname}|{port}|{database}"
+        else:
+            fields: dict[str, str] = {}
+            for token in shlex.split(dsn, posix=True):
+                if "=" not in token:
+                    raise ValueError("invalid keyword DSN")
+                key, value = token.split("=", 1)
+                normalized_key = key.casefold()
+                if normalized_key in {"host", "hostaddr", "port", "dbname"}:
+                    fields[normalized_key] = value
+            host = fields.get("host", "")
+            hostaddr = fields.get("hostaddr", "")
+            if not host and not hostaddr:
+                raise ValueError("keyword DSN has no endpoint")
+            if host and not host.startswith("/"):
+                host = ",".join(part.casefold() for part in host.split(","))
+            port = fields.get("port") or "5432"
+            database = fields.get("dbname", "")
+            identity = (
+                f"postgresql|host={host}|hostaddr={hostaddr}|"
+                f"port={port}|database={database}"
+            )
+    except (AttributeError, TypeError, ValueError):
+        pass
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
@@ -250,16 +286,17 @@ class PostgresSchemaIntrospector:
             row for row in constraints[:_MAX_RELATIONS] if permitted(row[1])
         ]
 
+        database_id = _catalog_id("database", database)
         entities: list[dict] = [{
-            "id": f"database:{database}", "name": database, "kind": "database",
+            "id": database_id, "name": database, "kind": "database",
         }]
         relations: list[dict] = []
         schema_names = sorted({str(row[0]) for row in tables} | {str(row[0]) for row in columns})
         for schema in schema_names:
-            sid = f"schema:{schema}"
+            sid = _catalog_id("schema", schema)
             entities.append({"id": sid, "name": schema, "kind": "schema"})
             relations.append({
-                "source": f"database:{database}", "target": sid, "relation": "contains",
+                "source": database_id, "target": sid, "relation": "contains",
             })
 
         table_ids = set()
@@ -269,21 +306,22 @@ class PostgresSchemaIntrospector:
             columns_by_table.setdefault((str(row[0]), str(row[1])), []).append(row)
         for schema, table, table_type in tables:
             schema, table = str(schema), str(table)
-            tid = f"table:{schema}.{table}"
+            tid = _catalog_id("table", schema, table)
             table_ids.add(tid)
             entities.append({
-                "id": tid, "name": f"{schema}.{table}", "kind": "view"
+                "id": tid, "name": _qualified_name(schema, table), "kind": "view"
                 if "VIEW" in str(table_type).upper() else "table",
             })
             relations.append({
-                "source": f"schema:{schema}", "target": tid, "relation": "contains",
+                "source": _catalog_id("schema", schema), "target": tid, "relation": "contains",
             })
-            lines.extend([f"## {schema}.{table}", ""])
+            lines.extend([f"## {_qualified_name(schema, table)}", ""])
             for col in columns_by_table.get((schema, table), []):
                 _, _, column, position, data_type, nullable, default = col
-                cid = f"column:{schema}.{table}.{column}"
+                cid = _catalog_id("column", schema, table, column)
                 entities.append({
-                    "id": cid, "name": f"{schema}.{table}.{column}", "kind": "column",
+                    "id": cid, "name": _qualified_name(schema, table, column),
+                    "kind": "column",
                     "data_type": str(data_type), "nullable": str(nullable) == "YES",
                     "position": int(position),
                 })
@@ -303,14 +341,15 @@ class PostgresSchemaIntrospector:
                 constraint
             )
             schema, table = str(schema), str(table)
-            source_table = f"table:{schema}.{table}"
+            source_table = _catalog_id("table", schema, table)
             if source_table not in table_ids:
                 continue
-            constraint_id = f"constraint:{schema}.{table}.{name}"
+            constraint_id = _catalog_id("constraint", schema, table, name)
             if constraint_id not in constraint_entities:
                 entities.append({
-                    "id": constraint_id, "name": str(name), "kind": "constraint",
-                    "constraint_type": str(ctype),
+                    "id": constraint_id,
+                    "name": _qualified_name(schema, table, name),
+                    "kind": "constraint", "constraint_type": str(ctype),
                 })
                 constraint_entities.add(constraint_id)
             constraint_key = (source_table, constraint_id, "has_constraint")
@@ -322,7 +361,7 @@ class PostgresSchemaIntrospector:
                 })
                 relation_keys.add(constraint_key)
             if str(ctype).upper() == "FOREIGN KEY" and target_schema and target_table:
-                target = f"table:{target_schema}.{target_table}"
+                target = _catalog_id("table", target_schema, target_table)
                 reference_key = (source_table, target, "references")
                 if reference_key not in relation_keys:
                     relations.append({

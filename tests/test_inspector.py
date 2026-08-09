@@ -1,4 +1,8 @@
 """Inspector API tests — skip cleanly on the numpy-only CI gate (like test_app_auth)."""
+from concurrent.futures import ThreadPoolExecutor
+import logging
+import threading
+
 import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
@@ -201,3 +205,92 @@ def test_consolidate_endpoint_dry_run(client):
     svc_r = c.post("/api/consolidate", json={"workspace": "acme", "dry_run": True})
     assert svc_r.status_code == 200
     assert svc_r.json()["dry_run"] is True
+
+
+def test_cors_preflight_is_validated_before_inspector_auth(monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "sekrit")
+    monkeypatch.setattr(settings, "cors_origins", ["https://dashboard.example"])
+    svc = MemoryService.create(":memory:")
+    client = TestClient(create_app(svc))
+
+    response = client.options(
+        "/api/workspaces",
+        headers={
+            "Origin": "https://dashboard.example",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://dashboard.example"
+    svc.close()
+
+
+def test_inspector_closes_only_factory_owned_service(monkeypatch):
+    class _Service:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    owned = _Service()
+    monkeypatch.setattr(MemoryService, "create", lambda *args, **kwargs: owned)
+    owned_app = create_app()
+
+    with TestClient(owned_app):
+        pass
+
+    assert owned.close_calls == 1
+
+    injected = _Service()
+    with TestClient(create_app(injected)):
+        pass
+
+    assert injected.close_calls == 0
+
+
+def test_slow_inspector_service_call_does_not_block_health(monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingService:
+        def recall(self, *args, **kwargs):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release blocked recall")
+            return {"count": 0, "memories": []}
+
+    with TestClient(create_app(_BlockingService())) as test_client:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(
+                test_client.get,
+                "/api/recall",
+                params={"q": "slow", "workspace": "acme"},
+            )
+            try:
+                assert entered.wait(1)
+                health = test_client.get("/api/health")
+                assert health.status_code == 200
+                assert health.json()["status"] == "ok"
+            finally:
+                release.set()
+            assert pending.result(timeout=2).status_code == 200
+
+
+def test_inspector_library_factory_does_not_reconfigure_root_logging(monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "")
+
+    class _Service:
+        pass
+
+    root = logging.getLogger()
+    handlers_before = list(root.handlers)
+    level_before = root.level
+
+    create_app(_Service())
+
+    assert root.handlers == handlers_before
+    assert root.level == level_before

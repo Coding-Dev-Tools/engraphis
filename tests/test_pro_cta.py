@@ -10,7 +10,6 @@ CTA_PARAMS = (
     "utm_content=",
 )
 CTA_LABELS = (
-    "Subscribe to Pro",
     "Update billing",
     "Open Engraphis Cloud",
 )
@@ -27,6 +26,10 @@ def test_dashboard_shells_share_the_pro_cta_contract():
         assert "utm_source" in shell
         assert "utm_campaign" in shell
         assert all(label in shell for label in CTA_LABELS)
+    # The dashboard shells share the dynamic CTA implementation, while the
+    # compatibility shell still matches the generated source exactly.
+    for shell in (ledger, classic):
+        assert "Subscribe to ${name}" in shell
     assert "Start 3-day ${name} trial" in ledger
     assert "Start ${TRIAL_DAYS}-day ${name} trial" in classic
 

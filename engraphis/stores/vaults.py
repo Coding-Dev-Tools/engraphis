@@ -80,9 +80,21 @@ def update_vault(namespace: str, *, name: Optional[str] = None,
 
 def set_active_vault(namespace: str) -> None:
     conn = get_conn()
-    conn.execute("UPDATE vaults SET is_active=0")
-    conn.execute("UPDATE vaults SET is_active=1 WHERE namespace=?", (namespace,))
-    conn.commit()
+    exists = conn.execute(
+        "SELECT 1 FROM vaults WHERE namespace=?", (namespace,)
+    ).fetchone()
+    if exists is None:
+        raise ValueError("vault does not exist")
+    try:
+        conn.execute("UPDATE vaults SET is_active=0")
+        conn.execute(
+            "UPDATE vaults SET is_active=1, updated_at=? WHERE namespace=?",
+            (now_ts(), namespace),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def get_active_vault() -> Optional[dict[str, Any]]:
@@ -92,26 +104,69 @@ def get_active_vault() -> Optional[dict[str, Any]]:
 
 
 def delete_vault(namespace: str, delete_memories: bool = True) -> dict[str, Any]:
+    """Delete a vault while preserving the exactly-one-active invariant."""
     from engraphis.stores import vectors as mem_store
+
     conn = get_conn()
+    row = conn.execute(
+        "SELECT is_active FROM vaults WHERE namespace=?", (namespace,)
+    ).fetchone()
+    if row is None:
+        return {"namespace": namespace, "deleted_memories": 0}
     deleted_memories = 0
-    if delete_memories:
-        deleted_memories = mem_store.delete_namespace(namespace)
-    conn.execute("DELETE FROM vaults WHERE namespace=?", (namespace,))
-    conn.commit()
+    try:
+        if delete_memories:
+            deleted_memories = mem_store.delete_namespace(namespace, commit=False)
+        conn.execute("DELETE FROM vaults WHERE namespace=?", (namespace,))
+        if row["is_active"]:
+            replacement = conn.execute(
+                "SELECT namespace FROM vaults ORDER BY name, namespace LIMIT 1"
+            ).fetchone()
+            if replacement is not None:
+                conn.execute(
+                    "UPDATE vaults SET is_active=1, updated_at=? WHERE namespace=?",
+                    (now_ts(), replacement["namespace"]),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    ensure_default_vault()
     return {"namespace": namespace, "deleted_memories": deleted_memories}
 
 
 def ensure_default_vault() -> None:
-    """Create a default vault if none exist."""
+    """Ensure a deterministic active vault exists."""
     conn = get_conn()
-    count = conn.execute("SELECT COUNT(*) as c FROM vaults").fetchone()["c"]
-    if count == 0:
-        create_vault(
-            namespace="default",
-            name="Default",
-            description="General purpose memory vault",
-            color="#9d7cf6",
-            memory_type="semantic",
+    active = conn.execute(
+        "SELECT namespace FROM vaults WHERE is_active=1 LIMIT 1"
+    ).fetchone()
+    if active is not None:
+        return
+    replacement = conn.execute(
+        "SELECT namespace FROM vaults ORDER BY name, namespace LIMIT 1"
+    ).fetchone()
+    if replacement is not None:
+        conn.execute(
+            "UPDATE vaults SET is_active=1, updated_at=? WHERE namespace=?",
+            (now_ts(), replacement["namespace"]),
         )
-        set_active_vault("default")
+        conn.commit()
+        return
+    timestamp = now_ts()
+    conn.execute(
+        """INSERT INTO vaults
+           (namespace, name, description, color, memory_type, is_active, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            "default",
+            "Default",
+            "General purpose memory vault",
+            "#9d7cf6",
+            "semantic",
+            1,
+            timestamp,
+            timestamp,
+        ),
+    )
+    conn.commit()

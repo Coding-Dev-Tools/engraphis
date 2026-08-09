@@ -6,60 +6,109 @@ import sys
 
 import pytest
 
+import scripts.init as init_script
 from scripts.init import main
 
 
-def test_init_writes_env_with_absolute_db_path(tmp_path, monkeypatch, capsys):
+def _config_env(tmp_path: Path) -> Path:
+    return tmp_path / "home" / ".engraphis" / "config.env"
+
+
+def _write_private(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+@pytest.fixture(autouse=True)
+def _select_trusted_config(tmp_path, monkeypatch):
+    path = _config_env(tmp_path)
+    monkeypatch.setattr(init_script, "_trusted_env_file", lambda: path)
+    return path
+
+
+def test_init_writes_trusted_env_with_absolute_db_path(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main(["--db", "mem/engraphis.db"]) == 0
-    env = (tmp_path / ".env").read_text()
+    env = _config_env(tmp_path).read_text()
     out = capsys.readouterr().out
     assert "ENGRAPHIS_DB_PATH=" in env
     assert str((tmp_path / "mem" / "engraphis.db").resolve()) in env
-    assert "engraphis-mcp" in out and "mcpServers" in out   # agent snippets printed
-    out.encode("ascii")  # redirected Windows consoles may not be UTF-8
+    assert not (tmp_path / ".env").exists()
+    assert "engraphis-mcp" in out and "mcpServers" in out
+    out.encode("ascii")
 
 
-def test_init_never_clobbers_existing_env(tmp_path, monkeypatch):
+def test_init_never_clobbers_existing_trusted_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env").write_text("ENGRAPHIS_DB_PATH=/keep/me.db\n")
+    env_file = _config_env(tmp_path)
+    _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/me.db\n")
     assert main([]) == 0
-    assert (tmp_path / ".env").read_text() == "ENGRAPHIS_DB_PATH=/keep/me.db\n"
-    assert main(["--force"]) == 0                            # explicit opt-in overwrites
-    assert "/keep/me.db" not in (tmp_path / ".env").read_text()
+    assert env_file.read_text() == "ENGRAPHIS_DB_PATH=/keep/me.db\n"
+    assert main(["--force"]) == 0
+    assert "/keep/me.db" not in env_file.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
+def test_init_rejects_an_insecure_existing_trusted_env(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/me.db\n")
+    env_file.chmod(0o644)
+
+    assert main([]) == 1
+
+    assert env_file.read_text() == "ENGRAPHIS_DB_PATH=/keep/me.db\n"
+    assert "owner-only permissions are required" in capsys.readouterr().out
+
+
+def test_init_reports_trusted_config_selection_failure(monkeypatch, capsys):
+    def fail():
+        raise ValueError("ENGRAPHIS_ENV_FILE must be an absolute path")
+
+    monkeypatch.setattr(init_script, "_trusted_env_file", fail)
+
+    assert main([]) == 1
+    assert "ENGRAPHIS_ENV_FILE must be an absolute path" in capsys.readouterr().out
 
 
 def test_existing_env_snippets_use_the_kept_database(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     kept = tmp_path / "kept.db"
-    (tmp_path / ".env").write_text(f"ENGRAPHIS_DB_PATH={kept}\n")
+    _write_private(_config_env(tmp_path), f"ENGRAPHIS_DB_PATH={kept}\n")
     assert main([]) == 0
     assert str(kept) in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
-def test_generated_env_is_private(tmp_path, monkeypatch):
+def test_generated_trusted_env_and_parent_are_private(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert main(["--token"]) == 0
-    assert (tmp_path / ".env").stat().st_mode & 0o077 == 0
+    env_file = _config_env(tmp_path)
+    assert env_file.stat().st_mode & 0o077 == 0
+    assert env_file.parent.stat().st_mode & 0o077 == 0
 
 
 def test_init_token_flag_generates_bearer_token(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert main(["--token"]) == 0
-    assert "ENGRAPHIS_API_TOKEN=" in (tmp_path / ".env").read_text()
+    assert "ENGRAPHIS_API_TOKEN=" in _config_env(tmp_path).read_text()
 
 
 def test_init_encrypted_generates_private_key_file_and_mcp_configuration(
         tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+    monkeypatch.setattr(
+        "scripts.init._try_import",
+        lambda name: object() if name == "sqlcipher3" else None,
+    )
 
     assert main(["--encrypted", "--db", "vault/mem.db"]) == 0
 
     db_path = (tmp_path / "vault" / "mem.db").resolve()
     key_path = db_path.with_name(".mem.db.key")
-    env = (tmp_path / ".env").read_text()
+    env = _config_env(tmp_path).read_text()
     output = capsys.readouterr().out
     assert f"ENGRAPHIS_DB_KEY_FILE={key_path}" in env
     key = key_path.read_text().strip()
@@ -70,23 +119,29 @@ def test_init_encrypted_generates_private_key_file_and_mcp_configuration(
 
 def test_init_uses_encryption_by_default_when_sqlcipher_is_available(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+    monkeypatch.setattr(
+        "scripts.init._try_import",
+        lambda name: object() if name == "sqlcipher3" else None,
+    )
 
     assert main([]) == 0
 
-    env = (tmp_path / ".env").read_text()
+    env = _config_env(tmp_path).read_text()
     assert "ENGRAPHIS_DB_KEY_FILE=" in env
 
 
 def test_init_refuses_to_attach_new_key_to_existing_database(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+    monkeypatch.setattr(
+        "scripts.init._try_import",
+        lambda name: object() if name == "sqlcipher3" else None,
+    )
     existing = tmp_path / "existing.db"
     existing.write_bytes(b"SQLite format 3\x00")
 
     assert main(["--encrypted", "--db", str(existing)]) == 1
 
-    assert not (tmp_path / ".env").exists()
+    assert not _config_env(tmp_path).exists()
     assert not existing.with_name(".existing.db.key").exists()
     assert "refusing to enable encryption" in capsys.readouterr().out
 
@@ -94,7 +149,10 @@ def test_init_refuses_to_attach_new_key_to_existing_database(tmp_path, monkeypat
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
 def test_generated_encryption_key_is_private(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("scripts.init._try_import", lambda name: object() if name == "sqlcipher3" else None)
+    monkeypatch.setattr(
+        "scripts.init._try_import",
+        lambda name: object() if name == "sqlcipher3" else None,
+    )
 
     assert main(["--encrypted"]) == 0
 
@@ -102,16 +160,20 @@ def test_generated_encryption_key_is_private(tmp_path, monkeypatch):
     assert key_path.stat().st_mode & 0o077 == 0
 
 
-def test_installed_config_loads_the_env_written_in_current_directory(
+def test_installed_config_loads_the_trusted_env_from_an_unrelated_cwd(
         tmp_path, monkeypatch):
-    """The wheel must consume the exact project-local file ``engraphis-init`` writes."""
+    """The wheel must consume the exact trusted file ``engraphis-init`` writes."""
     pytest.importorskip("dotenv")
     monkeypatch.chdir(tmp_path)
     target = tmp_path / "preserved.db"
     main(["--db", str(target)])
 
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    (unrelated / ".env").write_text("ENGRAPHIS_DB_PATH=/wrong/cwd.db\n")
     env = os.environ.copy()
     env.pop("ENGRAPHIS_DB_PATH", None)
+    env["ENGRAPHIS_ENV_FILE"] = str(_config_env(tmp_path))
     root = str(Path(__file__).resolve().parents[1])
     env["PYTHONPATH"] = root + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
@@ -119,7 +181,7 @@ def test_installed_config_loads_the_env_written_in_current_directory(
     result = subprocess.run(
         [sys.executable, "-c",
          "from engraphis.config import settings; print(settings.db_path)"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, check=False,
+        cwd=unrelated, env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(target.resolve())
@@ -129,7 +191,7 @@ def test_installed_config_loads_the_env_written_in_current_directory(
     result = subprocess.run(
         [sys.executable, "-c",
          "from engraphis.config import settings; print(settings.db_path)"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, check=False,
+        cwd=unrelated, env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(explicit)

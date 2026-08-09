@@ -47,6 +47,7 @@
     .top-meta { display: flex; gap: 10px; align-items: center; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
     .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 16px var(--green); }
     .pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); background: rgba(255,255,255,.025); font-size: 11px; white-space: nowrap; }
+    [hidden] { display: none !important; }
     .pill.violet { color: #d9ccff; border-color: rgba(167,139,250,.38); background: rgba(167,139,250,.09); }
     .pill.cyan { color: #b9f7ff; border-color: rgba(103,232,249,.38); background: rgba(103,232,249,.08); }
     .pill.green { color: #bbf7de; border-color: rgba(110,231,183,.38); background: rgba(110,231,183,.08); }
@@ -163,7 +164,7 @@
   <div class="frame">
     <header class="topbar">
       <div class="brand"><span class="mark"></span><span>Engraphis</span><span style="color:var(--faint)">/</span><span>Memory continuity</span></div>
-      <div class="top-meta"><span class="live-dot"></span><span>local replay</span><span class="pill violet">56 sec</span><span id="timecode" class="timecode">00:00</span></div>
+      <div class="top-meta"><span class="live-dot"></span><span>local replay</span><span id="payload-source" class="pill amber" hidden>sample fallback data</span><span class="pill violet">56 sec</span><span id="timecode" class="timecode">00:00</span></div>
     </header>
     <main class="stage">
       <section class="scene intro active" data-scene="intro">
@@ -225,10 +226,12 @@
       timeline: [{ content: "The screen demo records against the standard dashboard port 8700.", valid_to: 1 }, { content: "The screen demo records against port 8790 so it does not collide with a developer dashboard.", valid_to: null }],
       inspection: { events: [{ action: "invalidate", detail: "superseded prior version" }] }
     };
+    window.demoPayloadReady = false;
+    window.demoPayloadSource = "loading";
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
     const shortId = (value) => value ? value.slice(0, 18) + "…" : "ses_01…";
     const text = (selector, value) => { const node = document.querySelector(selector); if (node) node.textContent = value ?? ""; };
-    function hydrate(data) {
+    function hydrate(data, source) {
       const session = data.session || FALLBACK.session;
       const recall = data.recall || FALLBACK.recall;
       const memory = recall.memory || FALLBACK.recall.memory;
@@ -252,8 +255,38 @@
       text("[data-provenance]", `${memory.provenance?.source || "demo-seed"} · ${memory.provenance?.trusted === false ? "untrusted" : "trusted"}`);
       const chain = document.querySelector("[data-timeline]");
       if (chain) chain.innerHTML = timeline.map((item) => { const past = item.valid_to != null || item.expired_at != null; return `<div class="node${past ? "" : " current"}"><div class="node-label"><span>${past ? "Past version" : "Current version"}</span><span class="pill ${past ? "amber" : "green"}">${past ? "past" : "current"}</span></div><div class="node-copy">${esc(item.content)}</div><div class="node-meta"><span>valid time · ${past ? "closed" : "current"}</span><span>source · ${esc(item.provenance?.source || "demo-seed")}</span></div></div>`; }).join("");
+      const sourceBadge = document.getElementById("payload-source");
+      sourceBadge.hidden = source === "generated";
+      window.demoPayloadSource = source;
+      window.demoPayloadReady = true;
     }
-    fetch("generated/screen_demo_payload.json").then((response) => response.ok ? response.json() : Promise.reject(new Error("payload unavailable"))).then(hydrate).catch(() => hydrate(FALLBACK));
+    const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
+    const validPayload = (data) => {
+      const session = data && data.session;
+      const memory = data && data.recall && data.recall.memory;
+      const timeline = data && data.timeline;
+      const events = data && data.inspection && data.inspection.events;
+      return Boolean(
+        session && nonEmpty(session.session_id) && session.bootstrap
+        && nonEmpty(session.bootstrap.summary)
+        && data.recall && nonEmpty(data.recall.query)
+        && memory && nonEmpty(memory.title) && nonEmpty(memory.content) && nonEmpty(memory.arm)
+        && Number.isFinite(Number(memory.score)) && Number.isFinite(Number(memory.retention))
+        && memory.provenance && nonEmpty(memory.provenance.source)
+        && Array.isArray(timeline) && timeline.length >= 2
+        && timeline.every((item) => item && nonEmpty(item.content)
+          && item.provenance && nonEmpty(item.provenance.source))
+        && Array.isArray(events) && events.length > 0
+        && events.every((item) => item && nonEmpty(item.action) && nonEmpty(item.detail))
+      );
+    };
+    fetch("generated/screen_demo_payload.json")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("payload unavailable")))
+      .then((data) => {
+        if (!validPayload(data)) throw new Error("payload is incomplete");
+        hydrate(data, "generated");
+      })
+      .catch(() => hydrate(FALLBACK, "fallback"));
 
     const TOTAL = 56;
     const scenes = [

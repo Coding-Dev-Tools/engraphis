@@ -10,17 +10,31 @@ from engraphis.stores import get_conn, now_ts
 
 # ── Events ───────────────────────────────────────────────────────────────────
 
-def append_event(*, namespace: str, entity_name: str, event_type: str,
-                 description: Optional[str] = None, payload: Optional[dict] = None,
-                 timestamp: Optional[float] = None) -> int:
+def append_event(
+    *,
+    namespace: str,
+    entity_name: str,
+    event_type: str,
+    description: Optional[str] = None,
+    payload: Optional[dict] = None,
+    timestamp: Optional[float] = None,
+    commit: bool = True,
+) -> int:
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO events (namespace, entity_name, event_type, description, payload, timestamp)
            VALUES (?,?,?,?,?,?)""",
-        (namespace, entity_name, event_type, description,
-         json.dumps(payload or {}, ensure_ascii=False), timestamp or now_ts()),
+        (
+            namespace,
+            entity_name,
+            event_type,
+            description,
+            json.dumps(payload or {}, ensure_ascii=False, allow_nan=False),
+            now_ts() if timestamp is None else timestamp,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -56,7 +70,13 @@ def record_interaction(*, namespace: str, entity_name: str,
     cur = conn.execute(
         """INSERT INTO interactions (namespace, entity_name, interaction_level, description, timestamp)
            VALUES (?,?,?,?,?)""",
-        (namespace, entity_name, interaction_level, description, timestamp or now_ts()),
+        (
+            namespace,
+            entity_name,
+            interaction_level,
+            description,
+            now_ts() if timestamp is None else timestamp,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -73,14 +93,18 @@ def get_interactions(namespace: str, limit: int = 100) -> list[dict[str, Any]]:
 
 # ── Thoughts ─────────────────────────────────────────────────────────────────
 
-def save_thought(*, namespace: str, content: str,
-                 source_memory_ids: Optional[list[int]] = None) -> int:
+def save_thought(
+    *,
+    namespace: str,
+    content: str,
+    source_memory_ids: Optional[list[dict[str, str]]] = None,
+) -> int:
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO thoughts (namespace, content, source_memory_ids, created_at)
            VALUES (?,?,?,?)""",
         (namespace, content,
-         json.dumps(source_memory_ids or [], ensure_ascii=False), now_ts()),
+         json.dumps(source_memory_ids or [], ensure_ascii=False, allow_nan=False), now_ts()),
     )
     conn.commit()
     return cur.lastrowid
@@ -102,17 +126,31 @@ def get_thoughts(namespace: str, limit: int = 50) -> list[dict[str, Any]]:
 
 # ── Ingestion Jobs ───────────────────────────────────────────────────────────
 
-def create_job(*, namespace: Optional[str], job_type: str,
-               payload: Optional[dict] = None) -> dict[str, Any]:
+def create_job(
+    *,
+    namespace: Optional[str],
+    job_type: str,
+    payload: Optional[dict] = None,
+    commit: bool = True,
+) -> dict[str, Any]:
     job_id = uuid.uuid4().hex[:16]
     conn = get_conn()
     now = now_ts()
     conn.execute(
         """INSERT INTO jobs (job_id, namespace, job_type, state, payload, created_at, updated_at)
            VALUES (?,?,?,?,?,?,?)""",
-        (job_id, namespace, job_type, "completed", json.dumps(payload or {}), now, now),
+        (
+            job_id,
+            namespace,
+            job_type,
+            "completed",
+            json.dumps(payload or {}, ensure_ascii=False, allow_nan=False),
+            now,
+            now,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_job(job_id)
 
 

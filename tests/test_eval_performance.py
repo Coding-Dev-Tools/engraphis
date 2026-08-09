@@ -243,7 +243,7 @@ def test_cli_acceptance_matrix_uses_matrix_runner(tmp_path, capsys, monkeypatch)
         "filler_memories": 0,
         "token_budget": 1500,
         "retrieval_profile": "graph",
-        "processes": 1,
+        "processes": 5,
         "minimum_queries": 0,
     }]
     assert json.loads(capsys.readouterr().out) == expected

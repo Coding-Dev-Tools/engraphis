@@ -1,11 +1,11 @@
 """Retention / decay engine — Ebbinghaus forgetting curve + interaction-aware
 reinforcement.
 
-Formulas (from the Engraphis paper §3.2 and MemoryBank):
-    R(t) = exp(-t / S)                    retention at time t
-    S_new = S * (1 + α * log(1 + n))      stability grows with access count n
-    S += boost(level)                     interaction signals boost stability
-    surprise = 1 + |prediction_error|     novelty weight
+Formulas (shared with the v2 retention policy):
+    R(t) = exp(-t / S)                              retention at time t
+    ΔS = (α * min(S, 1) + boost) * ln(1 + 1 / n)   nth-event reinforcement
+    S_new = min(100, S + ΔS)                        bounded stability
+    surprise = 1 + |prediction_error|               novelty weight
 
 The decay pass reduces S for memories not recently accessed (subconscious
 forgetting). The reinforcement pass increases S when a memory is recalled or
@@ -20,6 +20,13 @@ from engraphis.config import settings
 from engraphis.stores import get_conn, now_ts
 from engraphis.stores import vectors as mem_store
 from engraphis.core.store import _escape_like
+from engraphis.core.retention_policy import (
+    DEFAULT_REINFORCEMENT_ALPHA,
+    MAX_ACCESS_COUNT,
+    effective_access_count,
+    effective_stability,
+    reinforced_stability,
+)
 
 _INTERACTION_BOOST = {
     "view": 0.05,
@@ -31,48 +38,78 @@ _INTERACTION_BOOST = {
     "read": 0.05,
 }
 
-_ALPHA = 0.3
+_ALPHA = DEFAULT_REINFORCEMENT_ALPHA
 
 
 def retention_score(mem: dict[str, Any], now: Optional[float] = None) -> float:
-    """Ebbinghaus retention R = exp(-t/S) where t is days since last access."""
-    now = now or now_ts()
-    S = max(mem.get("stability", 1.0), 0.01)
-    days = (now - mem.get("last_access", now)) / 86400.0
-    return math.exp(-days / S)
+    """Return a finite Ebbinghaus score in the invariant range ``[0, 1]``."""
+    reference = now_ts() if now is None else now
+    try:
+        reference = float(reference)
+    except (TypeError, ValueError, OverflowError):
+        reference = now_ts()
+    if not math.isfinite(reference):
+        reference = now_ts()
+    try:
+        last_access = float(mem.get("last_access", reference))
+    except (TypeError, ValueError, OverflowError):
+        last_access = reference
+    if not math.isfinite(last_access):
+        last_access = reference
+    days = max(0.0, (reference - last_access) / 86400.0)
+    score = math.exp(-days / effective_stability(mem.get("stability", 1.0)))
+    return min(1.0, max(0.0, score))
 
 
 def reinforce(mem_id: int, *, access_count_delta: int = 1) -> None:
-    """Reinforce a memory on recall — increase stability via spacing effect."""
+    """Apply one or more bounded marginal-log reinforcement events."""
+    if (
+        isinstance(access_count_delta, bool)
+        or not isinstance(access_count_delta, int)
+        or not 0 <= access_count_delta <= 10_000
+    ):
+        raise ValueError("access_count_delta must be an integer from 0 to 10000")
+    if access_count_delta == 0:
+        return
     conn = get_conn()
     row = conn.execute(
         "SELECT stability, access_count FROM memories WHERE id=?", (mem_id,)
     ).fetchone()
     if not row:
         return
-    new_count = row["access_count"] + access_count_delta
-    growth = 1.0 + _ALPHA * math.log(1 + new_count)
-    new_stab = row["stability"] * growth
+    stability = effective_stability(row["stability"])
+    count = effective_access_count(row["access_count"])
+    for _ in range(min(access_count_delta, MAX_ACCESS_COUNT - min(count, MAX_ACCESS_COUNT))):
+        stability, count = reinforced_stability(
+            stability,
+            count,
+            alpha=_ALPHA,
+        )
     conn.execute(
         "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
-        (new_stab, new_count, now_ts(), mem_id),
+        (stability, count, now_ts(), mem_id),
     )
     conn.commit()
 
 
 def apply_interaction_boost(mem_id: int, interaction_level: str) -> None:
-    """Boost stability based on interaction signal (view/react/reply/create)."""
+    """Apply one bounded interaction reinforcement event."""
     boost = _INTERACTION_BOOST.get(interaction_level.lower(), 0.1)
     conn = get_conn()
     row = conn.execute(
-        "SELECT stability FROM memories WHERE id=?", (mem_id,)
+        "SELECT stability, access_count FROM memories WHERE id=?", (mem_id,)
     ).fetchone()
     if not row:
         return
-    new_stab = row["stability"] + boost
+    stability, count = reinforced_stability(
+        row["stability"],
+        effective_access_count(row["access_count"]),
+        alpha=_ALPHA,
+        boost=boost,
+    )
     conn.execute(
-        "UPDATE memories SET stability=?, last_access=? WHERE id=?",
-        (new_stab, now_ts(), mem_id),
+        "UPDATE memories SET stability=?, access_count=?, last_access=? WHERE id=?",
+        (stability, count, now_ts(), mem_id),
     )
     conn.commit()
 
@@ -107,9 +144,23 @@ def decay_pass(namespace: Optional[str] = None) -> int:
 
 
 def score_memory(mem: dict[str, Any], query_vec, mem_vec) -> float:
-    """Conscious Recall score = retention × cosine_similarity × surprise."""
-    r = retention_score(mem)
+    """Return a finite legacy retention × cosine × surprise score."""
     import numpy as np
-    sim = float(np.dot(query_vec, mem_vec)) if query_vec is not None else 0.0
-    surprise = mem.get("surprise", 1.0)
-    return r * sim * surprise
+
+    retention = retention_score(mem)
+    try:
+        semantic = (
+            float(np.dot(query_vec, mem_vec)) if query_vec is not None else 0.0
+        )
+    except (TypeError, ValueError, OverflowError):
+        semantic = 0.0
+    if not math.isfinite(semantic):
+        semantic = 0.0
+    try:
+        surprise = float(mem.get("surprise", 1.0))
+    except (TypeError, ValueError, OverflowError):
+        surprise = 1.0
+    if not math.isfinite(surprise):
+        surprise = 1.0
+    score = retention * semantic * surprise
+    return score if math.isfinite(score) else 0.0

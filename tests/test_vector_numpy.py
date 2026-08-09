@@ -284,8 +284,18 @@ def test_repair_uses_active_dimension_and_creates_backup(tmp_path):
     assert Path(result["backup"]).is_file()
     repaired = Store(str(db_path))
     row = repaired.conn.execute(
-        "SELECT dim, model FROM mem_vectors WHERE id=?", (mid,)).fetchone()
-    assert (row["dim"], row["model"]) == (384, "deterministic")
+        "SELECT dim, model FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone()
+    active = repaired.conn.execute(
+        "SELECT version FROM embedding_state WHERE identity='__active__'"
+    ).fetchone()
+    rebuilding = repaired.conn.execute(
+        "SELECT 1 FROM embedding_state WHERE identity='__rebuilding__'"
+    ).fetchone()
+    assert row["dim"] == 384
+    assert active is not None and row["model"] == active["version"]
+    assert str(row["model"]).startswith("emb:v1:")
+    assert rebuilding is None
     repaired.close()
 
 
@@ -301,6 +311,31 @@ def test_delete_removes_from_index():
     assert index.search(vec, k=1)[0][0] == mid
     index.delete([mid])
     assert index.search(vec, k=1) == []
+    store.close()
+
+
+def test_zero_vectors_are_non_searchable():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("zero-contract")
+    index = NumpyVectorIndex(store, dim=2)
+    zero_id = store.add_memory(MemoryRecord(
+        id="",
+        content="zero vector",
+        workspace_id=workspace_id,
+        embedding=np.zeros(2, dtype=np.float32),
+    ))
+    directed_id = store.add_memory(MemoryRecord(
+        id="",
+        content="directed vector",
+        workspace_id=workspace_id,
+        embedding=np.array([1.0, 0.0], dtype=np.float32),
+    ))
+
+    assert index.search(np.zeros(2, dtype=np.float32), k=5) == []
+    assert [memory_id for memory_id, _score in index.search(
+        np.array([1.0, 0.0], dtype=np.float32), k=5
+    )] == [directed_id]
+    assert zero_id != directed_id
     store.close()
 
 

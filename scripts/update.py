@@ -13,6 +13,7 @@ Detects how you installed Engraphis and upgrades the same way:
     pipx                → `pipx upgrade engraphis`
     Docker              → rebuild from the updated host checkout
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -32,9 +33,7 @@ REPO_URL = "https://github.com/Coding-Dev-Tools/engraphis.git"
 LATEST_TAG = ""
 # Stable SemVer only. Bounded components prevent an untrusted remote ref containing
 # millions of digits from turning int() conversion into a local denial of service.
-_SEMVER = re.compile(
-    r"^v?((?:0|[1-9]\d{0,8}))\.((?:0|[1-9]\d{0,8}))(?:\.((?:0|[1-9]\d{0,8})))?$"
-)
+_SEMVER = re.compile(r"^v?((?:0|[1-9]\d{0,8}))\.((?:0|[1-9]\d{0,8}))(?:\.((?:0|[1-9]\d{0,8})))?$")
 
 
 # Every step below runs with an explicit, differentiated budget. An unbounded call against
@@ -127,10 +126,17 @@ def _start_windows_job(process: subprocess.Popen):
             ]
 
         class _IoCounters(ctypes.Structure):
-            _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-            )]
+            _fields_ = [
+                (name, ctypes.c_ulonglong)
+                for name in (
+                    "ReadOperationCount",
+                    "WriteOperationCount",
+                    "OtherOperationCount",
+                    "ReadTransferCount",
+                    "WriteTransferCount",
+                    "OtherTransferCount",
+                )
+            ]
 
         class _ExtendedLimitInformation(ctypes.Structure):
             _fields_ = [
@@ -146,7 +152,10 @@ def _start_windows_job(process: subprocess.Popen):
         kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         kernel32.SetInformationJobObject.argtypes = (
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
         )
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
@@ -161,9 +170,17 @@ def _start_windows_job(process: subprocess.Popen):
             limits = _ExtendedLimitInformation()
             limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
             configured = kernel32.SetInformationJobObject(
-                job, 9, ctypes.byref(limits), ctypes.sizeof(limits),  # ExtendedLimitInformation
+                job,
+                9,
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),  # ExtendedLimitInformation
             )
-            assigned = configured and kernel32.AssignProcessToJobObject(job, process._handle)
+            process_handle = getattr(process, "_handle", None)
+            assigned = bool(
+                configured
+                and process_handle is not None
+                and kernel32.AssignProcessToJobObject(job, process_handle)
+            )
         else:
             assigned = False
         if not assigned:
@@ -209,8 +226,10 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
             try:
                 subprocess.run(
                     [taskkill, "/F", "/T", "/PID", str(process.pid)],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=_TREE_KILL_TIMEOUT_S,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_TREE_KILL_TIMEOUT_S,
                 )
             except (OSError, subprocess.SubprocessError):
                 pass
@@ -225,8 +244,9 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
-def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
-                  env: Optional[dict]) -> subprocess.CompletedProcess:
+def _bounded_call(
+    cmd: list[str], what: str, timeout: int, capture: bool, env: Optional[dict]
+) -> subprocess.CompletedProcess:
     """Run *cmd* under a budget that **nothing in its process tree** can outlive.
 
     Every step lands here, because "bounded" has to mean the same thing for a step that is
@@ -252,8 +272,12 @@ def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
     a stalled socket, and none of these commands has anything to read.
     """
     process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE if capture else None, stdin=subprocess.DEVNULL,
-        text=True, env=env, **_OWN_PROCESS_GROUP,
+        cmd,
+        stdout=subprocess.PIPE if capture else None,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        **_OWN_PROCESS_GROUP,
     )
     job = _start_windows_job(process)
     try:
@@ -274,8 +298,14 @@ def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
     return subprocess.CompletedProcess(cmd, process.returncode, stdout or "", None)
 
 
-def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
-         capture: bool = False, env: Optional[dict] = None) -> subprocess.CompletedProcess:
+def _run(
+    cmd: list[str],
+    what: str,
+    timeout: int,
+    check: bool = False,
+    capture: bool = False,
+    env: Optional[dict] = None,
+) -> subprocess.CompletedProcess:
     """Run *cmd* under an explicit budget; a stall raises instead of hanging forever.
 
     ``capture`` stays opt-in — a pipe nobody reads is only another handle a grandchild can
@@ -290,8 +320,9 @@ def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
     return result
 
 
-def _run_captured(cmd: list[str], what: str, timeout: int,
-                  env: Optional[dict] = None) -> subprocess.CompletedProcess:
+def _run_captured(
+    cmd: list[str], what: str, timeout: int, env: Optional[dict] = None
+) -> subprocess.CompletedProcess:
     """Run *cmd* for its stdout under a budget that is actually enforced.
 
     For the steps that must be *parsed* rather than merely displayed, so simply not
@@ -343,12 +374,16 @@ def _release_index_lock(project_dir: Path, existed_before: bool, ours: bool) -> 
         try:
             lock.unlink()
         except OSError as exc:
-            print("Could not remove the index lock left by the interrupted checkout: %s "
+            print(
+                "Could not remove the index lock left by the interrupted checkout: %s "
                   "(%s). Delete that file, then re-run `engraphis-update`." % (lock, exc),
-                  file=sys.stderr)
+                file=sys.stderr,
+            )
         else:
-            print("Removed the index lock left by the interrupted checkout: %s" % lock,
-                  file=sys.stderr)
+            print(
+                "Removed the index lock left by the interrupted checkout: %s" % lock,
+                file=sys.stderr,
+            )
         return
     print(
         "A git index lock is present that this update did not create: %s\n"
@@ -374,14 +409,16 @@ def _select_latest_tag(tags) -> str:
 def _remote_latest_tag(git: str, repo_url: str = REPO_URL) -> str:
     result = _run_captured(
         [git, "ls-remote", "--tags", "--refs", repo_url, "v*"],
-        "Listing release tags from the Git remote", _GIT_LS_REMOTE_TIMEOUT_S,
+        "Listing release tags from the Git remote",
+        _GIT_LS_REMOTE_TIMEOUT_S,
         env=_git_env(),
     )
     if result.returncode:
         return ""
     return _select_latest_tag(
         line.rsplit("refs/tags/", 1)[-1]
-        for line in result.stdout.splitlines() if "refs/tags/" in line
+        for line in result.stdout.splitlines()
+        if "refs/tags/" in line
     )
 
 
@@ -408,6 +445,7 @@ def _detect_install() -> str:
     # pipx creates isolated venvs with a predictable parent.
     try:
         from engraphis import __file__ as engraphis_path
+
         engraphis_dir = Path(engraphis_path).resolve().parent
         if "pipx" in str(engraphis_dir):
             return "pipx"
@@ -420,12 +458,18 @@ def _detect_install() -> str:
     try:
         result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
-            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S,
-            capture=True)
+            "Reading the installed Engraphis metadata",
+            _PIP_METADATA_TIMEOUT_S,
+            capture=True,
+        )
         if result.returncode == 0:
             info = result.stdout
             if "Editable project location:" in info:
-                location = [line.split(":", 1)[1].strip() for line in info.split("\n") if line.startswith("Editable project location:")]
+                location = [
+                    line.split(":", 1)[1].strip()
+                    for line in info.split("\n")
+                    if line.startswith("Editable project location:")
+                ]
                 if location and (Path(location[0]) / ".git").exists():
                     return "editable"
             # PEP 610 records VCS provenance in direct_url.json. ``pip show`` does not
@@ -449,15 +493,23 @@ def _git_update(check_only: bool = False) -> None:
     try:
         result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
-            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S,
-            check=True, capture=True)
+            "Reading the installed Engraphis metadata",
+            _PIP_METADATA_TIMEOUT_S,
+            check=True,
+            capture=True,
+        )
     except subprocess.CalledProcessError:
         print("Engraphis is not installed.", file=sys.stderr)
         sys.exit(1)
 
     location_line = next(
-        (line for line in result.stdout.split("\n") if line.startswith("Editable project location:")),
-        None)
+        (
+            line
+            for line in result.stdout.split("\n")
+            if line.startswith("Editable project location:")
+        ),
+        None,
+    )
     if not location_line:
         print("Could not determine the editable install location.", file=sys.stderr)
         sys.exit(1)
@@ -479,36 +531,45 @@ def _git_update(check_only: bool = False) -> None:
     print("Fetching release tags from origin...")
     fetched = _run(
         [git, "-C", str(project_dir), "fetch", "--tags", "origin"],
-        "Fetching release tags from origin", _GIT_FETCH_TIMEOUT_S,
+        "Fetching release tags from origin",
+        _GIT_FETCH_TIMEOUT_S,
         env=_git_env(),
     )
     if fetched.returncode:
-        print("Could not fetch release tags from origin; no update was applied.",
-              file=sys.stderr)
+        print("Could not fetch release tags from origin; no update was applied.", file=sys.stderr)
         sys.exit(1)
-    local = _run([git, "-C", str(project_dir), "rev-parse", "HEAD"],
-                 "Reading the current revision", _GIT_LOCAL_TIMEOUT_S,
-                 capture=True, env=_git_env()).stdout.strip()
+    local = _run(
+        [git, "-C", str(project_dir), "rev-parse", "HEAD"],
+        "Reading the current revision",
+        _GIT_LOCAL_TIMEOUT_S,
+        capture=True,
+        env=_git_env(),
+    ).stdout.strip()
     branch_result = _run(
         [git, "-C", str(project_dir), "symbolic-ref", "--quiet", "--short", "HEAD"],
-        "Reading the current branch", _GIT_LOCAL_TIMEOUT_S,
-        capture=True, env=_git_env(),
+        "Reading the current branch",
+        _GIT_LOCAL_TIMEOUT_S,
+        capture=True,
+        env=_git_env(),
     )
     original_ref = branch_result.stdout.strip() if branch_result.returncode == 0 else local
     tag = LATEST_TAG
     if not tag:
         tags = _run_captured(
             [git, "-C", str(project_dir), "ls-remote", "--tags", "--refs", "origin", "v*"],
-            "Listing release tags from origin", _GIT_LS_REMOTE_TIMEOUT_S,
+            "Listing release tags from origin",
+            _GIT_LS_REMOTE_TIMEOUT_S,
             env=_git_env(),
         )
         if tags.returncode:
-            print("Could not list release tags from origin; no update was applied.",
-                  file=sys.stderr)
+            print(
+                "Could not list release tags from origin; no update was applied.", file=sys.stderr
+            )
             sys.exit(1)
         tag = _select_latest_tag(
             line.rsplit("refs/tags/", 1)[-1]
-            for line in tags.stdout.splitlines() if "refs/tags/" in line
+            for line in tags.stdout.splitlines()
+            if "refs/tags/" in line
         )
     if not tag:
         print("Could not determine the latest stable release tag.", file=sys.stderr)
@@ -517,8 +578,10 @@ def _git_update(check_only: bool = False) -> None:
     # report a false update forever.
     remote = _run(
         [git, "-C", str(project_dir), "rev-list", "-n", "1", tag],
-        "Resolving the release tag", _GIT_LOCAL_TIMEOUT_S,
-        capture=True, env=_git_env(),
+        "Resolving the release tag",
+        _GIT_LOCAL_TIMEOUT_S,
+        capture=True,
+        env=_git_env(),
     )
     remote_sha = remote.stdout.strip() if remote.returncode == 0 else ""
 
@@ -538,8 +601,10 @@ def _git_update(check_only: bool = False) -> None:
 
     dirty = _run(
         [git, "-C", str(project_dir), "status", "--porcelain"],
-        "Checking the working tree", _GIT_LOCAL_TIMEOUT_S,
-        capture=True, env=_git_env(),
+        "Checking the working tree",
+        _GIT_LOCAL_TIMEOUT_S,
+        capture=True,
+        env=_git_env(),
     )
     if dirty.stdout.strip():
         print("Refusing to update a working tree with uncommitted changes.", file=sys.stderr)
@@ -552,15 +617,22 @@ def _git_update(check_only: bool = False) -> None:
     lock_existed = _index_lock(project_dir).exists()
     stage = "checkout"
     try:
-        _run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
-             "Checking out the release tag", _GIT_CHECKOUT_TIMEOUT_S,
-             check=True, capture=False, env=_git_env())
+        _run(
+            [git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
+            "Checking out the release tag",
+            _GIT_CHECKOUT_TIMEOUT_S,
+            check=True,
+            capture=False,
+            env=_git_env(),
+        )
         stage = "reinstall"
         print(f"Reinstalling from {project_dir}...")
         _run(
             [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
-            "Reinstalling the editable checkout", _PIP_INSTALL_TIMEOUT_S,
-            check=True, capture=False,
+            "Reinstalling the editable checkout",
+            _PIP_INSTALL_TIMEOUT_S,
+            check=True,
+            capture=False,
         )
     except (subprocess.CalledProcessError, UpdateTimeout) as exc:
         # A failed *or stalled* checkout or reinstall must not strand a previously working
@@ -570,27 +642,31 @@ def _git_update(check_only: bool = False) -> None:
         print("Restoring the previous checkout...", file=sys.stderr)
         # Only a checkout *we* terminated can have abandoned a lock; see _release_index_lock.
         _release_index_lock(
-            project_dir, lock_existed,
+            project_dir,
+            lock_existed,
             ours=stage == "checkout" and isinstance(exc, UpdateTimeout),
         )
-        manual = (
-            "Run `%s` and `%s` to restore the previous installation." % (
-                subprocess.list2cmdline(
-                    [git, "-C", str(project_dir), "checkout", original_ref]
-                ),
+        manual = "Run `%s` and `%s` to restore the previous installation." % (
+            subprocess.list2cmdline([git, "-C", str(project_dir), "checkout", original_ref]),
                 subprocess.list2cmdline(
                     [sys.executable, "-m", "pip", "install", "-e", str(project_dir)]
                 ),
             )
-        )
         try:
-            _run([git, "-C", str(project_dir), "checkout", original_ref],
-                 "Restoring the previous checkout", _GIT_CHECKOUT_TIMEOUT_S,
-                 check=True, capture=False, env=_git_env())
+            _run(
+                [git, "-C", str(project_dir), "checkout", original_ref],
+                "Restoring the previous checkout",
+                _GIT_CHECKOUT_TIMEOUT_S,
+                check=True,
+                capture=False,
+                env=_git_env(),
+            )
             _run(
                 [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
-                "Reinstalling the previous checkout", _PIP_INSTALL_TIMEOUT_S,
-                check=True, capture=False,
+                "Reinstalling the previous checkout",
+                _PIP_INSTALL_TIMEOUT_S,
+                check=True,
+                capture=False,
             )
         except UpdateTimeout:
             # Rollback itself stalled: name the two commands that finish it by hand
@@ -599,8 +675,10 @@ def _git_update(check_only: bool = False) -> None:
         except subprocess.CalledProcessError:
             # The restore ran unchecked before, so a *failed* one was silent and main()
             # still told the user the previous installation had been restored. It had not.
-            print("Rollback FAILED: the working tree may still be on %s. %s"
-                  % (tag, manual), file=sys.stderr)
+            print(
+                "Rollback FAILED: the working tree may still be on %s. %s" % (tag, manual),
+                file=sys.stderr,
+            )
         raise
     print(f"Updated to {tag}.")
 
@@ -623,8 +701,7 @@ def _installed_extras() -> str:
         names = [part.strip() for part in value.split(",") if part.strip()]
         if not names or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names):
             raise ValueError(
-                "ENGRAPHIS_UPDATE_EXTRAS must be a comma-separated list of "
-                "package extras or 'none'"
+                "ENGRAPHIS_UPDATE_EXTRAS must be a comma-separated list of package extras or 'none'"
             )
         return "[" + ",".join(sorted(set(names))) + "]"
     return "[all]"
@@ -637,8 +714,10 @@ def _pip_update(method: str, check_only: bool = False) -> None:
         git = shutil.which("git")
         remote = _installed_git_url()
         if not remote:
-            print("Could not read the recorded Git install URL; refusing to switch sources.",
-                  file=sys.stderr)
+            print(
+                "Could not read the recorded Git install URL; refusing to switch sources.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         tag = LATEST_TAG or (_remote_latest_tag(git, remote) if git else "")
         if not tag:
@@ -648,56 +727,78 @@ def _pip_update(method: str, check_only: bool = False) -> None:
             print(f"Latest stable Git release: {tag}")
             return
         _run(
-            [sys.executable, "-m", "pip", "install", "--upgrade",
-             f"git+{remote}@{tag}#egg=engraphis{extras}"],
-            "Installing the update from Git", _PIP_INSTALL_TIMEOUT_S,
-            check=True, capture=False)
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                f"git+{remote}@{tag}#egg=engraphis{extras}",
+            ],
+            "Installing the update from Git",
+            _PIP_INSTALL_TIMEOUT_S,
+            check=True,
+            capture=False,
+        )
         return
     version = LATEST_TAG[1:] if LATEST_TAG else ""
     target = "engraphis" + extras + ("==" + version if version else "")
     if check_only:
         _run(
             [sys.executable, "-m", "pip", "install", "--dry-run", "--upgrade", target],
-            "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
+            "Checking the package index for a newer release",
+            _PIP_RESOLVE_TIMEOUT_S,
+            check=True,
             capture=False,
         )
         return
     _run(
         [sys.executable, "-m", "pip", "install", "--upgrade", target],
-        "Installing the update from the package index", _PIP_INSTALL_TIMEOUT_S,
-        check=True, capture=False)
+        "Installing the update from the package index",
+        _PIP_INSTALL_TIMEOUT_S,
+        check=True,
+        capture=False,
+    )
 
 
 def _pipx_update(check_only: bool = False) -> None:
     """Update a pipx install."""
     extras = _installed_extras()
     if check_only:
-        if LATEST_TAG:
-            target = "engraphis" + extras + "==" + LATEST_TAG[1:]
-            _run(
-                ["pipx", "runpip", "engraphis", "install", "--dry-run", "--upgrade", target],
-                "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
-                capture=False,
-            )
-        else:
-            print("pipx detected - run `pipx upgrade engraphis` to check for updates.")
+        target = "engraphis" + extras + (
+            "==" + LATEST_TAG[1:] if LATEST_TAG else ""
+        )
+        _run(
+            ["pipx", "runpip", "engraphis", "install", "--dry-run", "--upgrade", target],
+            "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
+            check=True, capture=False,
+        )
         return
     if LATEST_TAG:
         _run(
             ["pipx", "install", "--force", "engraphis" + extras + "==" + LATEST_TAG[1:]],
-            "Installing the update with pipx", _PIPX_TIMEOUT_S,
-            check=True, capture=False,
+            "Installing the update with pipx",
+            _PIPX_TIMEOUT_S,
+            check=True,
+            capture=False,
         )
         return
     if extras:
         _run(
             ["pipx", "install", "--force", "engraphis" + extras],
-            "Installing the update with pipx", _PIPX_TIMEOUT_S,
-            check=True, capture=False,
+            "Installing the update with pipx",
+            _PIPX_TIMEOUT_S,
+            check=True,
+            capture=False,
         )
     else:
-        _run(["pipx", "upgrade", "engraphis"], "Upgrading with pipx", _PIPX_TIMEOUT_S,
-             check=True, capture=False)
+        _run(
+            ["pipx", "upgrade", "engraphis"],
+            "Upgrading with pipx",
+            _PIPX_TIMEOUT_S,
+            check=True,
+            capture=False,
+        )
 
 
 def _docker_update(check_only: bool = False) -> None:
@@ -715,10 +816,14 @@ def main(argv=None) -> None:
     import argparse
 
     ap = argparse.ArgumentParser(description="Update Engraphis to the latest release.")
-    ap.add_argument("version", nargs="?", default="",
-                    help="Pin a specific stable version (e.g. v1.0.0).")
-    ap.add_argument("--check", action="store_true",
-                    help="Only report if an update is available, don't apply it.")
+    ap.add_argument(
+        "version", nargs="?", default="", help="Pin a specific stable version (e.g. v1.0.0)."
+    )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Only report if an update is available, don't apply it.",
+    )
     args = ap.parse_args(argv)
 
     global LATEST_TAG

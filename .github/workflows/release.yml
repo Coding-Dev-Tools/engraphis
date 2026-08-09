@@ -40,7 +40,7 @@ jobs:
       - name: Install release gate and the production dependency set (without SQLCipher)
         run: >-
           python -m pip install --upgrade
-          pip setuptools wheel build twine pip-audit ".[all,test]"
+          pip setuptools wheel build twine pip-audit cyclonedx-bom ".[all,test]"
 
       - name: Require tag and package version to match
         if: github.event_name == 'push'
@@ -76,6 +76,17 @@ jobs:
           python -m eval.adversarial_memory_security
           python -m pip_audit --local --skip-editable
 
+      - name: Capture the exact build environment and Python SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-environment-evidence
+          python -m pip list --format=freeze \
+            | LC_ALL=C sort -f > build-environment-evidence/environment.lock
+          cyclonedx-py environment --output-reproducible --of JSON \
+            --pyproject pyproject.toml \
+            -o build-environment-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json
+
       - name: Build source and universal wheel distributions
         shell: bash
         run: |
@@ -83,9 +94,6 @@ jobs:
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
           python -m build --outdir dist
           python scripts/normalize_sdist.py dist/*.tar.gz
-          python -m build --outdir dist-repeat
-          python scripts/normalize_sdist.py dist-repeat/*.tar.gz
-          diff <(cd dist && sha256sum * | sort) <(cd dist-repeat && sha256sum * | sort)
           python scripts/verify_distribution_contents.py dist/*
       - name: Validate distributions
         run: python -m twine check dist/*
@@ -132,6 +140,141 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
+
+
+      - name: Store exact build environment evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: build-environment-evidence
+          path: build-environment-evidence/
+
+  reproducibility-build:
+    name: Independent distribution builder ${{ matrix.builder }}
+    runs-on: ubuntu-latest
+    container: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        builder: ["a", "b"]
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Build in isolated pinned environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel build
+          mkdir -p reproducibility/dist
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          python -m build --outdir reproducibility/dist
+          python scripts/normalize_sdist.py reproducibility/dist/*.tar.gz
+          python -m pip freeze --all --exclude-editable \
+            | LC_ALL=C sort > reproducibility/environment.lock
+          python scripts/verify_distribution_contents.py reproducibility/dist/*
+      - name: Store independent builder output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: reproducibility-builder-${{ matrix.builder }}
+          path: reproducibility/
+
+  reproducibility-check:
+    name: Compare independent distribution builders
+    needs: [build, reproducibility-build]
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Download primary distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-package-distributions
+          path: primary/
+      - name: Download builder A
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: reproducibility-builder-a
+          path: builder-a/
+      - name: Download builder B
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: reproducibility-builder-b
+          path: builder-b/
+      - name: Compare independent distribution builders
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir reproducibility-evidence
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          image = (
+              "python:3.11-slim@sha256:"
+              "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
+          )
+
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def artifact_map(directory):
+              return {
+                  path.name: digest(path)
+                  for path in sorted(directory.iterdir())
+                  if path.name.endswith((".whl", ".tar.gz"))
+              }
+
+          def toolchain(lock):
+              selected = {"build", "pip", "setuptools", "wheel"}
+              packages = {
+                  line.split("==", 1)[0].lower(): line.split("==", 1)[1]
+                  for line in lock.read_text(encoding="utf-8").splitlines()
+                  if "==" in line
+              }
+              assert selected <= packages.keys()
+              return {name: packages[name] for name in sorted(selected)}
+
+          primary = artifact_map(Path("primary"))
+          builders = []
+          environment_digests = set()
+          for name in ("a", "b"):
+              root = Path(f"builder-{name}")
+              artifacts = artifact_map(root / "dist")
+              lock = root / "environment.lock"
+              assert artifacts == primary
+              environment_digests.add(digest(lock))
+              builders.append({
+                  "name": name,
+                  "image": image,
+                  "python": "3.11",
+                  "environment_lock_sha256": digest(lock),
+                  "toolchain": toolchain(lock),
+                  "artifacts": artifacts,
+              })
+          assert len(environment_digests) == 1
+          report = {
+              "format": "engraphis-independent-reproducibility/v1",
+              "builders": builders,
+          }
+          Path("reproducibility-evidence/reproducibility.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Store independent reproducibility evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: independent-reproducibility
+          path: reproducibility-evidence/
 
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
@@ -225,6 +368,59 @@ jobs:
             )
           done
 
+
+  installed-artifact-platform-smoke:
+    name: Installed wheel smoke (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Download exact release distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Install and smoke the downloaded wheel on Windows and macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          environment = Path(os.environ["RUNNER_TEMP"]) / "engraphis-platform-wheel-smoke"
+          subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True)
+          executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1
+          subprocess.run(
+              [str(executable), "-m", "pip", "install", "--disable-pip-version-check",
+               str(wheels[0].resolve())],
+              check=True,
+          )
+          subprocess.run([str(executable), "-m", "pip", "check"], check=True)
+          subprocess.run(
+              [str(executable), "-m", "scripts.smoke_entry_points", "--timeout", "20"],
+              cwd=os.environ["RUNNER_TEMP"],
+              check=True,
+          )
+          PY
+
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -267,8 +463,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]" "uvicorn[standard]>=0.29"
-          npm ci
+          npm ci --ignore-scripts --omit=optional
           npx playwright install --with-deps chromium
+      - name: Audit the root browser dependency lock
+        run: npm audit --audit-level=high
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npm run test:e2e
 
@@ -323,7 +521,74 @@ jobs:
           ENGRAPHIS_API_TOKEN: ci-lan-overlay-token
         run: docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet
       - name: Build production image
-        run: docker build -t engraphis:release .
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir container-evidence
+          docker buildx build --pull --load \
+            --metadata-file container-evidence/build-metadata.json \
+            -t engraphis:release .
+      - name: Record immutable production image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          metadata = Path("container-evidence/build-metadata.json")
+          digest = json.loads(metadata.read_text(encoding="utf-8")).get(
+              "containerimage.digest",
+          )
+          assert isinstance(digest, str)
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+          Path("container-evidence/image.digest").write_text(
+              digest + "\n", encoding="utf-8",
+          )
+          metadata.unlink()
+          PY
+      - name: Generate whole-image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: engraphis:release
+          format: cyclonedx-json
+          output-file: container-evidence/engraphis-container.cdx.json
+          upload-artifact: false
+      - name: Bind whole-image SBOM to immutable digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("container-evidence/engraphis-container.cdx.json")
+          digest = Path("container-evidence/image.digest").read_text(encoding="utf-8").strip()
+          document = json.loads(path.read_text(encoding="utf-8"))
+          metadata = document.setdefault("metadata", {})
+          component = metadata.setdefault(
+              "component", {"type": "container", "name": "engraphis:release"},
+          )
+          properties = [
+              item for item in component.get("properties", [])
+              if item.get("name") != "engraphis:image-digest"
+          ]
+          properties.append({"name": "engraphis:image-digest", "value": digest})
+          component["properties"] = properties
+          path.write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Scan whole production image
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: engraphis:release
+          fail-build: true
+          severity-cutoff: high
+          output-format: json
+          output-file: container-evidence/grype.json
       - name: Verify production image OCR runtime
         run: >-
           docker run --rm --entrypoint sh engraphis:release -c
@@ -342,7 +607,7 @@ jobs:
             rm -rf "$audit_dir"
           }
           trap cleanup EXIT
-          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
           docker create --name "$container" engraphis:release >/dev/null
           docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
           python -m pip_audit --path "$audit_dir"
@@ -362,6 +627,11 @@ jobs:
           done
           docker logs engraphis-release
           exit 1
+      - name: Store whole-image evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: production-image-evidence
+          path: container-evidence/
       - name: Teardown
         if: always()
         run: docker rm -f engraphis-release || true
@@ -390,6 +660,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
       - name: Analyze complete source tree
         id: analyze
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
@@ -401,7 +672,7 @@ jobs:
 
   release-evidence:
     name: Generate public release evidence
-    needs: [build, python-matrix, artifact-core-py39, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
+    needs: [build, reproducibility-check, python-matrix, artifact-core-py39, installed-artifact-platform-smoke, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -412,24 +683,39 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - name: Install SBOM generator and project dependencies
-        run: >-
-          python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
-          cyclonedx-bom==7.3.0 ".[all,test]"
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-package-distributions
           path: dist/
-      - name: Generate evidence and reproducible SBOM after all release gates
+      - name: Download exact build environment evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: build-environment-evidence
+          path: release-evidence/
+      - name: Download whole-image evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: production-image-evidence
+          path: release-evidence/
+      - name: Download independent reproducibility evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: independent-reproducibility
+          path: release-evidence/
+      - name: Generate evidence from captured release artifacts
         shell: bash
         run: |
-          mkdir release-evidence
+          set -euo pipefail
           sbom="release-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json"
-          cyclonedx-py environment --output-reproducible --of JSON --pyproject pyproject.toml -o "$sbom"
           python scripts/release_evidence.py --dist dist --commit "$GITHUB_SHA" \
             --tag "$GITHUB_REF_NAME" \
             --sbom "$sbom" \
+            --environment-lock release-evidence/environment.lock \
+            --image-sbom release-evidence/engraphis-container.cdx.json \
+            --image-digest "$(tr -d '\r\n' < release-evidence/image.digest)" \
+            --image-scan release-evidence/grype.json \
+            --reproducibility release-evidence/reproducibility.json \
             --verified-check ruff \
             --verified-check pyright-core-backends \
             --verified-check codeql \
@@ -437,6 +723,7 @@ jobs:
             --verified-check reproducible-distributions \
             --verified-check installed-artifact-smoke \
             --verified-check installed-artifact-smoke-py39 \
+            --verified-check installed-artifact-platform-smoke \
             --verified-check privacy-boundary \
             --verified-check token-efficiency \
             --verified-check benchmark-schema-evidence \
@@ -444,6 +731,7 @@ jobs:
             --verified-check browser-e2e \
             --verified-check pi-extension \
             --verified-check dependency-audit \
+            --verified-check browser-dependency-audit \
             --verified-check container-smoke \
             --verified-check retrieval-sample \
             --verified-check retrieval-codemem \
@@ -536,11 +824,11 @@ jobs:
             # A previous partial attempt may have created the release before every
             # canonical package asset uploaded. Reconcile same-named assets from the
             # exact aggregate that passed the publish gate.
-            gh release upload "$GITHUB_REF_NAME" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release upload "$GITHUB_REF_NAME" dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release create "$GITHUB_REF_NAME" dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
@@ -596,59 +884,97 @@ jobs:
             --event push \
             --limit 20 \
             --json databaseId,headBranch,headSha,event,createdAt)"
-          run_id="$(jq -r \
-            --arg tag "$RELEASE_TAG" \
-            --arg sha "$tag_sha" \
-            'sort_by(.createdAt) | map(select(.headBranch == $tag and
-                                            .headSha == $sha and
-                                            .event == "push"))[0].databaseId // empty' \
-            <<<"$runs")"
-          test -n "$run_id"
-          jobs="$(gh run view "$run_id" --repo "$GH_REPO" --json jobs)"
-          test "$(jq '[.jobs[] | select(.name == "Build distributions" and
-                                        .conclusion == "success")] | length' \
-            <<<"$jobs")" -eq 1
-          test "$(jq '[.jobs[] | select(.name == "Publish to PyPI" and
-                                        (.conclusion == "success" or
-                                         .conclusion == "failure"))] | length' \
-            <<<"$jobs")" -eq 1
-          test "$(jq '[.jobs[] | select(.name == "Generate public release evidence" and
-                                        .conclusion == "success")] | length' \
-            <<<"$jobs")" -eq 1
-          gh run download "$run_id" \
-            --repo "$GH_REPO" \
-            --name python-package-distributions \
-            --dir dist
+          printf '%s\n' "$runs" > "$RUNNER_TEMP/release-runs.json"
+          python - "$RUNNER_TEMP/release-runs.json" "$RELEASE_TAG" "$tag_sha" \
+            > "$RUNNER_TEMP/release-run-candidates" <<'PY'
+          import json
+          import sys
 
-          gh run download "$run_id" \
-            --repo "$GH_REPO" \
-            --name public-release-evidence \
-            --dir release-evidence
-          python - "$RELEASE_TAG" "$tag_sha" <<'PY'
+          from scripts.release_evidence import repair_run_candidates
+
+          path, tag, commit = sys.argv[1:]
+          runs = json.loads(open(path, encoding="utf-8").read())
+          for run_id in repair_run_candidates(runs, tag, commit):
+              print(run_id)
+          PY
+
+          selected_run=""
+          while IFS= read -r candidate; do
+            test -n "$candidate" || continue
+            if ! jobs="$(gh run view "$candidate" --repo "$GH_REPO" --json jobs)"; then
+              continue
+            fi
+            test "$(jq '[.jobs[] | select(.name == "Build distributions" and
+                                          .conclusion == "success")] | length' \
+              <<<"$jobs")" -eq 1 || continue
+            test "$(jq '[.jobs[] | select(.name == "Publish to PyPI" and
+                                          (.conclusion == "success" or
+                                           .conclusion == "failure"))] | length' \
+              <<<"$jobs")" -eq 1 || continue
+            test "$(jq '[.jobs[] | select(.name == "Generate public release evidence" and
+                                          .conclusion == "success")] | length' \
+              <<<"$jobs")" -eq 1 || continue
+
+            rm -rf candidate-dist candidate-evidence
+            if ! gh run download "$candidate" \
+              --repo "$GH_REPO" \
+              --name python-package-distributions \
+              --dir candidate-dist; then
+              continue
+            fi
+            if ! gh run download "$candidate" \
+              --repo "$GH_REPO" \
+              --name public-release-evidence \
+              --dir candidate-evidence; then
+              continue
+            fi
+            if python - "$RELEASE_TAG" "$tag_sha" <<'PY'; then
           import hashlib
           import json
           import sys
           from pathlib import Path
 
           tag, commit = sys.argv[1:]
-          with open("release-evidence/release-evidence.json", encoding="utf-8") as handle:
+          evidence_root = Path("candidate-evidence")
+          with (evidence_root / "release-evidence.json").open(encoding="utf-8") as handle:
               evidence = json.load(handle)
-          assert evidence.get("format") == "engraphis-release-evidence/2"
+          assert evidence.get("format") == "engraphis-release-evidence/3"
           assert evidence.get("package", {}).get("version") == tag.removeprefix("v")
           assert evidence.get("tag") == tag
           assert evidence.get("commit") == commit
-          assert evidence.get("provenance", {}).get("source") == {"tag": tag, "commit": commit}
+          assert evidence.get("provenance", {}).get("source") == {
+              "tag": tag, "commit": commit,
+          }
           expected = {
               item["filename"]: item["sha256"]
               for item in evidence.get("artifacts", [])
           }
           actual = {
               path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in Path("dist").iterdir()
-              if path.is_file() and (path.name.endswith(".whl") or path.name.endswith(".tar.gz"))
+              for path in Path("candidate-dist").iterdir()
+              if path.is_file() and path.name.endswith((".whl", ".tar.gz"))
           }
           assert expected == actual
+          records = [
+              evidence["sbom"],
+              evidence["environment_lock"],
+              evidence["reproducibility"],
+              evidence["container"]["sbom"],
+              evidence["container"]["vulnerability_scan"],
+          ]
+          for record in records:
+              path = evidence_root / Path(record["path"]).name
+              assert path.is_file()
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == record["sha256"]
           PY
+              rm -rf dist release-evidence
+              mv candidate-dist dist
+              mv candidate-evidence release-evidence
+              selected_run="$candidate"
+              break
+            fi
+          done < "$RUNNER_TEMP/release-run-candidates"
+          test -n "$selected_run"
 
       - name: Verify any previously published subset
         env:
@@ -687,11 +1013,11 @@ jobs:
         shell: bash
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --clobber
           else
-            gh release create "$RELEASE_TAG" verified-dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
+            gh release create "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \

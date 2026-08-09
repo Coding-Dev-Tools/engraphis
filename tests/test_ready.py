@@ -28,10 +28,17 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "api_token", "")
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "ready.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
-    monkeypatch.setattr(settings, "embed_model", "")   # deterministic offline embedder
+    monkeypatch.setattr(settings, "embed_model", "")
 
-    from engraphis.app import create_legacy_reference_app
-    return create_legacy_reference_app(legacy_db_path=tmp_path / "ready-v1.db")
+    from engraphis import app as app_module
+    from engraphis.stores import init_db
+
+    monkeypatch.setattr(app_module, "_warmup_embedder", lambda: True)
+    app = app_module.create_legacy_reference_app(
+        legacy_db_path=tmp_path / "ready-v1.db"
+    )
+    init_db()
+    return app
 
 
 def test_api_ready_reports_checks_and_version(app):
@@ -56,30 +63,84 @@ def test_api_ready_is_503_when_db_check_fails(app, monkeypatch):
     assert body["checks"]["db"] is False
 
 
-def test_legacy_readiness_forwards_embedder_provenance_policy(monkeypatch):
+def test_api_ready_is_503_when_required_schema_is_missing(app):
+    from engraphis.stores import get_conn
+
+    conn = get_conn()
+    conn.execute("ALTER TABLE memories RENAME TO memories_missing")
+    conn.commit()
+
+    response = _get(app, "/api/ready")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["db"] is False
+
+
+def test_legacy_readiness_rechecks_exact_backend_after_failure(monkeypatch):
     from engraphis import app as app_module
-    from engraphis.backends import embedder_st
 
-    captured = {}
+    calls = []
 
-    def get_embedder(model, dim, **kwargs):
-        captured.update(model=model, dim=dim, **kwargs)
-        return type("Embedder", (), {"dim": 384})()
+    def warmup():
+        calls.append("legacy")
+        return len(calls) > 1
 
-    monkeypatch.setattr(settings, "embed_model", "organization/semantic-model")
-    monkeypatch.setattr(settings, "embed_dim", 384)
-    monkeypatch.setattr(settings, "embed_revision", "a" * 40)
-    monkeypatch.setattr(settings, "require_immutable_models", True)
-    monkeypatch.setattr(app_module, "_embedder_ok", False)
-    monkeypatch.setattr(embedder_st, "get_embedder", get_embedder)
+    monkeypatch.setattr(app_module, "_warmup_embedder", warmup)
+    monkeypatch.setattr(app_module, "_embedder_ok", True)
 
+    assert app_module._embedder_ready() is False
     assert app_module._embedder_ready() is True
-    assert captured == {
-        "model": "organization/semantic-model",
-        "dim": 384,
-        "revision": "a" * 40,
-        "require_immutable_models": True,
-    }
+    assert calls == ["legacy", "legacy"]
+
+
+def test_background_maintenance_runs_off_the_event_loop(monkeypatch):
+    import asyncio
+    import contextlib
+    import threading
+    import time
+
+    from engraphis import app as app_module
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_decay(*, namespace=None):
+        del namespace
+        started.set()
+        release.wait(timeout=2)
+        return 0
+
+    def release_later():
+        started.wait(timeout=1)
+        time.sleep(0.5)
+        release.set()
+
+    monkeypatch.setattr(settings, "loop_interval", 0)
+    monkeypatch.setattr(app_module.reweight, "decay_pass", blocking_decay)
+    monkeypatch.setattr(
+        app_module.thoughts_engine,
+        "synthesize_thoughts",
+        lambda **_kwargs: {"persisted": False},
+    )
+    helper = threading.Thread(target=release_later, daemon=True)
+    helper.start()
+
+    async def exercise():
+        task = asyncio.create_task(
+            app_module._consciousness_loop(enable_consolidation=False)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            # A direct call would pin the loop until ``release_later`` fires.
+            assert not release.is_set()
+        finally:
+            release.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
+    helper.join(timeout=1)
 
 
 def test_probes_are_public_even_with_token(monkeypatch, tmp_path):
@@ -88,8 +149,9 @@ def test_probes_are_public_even_with_token(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "embed_model", "")
 
-    from engraphis.app import create_legacy_reference_app
-    app = create_legacy_reference_app(legacy_db_path=tmp_path / "tok-v1.db")
+    from engraphis import app as app_module
+    monkeypatch.setattr(app_module, "_warmup_embedder", lambda: True)
+    app = app_module.create_legacy_reference_app(legacy_db_path=tmp_path / "tok-v1.db")
     assert _get(app, "/api/health").status_code == 200          # no 401
     assert _get(app, "/api/ready").status_code in (200, 503)    # no 401
 

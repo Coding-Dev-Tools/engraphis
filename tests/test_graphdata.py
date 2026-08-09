@@ -44,13 +44,38 @@ def test_build_graph_payload_basic_shape():
     types = {t["etype"]: t["count"] for t in g["types"]}
     assert types == {"person_or_concept": 1, "organization": 2}
 
-    # "top" is a human-readable ranking: id for focusing the graph, name for display
-    assert g["top"] == [{"id": "e1", "name": "Alice", "degree": 1},
-                         {"id": "e2", "name": "Acme Corp", "degree": 1}] or \
-           g["top"] == [{"id": "e2", "name": "Acme Corp", "degree": 1},
-                         {"id": "e1", "name": "Alice", "degree": 1}]
+    # Equal-degree ties use entity id as the canonical secondary key.
+    assert g["top"] == [
+        {"id": "e1", "name": "Alice", "degree": 1},
+        {"id": "e2", "name": "Acme Corp", "degree": 1},
+    ]
 
     assert g["stats"] == {"entities": 3, "edges": 1, "connected": 2, "isolated": 1}
+
+
+def test_build_graph_payload_is_independent_of_input_order():
+    entities = [
+        {"id": "e3", "name": "Three", "etype": "zeta"},
+        {"id": "e1", "name": "One", "etype": "alpha"},
+        {"id": "e2", "name": "Two", "etype": "middle"},
+    ]
+    edges = [
+        {"id": "edge_b", "src": "e3", "dst": "e2", "relation": "uses"},
+        {"id": "edge_a", "src": "e1", "dst": "e2", "relation": "calls"},
+    ]
+
+    forward = build_graph_payload("acme", entities, edges)
+    reversed_rows = build_graph_payload(
+        "acme", list(reversed(entities)), list(reversed(edges)),
+    )
+
+    assert forward == reversed_rows
+    assert [node["id"] for node in forward["nodes"]] == ["e2", "e1", "e3"]
+    assert [edge["id"] for edge in forward["edges"]] == ["edge_a", "edge_b"]
+    assert [item["etype"] for item in forward["types"]] == [
+        "alpha", "middle", "zeta",
+    ]
+    assert [item["id"] for item in forward["top"]] == ["e2", "e1", "e3"]
 
 
 def test_build_graph_payload_does_not_duplicate_connected_entities():

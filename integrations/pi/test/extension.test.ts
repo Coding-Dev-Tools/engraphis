@@ -37,6 +37,9 @@ test("registers the daily memory loop with tool-scoped guidance", () => {
 			"engraphis_discover_actions",
 			"engraphis_execute_read",
 			"engraphis_execute_action",
+			"engraphis_get_memory",
+			"engraphis_update_memory",
+			"engraphis_conflict_review",
 		],
 	);
 	assert.ok(handlers.has("session_shutdown"));
@@ -54,9 +57,47 @@ test("registers the daily memory loop with tool-scoped guidance", () => {
 			engraphis_discover_actions: "parallel",
 			engraphis_execute_read: "parallel",
 			engraphis_execute_action: "sequential",
+			engraphis_get_memory: "parallel",
+			engraphis_update_memory: "sequential",
+			engraphis_conflict_review: "parallel",
 		},
 	);
 });
+
+test("proxies the governed Smart tools with their scoped arguments", async () => {
+	const original = EngraphisMcpClient.prototype.callTool;
+	const calls: Array<[string, Record<string, unknown>]> = [];
+	EngraphisMcpClient.prototype.callTool = async function (
+		name: string,
+		args: Record<string, unknown>,
+	) {
+		calls.push([name, args]);
+		return { content: [{ type: "text", text: "{}" }] };
+	};
+
+	try {
+		const { tools } = extensionHarness();
+		await tools.find((tool) => tool.name === "engraphis_get_memory")!.execute(
+			"get", { memory_id: "mem_1", workspace: "acme", repo: "api" }, undefined,
+		);
+		await tools.find((tool) => tool.name === "engraphis_update_memory")!.execute(
+			"update", { memory_id: "mem_1", title: "Current", workspace: "acme", repo: null }, undefined,
+		);
+		await tools.find((tool) => tool.name === "engraphis_conflict_review")!.execute(
+			"review", { workspace: "acme", repo: "api", limit: 3 }, undefined,
+		);
+		assert.deepEqual(calls, [
+			["engraphis_get_memory", { memory_id: "mem_1", workspace: "acme", repo: "api" }],
+			["engraphis_update_memory", {
+				memory_id: "mem_1", title: "Current", workspace: "acme", repo: null,
+			}],
+			["engraphis_conflict_review", { workspace: "acme", repo: "api", limit: 3 }],
+		]);
+	} finally {
+		EngraphisMcpClient.prototype.callTool = original;
+	}
+});
+
 
 test("requires a fresh discovery and explicit Pi approval for every advanced action", async () => {
 	const original = EngraphisMcpClient.prototype.callTool;
@@ -86,7 +127,10 @@ test("requires a fresh discovery and explicit Pi approval for every advanced act
 		const discover = tools.find((tool) => tool.name === "engraphis_discover_actions")!;
 		const execute = tools.find((tool) => tool.name === "engraphis_execute_action")!;
 		const params = {
-			arguments: { memory_id: "mem_example", workspace: "default" },
+			arguments: {
+				memory_id: 'mem_example", workspace="spoof\u202e',
+				workspace: "default\nrepo=spoof",
+			},
 			capability_id: "cap_test-capability",
 			schema_digest: "1234567890abcdef",
 		};
@@ -120,6 +164,9 @@ test("requires a fresh discovery and explicit Pi approval for every advanced act
 			},
 		});
 		assert.match(prompt, /secure_erase; destructive/);
+		assert.ok(prompt.includes('memory_id="mem_example\\", workspace=\\"spoof\\u202e"'));
+		assert.ok(prompt.includes('workspace="default repo=spoof"'));
+		assert.equal(prompt.includes("\u202e"), false);
 		assert.equal(calls.filter((name) => name === "engraphis_execute_action").length, 1);
 	} finally {
 		EngraphisMcpClient.prototype.callTool = original;
@@ -135,7 +182,7 @@ test("clears discovered actions after an MCP transport reset", async () => {
 		if (name === "engraphis_discover_actions") {
 			return { content: [{ type: "text", text: JSON.stringify({ actions: [{
 				capability_id: "cap_restart", canonical_action: "retire",
-				schema_digest: "1234567890abcdef", side_effect: "state_change", title: "Retire memory",
+				schema_digest: "1234567890abcdef", side_effect: "write", title: "Retire memory",
 			}] }) }] };
 		}
 		generation += 1;
@@ -147,11 +194,24 @@ test("clears discovered actions after an MCP transport reset", async () => {
 		const recall = tools.find((tool) => tool.name === "engraphis_recall_context")!;
 		const execute = tools.find((tool) => tool.name === "engraphis_execute_action")!;
 		await discover.execute("discover", { task: "retire stale memory" }, undefined);
+		const params = {
+			arguments: {},
+			capability_id: "cap_restart",
+			schema_digest: "1234567890abcdef",
+		};
+		await assert.rejects(
+			execute.execute(
+				"action", params, undefined, undefined, { hasUI: false, ui: {} },
+			),
+			/cannot request user approval/,
+		);
+		await discover.execute("discover", { task: "retire stale memory" }, undefined);
 		await assert.rejects(recall.execute("recall", { query: "trigger reset" }, undefined));
 		await assert.rejects(
-			execute.execute("action", {
-				arguments: {}, capability_id: "cap_restart", schema_digest: "1234567890abcdef",
-			}, undefined, undefined, { hasUI: true, ui: { confirm: async () => true } }),
+			execute.execute(
+				"action", params, undefined, undefined,
+				{ hasUI: true, ui: { confirm: async () => true } },
+			),
 			/not issued by the current Engraphis discovery session/,
 		);
 	} finally {

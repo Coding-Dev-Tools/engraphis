@@ -38,8 +38,8 @@ middleware. Do not expose it through a LAN address or proxy. For a remote deploy
 `engraphis[all]`, set a strong `ENGRAPHIS_API_TOKEN`, terminate TLS, and use the dashboard's
 authenticated `/mcp` endpoint instead.
 
-Use `engraphis-mcp-http --classic` only for an existing integration that requires the former 33
-direct tool names. New integrations should keep the Smart default.
+Use `engraphis-mcp-http --classic` only for an existing integration that requires the 34 direct
+tool names. New integrations should keep the nine-tool Smart default.
 
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support
 unless that client has a maintained setup guide and integration test.
@@ -95,8 +95,10 @@ real integration step.
 
 That redeems the token against `POST /v1/devices/connect` on the control plane and writes the
 owner-only session file `~/.engraphis/cloud_session.json` (mode `0600`). The dashboard, the MCP
-server, and Cloud Sync all read that file, so no environment secret is needed afterwards. Rerun
-`engraphis connect` with a fresh token on every machine you want connected.
+server, and Cloud Sync all read that file, so no environment secret is needed afterwards. The
+saved control and compute URLs are bound to that rotating credential family: later environment
+changes cannot redirect its bearer credentials. Reconnect with a fresh portal token to change
+either endpoint. Rerun `engraphis connect` on every machine you want connected.
 
 Useful options:
 
@@ -107,8 +109,8 @@ Useful options:
 | `--workspace WS_ID` | Bind this device to a single workspace. |
 | `--label TEXT` | Name this installation in your account portal. |
 | `--device-name TEXT` | Override the device name (defaults to the hostname). |
-| `--control-url URL` | Point at a non-default control plane. |
-| `--compute-url URL` | Set the managed compute endpoint (also `ENGRAPHIS_CLOUD_COMPUTE_URL`). |
+| `--control-url URL` | Select the control plane for a new connection/preflight; reconnect to change a saved credential family's endpoint. |
+| `--compute-url URL` | Select managed compute for a new connection (also `ENGRAPHIS_CLOUD_COMPUTE_URL`); reconnect to change it later. |
 | `--json` | Print a redacted, machine-readable summary. |
 
 The summary accepts only bounded, printable metadata from the documented response shape.
@@ -144,11 +146,13 @@ has an absolute lifetime and rotation never extends it. Only credential hashes a
 service; the raw replacement is returned once and must be kept in an owner-only local state file
 or secrets manager.
 
-Customer-side environment variables are documented in [`.env.example`](../.env.example). Prefer
-the `~/.engraphis/cloud_session.json` that `engraphis connect --token` writes over long-lived
-environment secrets: it holds a rotating credential, it is owner-only, and it is the path the
-client keeps up to date on its own. Environment secrets are for non-interactive deployments that
-cannot run the connect command.
+Customer-side environment variables are documented in [`.env.example`](../.env.example). Values
+come from the process environment or the owner-private `~/.engraphis/config.env`; an explicit
+`ENGRAPHIS_ENV_FILE` must be an absolute owner-private regular file. Engraphis never searches the
+working directory for `.env`. Prefer the `~/.engraphis/cloud_session.json` that
+`engraphis connect --token` writes over long-lived environment secrets: it holds a rotating
+credential, is owner-only, and keeps its bound endpoints and replacement credential up to date.
+Environment secrets are for non-interactive deployments that cannot run the connect command.
 
 ## Trial and grace
 

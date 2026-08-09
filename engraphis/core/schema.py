@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 15
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -23,6 +23,22 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_at REAL,
     settings   TEXT DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS teams (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at REAL,
+    settings   TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',   -- owner|admin|member
+    joined_at  REAL,
+    PRIMARY KEY (team_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id, role);
 
 CREATE TABLE IF NOT EXISTS repos (
     id           TEXT PRIMARY KEY,
@@ -49,7 +65,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at     REAL,
     summary      TEXT,
     open_threads TEXT DEFAULT '[]',
-    outcome      TEXT
+    outcome      TEXT,
+    handoff       TEXT DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(workspace_id, repo_id, status);
 
@@ -76,6 +93,7 @@ CREATE TABLE IF NOT EXISTS memories (
     valid_to     REAL,
     valid_to_recorded_at REAL,                    -- system-time when valid_to was learned
     ingested_at  REAL,                             -- system-time validity
+    modified_hlc TEXT NOT NULL DEFAULT '',          -- descriptive-state hybrid logical clock
     expired_at   REAL,
     subject_key  TEXT DEFAULT '',                 -- stable claim subject, optional
     claim_kind   TEXT DEFAULT '',                 -- optional claim predicate/category
@@ -84,11 +102,12 @@ CREATE TABLE IF NOT EXISTS memories (
     provenance   TEXT DEFAULT '{}',
     pinned_at    REAL,                              -- system-time when a pin last became effective
     unpinned_at  REAL,                              -- system-time when an unpin became effective
-    sort_order   REAL                              -- manual drag-to-reorder position (dashboard); NULL = unordered
+    sort_order   REAL                                 -- manual drag-to-reorder position (dashboard); NULL = unordered
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
+
 
 -- Persisted memory↔entity incidence lets graph retrieval attach evidence without
 -- rescanning every memory's prose.  Temporal fields preserve historical walks.
@@ -418,7 +437,9 @@ CREATE INDEX IF NOT EXISTS idx_code_mem_symbol
     ON code_memory_links(repo_id, symbol_id);
 CREATE INDEX IF NOT EXISTS idx_code_mem_memory
     ON code_memory_links(repo_id, memory_id);
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_mem_live_unique
+    ON code_memory_links(repo_id, symbol_id, memory_id, relation)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
 -- ── Event ledger & audit ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
     id               TEXT PRIMARY KEY,
@@ -487,6 +508,20 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value      TEXT,
     updated_at REAL
 );
+
+-- Durable, content-free proof that a memory id crossed a sync boundary.
+-- This survives secure erasure so a later private form can still emit the remote
+-- deletion marker peers require, without inferring export authority from current scope.
+CREATE TABLE IF NOT EXISTS memory_sync_exports (
+    memory_id        TEXT PRIMARY KEY,
+    workspace_id     TEXT NOT NULL,
+    repo_id          TEXT,
+    first_exported_at REAL NOT NULL,
+    last_exported_at  REAL NOT NULL,
+    CHECK(last_exported_at >= first_exported_at)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_sync_exports_workspace
+    ON memory_sync_exports(workspace_id, repo_id, memory_id);
 -- ── Maintenance cursors (local bounded-sweep progress) ───────────────────────
 -- Consolidation scans are intentionally bounded. Persist their keyset cursor so
 -- recurring sweeps rotate past rows that are not currently clusterable instead of
@@ -519,11 +554,238 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
     device_id  TEXT NOT NULL,             -- origin device (sync attribution only)
     workspace_id TEXT,                    -- sync scope (may be NULL for legacy rows)
     repo_id    TEXT,                       -- repo scope; NULL means workspace scope/legacy
+    export_class TEXT NOT NULL DEFAULT 'never_export'
+        CHECK(export_class IN ('never_export', 'remote_erasure')),
     created_at REAL NOT NULL
 );
 -- Sync exports scope tombstones by workspace; keep that read bounded as erasures grow.
 CREATE INDEX IF NOT EXISTS idx_memory_tombstones_workspace
     ON memory_tombstones(workspace_id, repo_id, memory_id);
+
+-- Per-device byte transfer counters for sync monitoring (v10).
+-- Tracks bytes_sent and bytes_received per device_id for bandwidth accounting.
+-- These are local counters, never part of sync bundles; device identity is metadata.
+CREATE TABLE IF NOT EXISTS sync_stats (
+    device_id       TEXT PRIMARY KEY,
+    bytes_sent      INTEGER NOT NULL DEFAULT 0,
+    bytes_received  INTEGER NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_stats_updated
+    ON sync_stats(updated_at);
+
+-- Local source-import manifest (v14, generalized in v15).  It intentionally
+-- records no source root, document body, or attachment data: those remain owned
+-- by the selected local collection and the canonical memory rows respectively.
+CREATE TABLE IF NOT EXISTS source_vaults (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    root_digest     TEXT NOT NULL,
+    display_name    TEXT NOT NULL DEFAULT '',
+    workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repo_id         TEXT REFERENCES repos(id) ON DELETE CASCADE,
+    session_id      TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    scope           TEXT NOT NULL DEFAULT 'workspace',
+    memory_type     TEXT NOT NULL DEFAULT 'semantic',
+    importer_version TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    CHECK(kind IN ('documents','obsidian')),
+    CHECK(length(root_digest)=64 AND root_digest NOT GLOB '*[^0-9a-f]*'),
+    CHECK(length(display_name)<=200),
+    CHECK(length(importer_version)<=64),
+    CHECK(scope IN ('workspace','repo','session')),
+    CHECK(memory_type IN ('working','episodic','semantic','procedural')),
+    CHECK(
+        (scope='workspace' AND repo_id IS NULL AND session_id IS NULL)
+        OR (scope='repo' AND repo_id IS NOT NULL AND session_id IS NULL)
+        OR (scope='session' AND session_id IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_source_vaults_root
+    ON source_vaults(kind, root_digest);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_vaults_identity
+    ON source_vaults(
+        kind, root_digest, workspace_id,
+        COALESCE(repo_id, ''), COALESCE(session_id, '')
+    );
+
+CREATE TABLE IF NOT EXISTS source_imports (
+    id              TEXT PRIMARY KEY,
+    vault_id        TEXT NOT NULL REFERENCES source_vaults(id) ON DELETE CASCADE,
+    source_key      TEXT NOT NULL,
+    relative_path   TEXT NOT NULL,
+    memory_id       TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    subject_key     TEXT NOT NULL DEFAULT '',
+    content_sha256  TEXT NOT NULL DEFAULT '',
+    canonical_sha256 TEXT NOT NULL DEFAULT '',
+    importer_version TEXT NOT NULL,
+    file_size       INTEGER NOT NULL DEFAULT 0,
+    file_mtime_ns   INTEGER,
+    state           TEXT NOT NULL DEFAULT 'imported',
+    first_imported_at REAL,
+    last_imported_at REAL,
+    last_seen_at    REAL,
+    missing_at      REAL,
+    last_seen_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+    last_error      TEXT NOT NULL DEFAULT '',
+    UNIQUE(vault_id, source_key),
+    CHECK(length(source_key)=64 AND source_key NOT GLOB '*[^0-9a-f]*'),
+    CHECK(relative_path<>'' AND substr(relative_path,1,1)<>'/'
+          AND instr(relative_path, '\\')=0 AND instr(relative_path, ':')=0
+          AND instr(relative_path, '//')=0
+          AND relative_path NOT IN ('.','..')
+          AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%'
+          AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%'
+          AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'),
+    CHECK(length(relative_path)<=4096),
+    CHECK(content_sha256='' OR
+          (length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*')),
+    CHECK(canonical_sha256='' OR
+          (length(canonical_sha256)=64 AND canonical_sha256 NOT GLOB '*[^0-9a-f]*')),
+    CHECK(file_size>=0),
+    CHECK(length(importer_version)<=64),
+    CHECK(length(last_error)<=2000),
+    CHECK(state IN ('imported','unchanged','skipped','rejected','error','conflict','missing','renamed'))
+);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_state
+    ON source_imports(vault_id, state, relative_path);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_path
+    ON source_imports(vault_id, relative_path);
+CREATE INDEX IF NOT EXISTS idx_source_imports_vault_hash
+    ON source_imports(vault_id, content_sha256);
+
+CREATE TABLE IF NOT EXISTS source_import_items (
+    id              TEXT PRIMARY KEY,
+    job_id          TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    source_id       TEXT REFERENCES source_imports(id) ON DELETE SET NULL,
+    relative_path   TEXT NOT NULL,
+    source_format   TEXT NOT NULL DEFAULT '',
+    planned_action  TEXT NOT NULL,
+    result_state    TEXT NOT NULL DEFAULT 'pending',
+    warning_count   INTEGER NOT NULL DEFAULT 0,
+    error_code      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    finished_at     REAL,
+    UNIQUE(job_id, relative_path, planned_action),
+    CHECK(relative_path<>'' AND substr(relative_path,1,1)<>'/'
+          AND instr(relative_path, '\\')=0 AND instr(relative_path, ':')=0
+          AND instr(relative_path, '//')=0
+          AND relative_path NOT IN ('.','..')
+          AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%'
+          AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%'
+          AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'),
+    CHECK(length(relative_path)<=4096),
+    CHECK(length(source_format)<=64
+          AND source_format NOT GLOB '*[^A-Za-z0-9_.+-]*'),
+    CHECK(planned_action IN ('imported','updated','skipped','rejected','renamed','missing','conflict')),
+    CHECK(result_state IN ('pending','imported','updated','skipped','rejected','renamed','missing','conflict','error','warning')),
+    CHECK(warning_count>=0)
+);
+CREATE INDEX IF NOT EXISTS idx_source_import_items_job_result
+    ON source_import_items(job_id, result_state, relative_path);
+
+-- Scope-security triggers for the source-import manifest.  These enforce that
+-- vaults, imports, and job items never cross workspace/repo/session boundaries,
+-- even when written by direct SQL.  The v15 shape does not reference
+-- jobs.session_id (added in v16); keep these compatible with both.
+CREATE TRIGGER IF NOT EXISTS trg_source_vault_scope_insert
+BEFORE INSERT ON source_vaults BEGIN
+    SELECT CASE WHEN NEW.repo_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM repos r
+        WHERE r.id=NEW.repo_id AND r.workspace_id=NEW.workspace_id
+    ) THEN RAISE(ABORT, 'source vault repo scope mismatch') END;
+    SELECT CASE WHEN NEW.session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id
+          AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'source vault session scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_vault_scope_update
+BEFORE UPDATE OF workspace_id, repo_id, session_id, scope ON source_vaults BEGIN
+    SELECT CASE WHEN NEW.repo_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM repos r
+        WHERE r.id=NEW.repo_id AND r.workspace_id=NEW.workspace_id
+    ) THEN RAISE(ABORT, 'source vault repo scope mismatch') END;
+    SELECT CASE WHEN NEW.session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id
+          AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'source vault session scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_scope_insert
+BEFORE INSERT ON source_imports WHEN NEW.memory_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM memories m JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE m.id=NEW.memory_id AND m.workspace_id=v.workspace_id
+          AND m.repo_id IS v.repo_id AND m.session_id IS v.session_id
+          AND m.scope=v.scope
+    ) THEN RAISE(ABORT, 'source import memory scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_scope_update
+BEFORE UPDATE OF vault_id, memory_id ON source_imports
+WHEN NEW.memory_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM memories m JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE m.id=NEW.memory_id AND m.workspace_id=v.workspace_id
+          AND m.repo_id IS v.repo_id AND m.session_id IS v.session_id
+          AND m.scope=v.scope
+    ) THEN RAISE(ABORT, 'source import memory scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_seen_job_insert
+BEFORE INSERT ON source_imports WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE j.id=NEW.last_seen_job_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_seen_job_update
+BEFORE UPDATE OF vault_id, last_seen_job_id ON source_imports
+WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
+        WHERE j.id=NEW.last_seen_job_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_source_import_job_insert
+BEFORE INSERT ON source_import_items BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j WHERE j.id=NEW.job_id
+          AND j.kind IN ('document_import','obsidian_import')
+    ) THEN RAISE(ABORT, 'source import item requires a document import job') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM source_imports i
+        JOIN source_vaults v ON v.id=i.vault_id
+        JOIN jobs j ON j.id=NEW.job_id
+        WHERE i.id=NEW.source_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) AND NEW.source_id IS NOT NULL
+    THEN RAISE(ABORT, 'source import job scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_source_import_job_update
+BEFORE UPDATE OF job_id, source_id ON source_import_items BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM jobs j WHERE j.id=NEW.job_id
+          AND j.kind IN ('document_import','obsidian_import')
+    ) THEN RAISE(ABORT, 'source import item requires a document import job') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM source_imports i
+        JOIN source_vaults v ON v.id=i.vault_id
+        JOIN jobs j ON j.id=NEW.job_id
+        WHERE i.id=NEW.source_id
+          AND j.kind IN ('document_import','obsidian_import')
+          AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+    ) AND NEW.source_id IS NOT NULL
+    THEN RAISE(ABORT, 'source import job scope mismatch') END;
+END;
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

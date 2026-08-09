@@ -7,6 +7,7 @@ from engraphis.backends.extractor import (
     get_extractor,
 )
 from engraphis.core.interfaces import Extractor, MemoryType
+from engraphis.core.poisoning import prompt_eligible
 
 
 class FakeLLM:
@@ -62,6 +63,10 @@ def test_llm_extractor_degrades_to_passthrough_on_garbage():
     facts = LLMExtractor(FakeLLM("not json at all")).extract("the original text")
     assert len(facts) == 1
     assert facts[0].content == "the original text"
+    assert facts[0].metadata["extraction_fallback"] == {
+        "mode": "llm",
+        "reason": "provider_or_output_error",
+    }
 
 
 def test_llm_extractor_sanitizes_adversarial_fields():
@@ -91,6 +96,73 @@ def test_get_extractor_defaults_offline():
     assert isinstance(get_extractor("llm", llm=FakeLLM("{}")), LLMExtractor)
 
 
+
+@pytest.mark.parametrize("kind", ["llm", "llm_structured"])
+def test_llm_factory_reports_client_construction_fallback(monkeypatch, kind):
+    pytest.importorskip(
+        "httpx", reason="LLM factory tests require the optional HTTP dependency"
+    )
+    import engraphis.llm.client as llm_client
+
+    def unavailable_client(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(llm_client, "LLMClient", unavailable_client)
+    extractor = get_extractor(kind)
+
+    assert isinstance(extractor, PassthroughExtractor)
+    fact = extractor.extract("preserve this write")[0]
+    assert fact.metadata["extraction_fallback"] == {
+        "mode": kind,
+        "reason": "provider_or_output_error",
+    }
+
+
+@pytest.mark.parametrize("kind", ["llm", "llm_structured"])
+def test_engine_create_preserves_factory_time_llm_fallback(monkeypatch, kind):
+    pytest.importorskip(
+        "httpx", reason="LLM factory tests require the optional HTTP dependency"
+    )
+    import engraphis.llm.client as llm_client
+    from engraphis.core.engine import MemoryEngine
+
+    def unavailable_client(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(llm_client, "LLMClient", unavailable_client)
+    engine = MemoryEngine.create(":memory:", extractor=kind)
+
+    assert isinstance(engine.extractor, PassthroughExtractor)
+    fact = engine.extractor.extract("preserve this write")[0]
+    assert fact.metadata["extraction_fallback"]["mode"] == kind
+
+
+def test_engine_ingest_reports_and_persists_llm_fallback():
+    from engraphis.core.engine import MemoryEngine
+
+    engine = MemoryEngine.create(":memory:")
+    engine.extractor = LLMExtractor(FakeLLM("not json"))
+    workspace_id = engine.store.get_or_create_workspace("w")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "r")
+
+    result = engine.ingest(
+        "raw transcript",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+    )
+    record = engine.store.get_memory(result["facts"][0]["id"])
+
+    assert result["extracted"] is False
+    assert record.metadata["extraction_fallback"] == {
+        "mode": "llm",
+        "reason": "provider_or_output_error",
+    }
+    assert record.provenance["trusted"] is True
+    assert record.provenance["review_state"] == "approved"
+    assert prompt_eligible(record.provenance, record.metadata)
+    assert engine.recall("raw transcript", workspace_id=workspace_id).count == 1
+
+
 def test_engine_ingest_stores_each_extracted_fact():
     from engraphis.core.engine import MemoryEngine
     payload = ('{"facts": [{"content": "We deploy through GitHub Actions.", "mtype": "semantic"}, '
@@ -102,8 +174,17 @@ def test_engine_ingest_stores_each_extracted_fact():
     rid = eng.store.get_or_create_repo(wid, "r")
     out = eng.ingest("raw transcript blob", workspace_id=wid, repo_id=rid)
     assert out["count"] == 2 and out["extracted"] is True
-    types = {eng.store.get_memory(f["id"]).mtype for f in out["facts"]}
+    records = [eng.store.get_memory(f["id"]) for f in out["facts"]]
+    types = {record.mtype for record in records}
     assert types == {MemoryType.SEMANTIC, MemoryType.PROCEDURAL}
+    assert all(record.provenance["trusted"] is False for record in records)
+    assert all(record.provenance["review_state"] == "pending" for record in records)
+    assert all(
+        record.provenance["derived_by_llm_extraction"] is True
+        and not prompt_eligible(record.provenance, record.metadata)
+        for record in records
+    )
+    assert eng.recall("GitHub Actions", workspace_id=wid, repo_id=rid).count == 0
 
 
 def test_engine_ingest_without_extractor_is_passthrough():
@@ -136,5 +217,108 @@ def test_engine_ingest_preserves_structured_extractor_metadata():
     assert rec.metadata["llm_extraction"]["mode"] == "llm_structured"
     assert rec.metadata["llm_extraction"]["fact_count"] == 1
     assert len(rec.metadata["llm_extraction"]["source_sha256"]) == 64
-    assert rec.metadata["entities"] == ["Engraphis", "SQLite"]
-    assert rec.metadata["relations"][0]["target"] == "SQLite"
+    assert rec.metadata["llm_extraction"]["review_required"] is True
+    assert "entities" not in rec.metadata and "relations" not in rec.metadata
+    deferred = rec.metadata["unverified_derived_graph"]
+    assert deferred["entities"] == ["Engraphis", "SQLite"]
+    assert deferred["relations"][0]["target"] == "SQLite"
+    assert deferred["source"] == "llm_extraction"
+
+
+@pytest.mark.parametrize("mode", ["llm", "llm_structured"])
+def test_llm_quality_eval_rejects_fail_soft_facts_as_model_backed(
+    monkeypatch,
+    mode,
+):
+    import engraphis.factory as engine_factory
+    from eval import extractor_quality
+
+    class _UnavailableLLM:
+        def chat(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+        def extract_json(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    def unavailable_extractor(kind, **_kwargs):
+        if kind == "llm":
+            return LLMExtractor(_UnavailableLLM())
+        if kind == "llm_structured":
+            return StructuredLLMExtractor(_UnavailableLLM())
+        return get_extractor(kind)
+
+    monkeypatch.setattr(engine_factory, "get_extractor", unavailable_extractor)
+    cases = [{
+        "document": "The API uses PASETO tokens.",
+        "questions": [{"q": "Which tokens?", "evidence": "PASETO"}],
+    }]
+
+    with pytest.raises(RuntimeError, match="no model-backed facts"):
+        extractor_quality.run_eval(cases, mode=mode)
+
+
+def test_llm_quality_eval_counts_successful_model_backed_facts(monkeypatch):
+    import engraphis.factory as engine_factory
+    from eval import extractor_quality
+
+    payload = '{"facts":[{"content":"The API uses PASETO tokens."}]}'
+
+    def model_extractor(kind, **_kwargs):
+        if kind == "llm":
+            return LLMExtractor(FakeLLM(payload))
+        return get_extractor(kind)
+
+    monkeypatch.setattr(engine_factory, "get_extractor", model_extractor)
+    cases = [{
+        "document": "The API uses PASETO tokens.",
+        "questions": [{"q": "Which tokens?", "evidence": "PASETO"}],
+    }]
+
+    result = extractor_quality.run_eval(cases, mode="llm")
+
+    assert result["fact_count"] == 1
+    assert result["model_backed_fact_count"] == 1
+
+
+def test_extractor_quality_requires_explicit_llm_opt_in(monkeypatch):
+    from eval import extractor_quality
+
+    called = []
+
+    def fake_run_eval(_cases, *, mode, **_kwargs):
+        called.append(mode)
+        return {"mode": mode}
+
+    monkeypatch.setattr(extractor_quality, "run_eval", fake_run_eval)
+    result = extractor_quality.evaluate_all([], k=5, embed_model=None)
+
+    assert called == ["none", "chunk"]
+    assert {item["mode"] for item in result["skipped"]} == {
+        "llm",
+        "llm_structured",
+    }
+    assert all(
+        "explicit --include-llm" in item["reason"]
+        for item in result["skipped"]
+    )
+
+
+def test_extractor_quality_explicit_llm_opt_in_attempts_provider_modes(monkeypatch):
+    from eval import extractor_quality
+
+    called = []
+
+    def fake_run_eval(_cases, *, mode, **_kwargs):
+        called.append(mode)
+        return {"mode": mode}
+
+    monkeypatch.setattr(extractor_quality, "run_eval", fake_run_eval)
+    result = extractor_quality.evaluate_all(
+        [],
+        k=5,
+        embed_model=None,
+        include_llm=True,
+    )
+
+    assert called == ["none", "chunk", "llm", "llm_structured"]
+    assert result["skipped"] == []

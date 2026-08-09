@@ -63,22 +63,16 @@ def main(argv=None) -> int:
     ap.add_argument("--structured", action="store_true",
                     help="Use configured LLM for schema-validated consolidation facts "
                          "with entities/relations/confidence; falls back to deterministic.")
-    ap.add_argument("--supersede-sources", action="store_true",
-                    help="Only with --structured: bi-temporally close source episodes "
-                         "after validated facts are written.")
     ap.add_argument("--min-mentions", type=int, default=3,
                     help="Memories mentioning an entity before it earns a profile "
                          "(default 3; only used with --profiles).")
     args = ap.parse_args(argv)
-    if args.supersede_sources and not args.structured:
-        print("error: --supersede-sources requires --structured", file=sys.stderr)
-        return 2
 
     service = _service(args.db)
     try:
         return _consolidate(args, service.engine)
     finally:
-        service.store.close()
+        service.close()
 
 
 def _consolidate(args: argparse.Namespace, engine: MemoryEngine) -> int:
@@ -112,8 +106,11 @@ def _consolidate(args: argparse.Namespace, engine: MemoryEngine) -> int:
             workspace_id=wid_row["id"], repo_id=rid, dry_run=args.dry_run,
             min_cluster=args.min_cluster, archive_below=args.archive_below, llm=llm,
             profiles=args.profiles, min_mentions=args.min_mentions,
-            structured=args.structured, supersede_sources=args.supersede_sources,
+            structured=args.structured,
         )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     finally:
         if llm is not None and hasattr(llm, "close"):
             try:

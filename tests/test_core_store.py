@@ -10,14 +10,18 @@ import pytest
 from engraphis.core.interfaces import (
     Edge,
     GraphLayer,
+    GraphReader,
+    GraphWriter,
     MemoryRecord,
     MemoryType,
     Node,
     Scope,
     SearchFilter,
+    format_modified_hlc,
+    parse_modified_hlc,
 )
 from engraphis.core import scoring
-from engraphis.core.retention_policy import MAX_STABILITY_DAYS
+from engraphis.core.retention_policy import MAX_STABILITY_DAYS, reinforced_stability
 from engraphis.core.schema import SCHEMA_VERSION
 from engraphis.core.store import Store, memory_matches_filter, normalize_entity_name
 
@@ -344,6 +348,36 @@ def test_upsert_edge_support_failure_rolls_back_edge_and_releases_lock(store, mo
     ).fetchone() is not None
 
 
+def test_close_validity_rolls_back_fact_and_audit_on_graph_failure(store, monkeypatch):
+    wid = store.get_or_create_workspace("close-rollback")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_close_rollback",
+        content="live",
+        workspace_id=wid,
+    ))
+    created = store.get_memory(memory_id)
+    assert created is not None and created.valid_from is not None
+    audit_before = store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE target=?", (memory_id,)
+    ).fetchone()[0]
+
+    def fail_graph_retirement(*args, **kwargs):
+        raise RuntimeError("graph retirement unavailable")
+
+    monkeypatch.setattr(
+        store, "invalidate_edges_for_memory", fail_graph_retirement
+    )
+    with pytest.raises(RuntimeError, match="graph retirement unavailable"):
+        store.close_validity(memory_id, at=created.valid_from + 1.0)
+
+    record = store.get_memory(memory_id)
+    assert record is not None and record.valid_to is None
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM audit WHERE target=?", (memory_id,)
+    ).fetchone()[0] == audit_before
+    assert store.conn.in_transaction is False
+
+
 def test_upsert_entity_backfill_failure_rolls_back_entity(store, monkeypatch):
     wid = store.get_or_create_workspace("w")
     node = Node(id="entity-backfill-failure", name="Failure Entity",
@@ -413,10 +447,25 @@ def test_upsert_entity_failure_after_waiting_for_other_transaction_releases_lock
         "SELECT 1 FROM entities WHERE id=?", (node.id,)
     ).fetchone() is None
 
+def _add_link_test_memories(store, *memory_ids):
+    wid = store.get_or_create_workspace("memory-link-tests")
+    for memory_id in memory_ids:
+        store.add_memory(MemoryRecord(
+            id=memory_id,
+            content=f"endpoint {memory_id}",
+            workspace_id=wid,
+            scope=Scope.WORKSPACE,
+            valid_from=1.0,
+            ingested_at=1.0,
+        ), commit=False)
+    store.conn.commit()
+
+
 @pytest.mark.parametrize("method_name", ("add_link", "add_link_version"))
 def test_link_writes_release_transaction_after_waiting_for_other_thread(
     store, monkeypatch, method_name,
 ):
+    _add_link_test_memories(store, "link-a", "link-b")
     entered = threading.Event()
     release = threading.Event()
     outcome = []
@@ -466,6 +515,26 @@ def test_link_writes_release_transaction_after_waiting_for_other_thread(
     else:
         store.add_link("link-a", "link-b", relation="related")
     assert store.get_links("link-a")
+
+
+@pytest.mark.parametrize("method_name", ("add_link", "add_link_version"))
+def test_link_writes_preserve_caller_owned_transaction(store, method_name):
+    _add_link_test_memories(store, "link-outer-a", "link-outer-b")
+    store.conn.execute("BEGIN IMMEDIATE")
+
+    with pytest.raises(ValueError, match="endpoints must exist"):
+        getattr(store, method_name)(
+            "link-outer-a", "link-missing", relation="related"
+        )
+    assert store.conn.in_transaction
+
+    getattr(store, method_name)(
+        "link-outer-a", "link-outer-b", relation="related"
+    )
+    assert store.conn.in_transaction
+    assert store.has_link("link-outer-a", "link-outer-b")
+    store.conn.rollback()
+    assert not store.has_link("link-outer-a", "link-outer-b")
 
 
 def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch):
@@ -943,6 +1012,7 @@ def test_memory_links_honor_known_at_empty_layers_and_large_id_sets(
     from engraphis.core import store as store_mod
 
     ids = [f"mem_{index:04d}" for index in range(600)]
+    _add_link_test_memories(store, *ids)
     store.add_link(ids[0], ids[-1], relation="causes", layer=GraphLayer.CAUSAL)
     store.conn.execute(
         "UPDATE mem_links SET created_at=100, valid_from=100, ingested_at=100"
@@ -961,6 +1031,7 @@ def test_memory_links_honor_known_at_empty_layers_and_large_id_sets(
 
 
 def test_closed_memory_link_can_be_reactivated_without_erasing_history(store):
+    _add_link_test_memories(store, "mem_a", "mem_b")
     store.add_link(
         "mem_a", "mem_b", relation="related",
         valid_from=10.0, valid_to=20.0, valid_to_recorded_at=20.0,
@@ -999,6 +1070,7 @@ def test_closed_memory_link_can_be_reactivated_without_erasing_history(store):
 
 
 def test_expired_memory_link_does_not_block_reactivation(store):
+    _add_link_test_memories(store, "mem_a", "mem_b")
     store.add_link(
         "mem_a", "mem_b", relation="related",
         valid_from=10.0, ingested_at=10.0, expired_at=20.0,
@@ -1029,6 +1101,7 @@ def test_expired_memory_link_does_not_block_reactivation(store):
 def test_memory_link_metadata_change_versions_system_time_without_rewriting_history(
         store, monkeypatch):
     from engraphis.core import store as store_mod
+    _add_link_test_memories(store, "mem_a", "mem_b")
 
     store.add_link(
         "mem_a", "mem_b", relation="related", layer=GraphLayer.SEMANTIC,
@@ -1776,3 +1849,1053 @@ def test_mem_links_b_index_is_used(store):
     plan = " ".join(str(r[3]) for r in store.conn.execute(
         "EXPLAIN QUERY PLAN SELECT a, b FROM mem_links WHERE b=?", ("mem_x",)).fetchall())
     assert "idx_mem_links_b" in plan
+
+
+# ── owner-01 persistence hardening regressions ───────────────────────────────
+
+BAD_TEMPORAL_VALUES = [
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="positive-infinity"),
+    pytest.param(float("-inf"), id="negative-infinity"),
+    pytest.param(True, id="boolean"),
+    pytest.param("not-a-time", id="text"),
+    pytest.param(10**10000, id="overflowing-integer"),
+]
+
+
+@pytest.mark.parametrize("bad_value", BAD_TEMPORAL_VALUES)
+def test_record_temporal_fields_reject_non_finite_values(bad_value):
+    for field in (
+        "last_access", "valid_from", "valid_to", "ingested_at", "expired_at",
+        "valid_to_recorded_at", "pinned_at", "unpinned_at",
+    ):
+        with pytest.raises(ValueError, match="finite timestamp"):
+            MemoryRecord(id="", content="invalid time", **{field: bad_value})
+
+
+@pytest.mark.parametrize("bad_value", BAD_TEMPORAL_VALUES)
+def test_edge_temporal_fields_and_weight_reject_non_finite_values(bad_value):
+    for field in (
+        "valid_from", "valid_to", "ingested_at", "expired_at",
+        "valid_to_recorded_at",
+    ):
+        with pytest.raises(ValueError, match="finite timestamp"):
+            Edge(id="", src="a", dst="b", relation="related", **{field: bad_value})
+    with pytest.raises(ValueError, match="finite number"):
+        Edge(id="", src="a", dst="b", relation="related", weight=bad_value)
+
+
+@pytest.mark.parametrize("bad_value", BAD_TEMPORAL_VALUES)
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "add_memory",
+        "upsert_edge",
+        "add_edge_support",
+        "close_validity",
+        "invalidate_edge",
+        "invalidate_edges_for_memory",
+        "retire_memory_graph_state",
+        "add_link",
+        "add_link_version",
+        "link_memory_entity",
+        "add_memory_tombstone",
+    ],
+)
+def test_temporal_mutators_reject_invalid_values_before_persisting(
+        store, operation, bad_value):
+    wid = store.get_or_create_workspace("temporal-domain")
+    first = store.add_memory(MemoryRecord(
+        id="mem_time_a", content="a", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    second = store.add_memory(MemoryRecord(
+        id="mem_time_b", content="b", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    entity_id = store.upsert_entity(Node(
+        id="ent_time", name="Time", workspace_id=wid,
+    ))
+    edge_id = store.upsert_edge(Edge(
+        id="edge_time", src="ent_time", dst="ent_other", relation="related",
+        workspace_id=wid,
+    ))
+    rows_before = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"]
+
+    with pytest.raises(ValueError, match="finite"):
+        if operation == "add_memory":
+            record = MemoryRecord(
+                id="mem_invalid_time", content="bad", workspace_id=wid,
+            )
+            record.valid_from = bad_value
+            store.add_memory(record)
+        elif operation == "upsert_edge":
+            edge = Edge(
+                id="edge_invalid_time", src="a", dst="b", relation="related",
+                workspace_id=wid,
+            )
+            edge.valid_from = bad_value
+            store.upsert_edge(edge)
+        elif operation == "add_edge_support":
+            store.add_edge_support(
+                edge_id, {"memory_id": first}, valid_from=bad_value,
+            )
+        elif operation == "close_validity":
+            store.close_validity(first, at=bad_value)
+        elif operation == "invalidate_edge":
+            store.invalidate_edge(edge_id, at=bad_value)
+        elif operation == "invalidate_edges_for_memory":
+            store.invalidate_edges_for_memory(first, at=bad_value)
+        elif operation == "retire_memory_graph_state":
+            store.retire_memory_graph_state(first, at=bad_value)
+        elif operation == "add_link":
+            store.add_link(first, second, valid_from=bad_value)
+        elif operation == "add_link_version":
+            store.add_link_version(first, second, valid_from=bad_value)
+        elif operation == "link_memory_entity":
+            store.link_memory_entity(
+                memory_id=first,
+                entity_id=entity_id,
+                workspace_id=wid,
+                repo_id=None,
+                valid_from=bad_value,
+            )
+        else:
+            store.add_memory_tombstone(first, deleted_at=bad_value)
+
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"] == rows_before
+    assert store.conn.in_transaction is False
+
+
+@pytest.mark.parametrize("bad_value", BAD_TEMPORAL_VALUES)
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "memory_matches_filter",
+        "edges_in_scope",
+        "edge_supports_in_scope",
+        "neighbors",
+        "mutated_filter",
+    ],
+)
+def test_temporal_read_overrides_reject_invalid_values(store, operation, bad_value):
+    with pytest.raises(ValueError, match="finite timestamp"):
+        if operation == "memory_matches_filter":
+            memory_matches_filter(
+                MemoryRecord(id="mem_read_time", content="read", valid_from=1.0),
+                None,
+                at=bad_value,
+            )
+        elif operation == "edges_in_scope":
+            store.edges_in_scope(at=bad_value)
+        elif operation == "edge_supports_in_scope":
+            store.edge_supports_in_scope(at=bad_value)
+        elif operation == "neighbors":
+            store.neighbors(["ent_read_time"], at=bad_value)
+        else:
+            flt = SearchFilter()
+            flt.valid_at = bad_value
+            store.list_memories(flt)
+
+
+def test_invalid_memory_overwrite_rolls_back_audit_and_releases_writer(store):
+    wid = store.get_or_create_workspace("overwrite-rollback")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_overwrite", content="original", workspace_id=wid,
+        valid_from=10.0,
+    ))
+    audit_before = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"]
+    with pytest.raises(ValueError, match="valid_to cannot predate"):
+        store.add_memory(MemoryRecord(
+            id=memory_id, content="rejected", workspace_id=wid,
+            valid_from=10.0, valid_to=9.0,
+        ))
+
+    assert store.get_memory(memory_id).content == "original"
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"] == audit_before
+    assert store.conn.in_transaction is False
+
+    errors = []
+
+    def write_after_failure():
+        try:
+            store.add_memory(MemoryRecord(
+                id="", content="accepted", workspace_id=wid,
+            ))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    thread = threading.Thread(target=write_after_failure)
+    thread.start()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert errors == []
+
+
+def test_invalid_memory_overwrite_preserves_caller_owned_transaction(store):
+    wid = store.get_or_create_workspace("overwrite-savepoint")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_overwrite_savepoint", content="original", workspace_id=wid,
+        valid_from=10.0,
+    ))
+    audit_before = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"]
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ValueError, match="valid_to cannot predate"):
+        store.add_memory(MemoryRecord(
+            id=memory_id, content="rejected", workspace_id=wid,
+            valid_from=10.0, valid_to=9.0,
+        ), commit=False)
+
+    assert store.conn.in_transaction
+    assert store.get_memory(memory_id).content == "original"
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"] == audit_before
+    accepted = store.add_memory(MemoryRecord(
+        id="", content="outer transaction survives", workspace_id=wid,
+    ), commit=False)
+    assert store.get_memory(accepted) is not None
+    store.conn.rollback()
+    assert store.get_memory(accepted) is None
+    assert store.get_memory(memory_id).content == "original"
+
+
+def test_memory_link_writes_and_reads_enforce_endpoint_ownership(store):
+    workspace_a = store.get_or_create_workspace("link-a")
+    workspace_b = store.get_or_create_workspace("link-b")
+    a = store.add_memory(MemoryRecord(
+        id="mem_link_a", content="a", workspace_id=workspace_a,
+        scope=Scope.WORKSPACE,
+    ))
+    same = store.add_memory(MemoryRecord(
+        id="mem_link_same", content="same", workspace_id=workspace_a,
+        scope=Scope.WORKSPACE,
+    ))
+    foreign = store.add_memory(MemoryRecord(
+        id="mem_link_foreign", content="foreign", workspace_id=workspace_b,
+        scope=Scope.WORKSPACE,
+    ))
+
+    store.add_link(a, same, relation="related")
+    with pytest.raises(ValueError, match="share workspace ownership"):
+        store.add_link(a, foreign, relation="related")
+    with pytest.raises(ValueError, match="must exist"):
+        store.add_link(a, "mem_missing", relation="related")
+    assert store.conn.in_transaction is False
+
+    # Simulate one legacy/direct-SQL row that predates the governed writer.
+    store.conn.execute(
+        "INSERT INTO mem_links(a,b,relation,layer,reason,created_at,valid_from,"
+        "ingested_at) VALUES (?,?,?,?,?,?,?,?)",
+        (a, foreign, "legacy", "semantic", "", 1.0, 1.0, 1.0),
+    )
+    store.conn.commit()
+    flt = SearchFilter(workspace_id=workspace_a)
+    assert [row["b"] for row in store.get_links(a, flt=flt)] == [same]
+    assert [row["b"] for row in store.get_links(a)] == [same]
+    assert not store.has_link(a, foreign, relation="legacy")
+    assert store.links_among(
+        [a, foreign], include_invalid=True
+    ) == []
+    assert all(
+        foreign not in (row["a"], row["b"])
+        for row in store.links_touching([a], flt=flt)
+    )
+
+
+def test_same_workspace_links_preserve_ancestor_and_cross_repo_relationships(store):
+    wid = store.get_or_create_workspace("link-same-workspace")
+    first_repo = store.get_or_create_repo(wid, "first")
+    second_repo = store.get_or_create_repo(wid, "second")
+    first = store.add_memory(MemoryRecord(
+        id="mem_link_first_repo", content="first", workspace_id=wid,
+        repo_id=first_repo, scope=Scope.REPO,
+    ))
+    second = store.add_memory(MemoryRecord(
+        id="mem_link_second_repo", content="second", workspace_id=wid,
+        repo_id=second_repo, scope=Scope.REPO,
+    ))
+    ancestor = store.add_memory(MemoryRecord(
+        id="mem_link_workspace_ancestor", content="ancestor", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+
+    store.add_link(first, second, relation="related")
+    store.add_link(first, ancestor, relation="supports")
+    assert store.has_link(first, second, relation="related")
+    assert store.has_link(first, ancestor, relation="supports")
+    assert {
+        row["b"] for row in store.get_links(first)
+    } == {second, ancestor}
+
+    scoped = store.get_links(first, flt=SearchFilter(
+        workspace_id=wid, repo_id=first_repo, include_ancestors=True,
+    ))
+    assert [(row["b"], row["relation"]) for row in scoped] == [
+        (ancestor, "supports"),
+    ]
+
+
+def test_governed_scope_transition_requires_persisted_widening_evidence(store):
+    wid = store.get_or_create_workspace("governed-link")
+    rid = store.get_or_create_repo(wid, "repo")
+    source = store.add_memory(MemoryRecord(
+        id="mem_scope_source", content="source", workspace_id=wid,
+        repo_id=rid, scope=Scope.REPO,
+    ))
+    promoted = store.add_memory(MemoryRecord(
+        id="mem_scope_promoted", content="promoted", workspace_id=wid,
+        scope=Scope.WORKSPACE, metadata={"promoted_from": [source]},
+    ))
+    unproven = store.add_memory(MemoryRecord(
+        id="mem_scope_unproven", content="unproven", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+
+    with pytest.raises(ValueError, match="governed promotion"):
+        store.add_link(promoted, source, relation="promotes")
+    with pytest.raises(ValueError, match="lacks persisted source evidence"):
+        store.add_link(
+            unproven, source, relation="promotes", allow_scope_transition=True,
+        )
+    store.add_link(
+        promoted, source, relation="promotes", allow_scope_transition=True,
+    )
+    assert store.has_link(promoted, source, relation="promotes")
+    store.conn.execute(
+        "INSERT INTO mem_links(a,b,relation,layer,reason,created_at,valid_from,"
+        "ingested_at) VALUES (?,?,?,?,?,?,?,?)",
+        (unproven, source, "promotes", "semantic", "", 1.0, 1.0, 1.0),
+    )
+    store.conn.commit()
+    assert not store.has_link(unproven, source, relation="promotes")
+    assert store.get_links(unproven) == []
+
+
+def test_visible_memory_ids_matches_canonical_filter_and_is_bounded(store):
+    wid = store.get_or_create_workspace("visibility")
+    rid = store.get_or_create_repo(wid, "repo")
+    sid = store.start_session(wid, rid, agent="test")
+    ids_in_scope = [
+        store.add_memory(MemoryRecord(
+            id="mem_vis_workspace", content="workspace", workspace_id=wid,
+            scope=Scope.WORKSPACE,
+        )),
+        store.add_memory(MemoryRecord(
+            id="mem_vis_repo", content="repo", workspace_id=wid,
+            repo_id=rid, scope=Scope.REPO,
+        )),
+        store.add_memory(MemoryRecord(
+            id="mem_vis_session", content="session", workspace_id=wid,
+            repo_id=rid, session_id=sid, scope=Scope.SESSION,
+        )),
+    ]
+    closed = store.add_memory(MemoryRecord(
+        id="mem_vis_closed", content="closed", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    stored_closed = store.get_memory(closed)
+    store.close_validity(closed, at=stored_closed.valid_from)
+    candidates = [*ids_in_scope, closed, "mem_missing"]
+    flt = SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        session_id=sid,
+        include_ancestors=True,
+    )
+    records = store.get_memories(candidates)
+    expected = {
+        memory_id for memory_id, record in records.items()
+        if memory_matches_filter(record, flt)
+    }
+
+    assert store.visible_memory_ids(candidates, flt) == expected
+    assert closed in store.visible_memory_ids(
+        candidates, flt, include_invalid=True
+    )
+    with pytest.raises(ValueError, match="at most"):
+        store.visible_memory_ids(
+            [f"mem_{index}" for index in range(501)], flt
+        )
+
+
+def test_entity_and_code_graph_reads_honor_keyset_and_sentinel_limits(store):
+    wid = store.get_or_create_workspace("bounded-graph")
+    rid = store.get_or_create_repo(wid, "repo")
+    for entity_id, name in (
+        ("ent_03", "Three"), ("ent_01", "One"), ("ent_02", "Two"),
+    ):
+        store.upsert_entity(Node(
+            id=entity_id, name=name, workspace_id=wid, repo_id=rid,
+        ))
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    first_page = store.list_entities(flt, after_id="", limit=2)
+    second_page = store.list_entities(
+        flt, after_id=first_page[-1].id, limit=2
+    )
+    assert [node.id for node in first_page] == ["ent_01", "ent_02"]
+    assert [node.id for node in second_page] == ["ent_03"]
+
+    symbol_ids = []
+    for index in range(4):
+        symbol_ids.append(store.upsert_symbol(
+            repo_id=rid,
+            kind="function",
+            name=f"symbol_{index}",
+            fqname=f"pkg.symbol_{index}",
+            file=f"file_{index // 2}.py",
+            span=f"{index + 1}:{index + 1}",
+        ))
+        store.add_code_edge(
+            repo_id=rid,
+            src=f"symbol_{index}",
+            dst=f"symbol_{(index + 1) % 4}",
+            relation="calls",
+        )
+    assert len(store.symbols_for_files(
+        rid, ["file_0.py", "file_1.py"], flt=flt, limit=3
+    )) == 3
+    assert len(store.list_symbols(rid, flt=flt, limit=3)) == 3
+    assert len(store.list_code_edges(rid, flt=flt, limit=3)) == 3
+
+
+def test_store_satisfies_narrow_graph_protocols(store):
+    assert isinstance(store, GraphReader)
+    assert isinstance(store, GraphWriter)
+
+
+def test_concurrent_identity_initializers_and_reinforcement_converge(tmp_path):
+    db_path = str(tmp_path / "identity.db")
+    Store(db_path).close()
+    stores = [Store(db_path), Store(db_path)]
+    try:
+        def race(call):
+            barrier = threading.Barrier(2)
+            results = []
+            errors = []
+
+            def worker(index):
+                try:
+                    barrier.wait()
+                    results.append(call(stores[index]))
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            assert all(not thread.is_alive() for thread in threads)
+            assert errors == []
+            return results
+
+        workspace_ids = race(
+            lambda current: current.get_or_create_workspace("shared")
+        )
+        assert len(set(workspace_ids)) == 1
+        personal_ids = race(
+            lambda current: current.get_or_create_workspace(
+                "personal-race",
+                settings={
+                    "visibility": "personal",
+                    "owner": (
+                        "alice@example.test"
+                        if current is stores[0] else "bob@example.test"
+                    ),
+                },
+            )
+        )
+        assert len(set(personal_ids)) == 1
+        persisted_row = stores[0].conn.execute(
+            "SELECT settings FROM workspaces WHERE id=?", (personal_ids[0],)
+        ).fetchone()
+        assert persisted_row is not None
+        persisted_settings = json.loads(persisted_row["settings"])
+        assert persisted_settings in (
+            {"visibility": "personal", "owner": "alice@example.test"},
+            {"visibility": "personal", "owner": "bob@example.test"},
+        )
+        assert stores[1].get_or_create_workspace(
+            "personal-race",
+            settings={"visibility": "personal", "owner": "mallory@example.test"},
+        ) == personal_ids[0]
+        reread_row = stores[0].conn.execute(
+            "SELECT settings FROM workspaces WHERE id=?", (personal_ids[0],)
+        ).fetchone()
+        assert reread_row is not None
+        assert json.loads(reread_row["settings"]) == persisted_settings
+        repo_ids = race(
+            lambda current: current.get_or_create_repo(workspace_ids[0], "repo")
+        )
+        assert len(set(repo_ids)) == 1
+        device_ids = race(lambda current: current.device_id())
+        assert len(set(device_ids)) == 1
+
+        memory_id = stores[0].add_memory(MemoryRecord(
+            id="mem_reinforce_concurrent",
+            content="reinforce",
+            workspace_id=workspace_ids[0],
+        ))
+        initial = stores[0].get_memory(memory_id)
+        assert initial is not None
+        barrier = threading.Barrier(8)
+        errors = []
+
+        def reinforce(index):
+            try:
+                barrier.wait()
+                for _ in range(10):
+                    stores[index % 2].reinforce(memory_id)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reinforce, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        record = stores[0].get_memory(memory_id)
+        assert record is not None
+        assert record.access_count == 80
+        expected_stability = initial.stability
+        expected_count = initial.access_count
+        for _ in range(80):
+            expected_stability, expected_count = reinforced_stability(
+                expected_stability, expected_count
+            )
+        assert record.stability == pytest.approx(expected_stability)
+        assert record.access_count == expected_count
+        assert math.isfinite(record.stability)
+    finally:
+        for current in stores:
+            current.close()
+
+
+def test_reinforce_preserves_caller_owned_transaction(store):
+    wid = store.get_or_create_workspace("reinforce-transaction")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_reinforce_transaction",
+        content="reinforce",
+        workspace_id=wid,
+    ))
+    before = store.get_memory(memory_id)
+    assert before is not None
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    store.reinforce(memory_id)
+    during = store.get_memory(memory_id)
+    assert during is not None
+    assert during.access_count == before.access_count + 1
+    assert store.conn.in_transaction
+    store.conn.rollback()
+
+    after = store.get_memory(memory_id)
+    assert after is not None
+    assert after.access_count == before.access_count
+    assert after.stability == before.stability
+
+
+def test_read_only_store_is_query_only_and_leaves_database_files_unchanged(tmp_path):
+    db_path = tmp_path / "read-only.db"
+    writable = Store(str(db_path))
+    wid = writable.get_or_create_workspace("read-only")
+    memory_id = writable.add_memory(MemoryRecord(
+        id="", content="immutable evidence", workspace_id=wid,
+    ))
+    writable.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writable.close()
+
+    tracked = [db_path, tmp_path / "read-only.db-wal", tmp_path / "read-only.db-shm"]
+
+    def file_state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: file_state(path) for path in tracked}
+    read_only = Store(str(db_path), read_only=True)
+    try:
+        record = read_only.get_memory(memory_id)
+        assert record is not None and record.content == "immutable evidence"
+        query_only = read_only.conn.execute("PRAGMA query_only").fetchone()
+        assert query_only is not None and query_only[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            read_only.conn.execute(
+                "UPDATE memories SET content='changed' WHERE id=?", (memory_id,)
+            )
+    finally:
+        read_only.close()
+    after = {path.name: file_state(path) for path in tracked}
+    assert after == before
+
+
+def test_read_only_store_rejects_active_wal_without_touching_sidecars(tmp_path):
+    db_path = tmp_path / "active-wal.db"
+    writable = Store(str(db_path))
+    try:
+        writable.conn.execute("PRAGMA wal_autocheckpoint=0")
+        writable.get_or_create_workspace("active-wal")
+        wal_path = tmp_path / "active-wal.db-wal"
+        assert wal_path.is_file() and wal_path.stat().st_size > 0
+        before = (
+            wal_path.stat().st_size,
+            wal_path.stat().st_mtime_ns,
+        )
+
+        with pytest.raises(RuntimeError, match="active WAL found"):
+            Store(str(db_path), read_only=True)
+
+        assert (
+            wal_path.stat().st_size,
+            wal_path.stat().st_mtime_ns,
+        ) == before
+    finally:
+        writable.close()
+
+
+def test_read_only_store_rejects_incomplete_current_version_marker(tmp_path):
+    db_path = tmp_path / "incomplete.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at REAL)"
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, 0)",
+        (SCHEMA_VERSION,),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="complete current schema"):
+        Store(str(db_path), read_only=True)
+
+
+def test_public_store_rejects_user_scope_before_mutation_but_legacy_import_reads(store):
+    wid = store.get_or_create_workspace("user-scope")
+    record = MemoryRecord(
+        id="mem_user_legacy",
+        content="historical user preference",
+        workspace_id=wid,
+        scope=Scope.USER,
+    )
+    audit_before = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"]
+    message = (
+        "user scope is not supported until owner-aware memories are implemented; "
+        "use workspace, repo, or session"
+    )
+
+    with pytest.raises(ValueError, match=message):
+        store.add_memory(record)
+    assert store.get_memory(record.id) is None
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+    ).fetchone()["n"] == audit_before
+    assert store.conn.in_transaction is False
+
+    store.add_memory(record, _allow_legacy_user_scope=True)
+    historical = store.get_memory(record.id)
+    assert historical is not None and historical.scope == Scope.USER
+
+
+@pytest.mark.parametrize(
+    ("scope", "sensitivity", "mark_exported", "expected"),
+    [
+        (Scope.WORKSPACE, "normal", True, "remote_erasure"),
+        (Scope.REPO, "sensitive", True, "remote_erasure"),
+        (Scope.WORKSPACE, "normal", False, "never_export"),
+        (Scope.SESSION, "normal", False, "never_export"),
+        (Scope.WORKSPACE, "secret", False, "never_export"),
+        (Scope.USER, "normal", False, "never_export"),
+    ],
+)
+def test_secure_erase_classifies_content_free_tombstone_export(
+        store, scope, sensitivity, mark_exported, expected):
+    wid = store.get_or_create_workspace("erase-class")
+    rid = store.get_or_create_repo(wid, "repo")
+    session_id = store.start_session(wid, rid, agent="test")
+    record = MemoryRecord(
+        id=f"mem_erase_{scope.value}_{sensitivity}",
+        content="erasable record",
+        workspace_id=wid,
+        repo_id=rid if scope in (Scope.REPO, Scope.SESSION) else None,
+        session_id=session_id if scope == Scope.SESSION else None,
+        scope=scope,
+        sensitivity=sensitivity,
+    )
+    memory_id = store.add_memory(
+        record,
+        _allow_legacy_user_scope=scope == Scope.USER,
+    )
+    if mark_exported:
+        assert store.mark_memories_sync_exported(
+            [memory_id], workspace_id=wid
+        ) == 1
+
+    result = store.secure_erase_memory(memory_id)
+
+    assert result["export_class"] == expected
+    tombstone = next(
+        row for row in store.list_memory_tombstones()
+        if row["id"] == memory_id
+    )
+    assert tombstone["export_class"] == expected
+    assert set(tombstone) == {
+        "id", "deleted_at", "device", "workspace_id", "repo_id",
+        "export_class",
+    }
+
+
+def test_tombstone_export_class_is_strict_and_monotonic(store):
+    with pytest.raises(ValueError, match="export_class must be"):
+        store.add_memory_tombstone(
+            "mem_invalid_export",
+            device_id="device",
+            export_class="local_only",
+        )
+    assert store.list_memory_tombstones() == []
+
+    store.add_memory_tombstone(
+        "mem_terminal",
+        deleted_at=20.0,
+        device_id="remote",
+        export_class="remote_erasure",
+    )
+    store.add_memory_tombstone(
+        "mem_terminal",
+        deleted_at=10.0,
+        device_id="local",
+        export_class="never_export",
+    )
+    tombstone = store.list_memory_tombstones()[0]
+    assert tombstone["deleted_at"] == 10.0
+    assert tombstone["device"] == "local"
+    assert tombstone["export_class"] == "remote_erasure"
+
+    store.add_memory_tombstone(
+        "mem_private_terminal",
+        deleted_at=30.0,
+        device_id="local",
+        export_class="never_export",
+    )
+    store.conn.commit()
+    with pytest.raises(ValueError, match="cannot become remotely exportable"):
+        store.add_memory_tombstone(
+            "mem_private_terminal",
+            deleted_at=5.0,
+            device_id="remote",
+            export_class="remote_erasure",
+        )
+    private = next(
+        item for item in store.list_memory_tombstones()
+        if item["id"] == "mem_private_terminal"
+    )
+    assert private["deleted_at"] == 30.0
+    assert private["export_class"] == "never_export"
+
+
+
+def test_modified_hlc_advances_across_clock_rollback_and_caller_rollback(
+        store, monkeypatch):
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: 100.0)
+    wid = store.get_or_create_workspace("modified-hlc")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_modified_hlc",
+        content="versioned",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    initial = store.get_memory(memory_id)
+    assert initial is not None
+    physical, logical, _ = parse_modified_hlc(initial.modified_hlc)
+    assert (physical, logical) == (100_000, 0)
+
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: 90.0)
+    rolled_back_clock = store.advance_memory_modified_hlc(memory_id)
+    next_physical, next_logical, _ = parse_modified_hlc(rolled_back_clock)
+    assert (next_physical, next_logical) == (physical, logical + 1)
+
+    observed = format_modified_hlc(
+        physical + 10, 7, "dev_" + ("0" * 26)
+    )
+    advanced = store.advance_memory_modified_hlc(
+        memory_id, observed_hlc=observed
+    )
+    assert advanced > observed
+    persisted = store.get_memory(memory_id)
+    assert persisted is not None and persisted.modified_hlc == advanced
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    nested = store.advance_memory_modified_hlc(memory_id, commit=True)
+    assert nested > advanced
+    assert store.conn.in_transaction
+    store.conn.rollback()
+    restored = store.get_memory(memory_id)
+    assert restored is not None and restored.modified_hlc == advanced
+
+    uncommitted = store.advance_memory_modified_hlc(memory_id, commit=False)
+    assert uncommitted > advanced
+    assert store.conn.in_transaction
+    store.conn.rollback()
+    restored = store.get_memory(memory_id)
+    assert restored is not None and restored.modified_hlc == advanced
+
+
+def test_modified_hlc_advances_atomically_across_store_connections(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: 200.0)
+    db_path = str(tmp_path / "modified-hlc-race.db")
+    stores = [Store(db_path), Store(db_path)]
+    try:
+        wid = stores[0].get_or_create_workspace("modified-hlc-race")
+        memory_id = stores[0].add_memory(MemoryRecord(
+            id="mem_modified_hlc_race",
+            content="versioned",
+            workspace_id=wid,
+            scope=Scope.WORKSPACE,
+        ))
+        barrier = threading.Barrier(8)
+        results: list[str] = []
+        errors: list[BaseException] = []
+        result_lock = threading.Lock()
+
+        def advance(index):
+            try:
+                barrier.wait()
+                value = stores[index % 2].advance_memory_modified_hlc(memory_id)
+                with result_lock:
+                    results.append(value)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=advance, args=(index,))
+            for index in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(set(results)) == len(results) == 8
+        persisted = stores[0].get_memory(memory_id)
+        assert persisted is not None
+        assert persisted.modified_hlc == max(results)
+    finally:
+        for current in stores:
+            current.close()
+
+
+def test_sync_export_markers_are_bounded_atomic_and_content_free(store):
+    wid = store.get_or_create_workspace("sync-export-proof")
+    shared_id = store.add_memory(MemoryRecord(
+        id="mem_sync_export_shared",
+        content="shareable",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    secret_id = store.add_memory(MemoryRecord(
+        id="mem_sync_export_secret",
+        content="private",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        sensitivity="secret",
+    ))
+
+    with pytest.raises(ValueError, match="shareable workspace/repo"):
+        store.mark_memories_sync_exported(
+            [shared_id, secret_id], workspace_id=wid
+        )
+    assert store.get_memory_sync_export(shared_id) is None
+    assert store.get_memory_sync_export(secret_id) is None
+    assert store.conn.in_transaction is False
+
+    with pytest.raises(ValueError, match="finite timestamp"):
+        store.mark_memories_sync_exported(
+            [shared_id], workspace_id=wid, exported_at=float("inf")
+        )
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    assert store.mark_memories_sync_exported(
+        [shared_id, shared_id], workspace_id=wid,
+        exported_at=10.0, commit=True,
+    ) == 1
+    marker = store.get_memory_sync_export(shared_id)
+    assert marker == {
+        "memory_id": shared_id,
+        "workspace_id": wid,
+        "repo_id": None,
+        "first_exported_at": 10.0,
+        "last_exported_at": 10.0,
+    }
+    assert store.conn.in_transaction
+    store.conn.rollback()
+    assert store.get_memory_sync_export(shared_id) is None
+
+
+def test_prior_export_marker_survives_private_transition_and_secure_erase(store):
+    wid = store.get_or_create_workspace("sync-export-transition")
+    rid = store.get_or_create_repo(wid, "repo")
+    session_id = store.start_session(wid, rid, agent="test")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_sync_export_transition",
+        content="shared first",
+        workspace_id=wid,
+        repo_id=rid,
+        scope=Scope.REPO,
+    ))
+    store.mark_memories_sync_exported(
+        [memory_id], workspace_id=wid, exported_at=10.0
+    )
+
+    store.advance_memory_modified_hlc(memory_id, commit=False)
+    store.conn.execute(
+        "UPDATE memories SET scope='session', session_id=?, sensitivity='secret' "
+        "WHERE id=?",
+        (session_id, memory_id),
+    )
+    store.conn.commit()
+    result = store.secure_erase_memory(memory_id)
+
+    assert result["export_class"] == "remote_erasure"
+    tombstone = next(
+        row for row in store.list_memory_tombstones(wid, rid)
+        if row["id"] == memory_id
+    )
+    assert tombstone["export_class"] == "remote_erasure"
+    assert tombstone["repo_id"] == rid
+    marker = store.get_memory_sync_export(memory_id)
+    assert marker is not None
+    assert set(marker) == {
+        "memory_id", "workspace_id", "repo_id",
+        "first_exported_at", "last_exported_at",
+    }
+
+
+@pytest.mark.parametrize(
+    "modified_hlc",
+    [
+        "not-an-hlc",
+        "000000000001:00000000:legacy-device",
+        "000000000001:000000000:dev_" + ("0" * 26),
+        "000000000001:00000000:dev_" + ("I" * 26),
+    ],
+)
+def test_modified_hlc_rejects_noncanonical_values_before_persisting(
+        store, modified_hlc):
+    wid = store.get_or_create_workspace("invalid-modified-hlc")
+    record = MemoryRecord(
+        id="mem_invalid_modified_hlc",
+        content="invalid version",
+        workspace_id=wid,
+    )
+    record.modified_hlc = modified_hlc
+
+    with pytest.raises(ValueError, match="canonical HLC"):
+        store.add_memory(record)
+
+    assert store.get_memory(record.id) is None
+    assert store.conn.in_transaction is False
+
+
+def test_add_memory_preserves_blank_legacy_hlc_only_by_explicit_opt_in(store):
+    wid = store.get_or_create_workspace("legacy-hlc-import")
+    local_id = store.add_memory(MemoryRecord(
+        id="mem_local_hlc",
+        content="local",
+        workspace_id=wid,
+    ))
+    local = store.get_memory(local_id)
+    assert local is not None and local.modified_hlc
+
+    legacy = MemoryRecord(
+        id="mem_legacy_hlc",
+        content="legacy one",
+        workspace_id=wid,
+        ingested_at=10.0,
+    )
+    store.add_memory(legacy, _preserve_legacy_modified_hlc=True)
+    persisted = store.get_memory(legacy.id)
+    assert persisted is not None and persisted.modified_hlc == ""
+
+    store.add_memory(
+        MemoryRecord(
+            id=legacy.id,
+            content="legacy two",
+            workspace_id=wid,
+            ingested_at=20.0,
+        ),
+        audit=False,
+        _preserve_legacy_modified_hlc=True,
+    )
+    persisted = store.get_memory(legacy.id)
+    assert persisted is not None
+    assert persisted.content == "legacy two"
+    assert persisted.modified_hlc == ""
+
+    store.conn.execute("BEGIN IMMEDIATE")
+    store.add_memory(
+        MemoryRecord(
+            id="mem_legacy_hlc_rollback",
+            content="rolled back",
+            workspace_id=wid,
+        ),
+        _preserve_legacy_modified_hlc=True,
+    )
+    assert store.conn.in_transaction
+    store.conn.rollback()
+    assert store.get_memory("mem_legacy_hlc_rollback") is None
+
+    advanced = store.advance_memory_modified_hlc(legacy.id)
+    assert advanced
+    persisted = store.get_memory(legacy.id)
+    assert persisted is not None and persisted.modified_hlc == advanced
+
+
+def test_add_memory_advances_hlc_only_for_real_local_descriptive_overwrite(store):
+    wid = store.get_or_create_workspace("local-hlc-overwrite")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_local_hlc_overwrite",
+        content="one",
+        workspace_id=wid,
+    ))
+    original = store.get_memory(memory_id)
+    assert original is not None and original.modified_hlc
+    original_clock = original.modified_hlc
+
+    original.content = "two"
+    store.add_memory(original)
+    changed = store.get_memory(memory_id)
+    assert changed is not None
+    assert changed.modified_hlc > original_clock
+
+    changed_clock = changed.modified_hlc
+    changed.modified_hlc = ""
+    store.add_memory(changed)
+    idempotent = store.get_memory(memory_id)
+    assert idempotent is not None
+    assert idempotent.modified_hlc == changed_clock
+
+    idempotent.stability += 1.0
+    store.add_memory(idempotent)
+    lattice_only = store.get_memory(memory_id)
+    assert lattice_only is not None
+    assert lattice_only.stability == idempotent.stability
+    assert lattice_only.modified_hlc == changed_clock

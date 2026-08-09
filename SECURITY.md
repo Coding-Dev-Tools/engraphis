@@ -71,7 +71,10 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
   workspace a hard boundary; requests outside the list are refused before touching the store
 
 ### 4. Secrets & data at rest
-- `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored; never logged
+- `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored and must never be logged. Gitignore is
+  not a runtime trust boundary: Engraphis never searches the working directory for `.env`.
+  Configuration files are limited to owner-private `~/.engraphis/config.env` or an absolute
+  owner-private regular file selected by `ENGRAPHIS_ENV_FILE`; explicit process variables win.
 - **Encryption at rest (opt-in):** `ENGRAPHIS_DB_KEY` / `ENGRAPHIS_DB_KEY_FILE` +
   `pip install "engraphis[encryption]"` → AES-256 via SQLCipher. Whole-file; lose key = lose data.
   Off by default; without it, protect with filesystem permissions + full-disk encryption.
@@ -133,6 +136,9 @@ them back as `expected_head` / `expected_count` when independent evidence is req
 - **Cloud authorization:** the public package accepts only short-lived scoped access tokens or
   a rotating refresh credential bound to its bootstrap `device` or `member` subject. It contains
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
+- **Credential-origin binding:** a saved rotating credential remains bound to the control/compute
+  URLs recorded for its family; environment changes cannot redirect it. A standalone sync token
+  likewise requires `ENGRAPHIS_SYNC_TOKEN_ORIGIN` to match the relay origin.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
 - **Cloud Sync and managed-compute privacy:** Cloud Sync encrypts eligible shared-workspace
@@ -145,6 +151,10 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   carries normal and sensitive memory content, excludes secret-class and session-scoped rows, and
   is capped at 16 MiB. Secret-class memories are excluded before serialization and rejected again
   by the hosted service.
+- **Cloud Sync rollback bounds:** version-3 snapshots chain per-device generations, state hashes,
+  and tombstone checkpoints. Previously observed rollback is rejected, but first contact remains
+  unanchored/incomplete until the hosted service supplies an authenticated workspace manifest:
+  a local client cannot prove that an untrusted relay did not withhold an unseen device.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.

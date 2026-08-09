@@ -18,6 +18,7 @@ import logging
 import os
 from numbers import Integral
 from typing import Literal, Optional, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import numpy as np
 
@@ -28,6 +29,27 @@ logger = logging.getLogger("engraphis.embedder_api")
 # Default OpenRouter endpoint
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_API_KEY_ENV = "ENGRAPHIS_LLM_API_KEY"
+
+
+def _embeddings_endpoint(base_url: str) -> str:
+    """Return one OpenAI-compatible embeddings URL from a root or v1 base."""
+    parsed = urlsplit(base_url.strip())
+    stripped_path = parsed.path.strip("/")
+    path = f"/{stripped_path}" if stripped_path else ""
+    if path.endswith("/embeddings"):
+        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+    while path.endswith("/v1"):
+        path = path[:-3].rstrip("/")
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, path + "/v1/embeddings", parsed.query, "")
+    )
+
+
+def _embedding_space_endpoint(url: str) -> str:
+    """Remove request credentials while retaining the provider endpoint identity."""
+    parsed = urlsplit(url)
+    netloc = parsed.netloc.rsplit("@", 1)[-1].lower()
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path, "", ""))
 
 
 class ApiEmbedder:
@@ -43,6 +65,10 @@ class ApiEmbedder:
         API key. Falls back to ``ENGRAPHIS_LLM_API_KEY`` env var.
     dim : int, optional
         Known embedding dimension. If not provided, detected from first response.
+    space_version : str, optional
+        Provider/operator revision for the returned vector space. Persisted API
+        embeddings fail closed when this is omitted because mutable providers cannot
+        be fingerprinted from a model selector alone.
     """
 
     supports_semantic_search = True
@@ -55,9 +81,11 @@ class ApiEmbedder:
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         dim: Optional[int] = None,
+        space_version: Optional[str] = None,
     ) -> None:
         self.model = model
-        self._base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")
+        self._base_url = (base_url or _DEFAULT_BASE_URL).strip()
+        self._space_version = (space_version or "").strip()
         self._api_key = api_key or os.environ.get(_DEFAULT_API_KEY_ENV, "")
         if dim is not None:
             if isinstance(dim, bool) or not isinstance(dim, Integral):
@@ -68,7 +96,7 @@ class ApiEmbedder:
                     f"embedding dimension must be between 1 and {MAX_EMBEDDING_DIM}"
                 )
         self._dim = dim
-        self._embeddings_url = f"{self._base_url}/v1/embeddings"
+        self._embeddings_url = _embeddings_endpoint(self._base_url)
         # A custom endpoint can contain embedded credentials or signed query
         # parameters, while provider-controlled model identifiers are also untrusted
         # log input. Do not copy either into logs.
@@ -86,9 +114,14 @@ class ApiEmbedder:
 
     @property
     def embedding_version(self) -> str:
-        """Return a credential-free fingerprint of the provider vector space."""
-        payload = f"v1\0{self._base_url}\0{self.model}\0{self.dim}".encode("utf-8")
-        return "v1:" + hashlib.sha256(payload).hexdigest()
+        """Return a credential-free fingerprint, or empty for an unversioned API."""
+        if not self._space_version:
+            return ""
+        payload = (
+            f"v2\0{_embedding_space_endpoint(self._embeddings_url)}\0"
+            f"{self.model}\0{self.dim}\0{self._space_version}"
+        ).encode("utf-8")
+        return "v2:" + hashlib.sha256(payload).hexdigest()
 
     def embed(
         self, texts: list[str], *, kind: Literal["text", "code"] = "text"

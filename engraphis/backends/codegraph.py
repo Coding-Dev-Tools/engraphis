@@ -340,21 +340,36 @@ class TreeSitterSymbolIndexer:
 
     @staticmethod
     def _import_targets(node, src: bytes) -> list[str]:
+        if _node_kind(node) == "import_from_statement":
+            try:
+                module = _cg(node, "child_by_field_name", "module_name")
+            except Exception:
+                module = None
+            if module is not None:
+                text = _text(src, module).strip("\"'`")
+                return [text] if text else []
+
         wanted = {
             "dotted_name", "string", "interpreted_string_literal", "raw_string_literal",
             "scoped_identifier", "qualified_identifier",
         }
+        targets: list[str] = []
+        seen: set[str] = set()
         stack = [node]
         while stack:
             current = stack.pop()
             if current is not node and _node_kind(current) in wanted:
                 text = _text(src, current).strip("\"'`")
-                if text:
-                    return [text]
+                if text and text not in seen:
+                    seen.add(text)
+                    targets.append(text)
+                # A wanted node can contain wanted descendants (for example a qualified
+                # identifier). The outer node is the complete module target.
+                continue
             cc = _cg(current, "child_count")
             for i in range(cc - 1, -1, -1):
                 stack.append(_cg(current, "child", i))
-        return []
+        return targets
 
 
 def _base_targets_from_signature(first: str, lang: str) -> list[tuple[str, str]]:
@@ -737,10 +752,10 @@ def load_ignore_patterns(root: str) -> tuple:
     *prune* a walk already confined to ``root``; they can never widen it.
 
     * ``# comment`` and blank lines are ignored.
-    * ``!name`` re-includes a name the ignore file itself excluded (gitignore-style). It
-      can NOT re-expose a hardcoded default (``node_modules``/``.git``/build dirs …) —
-      those stay excluded no matter what an untrusted ``.engraphisignore`` says, so it
-      can't reintroduce the large-tree hang or pull vendored code into the graph.
+    * ``!pattern`` re-includes a path the ignore file itself excluded. Negations take
+      precedence over matching positive rules, but can NOT re-expose a hardcoded default
+      (``node_modules``/``.git``/build dirs …), so an untrusted repo cannot reintroduce
+      the large-tree hang or pull vendored code into the graph.
     * a bare token with no wildcard (``fixtures``) matches that file/dir name anywhere.
     * a token with a wildcard or slash (``*.gen.cs``, ``src/generated/*``) is a glob
       matched against each candidate's repo-root-relative POSIX path (and basename).
@@ -765,7 +780,7 @@ def load_ignore_patterns(root: str) -> tuple:
             continue
         if line.startswith("!"):
             tok = line[1:].strip().strip("/")
-            if tok and not _has_glob(tok):
+            if tok:
                 unignore.add(tok)
             continue
         line = line.rstrip("/")
@@ -776,6 +791,69 @@ def load_ignore_patterns(root: str) -> tuple:
     return names, globs, unignore
 
 
+def source_path_allowed(root: str, path: str, *,
+                        respect_ignore_file: bool = True) -> bool:
+    """Return whether one explicit path belongs to the repository source policy.
+
+    Incremental indexers and filesystem watchers do not walk the tree, so they must
+    apply the same hardcoded directory, ``.engraphisignore``, containment, and symlink
+    rules as :func:`iter_source_files`. Missing paths are allowed when their lexical
+    location is eligible so callers can retire a deleted file's prior index rows.
+    """
+    root_real = os.path.realpath(os.fspath(root))
+    raw_candidate = os.fspath(path)
+    if not os.path.isabs(raw_candidate):
+        raw_candidate = os.path.join(os.fspath(root), raw_candidate)
+    candidate = os.path.abspath(raw_candidate)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        if os.path.commonpath((root_real, candidate_real)) != root_real:
+            return False
+    except (OSError, ValueError):
+        return False
+    relative = os.path.relpath(candidate_real, root_real)
+    if relative in ("", "."):
+        return False
+    parts = Path(relative).parts
+    if not parts or detect_lang(parts[-1]) is None:
+        return False
+    if any(part in _DEFAULT_EXCLUDE_DIRS for part in parts[:-1]):
+        return False
+
+    # Reject a symlink at any existing component. The full walk uses
+    # followlinks=False and skips file links, so explicit paths must do the same.
+    lexical_root = Path(os.path.abspath(os.fspath(root)))
+    current = lexical_root
+    try:
+        lexical_relative = Path(candidate).relative_to(lexical_root)
+    except ValueError:
+        return False
+    for part in lexical_relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+
+    names: set = set()
+    globs: list = []
+    unignore: set = set()
+    if respect_ignore_file:
+        names, globs, unignore = load_ignore_patterns(root_real)
+    candidates = [
+        "/".join(parts[:index])
+        for index in range(1, len(parts) + 1)
+    ]
+    return not any(
+        _ignored_by_rules(
+            candidate_path,
+            candidate_path.rsplit("/", 1)[-1],
+            names,
+            globs,
+            unignore,
+        )
+        for candidate_path in candidates
+    )
+
+
 def _has_glob(s: str) -> bool:
     return any(c in s for c in "*?[")
 
@@ -784,6 +862,24 @@ def _rel_posix(rel_dir: str, name: str) -> str:
     if rel_dir in ("", "."):
         return name
     return rel_dir.replace(os.sep, "/") + "/" + name
+
+
+def _matches_ignore_pattern(rel_path: str, name: str, pattern: str) -> bool:
+    if _has_glob(pattern) or "/" in pattern:
+        return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(name, pattern)
+    return name == pattern
+
+
+def _ignored_by_rules(rel_path: str, name: str, names: set, globs: list,
+                      unignore: set) -> bool:
+    ignored = name in names or any(
+        _matches_ignore_pattern(rel_path, name, pattern) for pattern in globs
+    )
+    if not ignored:
+        return False
+    return not any(
+        _matches_ignore_pattern(rel_path, name, pattern) for pattern in unignore
+    )
 
 
 # Upper bound on directories visited in a single walk. Pairs with the engine's
@@ -816,12 +912,10 @@ def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None,
     unignore: set = set()
     if respect_ignore_file:
         ig_names, ig_globs, unignore = load_ignore_patterns(root_str)
-    # Defaults are non-negotiable: `!` can only re-include a name the ignore file itself
-    # added, never a hardcoded default — an untrusted repo can't disable the hang guards.
-    excl_dir_names = default_excl | (ig_names - unignore)
-
-    def _glob_hit(rel_path: str, name: str) -> bool:
-        return any(fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(name, g) for g in ig_globs)
+    # Defaults are non-negotiable: `!` can only re-include a path the ignore file itself
+    # excluded, never a hardcoded default — an untrusted repo cannot disable hang guards.
+    def _ignore_hit(rel_path: str, name: str) -> bool:
+        return _ignored_by_rules(rel_path, name, ig_names, ig_globs, unignore)
 
     dirs_seen = 0
     for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
@@ -834,12 +928,10 @@ def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None,
         # prune in place so os.walk skips these subtrees entirely
         dirnames[:] = [
             d for d in dirnames
-            if d not in excl_dir_names and not _glob_hit(_rel_posix(rel_dir, d), d)
+            if d not in default_excl and not _ignore_hit(_rel_posix(rel_dir, d), d)
         ]
         for fn in filenames:
-            if detect_lang(fn) is None or fn in ig_names:
-                continue
-            if _glob_hit(_rel_posix(rel_dir, fn), fn):
+            if detect_lang(fn) is None or _ignore_hit(_rel_posix(rel_dir, fn), fn):
                 continue
             full = os.path.join(dirpath, fn)
             if os.path.islink(full):  # never read a symlink target (may escape root)

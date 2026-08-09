@@ -36,6 +36,13 @@ def _finite_number(value: Any, *, field: str) -> float:
         raise ValueError(f"{field} must be a finite number")
     return result
 
+def _optional_namespace(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("namespace must be a non-empty string")
+    return value
+
 
 def _prompt_eligible(mem: Mapping[str, Any]) -> bool:
     metadata = mem.get("metadata")
@@ -83,8 +90,7 @@ def recall(
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
-    if namespace is not None and not isinstance(namespace, str):
-        raise ValueError("namespace must be a string")
+    namespace = _optional_namespace(namespace)
     num_chunks = _nonnegative_limit(num_chunks, field="num_chunks")
     min_retention = _finite_number(min_retention, field="min_retention")
     if document_ids is not None:
@@ -160,8 +166,7 @@ def recall(
 
 def recall_master(*, namespace: Optional[str] = None, max_chunks: int = 10) -> dict[str, Any]:
     """Recall the highest-retention memories in a namespace (no prompt needed)."""
-    if namespace is not None and not isinstance(namespace, str):
-        raise ValueError("namespace must be a string")
+    namespace = _optional_namespace(namespace)
     max_chunks = _nonnegative_limit(max_chunks, field="max_chunks")
     candidates = mem_store.all_vectors(namespace=namespace)
     if not candidates:
@@ -175,7 +180,7 @@ def recall_master(*, namespace: Optional[str] = None, max_chunks: int = 10) -> d
             r = float(reweight.retention_score(mem))
             surprise = float(mem.get("surprise", 1.0))
             score = r * surprise
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if not math.isfinite(score):
             continue
@@ -211,8 +216,7 @@ def recall_by_retention(
     as_of: Optional[float] = None,
 ) -> dict[str, Any]:
     """Recall from the Ebbinghaus bank — pure retention ranking, no semantic query."""
-    if namespace is not None and not isinstance(namespace, str):
-        raise ValueError("namespace must be a string")
+    namespace = _optional_namespace(namespace)
     top_k = _nonnegative_limit(top_k, field="top_k")
     min_retention = _finite_number(min_retention, field="min_retention")
     if as_of is not None:
@@ -224,7 +228,7 @@ def recall_by_retention(
             continue
         try:
             r = float(reweight.retention_score(mem, now=as_of))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if not math.isfinite(r) or r < min_retention:
             continue

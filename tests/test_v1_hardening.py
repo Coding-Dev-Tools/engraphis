@@ -9,7 +9,15 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 httpx = pytest.importorskip("httpx", reason="httpx not installed")
 
 from engraphis.config import settings  # noqa: E402
-from engraphis.models import MemoryItem, MAX_CONTENT_CHARS, MAX_NAME_CHARS  # noqa: E402
+from engraphis.models import (  # noqa: E402
+    ChatRequest,
+    InteractionRequest,
+    MAX_CHAT_MESSAGES,
+    MAX_CONTENT_CHARS,
+    MAX_NAME_CHARS,
+    MAX_NAME_LIST_ITEMS,
+    MemoryItem,
+)
 
 
 def test_model_strips_control_chars_and_caps_length():
@@ -19,6 +27,35 @@ def test_model_strips_control_chars_and_caps_length():
         MemoryItem(key="k", content="x" * (MAX_CONTENT_CHARS + 1), namespace="ns")
     with pytest.raises(Exception):
         MemoryItem(key="x" * (MAX_NAME_CHARS + 1), content="c", namespace="ns")
+
+
+def test_models_reject_nonfinite_metadata_timestamps_and_unbounded_collections():
+    with pytest.raises(Exception):
+        MemoryItem(
+            key="k",
+            content="content",
+            namespace="ns",
+            metadata={"score": float("nan")},
+        )
+    with pytest.raises(Exception):
+        MemoryItem(
+            key="k",
+            content="content",
+            namespace="ns",
+            created_at=float("inf"),
+        )
+    with pytest.raises(Exception):
+        ChatRequest(
+            messages=[
+                {"role": "user", "content": "hello"}
+                for _ in range(MAX_CHAT_MESSAGES + 1)
+            ]
+        )
+    with pytest.raises(Exception):
+        InteractionRequest(
+            namespace="ns",
+            entityNames=["entity"] * (MAX_NAME_LIST_ITEMS + 1),
+        )
 
 
 def _client(app):
@@ -59,6 +96,30 @@ def test_rate_limit_returns_429(monkeypatch, tmp_path):
     codes = anyio.run(go)
     assert codes[:2] == [200, 200]
     assert codes[2] == 429  # third request in the window is throttled
+
+
+def test_json_write_envelope_is_rejected_before_model_binding(monkeypatch, tmp_path):
+    import anyio
+    import engraphis.app as app_module
+
+    monkeypatch.setattr(settings, "api_token", "")
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "json.db"))
+    monkeypatch.setattr(settings, "loop_interval", 0)
+    monkeypatch.setattr(app_module, "_JSON_REQUEST_BYTES", 64)
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "json-v1.db")
+
+    async def go():
+        async with _client(app) as c:
+            return await c.post(
+                "/memory/insert",
+                content=b'{"namespace":"ns","key":"k","content":"' + b"x" * 80 + b'"}',
+                headers={"content-type": "application/json"},
+            )
+
+    response = anyio.run(go)
+    assert response.status_code == 413
+    assert response.json()["max_bytes"] == 64
 
 
 def test_health_is_exempt_from_rate_limit(monkeypatch, tmp_path):

@@ -23,7 +23,12 @@ def _artifact() -> dict:
     return {
         "schema": "engraphis-benchmark/v2",
         "suite": {"name": "fixture", "dataset": "questions.json", "sha256": "a" * 64},
-        "system": {"git_commit": "commit-123", "config_sha256": config_hash},
+        "system": {
+            "git_commit": "a" * 40,
+            "git_dirty": False,
+            "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+            "config_sha256": config_hash,
+        },
         "environment": {
             "python": "3.11.0",
             "implementation": "CPython",
@@ -41,7 +46,12 @@ def _artifact() -> dict:
             "n_total": 1,
             "n_scored": 1,
         },
-        "privacy": {"raw_query_policy": "redacted_sha256"},
+        "privacy": {
+            "raw_query_policy": "omitted",
+            "raw_answer_policy": "omitted",
+            "raw_context_policy": "omitted",
+            "content_fingerprint_policy": "omitted",
+        },
         "metrics": {"evidence_hit_rate": 0.9},
         "records": [{"question_id": "q1"}],
     }
@@ -192,6 +202,67 @@ def test_raw_content_and_credential_fields_fail_publication_guard() -> None:
 
     assert "artifact.records[0].question must not contain raw benchmark content" in errors
     assert "artifact.protocol.config.api_key must not contain credential material" in errors
+
+
+@pytest.mark.parametrize(
+    "fingerprint_field",
+    (
+        "query_sha256",
+        "answer_or_response_sha256",
+        "context_or_prompt_sha256",
+    ),
+)
+def test_content_fingerprints_and_dirty_sources_fail_publication_guard(
+    fingerprint_field,
+) -> None:
+    artifact = _artifact()
+    artifact["records"][0][fingerprint_field] = "b" * 64
+    artifact["system"]["git_dirty"] = True
+    artifact["system"]["dirty_state_sha256"] = "c" * 64
+
+    errors = validate_public_readiness(artifact)
+
+    assert any("content-derived fingerprint" in error for error in errors)
+    assert "artifact.system.git_dirty must be false" in errors
+    assert "artifact.system.dirty_state_sha256 must attest a clean worktree" in errors
+
+
+def test_longmemeval_end_to_end_scope_requires_run_and_matrix_bindings() -> None:
+    artifact = _artifact()
+    artifact["suite"]["name"] = "LongMemEval-V2"
+    config = artifact["protocol"]["config"]
+    config.update({
+        "measurement_scope": "end_to_end",
+        "upstream_revision": "b" * 40,
+        "execution_binding": {
+            "verified": True,
+            "status": "complete",
+            "clean_checkout": True,
+            "manifest_sha256": "c" * 64,
+            "upstream_revision": "b" * 40,
+            "source_questions": 1,
+            "output_rows": 1,
+        },
+        "matrix_binding": {
+            "verified": True,
+            "manifest_sha256": "d" * 64,
+            "config_sha256": "e" * 64,
+        },
+    })
+    artifact["system"]["config_sha256"] = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert validate_public_readiness(artifact) == []
+
+    del config["execution_binding"]
+    artifact["system"]["config_sha256"] = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert any(
+        "verified clean execution binding" in error
+        for error in validate_public_readiness(artifact)
+    )
 
 
 def test_retrieval_only_claim_cannot_overstate_answer_quality_cost_or_latency() -> None:

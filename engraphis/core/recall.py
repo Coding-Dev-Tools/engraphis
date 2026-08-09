@@ -22,6 +22,7 @@ import queue
 import re
 import threading
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex
 
 import numpy as np
@@ -291,12 +292,39 @@ class RecallEngine:
             item.text for item, run_config in zip(planned_queries, run_configs)
             if run_config.vector
         ]
-        embedded = self.embedder.embed(embedded_texts) if embedded_texts else []
-        embedded_iter = iter(embedded)
-        query_vectors = [
-            next(embedded_iter) if run_config.vector else None
-            for run_config in run_configs
-        ]
+        query_vectors: list[Optional[np.ndarray]]
+        if embedded_texts:
+            try:
+                embedded = self.embedder.embed(embedded_texts)
+                if len(embedded) != len(embedded_texts):
+                    raise ValueError("semantic embedder returned an unexpected vector count")
+                embedded_iter = iter(embedded)
+                query_vectors = [
+                    next(embedded_iter) if run_config.vector else None
+                    for run_config in run_configs
+                ]
+            except Exception as exc:  # optional backend; preserve non-vector arms
+                vector_search_ready = False
+                capabilities.update({
+                    "degraded_mode": True,
+                    "semantic_support": False,
+                    "vector_search_ready": False,
+                    "degraded_reason": (
+                        "semantic query embedding failed; lexical, graph, and "
+                        "code retrieval remain available"
+                    ),
+                })
+                run_configs = [
+                    replace(run_config, vector=False, semantic_scale=0.0)
+                    for run_config in run_configs
+                ]
+                query_vectors = [None for _ in run_configs]
+                logger.warning(
+                    "semantic query embedding failed (%s); using non-vector arms",
+                    type(exc).__name__,
+                )
+        else:
+            query_vectors = [None for _ in run_configs]
 
         vector_runtime_failed = False
         while True:
@@ -475,6 +503,19 @@ class RecallEngine:
         # ── weighted score (+ small RRF nudge for cross-arm agreement) ─────────
         scored: list[Candidate] = []
         score_details: dict[str, dict[str, Any]] = {}
+        consolidated_ids: set[str] = set()
+        consolidation_evidence_cache: dict[str, tuple[str, ...]] = {}
+
+        def consolidation_evidence_for(record: MemoryRecord) -> tuple[str, ...]:
+            cached = consolidation_evidence_cache.get(record.id)
+            if cached is not None:
+                return cached
+            evidence = (
+                tuple(_consolidation_evidence(record, store=self.store, flt=flt))
+                if _consolidated_source(record) else ()
+            )
+            consolidation_evidence_cache[record.id] = evidence
+            return evidence
         for mid, rec in recs.items():
             w = self.weights.get(rec.mtype, scoring.Weights())
             adjusted_semantic = arm_state["adjusted"]["semantic"].get(mid, 0.0)
@@ -484,6 +525,7 @@ class RecallEngine:
             semantic_score = max(adjusted_semantic, adjusted_code)
             base = scoring.score_memory(
                 rec, now=now, weights=w,
+                known_at=effective_known_at,
                 semantic=semantic_score, lexical=adjusted_lexical,
                 graph=adjusted_graph, recency_tau_days=self.recency_tau_days,
             )
@@ -492,14 +534,16 @@ class RecallEngine:
                 if mid in arm_state["raw"][name]
             ]
             fusion_score = base + 0.5 * rrf.get(mid, 0.0)
-            if _consolidated_source(rec):
+            is_consolidated = _consolidated_source(rec)
+            if is_consolidated:
+                consolidated_ids.add(mid)
                 # Small deterministic preference for consolidated digests/profiles
                 # (post-normalization constant; see CONSOLIDATION_BONUS).  Kept out
                 # of the base score so raw evidence comparisons stay untouched.
                 fusion_score += CONSOLIDATION_BONUS
             evidence = (
-                _consolidation_evidence(rec, store=self.store, flt=flt)
-                if _consolidated_source(rec) else []
+                list(consolidation_evidence_for(rec))
+                if diagnostics and is_consolidated else []
             )
             arm = (
                 "code" if "code" in arms
@@ -535,7 +579,7 @@ class RecallEngine:
                 "arm_agreement": len(arms),
                 "arms": arms,
                 "consolidation_bonus": (
-                    CONSOLIDATION_BONUS if _consolidated_source(rec) else 0.0
+                    CONSOLIDATION_BONUS if is_consolidated else 0.0
                 ),
                 "consolidation_source_ids": evidence,
             }
@@ -633,6 +677,13 @@ class RecallEngine:
             if record is not None:
                 final_records.append((candidate, record))
         final = [candidate for candidate, _ in final_records]
+        final_consolidation_evidence = {
+            candidate.id: (
+                consolidation_evidence_for(record)
+                if candidate.id in consolidated_ids else ()
+            )
+            for candidate, record in final_records
+        }
 
         if reinforce and not requested_historical:
             for c in final:
@@ -680,9 +731,7 @@ class RecallEngine:
             # Consolidated digests/profiles expose the ids of the source memories
             # they summarize as citable evidence (never their bodies — see
             # ``_consolidation_evidence``).  Ordinary memories carry no such field.
-            "consolidation_source_ids": (
-                _consolidation_evidence(record, store=self.store, flt=flt)
-            ),
+            "consolidation_source_ids": list(final_consolidation_evidence[c.id]),
         } for c, record in final_records]
         context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
         trace = None
@@ -731,10 +780,10 @@ class RecallEngine:
                 candidate.id: {
                     **_source_safety_metadata(record),
                     **(
-                        {"consolidation_source_ids": _consolidation_evidence(
-                            record, store=self.store, flt=flt
+                        {"consolidation_source_ids": list(
+                            final_consolidation_evidence[candidate.id]
                         )}
-                        if _consolidated_source(record) else {}
+                        if candidate.id in consolidated_ids else {}
                     ),
                 }
                 for candidate, record in final_records
@@ -1140,22 +1189,15 @@ class RecallEngine:
         ent = "ent::{}".format
         adj: dict[str, list[tuple[str, float]]] = {}
 
-        def safe_graph_weight(value: object, *, default: float = 1.0) -> float:
-            if not isinstance(
-                value, (str, bytes, bytearray, SupportsFloat, SupportsIndex)
-            ):
-                return default
-            try:
-                coercible_value: Any = value
-                weight = float(coercible_value)
-            except (TypeError, ValueError, OverflowError):
-                weight = default
-            if not math.isfinite(weight) or weight <= 0:
-                weight = default
-            return min(max(weight, 1e-6), 1e6)
-
-        def connect(a: str, b: str, w: float, layer: GraphLayer) -> None:
-            weighted = safe_graph_weight(w) * traversal_plan.multiplier(layer)
+        def connect(a: str, b: str, w: object, layer: GraphLayer) -> None:
+            weight = _positive_graph_weight(w)
+            if weight is None:
+                return
+            weighted = _positive_graph_weight(
+                weight * traversal_plan.multiplier(layer)
+            )
+            if weighted is None:
+                return
             adj.setdefault(a, []).append((b, weighted))
             adj.setdefault(b, []).append((a, weighted))
 
@@ -1180,6 +1222,8 @@ class RecallEngine:
             if prompt_only:
                 edges = self._prompt_eligible_edges(edges)
             for edge in edges:
+                if _positive_graph_weight(edge.weight) is None:
+                    continue
                 if edge.id in edges_by_id:
                     continue
                 edges_by_id[edge.id] = edge
@@ -1191,7 +1235,7 @@ class RecallEngine:
             connect(
                 ent(e.src),
                 ent(e.dst),
-                safe_graph_weight(e.weight),
+                e.weight,
                 e.layer or GraphLayer.SEMANTIC,
             )
 
@@ -1205,6 +1249,10 @@ class RecallEngine:
         incidence = self.store.list_memory_entities(
             flt, entity_ids=incidence_entity_ids, limit=12_000, prompt_only=prompt_only,
         )
+        incidence = [
+            row for row in incidence
+            if _positive_graph_weight(row.get("confidence")) is not None
+        ]
         # Links are graph evidence in their own right. Restricting their endpoints
         # to incidence rows silently drops a linked memory which has no entity
         # mention, even when its peer is reachable from a seeded entity. Use the
@@ -1250,11 +1298,12 @@ class RecallEngine:
         for row in incidence:
             memory_id = str(row.get("memory_id") or "")
             entity_id = str(row.get("entity_id") or "")
-            if memory_id and entity_id:
+            confidence = _positive_graph_weight(row.get("confidence"))
+            if memory_id and entity_id and confidence is not None:
                 key = (memory_id, entity_id)
                 incidence_strength[key] = max(
                     incidence_strength.get(key, 0.0),
-                    safe_graph_weight(row.get("confidence"), default=0.0),
+                    confidence,
                 )
         for (memory_id, entity_id), confidence in incidence_strength.items():
             # Incidence is a structural memory↔entity bridge, not an inferred
@@ -1313,8 +1362,9 @@ class RecallEngine:
         if prompt_only:
             edges = self._prompt_eligible_edges(edges)
         for edge in edges:
-            related_ids.add(edge.src)
-            related_ids.add(edge.dst)
+            if _positive_graph_weight(edge.weight) is not None:
+                related_ids.add(edge.src)
+                related_ids.add(edge.dst)
         rows = self.store.list_memory_entities(
             flt, entity_ids=sorted(related_ids), limit=12_000, prompt_only=prompt_only,
         )
@@ -1329,11 +1379,13 @@ class RecallEngine:
         if rows:
             for row in rows:
                 memory_id = str(row.get("memory_id") or "")
-                if memory_id and (eligible_ids is None or memory_id in eligible_ids):
-                    out[memory_id] = (
-                        out.get(memory_id, 0.0)
-                        + max(0.0, float(row.get("confidence") or 0.0))
-                    )
+                confidence = _positive_graph_weight(row.get("confidence"))
+                if (
+                    memory_id
+                    and confidence is not None
+                    and (eligible_ids is None or memory_id in eligible_ids)
+                ):
+                    out[memory_id] = out.get(memory_id, 0.0) + confidence
             return dict(sorted(
                 out.items(), key=lambda item: (-item[1], item[0])
             )[:max(0, int(candidate_k))])
@@ -1352,10 +1404,22 @@ class RecallEngine:
         whole canonical group whose representative ("OpenAI") appears in the query —
         the graph arm otherwise returns nothing on paraphrases.
         """
-        terms = sorted({
+        query_folded = str(query or "").casefold()
+        significant_terms = tokenize(query) - {
+            "what", "which", "who", "where", "when", "why", "how",
+        }
+        raw_terms = {
             term.casefold() for term in re.findall(r"[\w@#.+-]+", query)
             if len(term) >= 2
-        })[:16]
+        }
+        terms = sorted(
+            (
+                term for term in raw_terms
+                if term in significant_terms
+                or any(not character.isalnum() for character in term)
+            ),
+            key=lambda term: (-len(term), term),
+        )[:16]
         if not terms:
             return {}
         sql = "SELECT DISTINCT id, name FROM entities"
@@ -1381,12 +1445,16 @@ class RecallEngine:
         params.extend(terms)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY id LIMIT ?"
-        params.append(max(0, int(limit)))
-        seeds = {
-            r["id"]: r["name"]
-            for r in self.store.conn.execute(sql, params).fetchall()
-        }
+        sql += (
+            " ORDER BY CASE WHEN instr(?, lower(name)) > 0 THEN 0 ELSE 1 END, "
+            "length(name) DESC, id LIMIT ?"
+        )
+        params.extend((query_folded, max(0, int(limit))))
+        seeds = {}
+        for row in self.store.conn.execute(sql, params).fetchall():
+            name = str(row["name"] or "")
+            if name and name.casefold() in query_folded and _entity_pattern(name).search(query):
+                seeds[row["id"]] = name
         if seeds:
             # Expand to the full canonical group: when a query matches one member of a
             # canonical alias group, every member is a valid seed (the graph arm should
@@ -1410,7 +1478,8 @@ class RecallEngine:
                 else:
                     group_clauses.append("e.repo_id=?")
                 params_group.append(flt.repo_id)
-            marks = ",".join("?" for _ in seeds)
+            seed_ids = list(seeds)
+            marks = ",".join("?" for _ in seed_ids)
             expanded = self.store.conn.execute(
                 "SELECT e.id, e.name FROM entities e WHERE e.canonical_id IN ("
                 "SELECT COALESCE(NULLIF(e2.canonical_id, ''), e2.id) FROM entities e2 "
@@ -1418,10 +1487,10 @@ class RecallEngine:
                 + ((" AND " + " AND ".join(group_clauses)) if group_clauses else "")
                 + ") AND "
                 + (" AND ".join(group_clauses) if group_clauses else "1=1")
-                + " LIMIT ?",
-                # Placeholder order matches the SQL text: subquery marks, subquery
-                # scope clauses, outer scope clauses, then the LIMIT.
-                list(seeds) + params_group + params_group + [max(0, int(limit))],
+                + f" ORDER BY CASE WHEN e.id IN ({marks}) THEN 0 ELSE 1 END, e.id "
+                + "LIMIT ?",
+                seed_ids + params_group + params_group + seed_ids
+                + [max(0, int(limit))],
             ).fetchall()
             return {r["id"]: r["name"] for r in expanded} or seeds
         # Canonical fallback: an entity whose representative name appears in the query
@@ -1443,10 +1512,11 @@ class RecallEngine:
             "(" + " OR ".join("instr(lower(c.name), ?) > 0" for _ in terms) + ")"
         )
         sql2 = (
-            "SELECT DISTINCT e.id, e.name FROM entities e "
+            "SELECT DISTINCT e.id, e.name, c.name AS canonical_name FROM entities e "
             "JOIN entities c ON c.id = COALESCE(NULLIF(e.canonical_id, ''), e.id) "
-            "WHERE " + " AND ".join(canonical_clauses) +
-            " ORDER BY e.id LIMIT ?"
+            "WHERE " + " AND ".join(canonical_clauses)
+            + " ORDER BY CASE WHEN instr(?, lower(e.name)) > 0 THEN 0 ELSE 1 END, "
+            "length(e.name) DESC, e.id LIMIT ?"
         )
         # Scope params (workspace_id/repo_id) come first, then the name terms.
         scope_params = []
@@ -1454,10 +1524,17 @@ class RecallEngine:
             scope_params.append(flt.workspace_id)
         if flt.repo_id:
             scope_params.append(flt.repo_id)
-        canonical_params = scope_params + terms + [max(0, int(limit))]
+        canonical_params = (
+            scope_params + terms + [query_folded, max(0, int(limit))]
+        )
+        canonical_rows = self.store.conn.execute(sql2, canonical_params).fetchall()
         return {
-            r["id"]: r["name"]
-            for r in self.store.conn.execute(sql2, canonical_params).fetchall()
+            row["id"]: row["name"]
+            for row in canonical_rows
+            if (
+                str(row["canonical_name"] or "").casefold() in query_folded
+                and _entity_pattern(str(row["canonical_name"] or "")).search(query)
+            )
         }
 
     def _entity_map(self, flt: SearchFilter, *, limit: int = 2048) -> dict[str, str]:
@@ -1501,7 +1578,7 @@ def _sanitize_plan(
     original_query: str,
     selected_profile: str,
 ) -> RetrievalPlan:
-    """Validate an untrusted planner result and restore the mandatory identity route."""
+    """Validate one bounded planner prefix and restore the mandatory identity route."""
     if not isinstance(proposed, RetrievalPlan):
         raise ValueError("planner must return RetrievalPlan")
     # The mandatory route must be the caller's exact query, matching planning-off
@@ -1510,33 +1587,49 @@ def _sanitize_plan(
     queries = [PlannedQuery(original, 1, selected_profile)]
     seen = {" ".join(original.split()).casefold()}
     candidates = []
-    for position, item in enumerate(proposed.queries):
+    for position, item in enumerate(
+        islice(proposed.queries, MAX_PLANNED_QUERIES)
+    ):
         if not isinstance(item, PlannedQuery):
             raise ValueError("planner queries must be PlannedQuery values")
-        text = " ".join(str(item.text or "").split())[:2048]
+        if not isinstance(item.text, str) or len(item.text) > 2048:
+            raise ValueError("planned query text must be a bounded string")
+        text = " ".join(item.text.split())
         if not text or text.casefold() in seen:
             continue
-        if isinstance(item.priority, bool) or not isinstance(item.priority, int):
-            raise ValueError("planned query priority must be a positive integer")
-        priority = min(MAX_PLANNED_PRIORITY, max(2, item.priority))
+        if (
+            isinstance(item.priority, bool)
+            or not isinstance(item.priority, int)
+            or not 1 <= item.priority <= MAX_PLANNED_PRIORITY
+        ):
+            raise ValueError("planned query priority must be a bounded positive integer")
+        priority = max(2, item.priority)
         profile = str(item.profile or "balanced").strip().casefold()
         if profile not in {"balanced", "fast", "lexical", "graph", "code"}:
             raise ValueError("planned query profile is invalid")
-        mtypes = tuple(dict.fromkeys(MemoryType(value) for value in item.mtypes))
+        selected_mtypes = {
+            MemoryType(value)
+            for value in islice(item.mtypes, len(MemoryType))
+        }
+        mtypes = tuple(value for value in MemoryType if value in selected_mtypes)
         candidates.append((priority, position, PlannedQuery(text, priority, profile, mtypes)))
         seen.add(text.casefold())
     candidates.sort(key=lambda value: (value[0], value[1], value[2].text.casefold()))
     for _, _, item in candidates[: MAX_PLANNED_QUERIES - 1]:
         queries.append(item)
-    reasons = tuple(
-        str(reason).strip()[:80]
-        for reason in proposed.reason_codes[:8]
-        if str(reason).strip()
-    )
+    reasons = []
+    if isinstance(proposed.reason_codes, (str, bytes)):
+        raise ValueError("planner reason codes must be a bounded collection")
+    for reason in islice(proposed.reason_codes, 8):
+        if not isinstance(reason, str):
+            raise ValueError("planner reason codes must be strings")
+        normalized_reason = reason.strip()[:80]
+        if normalized_reason:
+            reasons.append(normalized_reason)
     return RetrievalPlan(
         tuple(queries),
         _normalize_mtype_limits(proposed.mtype_limits),
-        reasons,
+        tuple(reasons),
     )
 
 
@@ -1555,7 +1648,7 @@ def _normalize_mtype_limits(values: Optional[dict]) -> dict[MemoryType, int]:
     if not isinstance(values, dict):
         raise ValueError("mtype_limits must be an object of memory type to maximum count")
     normalized = {}
-    for raw_key, raw_limit in values.items():
+    for raw_key, raw_limit in islice(values.items(), len(MemoryType)):
         try:
             key = MemoryType(raw_key)
         except (TypeError, ValueError) as exc:
@@ -1596,6 +1689,14 @@ def _finite_arm_value(value: object) -> Optional[float]:
     except (TypeError, ValueError, OverflowError):
         return None
     return score if math.isfinite(score) else None
+
+
+def _positive_graph_weight(value: object) -> Optional[float]:
+    """Return bounded positive graph evidence; zero/invalid values are absent."""
+    score = _finite_arm_value(value)
+    if score is None or score <= 0.0:
+        return None
+    return min(max(score, 1e-6), 1e6)
 
 
 def _finite_arm_score(value: object) -> float:

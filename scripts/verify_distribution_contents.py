@@ -36,6 +36,8 @@ REQUIRED_COMMON = frozenset({
 REQUIRED_SDIST = REQUIRED_COMMON | frozenset({
     "BENCHMARKS.md",
     "docker-compose.lan.yml",
+    "deploy/force-graph-1.51.4.licenses.json",
+    "deploy/force-graph-1.51.4.yarn.lock",
     "eval/BASELINES.md",
 })
 _PRIVATE_RESEARCH = (
