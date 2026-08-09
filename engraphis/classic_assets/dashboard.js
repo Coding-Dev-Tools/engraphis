@@ -236,7 +236,7 @@ function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
 /* The badge follows the access state, not the plan name. A plan name alone told a trialist
    they were a subscriber, and told a lapsed or expired customer nothing was wrong. */
-function updateLicBadge(){const bd=document.getElementById('lic-badge');if(!bd||!LIC)return;const st=licAccessState(),plan=licPlanName(),trial=licTrialAvailable(),label=st==='trial'?'TRIAL':st==='trial_expired'?'GET PRO':st==='lapsed'?'BILLING':st==='active'?plan:trial?'TRY PRO':'GET PRO',aria=st==='active'?'Open Engraphis Cloud account':st==='lapsed'?'Update billing in hosted plan settings':trial?'Start the 3-day Pro trial in hosted plan settings':'Subscribe to Pro in hosted plan settings';bd.textContent=label;bd.className='pill '+(licAccessLive()?'pill-accent':'pill-muted');bd.setAttribute('aria-label',aria);bd.title=aria}
+function updateLicBadge(){/* The side-menu header intentionally has no plan or upgrade badge. */}
 function updateFeatureLocks(){
  const has=f=>LIC&&(LIC.features||[]).includes(f);
  const apply=(id,feature,label,plan)=>{
@@ -1177,7 +1177,7 @@ function loadForceGraph(){
  if(FORCE_GRAPH_LOADING)return FORCE_GRAPH_LOADING;
  FORCE_GRAPH_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/static/vendor/force-graph.min.js';
+  script.src='/static/vendor/force-graph.min.js?v=20260809-csp';
   /* A successful fetch is not a usable renderer unless the vendor asset registered its
      global. Treat a truncated/captive-portal 200 exactly like any other load failure. */
   script.onload=()=>{typeof ForceGraph==='undefined'?reject(new Error('Force graph asset loaded without registering ForceGraph')):resolve()};
@@ -1192,7 +1192,7 @@ function loadGraphEngine(){
  if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
  GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js?v=20260730-drag-stability';
+  script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard';
   /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
      resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
   script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};

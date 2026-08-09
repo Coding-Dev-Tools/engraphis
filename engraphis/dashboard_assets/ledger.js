@@ -369,7 +369,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260730-drag-stability',
+        '/v2-assets/engraphis-graph.js?v=20260809-physics-guard',
         'EngraphisGraph',
       ));
       graphAssetsPromise = attempt;
@@ -2861,8 +2861,8 @@
   function planPrices() {
     const annual = byId('billing-select').value === 'annual';
     return annual
-      ? { free: '$0', pro: '$100 / owner / year', team: '$200 / seat / year' }
-      : { free: '$0', pro: '$10 / owner / month', team: '$20 / seat / month' };
+      ? { free: '$0', pro: '$100 / year · 1 named owner', team: '$200 / seat / year' }
+      : { free: '$0', pro: '$10 / month · 1 named owner', team: '$20 / seat / month' };
   }
 
   function renderPlans() {

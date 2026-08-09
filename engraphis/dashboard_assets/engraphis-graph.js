@@ -84,6 +84,18 @@
      drag maps to a tiny world-space movement and reheating makes the rest of the layout look
      like it is racing away. Keep auto-fit useful without letting its scale become unstable. */
   const MAX_AUTO_FIT_ZOOM = 4;
+  const SETTINGS_ALPHA_TARGET = 0.12;
+  const DRAG_ALPHA_TARGET = 0.18;
+  const ALPHA_TARGET_HOLD_MS = 180;
+  const DRAG_SETTLE_DELAY_MS = 80;
+
+  /* Physics is allowed to respond live, but one bad force update must never turn a
+     settled graph into a high-speed slingshot. Keep the bounds in world units so they
+     remain meaningful at every camera zoom. */
+  const MIN_NODE_SPEED = 8;
+  const MAX_NODE_SPEED = 48;
+  const MIN_DRAG_PULL = 4;
+  const MAX_DRAG_PULL = 18;
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
@@ -907,6 +919,8 @@
        the whole layout. See `sameData`/`render`. */
     let seeded = null;
     let destroyed = false, running = true, fitTimer = 0, suspended = 0, pendingRender = null;
+    let physicsFrame = 0, physicsReheatPending = false;
+    let softAlphaTimer = 0, initialFitFrame = 0;
     let suppressNodeClickAfterDrag = false, dragClickFrame = 0;
     const requestFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
       ? window.requestAnimationFrame.bind(window)
@@ -917,13 +931,9 @@
     let betweennessReady = false;
     const fg = ForceGraph()(el);
     const api = {};
+
     let activeDragNode = null, activeDragLinks = [], dragFollowForce = null;
 
-    /* The ordinary link force is degree-normalised. That is useful for settling a graph, but
-       it makes a high-degree node a weak anchor during a manual drag: the centre force moves
-       the rest of the graph while each individual relation barely follows. Keep a separate,
-       drag-only one-hop force so every directly connected node follows the pointer. It pulls
-       toward the dragged node's position while preserving the configured link distance. */
     function setActiveDragNode(node) {
       activeDragNode = node || null;
       if (!activeDragNode) {
@@ -940,8 +950,7 @@
     function makeDragFollowForce() {
       const force = alpha => {
         if (!activeDragNode || state.settings.frozen || staticFullLayout) return;
-        const nodes = fg.graphData().nodes || [];
-        const byId = new Map(nodes.map(node => [node.id, node]));
+        const byId = new Map((fg.graphData().nodes || []).map(node => [node.id, node]));
         const targetDistance = Math.max(8, Number(state.settings.link) || 16);
         const strength = 0.28 + Math.min(0.16, (Number(state.settings.gravity) || 0) / 500);
         activeDragLinks.forEach(link => {
@@ -953,12 +962,40 @@
             || !Number.isFinite(other.x) || !Number.isFinite(other.y)
             || !Number.isFinite(activeDragNode.x) || !Number.isFinite(activeDragNode.y)) return;
           const dx = activeDragNode.x - other.x, dy = activeDragNode.y - other.y;
-          const distance = Math.hypot(dx, dy);
-          const gap = distance - targetDistance;
+          const distance = Math.hypot(dx, dy), gap = distance - targetDistance;
           if (distance < 1e-6 || gap <= 0) return;
-          const impulse = (gap / distance) * strength * (Number.isFinite(alpha) ? alpha : 1);
-          other.vx = (other.vx || 0) + dx * impulse;
-          other.vy = (other.vy || 0) + dy * impulse;
+          const rawPull = gap * strength * (Number.isFinite(alpha) ? alpha : 1);
+          const pull = Math.max(MIN_DRAG_PULL, Math.min(MAX_DRAG_PULL, rawPull));
+          other.vx = (other.vx || 0) + (dx / distance) * pull;
+          other.vy = (other.vy || 0) + (dy / distance) * pull;
+        });
+      };
+      force.initialize = nodes => { force.nodes = nodes; };
+      return force;
+    }
+
+    let velocityGuardForce = null;
+
+    function nodeSpeedLimit() {
+      const link = Math.max(8, Number(state.settings.link) || 16);
+      return Math.max(MIN_NODE_SPEED, Math.min(MAX_NODE_SPEED, link * 0.9));
+    }
+
+    function makeVelocityGuardForce() {
+      const force = () => {
+        const nodes = force.nodes || fg.graphData().nodes || [];
+        const limit = nodeSpeedLimit();
+        nodes.forEach(node => {
+          let vx = Number.isFinite(node.vx) ? node.vx : 0;
+          let vy = Number.isFinite(node.vy) ? node.vy : 0;
+          const speed = Math.hypot(vx, vy);
+          if (speed > limit) {
+            const scale = limit / speed;
+            vx *= scale;
+            vy *= scale;
+          }
+          node.vx = vx;
+          node.vy = vy;
         });
       };
       force.initialize = nodes => { force.nodes = nodes; };
@@ -977,6 +1014,13 @@
       ));
       fg.centerAt((bbox.x[0] + bbox.x[1]) / 2, (bbox.y[0] + bbox.y[1]) / 2, duration);
       fg.zoom(zoom, duration);
+    }
+
+    function cancelAutoFit() {
+      clearTimeout(fitTimer);
+      fitTimer = 0;
+      cancelFrame(initialFitFrame);
+      initialFitFrame = 0;
     }
 
     function suppressNodeClick() {
@@ -1026,8 +1070,10 @@
       suspended++;
       try { fn(api); } finally {
         suspended--;
+        const queuedPhysics = physicsReheatPending;
+        physicsReheatPending = false;
         pendingRender = null;
-        render(!!fit, !!reheat);
+        render(!!fit, !!reheat || queuedPhysics);
       }
     }
 
@@ -1176,6 +1222,7 @@
         fg.d3Force('y', null);
         fg.d3Force('radial', null);
         fg.d3Force('collide', null);
+        fg.d3Force('velocityGuard', null);
         fg.d3Force('dragFollow', null);
         return;
       }
@@ -1193,10 +1240,10 @@
       if (charge && charge.strength) charge.strength(-(mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel));
       if (link && link.distance) link.distance(s.link);
       if (typeof d3 === 'undefined') return;
-      if (!dragFollowForce) {
-        dragFollowForce = makeDragFollowForce();
-        fg.d3Force('dragFollow', dragFollowForce);
-      }
+      if (!velocityGuardForce) velocityGuardForce = makeVelocityGuardForce();
+      fg.d3Force('velocityGuard', velocityGuardForce);
+      if (!dragFollowForce) dragFollowForce = makeDragFollowForce();
+      fg.d3Force('dragFollow', dragFollowForce);
       fg.d3Force('radial', null);
       const layoutNodes = fg.graphData().nodes || [];
       /* The layout buttons are arrangements, not just five nearby slider presets. Keep the
@@ -1540,19 +1587,67 @@
       if (fg.warmupTicks) fg.warmupTicks(simulate ? (large ? 18 : 40) : 0);
     }
 
-    /* A pointer drag is an active interaction, not a normal layout run. The normal cooldown
-       protects settled graphs from repainting forever, but it also cuts off link attraction
-       after roughly two seconds while the user is still holding a node. Keep the simulation
-       alive until pointer-up, then finishNodeDrag() restores the bounded settling budget. */
-    function setDragSimulationBudget(active) {
-      if (active && !staticFullLayout && !state.settings.frozen) {
-        if (fg.cooldownTime) fg.cooldownTime(Infinity);
-        if (fg.cooldownTicks) fg.cooldownTicks(Infinity);
-        if (fg.warmupTicks) fg.warmupTicks(0);
-        if (fg.d3AlphaDecay) fg.d3AlphaDecay(0);
+    function prepareReheat() {
+      const nodes = fg.graphData().nodes || [];
+      nodes.forEach(node => {
+        if (node.fx !== undefined || node.fy !== undefined) {
+          node.vx = 0;
+          node.vy = 0;
+          return;
+        }
+        node.vx = Number.isFinite(node.vx) ? node.vx * 0.25 : 0;
+        node.vy = Number.isFinite(node.vy) ? node.vy * 0.25 : 0;
+      });
+    }
+
+    function supportsSoftAlpha() {
+      return typeof d3 !== 'undefined'
+        && typeof fg.d3AlphaTarget === 'function'
+        && typeof fg.resetCountdown === 'function';
+    }
+
+    function releaseSoftAlpha() {
+      clearTimeout(softAlphaTimer);
+      softAlphaTimer = 0;
+      if (!supportsSoftAlpha()) return;
+      fg.d3AlphaTarget(0);
+      fg.resetCountdown();
+    }
+
+    function softReheat() {
+      if (!supportsSoftAlpha()) {
+        /* Keep the dependency-light Node harness and older vendor bundles working. The real
+           browser bundle takes the bounded alpha-target path above. */
+        if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
         return;
       }
-      setSimulationBudget(!state.settings.frozen);
+      clearTimeout(softAlphaTimer);
+      softAlphaTimer = 0;
+      fg.d3AlphaTarget(SETTINGS_ALPHA_TARGET);
+      fg.resetCountdown();
+      softAlphaTimer = setTimeout(() => {
+        softAlphaTimer = 0;
+        if (!destroyed) releaseSoftAlpha();
+      }, ALPHA_TARGET_HOLD_MS);
+    }
+
+    function schedulePhysicsUpdate() {
+      cancelAutoFit();
+      physicsReheatPending = true;
+      if (suspended || physicsFrame || destroyed) return;
+      /* The dependency-light Node harness has no browser frame clock. Keep its public
+         behaviour synchronous while browsers coalesce a burst of range-input events. */
+      if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+        physicsReheatPending = false;
+        render(false, true);
+        return;
+      }
+      physicsFrame = requestFrame(() => {
+        physicsFrame = 0;
+        if (destroyed || suspended || !physicsReheatPending) return;
+        physicsReheatPending = false;
+        render(false, true);
+      });
     }
 
     function render(fit, reheat) {
@@ -1630,14 +1725,17 @@
           .linkDirectionalParticleColor(l => alpha(layerColor(l.layer), 0.95))
           .linkDirectionalParticleSpeed(l => 0.002 + ((state.settings.flowSpeed || 45) / 100) * 0.008);
       }
-      if (reheat && motion && !staticFullLayout && !state.settings.frozen && fg.d3ReheatSimulation) fg.d3ReheatSimulation();
+      if (reheat && motion && !staticFullLayout && !state.settings.frozen) {
+        prepareReheat();
+        softReheat();
+      }
       if ((staticFullLayout || state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
       /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
          but Style, Color by and Labels all just changed how the *same* data must be drawn. */
       if (reused) invalidate();
       if (fit) {
         const animateFit = motion && !reducedMotion;
-        clearTimeout(fitTimer);
+        cancelAutoFit();
         fitTimer = setTimeout(() => { if (!destroyed) autoFit(animateFit ? 600 : 0, 40); }, animateFit ? 320 : 0);
       }
       if (opts.onStats) opts.onStats({ nodes: data.nodes.length, links: data.links.length, total: raw.nodes.length, totalLinks: raw.links.length, preset: (PRESETS[state.settings.mode] || PRESETS.compact).label, collapsed: collapsed, ghosts: data.nodes.filter(n => n.ghost).length, bridges: data.links.filter(l => l.bridge).length, suggested: data.links.filter(l => l.suggested).length });
@@ -1659,33 +1757,8 @@
       if (opts.onNodeClick) opts.onNodeClick(node);
     }
 
-    /* A drag uses fx/fy while the pointer is down. Those anchors are only persistent when the
-       explicit Freeze control is on; leaving them behind in live mode makes one dragged node
-       look frozen even though the switch is off. Reheat as soon as a live drag starts too, so
-       the link force can pull connected nodes along with the pointer instead of waiting for
-       pointer-up. */
-    function reheatLiveLayout(dragging = false) {
-      if (state.settings.frozen || staticFullLayout) return;
-      applyForces();
-      if (dragging) setDragSimulationBudget(true);
-      else setSimulationBudget(true);
-      if (fg.d3AlphaDecay && !dragging) fg.d3AlphaDecay(alphaDecay());
-      if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
-    }
-
-    function finishNodeDrag(node) {
-      setActiveDragNode(null);
-      if (state.settings.frozen || staticFullLayout) {
-        node.fx = node.x;
-        node.fy = node.y;
-        node.vx = 0;
-        node.vy = 0;
-        return;
-      }
-      raw.nodes.forEach(item => { item.fx = undefined; item.fy = undefined; });
-      reheatLiveLayout();
-    }
-
+    /* A drag uses fx/fy only while the pointer is down. Pointer-up releases the anchor and gives
+       the live layout one bounded settle; dragging itself never reheats the simulation. */
     fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1)
       .enableNodeDrag(false).autoPauseRedraw(true)
       /* force-graph's default `nodeLabel`/`linkLabel` is the literal accessor "name", and its
@@ -1731,9 +1804,6 @@
         invalidate();
       })
       .onNodeClick(handleNodeClick)
-      // Kept as the drag contract for embedders that opt back into vendor dragging;
-      // Ledger itself disables that path and uses the scoped pointer controller below.
-      .onNodeDragEnd(node => { finishNodeDrag(node); suppressNodeClick(); })
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
         zoom = z.k || 1;
@@ -1751,20 +1821,10 @@
         }
       });
 
-    /* Some force-graph releases expose a vendor drag-start callback, while the dashboard's
-       current bundle does not. Use it only when present; Ledger's manual pointer controller
-       below remains the canonical path and does not depend on this optional API. */
-    if (typeof fg.onNodeDragStart === 'function') {
-      fg.onNodeDragStart(node => {
-        setActiveDragNode(node);
-        reheatLiveLayout(true);
-      });
-    }
-
-    /* force-graph's built-in drag always reheats the entire simulation. Ledger uses a scoped
-       controller: a frozen graph keeps a deliberate manual pin, while a live graph releases
-       the temporary drag anchor and reheats. Capturing pointer-down prevents the vendor's
-       drag handler from seeing node gestures while preserving its background pan/zoom path. */
+    /* force-graph's built-in drag always reheats the entire simulation. Ledger treats manual
+       placement as a pin, so install a small scoped drag controller and leave global physics
+       changes to the explicit Reheat control. Capturing pointer-down prevents the vendor's drag
+       handler from seeing node gestures while preserving its background pan/zoom path. */
     let detachManualDrag = null;
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function'
       && typeof el.addEventListener === 'function' && typeof el.querySelector === 'function') {
@@ -1783,7 +1843,15 @@
         window.removeEventListener('pointerup', endManualDrag, true);
         window.removeEventListener('pointercancel', endManualDrag, true);
         if (current.dragged) {
-          finishNodeDrag(current.node);
+          current.node.fx = undefined;
+          current.node.fy = undefined;
+          setActiveDragNode(null);
+          current.node.vx = 0;
+          current.node.vy = 0;
+          if (!state.settings.frozen && !staticFullLayout) {
+            prepareReheat();
+            softReheat();
+          }
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
           // Our capture listener owns the direct click. Suppress force-graph's
@@ -1798,7 +1866,6 @@
         if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
         const dx = event.clientX - manualDrag.startClientX;
         const dy = event.clientY - manualDrag.startClientY;
-        let started = false;
         if (!manualDrag.dragged) {
           if (Math.hypot(dx, dy) < 3) {
             event.preventDefault();
@@ -1806,17 +1873,14 @@
             return;
           }
           manualDrag.dragged = true;
-          started = true;
+          setActiveDragNode(manualDrag.node);
+          reheatLiveLayout(true);
         }
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;
-          node.vx = 0;
-          node.vy = 0;
-        if (started) {
-          setActiveDragNode(node);
-          reheatLiveLayout(true);
-        }
+        node.vx = 0;
+        node.vy = 0;
         invalidate();
         event.preventDefault();
         event.stopPropagation();
@@ -1834,6 +1898,7 @@
           if (d <= hitRadius && d < distance) { candidate = node; distance = d; }
         });
         if (!candidate) return;
+        cancelAutoFit();
         manualDrag = {
           node: candidate, pointerId: event.pointerId, startClientX: event.clientX,
           startClientY: event.clientY, offsetX: candidate.x - point.x,
@@ -1927,7 +1992,11 @@
       const next = patch && typeof patch === 'object' ? patch : {};
       const wasFrozen = state.settings.frozen === true;
       const isUnfreezing = wasFrozen && next.frozen === false;
-      if (LAYOUT_KEYS.some(k => next[k] !== undefined)) fullLayoutDirty = true;
+      const layoutChanged = LAYOUT_KEYS.some(k => next[k] !== undefined);
+      if (layoutChanged) {
+        fullLayoutDirty = true;
+        cancelAutoFit();
+      }
       Object.assign(state.settings, next);
       /* Classic synchronises the complete GSET object during a redraw. If the visible switch
          was turned off by that sync after an earlier freeze, a plain render restores the
@@ -1937,7 +2006,8 @@
         api.freeze(false);
         return;
       }
-      render(false, LAYOUT_KEYS.some(k => next[k] !== undefined));
+      render(false, false);
+      if (layoutChanged) schedulePhysicsUpdate();
     };
     api.setPreset = name => {
       const p = PRESETS[name] || PRESETS.compact;
@@ -2063,8 +2133,11 @@
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.reheat = () => {
       if (destroyed || state.settings.frozen || staticFullLayout) return;
+      cancelAutoFit();
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
-      if (fg.d3ReheatSimulation) { fg.d3AlphaDecay(alphaDecay()); fg.d3ReheatSimulation(); }
+      prepareReheat();
+      if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
+      softReheat();
     };
     api.freeze = on => {
       state.settings.frozen = on;
@@ -2080,12 +2153,13 @@
       if (staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
+      prepareReheat();
       setSimulationBudget(true);
       // A frozen render removes relation-flow particles. Reapply the live paint settings
       // before reheating so the enabled flow switch immediately becomes visible again.
       render(false, false);
       fg.d3AlphaDecay(alphaDecay());
-      if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
+      softReheat();
     };
     function renderedNode(id) {
       return ((fg.graphData() || {}).nodes || []).find(node => node && node.id === id) || null;
@@ -2220,8 +2294,15 @@
       running = false;
       clearTimeout(fitTimer);
       fitTimer = 0;
+      clearTimeout(softAlphaTimer);
+      softAlphaTimer = 0;
+      cancelFrame(initialFitFrame);
+      initialFitFrame = 0;
       cancelFrame(dragClickFrame);
       dragClickFrame = 0;
+      cancelFrame(physicsFrame);
+      physicsFrame = 0;
+      physicsReheatPending = false;
       pendingRender = null;
       try {
         if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }
@@ -2248,7 +2329,14 @@
       if (w > 0 && h > 0) fg.width(w).height(h);
     };
     measure();
-    requestAnimationFrame(() => { if (destroyed) return; measure(); autoFit(reduced() ? 0 : 400, 40); });
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      initialFitFrame = requestFrame(() => {
+        initialFitFrame = 0;
+        if (destroyed) return;
+        measure();
+        autoFit(reduced() ? 0 : 400, 40);
+      });
+    }
     if (typeof ResizeObserver !== 'undefined') {
       api._ro = new ResizeObserver(() => measure());
       api._ro.observe(el);

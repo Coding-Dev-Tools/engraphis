@@ -153,6 +153,86 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "embed_model", "")
     from engraphis.app import create_legacy_reference_app
     return TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem-v1.db"))
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("notes.md", "notes"),
+        ("nested/notes.v1.md", "notes.v1"),
+        (r"nested\\notes.md", "notes"),
+        (".env", ".env"),
+        (None, ""),
+    ],
+)
+def test_upload_filename_stem_is_lexical_only(filename, expected):
+    from engraphis.routes.vault import _filename_stem
+
+    assert _filename_stem(filename) == expected
+
+
+def test_import_folder_preserves_relative_case_and_uses_lexical_stem(
+    monkeypatch,
+    tmp_path,
+):
+    from engraphis.routes import vault as vault_routes
+
+    root = tmp_path / "MixedRoot"
+    nested = root / "NestedDir"
+    nested.mkdir(parents=True)
+    (nested / "notes.v1.md").write_text("body", encoding="utf-8")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(root))
+    monkeypatch.setattr(
+        vault_routes.ingest_engine,
+        "ingest_document",
+        lambda **_kwargs: {"document_id": "notes-v1"},
+    )
+
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/memory/vaults/import-folder",
+            json={
+                "path": str(root),
+                "namespace": "ns",
+                "file_pattern": "*.md",
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["data"]
+    assert result["imported"] == 1
+    assert result["files"] == [
+        {"path": "NestedDir/notes.v1.md", "title": "notes.v1", "status": "ok"}
+    ]
+
+
+def test_import_folder_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path):
+    from engraphis.routes import vault as vault_routes
+
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    fake_home = tmp_path / "fake-home"
+    allowed.mkdir()
+    outside.mkdir()
+    fake_home.mkdir()
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+    monkeypatch.setattr(
+        vault_routes.Path,
+        "home",
+        classmethod(lambda _cls: fake_home),
+    )
+
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(outside), "namespace": "ns"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"].startswith("Import path must be under an allowed root")
+
+
 def test_safe_call_classifies_and_sanitizes_legacy_failures():
     from fastapi import HTTPException
     from engraphis.core.secrets import SecretDetectedError
