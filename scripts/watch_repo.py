@@ -25,7 +25,7 @@ import signal
 import sys
 from pathlib import Path
 
-from engraphis.backends.codegraph import LANG_BY_EXT
+from engraphis.backends.codegraph import LANG_BY_EXT, _DEFAULT_EXCLUDE_DIRS, load_ignore_patterns
 
 logger = logging.getLogger("engraphis.watch_repo")
 
@@ -49,11 +49,27 @@ class _PollingWatcher:
         self.interval = max(1.0, interval)
         self._signatures: dict[str, tuple[int, int, bytes]] = {}
         self._initial_scan_done = False
+        # Apply the same directory/name pruning the code indexer uses so the
+        # watcher does not repeatedly hash every file under node_modules,
+        # vendor, or build-output trees that will never be indexed anyway.
+        # ``.engraphisignore`` at the repo root adds project-specific rules.
+        self._exclude_dirs: set[str] = set(_DEFAULT_EXCLUDE_DIRS)
+        try:
+            ignore_names, _ignore_globs, unignore = load_ignore_patterns(str(root))
+        except Exception:  # noqa: BLE001 — a broken ignore file must not abort scanning
+            ignore_names, unignore = set(), set()
+        self._exclude_dirs |= ignore_names
+        self._exclude_dirs -= unignore
 
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
         signatures: dict[str, tuple[int, int, bytes]] = {}
-        for dirpath, _dirnames, filenames in os.walk(self.root):
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            # Prune excluded directories in-place so os.walk does not descend.
+            dirnames[:] = [
+                d for d in dirnames if d not in self._exclude_dirs
+                and not d.startswith(".")
+            ]
             for fname in filenames:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext not in _WATCHED_EXTENSIONS:
