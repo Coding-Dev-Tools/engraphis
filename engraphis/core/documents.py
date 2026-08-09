@@ -372,7 +372,7 @@ def scan_document_tree(
                     result.rejected.append(DocumentFileIssue(raw_relative, _safe_reason(exc)))
                     continue
             result.skipped.append(DocumentFileIssue(relative, issue))
-            if issue == "unreadable directory":
+            if issue in {"unreadable directory", "unreadable path"}:
                 result.complete = False
             continue
         try:
@@ -1001,6 +1001,33 @@ def _archive_member_number(value: str) -> int:
     return int(match.group(0)) if match else 0
 
 
+_EPUB_XML_ENCODING_RE = re.compile(
+    br"<\?xml\b[^>]*\bencoding\s*=\s*(['\"])([^'\"]+)\1",
+    flags=re.I | re.S,
+)
+
+
+def _decode_epub_chapter(raw: bytes) -> str:
+    """Decode one EPUB spine member before feeding it to the HTML parser."""
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"
+    elif raw.startswith(b"<\x00"):
+        # XML permits UTF-16 without a BOM; the first code unit identifies LE.
+        encoding = "utf-16-le"
+    elif raw.startswith(b"\x00<"):
+        encoding = "utf-16-be"
+    else:
+        match = _EPUB_XML_ENCODING_RE.search(raw[:4096])
+        if match:
+            try:
+                encoding = codecs.lookup(match.group(2).decode("ascii")).name
+            except (LookupError, UnicodeError):
+                raise DocumentParseError("invalid EPUB chapter encoding") from None
+        else:
+            encoding = "utf-8"
+    return raw.decode(encoding, errors="replace")
+
+
 def _epub_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
     container = _xml_root(archive.read("META-INF/container.xml"), "EPUB container")
     rootfile = next((item.attrib.get("full-path", "") for item in container.iter() if item.tag.endswith("rootfile")), "")
@@ -1017,7 +1044,7 @@ def _epub_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
         if not href or candidate.is_absolute() or ".." in candidate.parts:
             raise DocumentParseError("invalid EPUB content path")
         raw = archive.read(candidate.as_posix())
-        text = _html_text(raw.decode("utf-8", errors="replace"), limit=MAX_CONTAINER_TEXT_CHARS - sum(len(part) for part in parts))
+        text = _html_text(_decode_epub_chapter(raw), limit=MAX_CONTAINER_TEXT_CHARS - sum(len(part) for part in parts))
         if text:
             if sum(len(part) for part in parts) + len(text) + (2 if parts else 0) > MAX_CONTAINER_TEXT_CHARS:
                 raise DocumentParseError("document exceeds 100000 character safety limit")
