@@ -25,15 +25,14 @@ import signal
 import sys
 from pathlib import Path
 
+from engraphis.backends.codegraph import LANG_BY_EXT
+
 logger = logging.getLogger("engraphis.watch_repo")
 
-# File extensions worth reindexing.  Tree-sitter covers more, but these are the
-# high-signal set that catches most code changes without thrashing on config/docs.
-_WATCHED_EXTENSIONS = frozenset({
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
-    ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
-    ".kt", ".scala", ".lua", ".sh", ".bash", ".zsh",
-})
+# File extensions worth reindexing. Keep this aligned with the codegraph indexer's
+# supported extensions so the watcher follows the same language coverage as
+# indexing, instead of drifting to a stale hand-maintained subset.
+_WATCHED_EXTENSIONS = frozenset(LANG_BY_EXT)
 
 
 class _PollingWatcher:
