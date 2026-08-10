@@ -34,7 +34,12 @@ import math
 from dataclasses import dataclass
 from typing import Any, Annotated, Callable, List, Optional
 
-from pydantic import Field, StrictBool, StrictInt
+try:
+    from pydantic import Field, StrictBool, StrictInt
+except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
+    Field = None  # type: ignore[assignment,misc]
+    StrictBool = None  # type: ignore[assignment,misc]
+    StrictInt = None  # type: ignore[assignment,misc]
 
 try:
     from mcp.server.fastmcp import FastMCP
