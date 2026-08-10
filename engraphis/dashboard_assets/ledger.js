@@ -369,7 +369,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics',
+        '/v2-assets/engraphis-graph.js?v=20260809-physics-guard',
         'EngraphisGraph',
       ));
       graphAssetsPromise = attempt;
