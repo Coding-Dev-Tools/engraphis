@@ -7724,11 +7724,39 @@ class MemoryService:
                 marks = ",".join("?" for _ in clean_types)
                 entity_sql += f" AND etype IN ({marks})"
                 entity_params.extend(clean_types)
+        # Fetch with generous headroom; the entity cap applies after
+        # session-scope pruning so private evidence cannot crowd out
+        # public entities in the candidate set.
         entity_sql += " ORDER BY canonical_id, id LIMIT ?"
         entity_params.append(MAX_GRAPH_ANALYSIS_ENTITIES * 3 + 1)
-        entity_rows = [dict(row) for row in self.store.conn.execute(
+        raw_entity_rows = [dict(row) for row in self.store.conn.execute(
             entity_sql, entity_params
         ).fetchall()]
+        # _graph_entity_visibility_sql requires an EXISTS check against
+        # memories. Apply it before the cap so session-private evidence
+        # does not consume the candidate budget.
+        entity_rows = []
+        for start in range(0, len(raw_entity_rows), 500):
+            chunk = raw_entity_rows[start:start + 500]
+            chunk_ids = [row.get("id") for row in chunk]
+            if not chunk_ids:
+                continue
+            marks = ",".join("?" for _ in chunk_ids)
+            visible = {
+                r["id"] for r in self.store.conn.execute(
+                    f"SELECT DISTINCT entity.id FROM entities entity "
+                    f"WHERE entity.id IN ({marks}) AND "
+                    + _graph_entity_visibility_sql("entity"),
+                    chunk_ids,
+                ).fetchall()
+            }
+            for row in chunk:
+                if row.get("id") in visible:
+                    entity_rows.append(row)
+                    if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+                        break
+            if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+                break
 
         edge_sql = (
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
@@ -7766,14 +7794,15 @@ class MemoryService:
         # History visibility is enforced by ``_graph_edge_history_visibility_sql``.
         # The ordinary evidence predicate below is intentionally live-only and would
         # otherwise erase the closed relations that history mode is meant to expose.
-        evidence_filter = not include_history
+        evidence_filter = not include_history and not prune_entities
         prune_entities = bool(
             clean_memory_types or lower_time is not None or upper_time is not None
         )
         allow_supportless = not (
             clean_memory_types or lower_time is not None or upper_time is not None
         )
-        if evidence_filter:
+        if prune_entities and include_history:
+            evidence_filter = True
             edge_sql += " AND ("
             if allow_supportless:
                 edge_sql += (
@@ -8117,8 +8146,9 @@ class MemoryService:
                     "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
                     "AND memory.expired_at IS NULL "
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
+                    "AND memory.workspace_id=? "
                     "ORDER BY support.edge_id, support.memory_id, support.source_kind",
-                    [*chunk, t, known_t, t, known_t],
+                    [*chunk, t, known_t, t, known_t, wid],
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
             for support in historical_supports:
