@@ -2509,7 +2509,19 @@ class MemoryService:
         )
         with self._graph_job_lock:
             self._obsidian_job_threads[job_id] = worker
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            with self._graph_job_lock:
+                self._obsidian_job_threads.pop(job_id, None)
+            failed_at = time.time()
+            self.store.conn.execute(
+                "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? "
+                "WHERE id=?",
+                (failed_at, failed_at, job_id),
+            )
+            self.store.conn.commit()
+            raise
         return {
             "job_id": job_id, "id": job_id, "state": "running", "status": "running",
             "source_id": prepared.get("source_id", prepared["vault_id"]),
@@ -2974,7 +2986,19 @@ class MemoryService:
         )
         with self._graph_job_lock:
             self._obsidian_job_threads[job_id] = worker
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            with self._graph_job_lock:
+                self._obsidian_job_threads.pop(job_id, None)
+            failed_at = time.time()
+            self.store.conn.execute(
+                "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? "
+                "WHERE id=?",
+                (failed_at, failed_at, job_id),
+            )
+            self.store.conn.commit()
+            raise
         return {
             "job_id": job_id, "id": job_id, "state": "running", "status": "running",
             "vault_id": prepared["vault_id"], "workspace": ws, "repo": repo,

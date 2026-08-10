@@ -2718,6 +2718,63 @@ def test_hlc_conflict_variant_publishes_external_vector():
     assert conflict_id in publications
 
 
+def test_hlc_conflict_successor_external_vector_matches_store_vector():
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, vecs, meta=None, *, commit=True):
+            publications.append((tuple(ids), vecs.copy(), meta))
+
+        def delete(self, ids, *, commit=True):
+            publications.append(("delete", tuple(ids), None))
+
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+
+    def bundle(content, node):
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": node,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "same-hlc-id",
+                "content": content,
+                "ingested_at": 42.0,
+                "valid_from": 42.0,
+                "modified_hlc": format_modified_hlc(42, 1, node),
+            }],
+            "mem_links": [],
+        }
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=RecordingExternalIndex(),
+    )
+    syncer.apply_bundle(bundle("lower-node edit", lower_node), into_workspace="w")
+    publications.clear()
+    syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
+
+    conflict_id = engine.store.conn.execute(
+        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+    ).fetchone()["id"]
+    # The preserved successor must be published to the separately-backed index with
+    # exactly the canonical vector the Store committed for its id.
+    published = [entry for entry in publications
+                 if entry[0] != "delete" and conflict_id in entry[0]]
+    assert published, "conflict successor was not published to the external index"
+    _, external_vector, external_meta = published[-1]
+    external_vector = np.asarray(external_vector, dtype=np.float32).reshape(-1)
+
+    stored = engine.store.get_vectors([conflict_id])[conflict_id]
+    assert external_vector.shape == stored.shape
+    np.testing.assert_allclose(external_vector, stored, rtol=0, atol=0)
+    assert external_meta == [{"model": syncer.embedding_space}]
+
+
 def test_sync_configured_embedder_failure_aborts_before_memory_write(caplog):
     engine = MemoryEngine.create(":memory:", vector_backend="numpy")
 

@@ -101,6 +101,21 @@ class _PollingWatcher:
         self._exclude_dirs |= ignore_names
         self._exclude_dirs -= unignore
 
+    def _is_excluded(self, path: str) -> bool:
+        """Return whether *path* (or any parent) is pruned by the exclude policy.
+
+        Matches the polling walk's pruning: any path component equal to a
+        ``_DEFAULT_EXCLUDE_DIRS`` entry or a name ruled out by
+        ``.engraphisignore`` is excluded, exactly like ``_watched_files``.
+        """
+        try:
+            relative = os.path.relpath(path, str(self.root))
+        except ValueError:
+            return True
+        if relative in ("", "."):
+            return False
+        return any(part in self._exclude_dirs for part in Path(relative).parts)
+
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
         signatures: dict[str, tuple[int, int, bytes]] = {}
@@ -230,7 +245,28 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
 
     _MAX_RETRIES = 3
 
+    def _build_handler() -> "_Handler":
+        watcher = _PollingWatcher(root)
+        handler = _Handler()
+        handler._exclude_dirs = watcher._exclude_dirs
+        return handler
+
     class _Handler(FileSystemEventHandler):
+        #: Directory/name pruning shared with the polling backend (defaults +
+        #: ``.engraphisignore``). Assigned by :func:`_build_handler`; left as an
+        #: empty set so a hand-constructed handler never blocks on it.
+        _exclude_dirs: set[str] = set()
+
+        def _excluded(self, path: str) -> bool:
+            """Return whether *path* (or any parent) is pruned by the exclude policy."""
+            try:
+                relative = os.path.relpath(path, str(root))
+            except ValueError:
+                return True
+            if relative in ("", "."):
+                return False
+            return any(part in self._exclude_dirs for part in Path(relative).parts)
+
         def _dispatch(self, paths: list[str]) -> None:
             for attempt in range(1, _MAX_RETRIES + 1):
                 if callback(paths):
@@ -245,11 +281,25 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
                 _MAX_RETRIES, paths,
             )
 
+        def on_any_event(self, event):
+            # Belt-and-suspenders gate at the framework entry point: reject events
+            # whose src or dest path is under an excluded directory (defaults +
+            # .engraphisignore) before they reach the specific handlers, mirroring
+            # the polling backend's pruning.
+            src = getattr(event, "src_path", "")
+            if src and self._excluded(src):
+                return
+            dest = getattr(event, "dest_path", "")
+            if dest and self._excluded(dest):
+                return
+            super().on_any_event(event)
+
         def on_modified(self, event):
-            if not event.is_directory:
-                ext = os.path.splitext(event.src_path)[1].lower()
-                if ext in _WATCHED_EXTENSIONS:
-                    enqueue([event.src_path])
+            if event.is_directory or self._excluded(event.src_path):
+                return
+            ext = os.path.splitext(event.src_path)[1].lower()
+            if ext in _WATCHED_EXTENSIONS:
+                enqueue([event.src_path])
 
         def on_created(self, event):
             self.on_modified(event)
@@ -263,13 +313,14 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
             paths = [
                 path
                 for path in (event.src_path, event.dest_path)
-                if os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
+                if not self._excluded(path)
+                and os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
             ]
             if paths:
                 enqueue(paths)
 
     observer = Observer()
-    observer.schedule(_Handler(), str(root), recursive=True)
+    observer.schedule(_build_handler(), str(root), recursive=True)
     observer.start()
     logger.info("watchdog observer started on %s", root)
     try:

@@ -19,6 +19,7 @@ from engraphis.backends.sync_relay import (
     EncryptedRelayTransport,
     RelayError,
     RelayTransport,
+    _saved_sync_token,
     decode_sync_e2ee_key,
 )
 from engraphis.core.engine import MemoryEngine
@@ -43,6 +44,26 @@ def test_decode_sync_e2ee_key_rejects_short_and_malformed_values():
         decode_sync_e2ee_key("short")
     with pytest.raises(RelayError):
         decode_sync_e2ee_key("A" * 43 + "==")  # two pads is not a 32-byte key
+
+
+def test_saved_sync_token_rejects_configured_token_bound_to_another_relay(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "engr_ut_" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "https://trusted.test")
+
+    with pytest.raises(RelayError, match="belongs to another relay") as caught:
+        _saved_sync_token("https://other.test")
+
+    assert caught.value.status == 409
+
+
+def test_saved_sync_token_rejects_configured_token_without_valid_origin(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN", "engr_ut_" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "")
+
+    with pytest.raises(RelayError, match="no valid relay binding") as caught:
+        _saved_sync_token("https://other.test")
+
+    assert caught.value.status == 409
 
 
 def test_get_transport_relay_builds_relay_transport(monkeypatch):

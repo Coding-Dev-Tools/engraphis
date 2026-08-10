@@ -405,6 +405,22 @@ def test_rtf_and_additional_office_containers_are_dependency_free():
     )
     assert literal_rtf.body == "Café"
 
+    # \binN skips N raw binary bytes (braces/backslashes inside are never
+    # parsed, so the group stack stays balanced) without emitting them.
+    bin_rtf = parse_document(
+        b"{\\rtf1\\ansi hello\\par\\pict\\bin8 ab{\\x7f world}",
+        "binary.rtf",
+    )
+    assert bin_rtf.body == "hello"
+    assert "world" not in bin_rtf.body
+    assert bin_rtf.body == "hello"  # \pict destination suppression drops trailing text
+    # An oversized \binN is rejected instead of trusting N.
+    with pytest.raises(DocumentParseError, match="invalid RTF"):
+        parse_document(
+            b"{\\rtf1\\ansi\\bin999999999}",
+            "oversized-binary.rtf",
+        )
+
     xlsx = _zip({
         "xl/sharedStrings.xml": "<sst><si><t>Revenue</t></si></sst>",
         "xl/worksheets/sheet1.xml": (
@@ -474,6 +490,30 @@ def test_html_charset_detection_ignores_comments_and_script_text():
     )
 
     assert html.body == "Café"
+
+
+def test_xhtml_uses_xml_prolog_encoding_before_meta_charset():
+    # Latin-1 declared in the XML prolog with no <meta charset> present.
+    xhtml = parse_document(
+        b'<?xml version="1.0" encoding="ISO-8859-1"?>'
+        b"<html><body>Caf\xe9</body></html>",
+        "page.xhtml",
+    )
+    assert xhtml.body == "Café"
+    # UTF-8 XHTML with a prolog still decodes correctly.
+    utf8_xhtml = parse_document(
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b"<html><body>Caf\xc3\xa9</body></html>",
+        "page.xhtml",
+    )
+    assert utf8_xhtml.body == "Café"
+    # The prolog may be preceded by whitespace.
+    spaced_xhtml = parse_document(
+        b' \n<?xml version="1.0" encoding="ISO-8859-1"?>'
+        b"<html><body>Caf\xe9</body></html>",
+        "page.xhtml",
+    )
+    assert spaced_xhtml.body == "Café"
 
 
 def test_unreadable_directory_is_reported_and_marks_scan_incomplete(monkeypatch, tmp_path):
@@ -663,6 +703,27 @@ def test_unreadable_directory_is_reported(monkeypatch, tmp_path):
     )
 
 
+def test_oversized_directory_is_bounded_and_marks_scan_incomplete(monkeypatch, tmp_path):
+    """A single directory with more entries than MAX_DOCUMENT_FILES must not be
+    materialized into an unbounded sorted list: the walk emits a
+    "directory exceeds safety limit" issue for that directory and the scan result
+    is marked incomplete."""
+    import engraphis.core.documents as documents_module
+
+    monkeypatch.setattr(documents_module, "MAX_DOCUMENT_FILES", 5)
+    oversized = tmp_path / "oversized"
+    oversized.mkdir()
+    for index in range(10):
+        (oversized / f"note-{index}.md").write_text(f"# Note {index}\n", encoding="utf-8")
+    scan = scan_document_tree(tmp_path)
+    assert scan.complete is False
+    assert any(
+        issue.relative_path == "oversized"
+        and issue.reason == "directory exceeds safety limit"
+        for issue in scan.skipped
+    )
+
+
 def test_normalized_paths_are_bounded_and_portable(tmp_path):
     assert normalize_document_path("notes/cafe\u0301.txt") == "notes/café.txt"
     with pytest.raises(DocumentParseError, match="4096"):
@@ -673,3 +734,89 @@ def test_normalized_paths_are_bounded_and_portable(tmp_path):
     assert len(scan.documents) == 1
     if len(list(tmp_path.iterdir())) == 2:
         assert any(item.reason == "duplicate normalized source path" for item in scan.rejected)
+
+
+def _worksheet(marker: str) -> str:
+    return (
+        '<worksheet xmlns="urn:sheet"><sheetData><row><c t="inlineStr"><is><t>'
+        + marker
+        + "</t></is></c></row></sheetData></worksheet>"
+    )
+
+
+def test_xlsx_extraction_follows_workbook_sheet_order():
+    xlsx = _zip({
+        "xl/workbook.xml": (
+            '<workbook xmlns="urn:wb" xmlns:r="urn:r">'
+            "<sheets>"
+            '<sheet name="Second" sheetId="2" r:id="rId2"/>'
+            '<sheet name="First" sheetId="1" r:id="rId1"/>'
+            '<sheet name="Orphan" sheetId="3" r:id="rId3"/>'
+            "</sheets></workbook>"
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            '<Relationships xmlns="urn:rels">'
+            '<Relationship Id="rId1" Type="urn:worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="urn:worksheet" Target="worksheets/sheet2.xml"/>'
+            "</Relationships>"
+        ),
+        "xl/worksheets/sheet1.xml": _worksheet("First sheet"),
+        "xl/worksheets/sheet2.xml": _worksheet("Second sheet"),
+        "xl/worksheets/sheet3.xml": _worksheet("Third sheet"),
+    })
+    record = parse_document(xlsx, "reordered.xlsx")
+    assert record.body == "Second sheet\nFirst sheet\nThird sheet"
+    assert record.metadata["sheets"] == 3
+    assert record.metadata["rows"] == 3
+
+
+def test_xlsx_extraction_falls_back_to_numeric_order_without_workbook():
+    xlsx = _zip({
+        "xl/worksheets/sheet1.xml": _worksheet("First sheet"),
+        "xl/worksheets/sheet2.xml": _worksheet("Second sheet"),
+        "xl/worksheets/sheet10.xml": _worksheet("Tenth sheet"),
+    })
+    record = parse_document(xlsx, "plain.xlsx")
+    assert record.body == "First sheet\nSecond sheet\nTenth sheet"
+    assert record.metadata["sheets"] == 3
+    assert record.metadata["rows"] == 3
+
+
+def _slide(marker: str) -> str:
+    return '<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:t>' + marker + "</a:t></p:sld>"
+
+
+def test_pptx_extraction_follows_presentation_slide_order():
+    pptx = _zip({
+        "ppt/presentation.xml": (
+            '<p:presentation xmlns:p="urn:p" xmlns:r="urn:r">'
+            "<p:sldIdLst>"
+            '<p:sldId id="256" r:id="rId2"/>'
+            '<p:sldId id="257" r:id="rId1"/>'
+            "</p:sldIdLst></p:presentation>"
+        ),
+        "ppt/_rels/presentation.xml.rels": (
+            '<Relationships xmlns="urn:rels">'
+            '<Relationship Id="rId1" Type="urn:slide" Target="slides/slide1.xml"/>'
+            '<Relationship Id="rId2" Type="urn:slide" Target="slides/slide2.xml"/>'
+            '<Relationship Id="rId3" Type="urn:slide" Target="slides/slide3.xml"/>'
+            "</Relationships>"
+        ),
+        "ppt/slides/slide1.xml": _slide("First slide"),
+        "ppt/slides/slide2.xml": _slide("Second slide"),
+        "ppt/slides/slide3.xml": _slide("Third slide"),
+    })
+    record = parse_document(pptx, "reordered.pptx")
+    assert record.body == "Second slide\n\nFirst slide\n\nThird slide"
+    assert record.metadata["slides"] == 3
+
+
+def test_pptx_extraction_falls_back_to_numeric_order_without_presentation():
+    pptx = _zip({
+        "ppt/slides/slide1.xml": _slide("First slide"),
+        "ppt/slides/slide2.xml": _slide("Second slide"),
+        "ppt/slides/slide10.xml": _slide("Tenth slide"),
+    })
+    record = parse_document(pptx, "plain.pptx")
+    assert record.body == "First slide\n\nSecond slide\n\nTenth slide"
+    assert record.metadata["slides"] == 3

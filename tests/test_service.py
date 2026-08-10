@@ -1674,3 +1674,38 @@ def test_graph_index_job_reuse_preserves_caller_owned_transaction(monkeypatch):
     finally:
         release.set()
         service.close()
+
+
+def test_document_import_launcher_marks_job_failed_when_worker_start_raises(monkeypatch):
+    """If Thread.start() raises, the job must not be left running forever: the
+    launcher marks it failed and removes the thread from the owned-workers dict
+    (the same failure pattern the graph-index launcher uses)."""
+    from engraphis.document_import import DocumentImporter
+
+    s = _svc()
+    s.create_workspace("acme")
+
+    original_thread_start = threading.Thread.start
+
+    def fail_start(self, *args, **kwargs):
+        raise RuntimeError("thread pool exhausted")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    try:
+        with pytest.raises(RuntimeError, match="thread pool exhausted"):
+            s.import_document_upload(
+                files=[("notes.md", b"# Title\nstart failure fact")],
+                attachment_manifest=None,
+                workspace="acme",
+                source_label="start-failure-source",
+                confirmed=True,
+            )
+    finally:
+        monkeypatch.setattr(threading.Thread, "start", original_thread_start)
+
+    assert s._obsidian_job_threads == {}
+    row = s.store.conn.execute(
+        "SELECT id, state FROM jobs WHERE kind=? ORDER BY created_at DESC LIMIT 1",
+        (DocumentImporter.JOB_KIND,),
+    ).fetchone()
+    assert row is not None and row["state"] == "failed"

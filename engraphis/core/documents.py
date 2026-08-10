@@ -407,7 +407,7 @@ def scan_document_tree(
                     result.rejected.append(DocumentFileIssue(raw_relative, _safe_reason(exc)))
                     continue
             result.skipped.append(DocumentFileIssue(relative, issue))
-            if issue in {"unreadable directory", "unreadable path"}:
+            if issue in {"unreadable directory", "unreadable path", "directory exceeds safety limit"}:
                 result.complete = False
             continue
         try:
@@ -580,10 +580,39 @@ class _HTMLCharsetParser(HTMLParser):
             self.encoding = candidate
 
 
+def _decode_xhtml_prolog(raw: bytes) -> Optional[str]:
+    """Return the encoding declared in an XML prolog, if raw looks like XML.
+
+    XHTML may declare its encoding in the ``<?xml ... encoding="..."?>`` prolog
+    before any HTML ``<meta charset>`` element, so check it before the meta
+    path.  ``None`` means no usable prolog encoding was found.
+    """
+    if not raw.lstrip().startswith(b"<"):
+        return None
+    head = raw.lstrip()[1:].lstrip()
+    if not head.startswith(b"?xml"):
+        return None
+    match = _EPUB_XML_ENCODING_RE.search(raw[:4096])
+    if not match:
+        return None
+    try:
+        return codecs.lookup(match.group(2).decode("ascii")).name
+    except (LookupError, UnicodeError):
+        return None
+
+
 def _decode_html(raw: bytes) -> Tuple[str, List[str]]:
     """Decode HTML using an early in-document charset declaration when present."""
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return _decode_text(raw)
+    prolog_encoding = _decode_xhtml_prolog(raw)
+    if prolog_encoding:
+        try:
+            return raw.decode(prolog_encoding), []
+        except UnicodeDecodeError:
+            return raw.decode(prolog_encoding, errors="replace"), [
+                "invalid %s was replaced with U+FFFD" % prolog_encoding.upper(),
+            ]
     parser = _HTMLCharsetParser()
     try:
         # Charset declarations are ASCII by definition.  Parsing a latin-1 view
@@ -869,6 +898,15 @@ def _rtf_body(content: str, fallback: str) -> Tuple[str, str, Dict[str, Any], Li
                         end = next_end
                         remaining -= 1
                     index = end
+                    continue
+                elif word == "bin" and number is not None:
+                    # \binN is followed by N raw binary bytes that may contain
+                    # braces or backslashes; skip them without emitting, parsing,
+                    # or counting them toward suppression so the group stack
+                    # cannot be unbalanced by a binary payload.
+                    if not 0 <= number <= MAX_DOCUMENT_CHARS:
+                        raise DocumentParseError("invalid RTF document")
+                    index = min(len(content), end + number)
                     continue
                 if not suppressed[-1] and word in {"line", "par"}:
                     append_text("\n")
@@ -1170,6 +1208,14 @@ def _xlsx_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
         (name for name in archive.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)),
         key=lambda value: _archive_member_number(value),
     )
+    sheets = _relationship_ordered(
+        archive, sheets,
+        rels_member="xl/_rels/workbook.xml.rels",
+        part_member="xl/workbook.xml",
+        part_label="XLSX workbook",
+        entry_suffix="sheet",
+        base="xl",
+    )
     rows: List[str] = []
     total = 0
     for name in sheets:
@@ -1227,6 +1273,14 @@ def _pptx_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
         (name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)),
         key=lambda value: _archive_member_number(value),
     )
+    slides = _relationship_ordered(
+        archive, slides,
+        rels_member="ppt/_rels/presentation.xml.rels",
+        part_member="ppt/presentation.xml",
+        part_label="PPTX presentation",
+        entry_suffix="sldId",
+        base="ppt",
+    )
     parts: List[str] = []
     total = 0
     for name in slides:
@@ -1243,6 +1297,113 @@ def _pptx_body(archive: zipfile.ZipFile) -> Tuple[str, Dict[str, Any]]:
 def _archive_member_number(value: str) -> int:
     match = re.search(r"\d+", Path(value).stem)
     return int(match.group(0)) if match else 0
+
+
+def _relationship_targets(
+    raw_rels: bytes, rels_label: str, base: str,
+) -> Dict[str, str]:
+    """Map relationship Ids to resolved part targets from one OOXML rels part.
+
+    Returns ``{relationship_id: resolved_member}`` for relationships whose
+    target resolves to a member inside the package.  Relative targets are
+    joined to the owning part's folder, ``..`` escapes are rejected and
+    package-absolute (leading ``/``) targets are normalized; the caller falls
+    back to numeric ordering when the rels part is missing or malformed.
+    """
+    root = _xml_root(raw_rels, rels_label)
+    targets: Dict[str, str] = {}
+    for relationship in root.iter():
+        if not relationship.tag.endswith("Relationship"):
+            continue
+        rid = next(
+            (
+                str(value) for key, value in relationship.attrib.items()
+                if key == "Id" or key.endswith("}Id")
+            ),
+            "",
+        )
+        target = next(
+            (
+                str(value) for key, value in relationship.attrib.items()
+                if key == "Target" or key.endswith("}Target")
+            ),
+            "",
+        )
+        if not rid or not target:
+            continue
+        resolved = _resolve_relationship_target(target, base)
+        if resolved is not None:
+            targets[rid] = resolved
+    return targets
+
+
+def _resolve_relationship_target(target: str, base: str) -> Optional[str]:
+    """Resolve an OOXML relationship target to a package member path.
+
+    Relative targets are joined to the owning part's folder (``base``); a
+    leading ``/`` marks a package-absolute target and is kept as the full
+    member.  ``..`` references escape the package root and are rejected, as
+    are empty and directory-style targets.  ``None`` means the target cannot
+    be used.
+    """
+    normalized = target.replace("\\", "/")
+    if ".." in normalized.split("/"):
+        return None
+    if not normalized or normalized.endswith("/"):
+        return None
+    if normalized.startswith("/"):
+        return normalized.lstrip("/")
+    return base + "/" + normalized if base else normalized
+
+
+def _relationship_ordered(
+    archive: zipfile.ZipFile,
+    members: List[str],
+    *,
+    rels_member: str,
+    part_member: str,
+    part_label: str,
+    entry_suffix: str,
+    base: str,
+) -> List[str]:
+    """Reorder container members by the part-declared relationship order.
+
+    The workbook/presentation part lists its sheets/slides as ``r:id``
+    references whose rels part maps each id to a target member; that order is
+    the one users see, and it need not match the numeric member order.  When
+    the rels part, the listing part, or either XML is missing or malformed the
+    members keep their (numeric) input order.
+    """
+    try:
+        raw_rels = archive.read(rels_member)
+        raw_part = archive.read(part_member)
+    except KeyError:
+        return members
+    try:
+        targets = _relationship_targets(raw_rels, rels_member, base)
+        if not targets:
+            return members
+        root = _xml_root(raw_part, part_label)
+    except DocumentParseError:
+        return members
+    members_set = set(members)
+    ordered: List[str] = []
+    for element in root.iter():
+        if not element.tag.endswith(entry_suffix):
+            continue
+        rid = next(
+            (
+                str(value) for key, value in element.attrib.items()
+                if key.endswith("}id")
+            ),
+            "",
+        )
+        target = targets.get(rid)
+        if target is None or target not in members_set or target in ordered:
+            continue
+        ordered.append(target)
+    remaining = [member for member in members if member not in ordered]
+    return ordered + remaining
 
 
 _EPUB_XML_ENCODING_RE = re.compile(
@@ -1546,16 +1707,23 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 def _walk_tree(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str]]]:
     try:
-        entries = sorted(
-            directory.iterdir(),
-            key=lambda item: (
-                unicodedata.normalize("NFC", item.name).casefold(),
-                unicodedata.normalize("NFC", item.name),
-            ),
-        )
+        entries = list(directory.iterdir())
     except OSError:
         yield directory, "unreadable directory"
         return
+    # Never sort an unbounded listing: once a single directory exceeds the scan
+    # budget, deterministic ordering no longer matters and sorting thousands of
+    # entries just wastes memory. Emit the directory as an issue and stop so
+    # scan_document_tree marks the result incomplete.
+    if len(entries) > MAX_DOCUMENT_FILES:
+        yield directory, "directory exceeds safety limit"
+        return
+    entries.sort(
+        key=lambda item: (
+            unicodedata.normalize("NFC", item.name).casefold(),
+            unicodedata.normalize("NFC", item.name),
+        ),
+    )
     for entry in entries:
         try:
             relative = entry.relative_to(root)

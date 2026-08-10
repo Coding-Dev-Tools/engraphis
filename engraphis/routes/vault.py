@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import heapq
 import logging
+import os
+import stat
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -46,6 +48,76 @@ _UPLOAD_FORM_FIELDS = 8
 _DUPLICATE_CANDIDATE_LIMIT = 500
 _DUPLICATE_RESULT_LIMIT = 200
 _DUPLICATE_BLOCK_SIZE = 256
+
+
+def _is_within(root: Path, candidate: Path) -> bool:
+    """Return whether *candidate* is a descendant of (or equal to) *root*."""
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    """Return whether two stat results reference the same file on disk."""
+    if left.st_dev or left.st_ino or right.st_dev or right.st_ino:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+    return True
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """Return whether a stat result carries the Windows reparse-point attribute."""
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
+    """Read *path* descriptor-safely, bounding it to *limit* bytes.
+
+    Mirrors ``engraphis.core.documents._read_tree_file``: the path is re-validated
+    against *folder* at open time (lstat -> type/symlink/reparse rejection ->
+    containment -> ``O_NOFOLLOW`` open -> fstat identity -> size bound -> read ->
+    post-read identity/containment recheck) so a symlink swapped in between the
+    enumeration phase and this read cannot escape the import root.
+    """
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_reparse_point(before):
+        raise OSError("unsafe file type")
+    if not _is_within(folder, path.resolve(strict=True)):
+        raise OSError("path escapes import root")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or _is_reparse_point(opened) or not _same_identity(before, opened):
+            raise OSError("file changed during import")
+        if opened.st_size > limit:
+            raise OSError("import resource exceeds its byte limit")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(64 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise OSError("import resource exceeds its byte limit")
+        finished, after = os.fstat(fd), os.lstat(path)
+        if (
+            not _same_identity(opened, finished)
+            or opened.st_size != finished.st_size
+            or opened.st_mtime_ns != finished.st_mtime_ns
+            or stat.S_ISLNK(after.st_mode)
+            or _is_reparse_point(after)
+            or not _same_identity(finished, after)
+            or not _is_within(folder, path.resolve(strict=True))
+        ):
+            raise OSError("file changed during import")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 class _BoundedUploadRoute(APIRoute):
@@ -389,8 +461,10 @@ def import_folder(req: FolderImportReq):
     for file_path, relative_path in files:
         relative = relative_path.as_posix()
         try:
-            with file_path.open("rb") as handle:
-                raw = handle.read(MAX_IMPORT_RESOURCE_BYTES + 1)
+            # The enumerated path may have been swapped for a symlink since the
+            # enumeration pass; _read_import_file re-validates type, containment,
+            # and identity at open/read time, so the import root cannot be escaped.
+            raw = _read_import_file(resolved_folder, file_path, MAX_IMPORT_RESOURCE_BYTES)
             if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
                 raise ValueError("file grew beyond the import resource limit")
             content = raw.decode("utf-8", errors="replace")

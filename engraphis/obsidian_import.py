@@ -1003,7 +1003,11 @@ class ObsidianImporter:
 
         def flush() -> None:
             nonlocal batch_open, writes_in_batch
-            if batch_open and self.store.conn.transaction_owned_by_current_thread():
+            if batch_open:
+                # This method OWNS the batch transaction it opened (``BEGIN IMMEDIATE``
+                # in the add_link loop and in retire_unsupported_links).  Commit it
+                # even when the connection reports no ownership, so the batch rows are
+                # never silently dropped while the run reports success.
                 self.store.conn.commit()
             batch_open = False
             writes_in_batch = 0

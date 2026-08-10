@@ -887,8 +887,10 @@ def _parse_headers(raw: str) -> dict:
         return {}
     try:
         parsed = json.loads(raw)
-    except Exception as exc:
-        print(f"[engraphis] ENGRAPHIS_LLM_EXTRA_HEADERS contains invalid JSON: {exc}",
+    except Exception:
+        # The decoder error text can echo a fragment of a header value that may
+        # contain secret-like content; emit a value-free diagnostic instead.
+        print("[engraphis] ENGRAPHIS_LLM_EXTRA_HEADERS contains invalid JSON",
               file=sys.stderr)
         return {}
     if not isinstance(parsed, dict):

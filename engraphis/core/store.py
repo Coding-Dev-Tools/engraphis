@@ -3325,6 +3325,14 @@ class Store:
     @contextmanager
     def _write_operation(self, name: str, *, commit: bool):
         """Isolate one compound write without settling a caller-owned transaction."""
+        # Inside ``defer_commits`` the caller's outer savepoint owns the whole
+        # operation.  Opening another savepoint here is legal but leaves it to be
+        # released by the deferral teardown; a failed helper that escapes the
+        # deferral context could otherwise strand an unreleased inner savepoint.
+        # Join the outer boundary directly so failure semantics stay with its owner.
+        if getattr(self.conn._pin, "defer_commits", 0):
+            yield
+            return
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         savepoint = ""
         try:
