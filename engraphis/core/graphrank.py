@@ -37,7 +37,40 @@ def personalized_pagerank(
     inputs return ``{}`` deterministically instead of attempting an unbounded
     local computation.
     """
+    if not isinstance(adjacency, dict) or not isinstance(seeds, list):
+        return {}
     if not adjacency or not seeds:
+        return {}
+    try:
+        damping = float(damping)
+        tol = float(tol)
+        iterations = int(iterations)
+    except (TypeError, ValueError, OverflowError):
+        return {}
+    if not math.isfinite(damping) or not 0.0 <= damping <= 1.0:
+        return {}
+    if not math.isfinite(tol) or tol < 0.0:
+        return {}
+    sanitized: dict[str, list[tuple[str, float]]] = {}
+    for source, neighbors in adjacency.items():
+        if not isinstance(source, str) or not isinstance(neighbors, (list, tuple)):
+            continue
+        clean_neighbors: list[tuple[str, float]] = []
+        for item in neighbors:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            destination, weight = item
+            if not isinstance(destination, str):
+                continue
+            try:
+                weight = float(weight)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(weight) and weight > 0.0:
+                clean_neighbors.append((destination, weight))
+        sanitized[source] = clean_neighbors
+    adjacency = sanitized
+    if not any(adjacency.values()):
         return {}
     nodes = set(adjacency)
     edge_count = 0

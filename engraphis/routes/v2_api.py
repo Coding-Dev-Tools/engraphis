@@ -127,6 +127,7 @@ def service() -> MemoryService:
                 vector_backend=settings.vector_backend,
                 rerank_model=getattr(settings, "rerank_model", "") or None,
                 rerank_revision=getattr(settings, "rerank_revision", "") or None,
+                allowed_workspaces=settings.allowed_workspaces,
             )
         return _service
 
@@ -357,9 +358,12 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
     import sqlite3 as _sql
-    ws = service()._clean_ws(ws)
-    conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
-    conn.row_factory = _sql.Row
+    current_service = service()
+    ws = current_service._clean_ws(ws)
+    # Read through the active store rather than opening a second raw SQLite connection.
+    # This keeps dashboard reads on the same database/connection semantics as writes,
+    # including :memory: databases, SQLCipher, and custom store connectors.
+    conn = current_service.store.conn
     try:
         row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
         if row is None:
@@ -394,8 +398,9 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                 args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
         sql += " ORDER BY COALESCE(last_access, valid_from) DESC"
         rows = conn.execute(sql, args).fetchall()
-    finally:
-        conn.close()
+    except _sql.Error as exc:
+        logger.error("dashboard keyword search failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
 
     def _prov(pp):
         try:
@@ -1341,18 +1346,22 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = Query(default=N
     without sentence-transformers. Live memories only (not superseded/expired)."""
     import json as _json
     import sqlite3 as _sql
+    current_service = service()
     ws = workspace or _default_ws()
     if not ws:
         # No workspace exists yet (fresh install) — nothing to list. Return an empty
         # result instead of letting _clean_ws(None) raise a 500.
         return {"workspace": "", "count": 0, "memories": []}
     try:
-        ws = service()._clean_ws(ws)
+        ws = current_service._clean_ws(ws)
     except (ValidationError, ValueError):
         logger.info("dashboard memories request rejected")
         raise _invalid_request() from None
-    conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
-    conn.row_factory = _sql.Row
+    # Keep this read on the live service store. A second sqlite3 connection points at
+    # a different database for :memory: stores and bypasses SQLCipher/custom connector
+    # semantics, which made the dashboard report no memories even while stats and writes
+    # used the populated active store.
+    conn = current_service.store.conn
     try:
         row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
         if row is None:
@@ -1374,8 +1383,6 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = Query(default=N
     except _sql.Error as exc:
         logger.error("dashboard memory listing failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
-    finally:
-        conn.close()
 
     def _prov(p):
         try:
@@ -2127,9 +2134,7 @@ def graph(workspace: Optional[str] = None,
     service closes that gap.
     """
     ws = workspace or _default_ws()
-    selected = None if layers is None else [
-        x.strip() for x in layers.split(",") if x.strip()
-    ]
+    selected = _graph_csv(layers)
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
         include_code=include_code, repo=repo, backfill=False, full=full,

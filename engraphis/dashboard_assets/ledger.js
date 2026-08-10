@@ -381,7 +381,13 @@
   }
 
   function showNotice(message) {
-    byId('notice-text').textContent = message;
+    const text = String(message || '');
+    byId('notice-text').textContent = text;
+    const banner = byId('notice-banner');
+    if (!banner) return;
+    banner.textContent = text;
+    banner.hidden = !text;
+    banner.dataset.tone = /\b(could not|unavailable|failed|broken|error)\b/i.test(text) ? 'error' : 'info';
   }
 
   function updateReleaseUrl(value) {
@@ -520,7 +526,6 @@
     const detail = byId('sidebar-pro-detail');
     const link = byId('sidebar-pro-cta');
     if (!copy || !detail || !link || !state.license) return;
-
     const renderFeatureCtas = () => {
       [
         ['analytics-pro-cta', 'analytics', 'pro'],
@@ -735,23 +740,41 @@
 
   function renderSavingsOverview(payload) {
     const target = byId('context-savings-summary-body');
-    if (!target) return;
     const { estimate, eligible, excluded } = savingsCounts(payload);
+    const persistentValue = byId('context-savings-persistent-value');
+    const persistentMeta = byId('context-savings-persistent-meta');
+    const persistentRate = byId('context-savings-persistent-rate');
+    const setPersistent = (value, meta, rate = '—') => {
+      if (persistentValue) persistentValue.textContent = value;
+      if (persistentMeta) persistentMeta.textContent = meta;
+      if (persistentRate) persistentRate.textContent = rate;
+    };
+    if (!target) {
+      setPersistent('—', 'Savings estimate unavailable.');
+      return;
+    }
     target.replaceChildren();
     if (!eligible) {
+      setPersistent('—', excluded ? `${excluded} excluded or unclassified deliveries so far.` : 'Tracking starts with the first eligible delivery.');
       target.append(
         empty('No receipt-backed context savings yet.'),
-        node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'} so far.`),
+        node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'} so far.`),
       );
       return;
     }
     const metric = savingsMetric(estimate);
+    const ratio = savingsRatio(estimate.savings_ratio);
+    setPersistent(
+      formatSavingsTokens(estimate.saved_tokens),
+      `Across ${eligible.toLocaleString()} eligible context deliveries · ${estimate.confidence || 'unknown'} confidence`,
+      `${(ratio * 100).toFixed(1)}% estimated reduction`,
+    );
     target.append(
       metric.hero,
       metric.progress,
       node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
       node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
-      node('p', 'field-note', `${excluded} excluded or unclassified ${excluded === 1 ? 'delivery' : 'deliveries'}.`),
+      node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}.`),
     );
   }
 
@@ -760,8 +783,13 @@
     if (!target) return;
     const { estimate, eligible, excluded } = savingsCounts(payload);
     target.replaceChildren();
-    const metric = eligible ? savingsMetric(estimate) : null;
     const header = node('div', 'savings-detail-header');
+    header.append(
+      node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
+      node('span', '', eligible
+        ? `${eligible} eligible deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(1)}% estimated reduction`
+        : 'No eligible estimates in this range.'),
+    );
     const presets = node('div', 'savings-presets');
     [
       ['since', 'Since tracking started'],
@@ -774,14 +802,11 @@
         loadAudit();
       });
       control.classList.toggle('active', state.savingsPreset === value);
+      control.setAttribute('aria-pressed', String(state.savingsPreset === value));
       presets.append(control);
     });
     header.append(presets);
-    if (metric) target.append(metric.hero, metric.progress);
     target.append(header);
-    target.append(node('p', 'savings-summary', eligible
-      ? `${eligible} eligible deliveries`
-      : 'No eligible estimates in this range.'));
     if (eligible) {
       target.append(node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`));
       target.append(node('p', 'field-note', 'Packed context is packing savings; adaptive history is estimated avoided prompt context.'));
@@ -803,14 +828,14 @@
           const item = node('div', 'savings-breakdown-row');
           item.append(
             node('span', '', text(row.token_counter || 'unknown')),
-            node('span', '', `${formatSavingsTokens(row.saved_tokens)} saved · ${row.receipt_count || 0} eligible delivery`),
+            node('span', '', `${formatSavingsTokens(row.saved_tokens)} saved · ${row.receipt_count || 0} eligible deliver${number(row.receipt_count) === 1 ? 'y' : 'ies'}`),
           );
           counterRows.append(item);
         });
         target.append(counterRows);
       }
     }
-    target.append(node('p', 'savings-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
+    target.append(node('p', 'savings-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
   }
 
   function renderDecisions(memories) {
@@ -892,11 +917,11 @@
     });
   }
 
-  function renderProactive(memories) {
+  function renderProactive(memories, unavailableMessage = '') {
     const target = byId('proactive-list');
     target.replaceChildren();
     if (!memories.length) {
-      target.append(empty('No proactive context is available.'));
+      target.append(empty(unavailableMessage || 'No proactive context is available.'));
       return;
     }
     memories.slice(0, 5).forEach(memory => {
@@ -927,7 +952,15 @@
       renderSavingsOverview(payload);
     } catch (error) {
       if (epoch !== state.refreshEpoch) return;
-      byId('context-savings-summary-body').replaceChildren(empty(`Could not load savings: ${error.message}`));
+      const message = `Could not load savings: ${error.message}`;
+      const target = byId('context-savings-summary-body');
+      if (target) target.replaceChildren(empty(message));
+      const persistentValue = byId('context-savings-persistent-value');
+      const persistentMeta = byId('context-savings-persistent-meta');
+      const persistentRate = byId('context-savings-persistent-rate');
+      if (persistentValue) persistentValue.textContent = 'Unavailable';
+      if (persistentMeta) persistentMeta.textContent = 'Receipt-backed estimate could not be loaded.';
+      if (persistentRate) persistentRate.textContent = '—';
     }
   }
 
@@ -946,10 +979,15 @@
     if (epoch !== state.refreshEpoch) return;
     const proactive = proactiveResult.status === 'fulfilled'
       ? (proactiveResult.value.memories || proactiveResult.value.results || [])
-      : state.memories.slice(0, 5);
-    renderProactive(proactive);
-    renderDecisions(proactive.length ? proactive : state.memories);
+      : [];
+    renderProactive(proactive, proactiveResult.status === 'rejected'
+      ? 'Strongest memories are unavailable. Try refreshing this workspace.' : '');
+    renderDecisions(proactive);
     renderActivity(auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : []);
+    if (auditResult.status === 'rejected') {
+      const cell = byId('activity-body').querySelector('td');
+      if (cell) cell.textContent = 'Activity is unavailable. Try refreshing this workspace.';
+    }
   }
 
   function renderWorkspaceNames() {
@@ -969,6 +1007,7 @@
       'timeline-result': 'Search a topic to inspect its temporal history.',
       'supersession-list': 'Search a topic to compare closed and current records.',
       'audit-list': 'Open Audit to load this workspace’s records and receipts.',
+      'savings-detail': 'Open Audit to load this workspace’s receipt-backed estimate.',
       'analytics-result': 'Open this tab to check availability.',
       'automation-result': 'Open this tab to check availability.',
       'team-result': 'Open this tab to check connection state.',
@@ -1012,13 +1051,15 @@
     } catch (_) {}
     showNotice('');
     try {
-      await Promise.all([
+      const results = await Promise.allSettled([
         loadStats(name, epoch),
         loadSavings(name, epoch),
         loadMemories(name, epoch),
         loadToday(name, epoch),
       ]);
       if (epoch !== state.refreshEpoch) return;
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) showNotice(`Some workspace panels could not refresh: ${failed.reason.message}`);
       renderWorkspaceList();
       if (state.view === 'relations') await loadGraph();
       if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
@@ -1056,6 +1097,23 @@
 
   function renderLibrary() {
     const target = byId('library-list');
+    if (!target.dataset.keyboardBound) {
+      target.dataset.keyboardBound = 'true';
+      target.addEventListener('keydown', event => {
+        const cards = [...target.querySelectorAll('[role="option"]')];
+        const current = event.target.closest('[role="option"]');
+        if (!current || !cards.length) return;
+        let index = cards.indexOf(current);
+        if (event.key === 'Home') index = 0;
+        else if (event.key === 'End') index = cards.length - 1;
+        else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') index = Math.min(cards.length - 1, index + 1);
+        else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') index = Math.max(0, index - 1);
+        else return;
+        event.preventDefault();
+        cards.forEach((card, cardIndex) => { card.tabIndex = cardIndex === index ? 0 : -1; });
+        cards[index].focus();
+      });
+    }
     target.replaceChildren();
     const memories = filteredMemories();
     byId('library-count').textContent = `${memories.length.toLocaleString()} ${memories.length === 1 ? 'memory' : 'memories'}`;
@@ -1064,6 +1122,9 @@
       return;
     }
     memories.forEach(memory => target.append(memoryCard(memory)));
+    const cards = [...target.querySelectorAll('[role="option"]')];
+    const selectedIndex = cards.findIndex(card => card.getAttribute('aria-selected') === 'true');
+    cards.forEach((card, index) => { card.tabIndex = index === (selectedIndex >= 0 ? selectedIndex : 0) ? 0 : -1; });
   }
 
   function definitionList(entries) {
@@ -1336,6 +1397,387 @@
     } finally {
       byId('import-files').value = '';
     }
+  }
+
+  const obsidianImport = {
+    preview: null, job: null, poll: null, selection: null, sources: [],
+    jobWorkspace: '', running: false, reviewGeneration: 0,
+  };
+  let documentExtensions = null;
+
+  async function obsidianApi(path, options = {}) {
+    const csrf = await reviewCsrfToken();
+    return api(path, {
+      ...options,
+      headers: { ...(options.headers || {}), 'X-Engraphis-Review-CSRF': csrf },
+    });
+  }
+
+  function obsidianSelection() {
+    const files = [
+      ...byId('obsidian-import-files').files,
+      ...byId('obsidian-import-folder').files,
+    ];
+    const sourceMode = byId('obsidian-source-mode').value;
+    const markdown = files.filter(file => /\.md$/i.test(file.name));
+    const documents = files.filter(file => {
+      const suffix = (file.name.split('.').pop() || '').toLowerCase();
+      // The format endpoint is an owner-only convenience hint.  The server still
+      // enforces its registry for every byte if the hint is temporarily unavailable.
+      return !documentExtensions || documentExtensions.has(suffix);
+    });
+    const uploadFiles = sourceMode === 'obsidian' ? markdown : documents;
+    const attachments = sourceMode === 'obsidian'
+      ? files.filter(file => !/\.md$/i.test(file.name)).map(file => ({
+      path: file.webkitRelativePath || file.name, size: file.size,
+      })) : [];
+    const unsupported = sourceMode === 'obsidian'
+      ? 0 : files.length - uploadFiles.length;
+    const fields = {
+      workspace: byId('obsidian-workspace').value.trim(),
+      repo: byId('obsidian-repo').value.trim(),
+      session_id: byId('obsidian-session').value.trim(),
+      scope: byId('obsidian-scope').value.trim(),
+      memory_type: byId('obsidian-memory-type').value,
+      source_id: byId('obsidian-vault-id').value,
+      source_label: byId('obsidian-vault-label').value.trim(),
+      on_conflict: byId('obsidian-conflict').value,
+      source_mode: sourceMode,
+    };
+    return { uploadFiles, attachments, unsupported, sourceMode, fields };
+  }
+
+  function obsidianFormData(selection, { confirmed = false, reviewToken = '' } = {}) {
+    const form = new FormData();
+    Object.entries(selection.fields).forEach(([name, value]) => form.append(name, value));
+    form.append('confirmed', confirmed ? 'true' : 'false');
+    if (reviewToken) form.append('review_token', reviewToken);
+    form.append('attachment_manifest', JSON.stringify(selection.attachments));
+    selection.uploadFiles.forEach(file => (
+      form.append('files', file, file.webkitRelativePath || file.name)
+    ));
+    return form;
+  }
+
+  function invalidateDocumentImportPreview(message = 'Selection changed. Preview again before importing.') {
+    obsidianImport.reviewGeneration += 1;
+    obsidianImport.preview = null;
+    obsidianImport.selection = null;
+    byId('obsidian-confirmed').checked = false;
+    byId('obsidian-run').disabled = true;
+    if (obsidianImport.running) return;
+    obsidianImport.job = null;
+    obsidianImport.jobWorkspace = '';
+    byId('obsidian-cancel').hidden = true;
+    delete byId('obsidian-cancel').dataset.jobId;
+    renderObsidianReport(null);
+    if (message) byId('obsidian-import-progress').textContent = message;
+  }
+
+  function updateDocumentImportMode() {
+    const obsidian = byId('obsidian-source-mode').value === 'obsidian';
+    byId('obsidian-files-label').textContent = obsidian ? 'Individual Markdown notes' : 'Individual documents';
+    byId('obsidian-folder-label').textContent = obsidian ? 'Obsidian vault folder' : 'Document folder';
+    byId('obsidian-import-description').textContent = obsidian
+      ? 'Choose an Obsidian vault folder. Engraphis previews Markdown note bytes and attachment metadata before it writes anything; attachment bytes are never uploaded.'
+      : 'Choose individual files or a folder. Engraphis previews supported document formats before it writes anything; uploaded bytes are processed locally and are not kept as dashboard upload copies.';
+    byId('obsidian-run').textContent = obsidian ? 'Import vault notes' : 'Import documents';
+    byId('obsidian-import-files').value = '';
+    byId('obsidian-import-folder').value = '';
+    invalidateDocumentImportPreview('Choose files or a folder to preview its import.');
+  }
+
+  function updateSourceLabelRequirement() {
+    const label = byId('obsidian-vault-label');
+    const isNewSource = !byId('obsidian-vault-id').value;
+    label.required = isNewSource;
+    label.setAttribute('aria-required', isNewSource ? 'true' : 'false');
+    label.placeholder = isNewSource ? 'Required for a new source' : 'Saved source label';
+  }
+
+  function prefillNewSourceLabelFromFolder() {
+    if (byId('obsidian-vault-id').value || byId('obsidian-vault-label').value.trim()) return;
+    const firstFolderFile = [...byId('obsidian-import-folder').files]
+      .find(file => file.webkitRelativePath && file.webkitRelativePath.includes('/'));
+    if (!firstFolderFile) return;
+    const folderName = firstFolderFile.webkitRelativePath.split('/')[0].trim();
+    if (folderName) byId('obsidian-vault-label').value = folderName;
+  }
+
+  function requireNewSourceLabel() {
+    if (byId('obsidian-vault-id').value || byId('obsidian-vault-label').value.trim()) return true;
+    byId('obsidian-import-progress').textContent = 'Enter a Source label before creating a new source.';
+    byId('obsidian-vault-label').focus();
+    return false;
+  }
+
+  function obsidianRows(result) {
+    const rows = result && (result.files || result.details || result.entries || []);
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  function renderObsidianReport(result) {
+    const target = byId('obsidian-import-report');
+    const wanted = byId('obsidian-report-filter').value;
+    target.replaceChildren();
+    const rows = obsidianRows(result).filter(row => {
+      const status = String(row.status || row.action || row.result || '').toLowerCase();
+      if (wanted === 'all') return true;
+      if (wanted === 'reject') return /reject|error|warn|conflict/.test(status) || Boolean(row.warning || row.error);
+      return status.includes(wanted);
+    });
+    if (!rows.length) {
+      target.append(empty(wanted === 'all' ? 'No per-file details were returned.' : 'No files match this filter.'));
+      return;
+    }
+    const list = node('ul');
+    rows.forEach(row => {
+      const status = String(row.status || row.action || row.result || 'reported').toLowerCase();
+      const action = row.action && String(row.action).toLowerCase() !== status
+        ? ` · action: ${row.action}` : '';
+      const format = row.format || row.format_name ? ` · format: ${row.format || row.format_name}` : '';
+      const warning = row.warning || row.error || row.reason
+        || (Number(row.warning_count) ? `${row.warning_count} warning(s)` : '');
+      const item = node('li', '', `${status.toUpperCase()} · ${row.path || row.file || row.relative_path || 'unnamed document'}${format}${action}${warning ? ` · ${warning}` : ''}`);
+      item.dataset.status = /reject|error/.test(status) || row.error || row.reason ? 'reject' : status;
+      list.append(item);
+    });
+    target.append(list);
+  }
+
+  function obsidianSummary(result, prefix = 'Preview') {
+    const counts = result && (result.counts || result);
+    const keys = ['documents', 'markdown', 'formats', 'imported', 'updated', 'renamed', 'skipped', 'rejected', 'conflict', 'missing', 'error'];
+    const summary = keys.filter(key => Number.isFinite(Number(counts && counts[key])))
+      .map(key => `${key.replace('_', ' ')}: ${counts[key]}`);
+    const unsupported = obsidianImport.selection && obsidianImport.selection.unsupported;
+    const warning = unsupported ? ` · warning: ${unsupported} unsupported files were not uploaded` : '';
+    byId('obsidian-import-progress').textContent = summary.length ? `${prefix} · ${summary.join(' · ')}${warning}` : `${prefix} ready.${warning}`;
+  }
+
+  async function loadObsidianVaults() {
+    const select = byId('obsidian-vault-id');
+    try {
+      const result = await obsidianApi(`/workspaces/import-documents/sources?${query(state.workspace)}`);
+      const vaults = result.sources || result.vaults || result || [];
+      obsidianImport.sources = Array.isArray(vaults) ? vaults : [];
+      select.replaceChildren(option('', 'New source'));
+      obsidianImport.sources.forEach(vault => select.append(option(vault.id, vault.label || vault.name || vault.id)));
+    } catch (_) {
+      // A first-run vault list is optional; preview/import still present a useful error.
+      select.replaceChildren(option('', 'New source'));
+      obsidianImport.sources = [];
+    }
+  }
+
+  async function loadDocumentFormats() {
+    try {
+      const result = await obsidianApi('/workspaces/import-documents/formats');
+      const extensions = Array.isArray(result.extensions) ? result.extensions : [];
+      documentExtensions = new Set(extensions.map(extension => String(extension).replace(/^\./, '').toLowerCase()));
+    } catch (_) {
+      // Server-side validation remains authoritative; do not invent a stale client registry.
+      documentExtensions = null;
+    }
+  }
+
+  function applySelectedDocumentSource() {
+    const source = obsidianImport.sources.find(item => item.id === byId('obsidian-vault-id').value);
+    if (!source) {
+      byId('obsidian-vault-label').value = '';
+      updateSourceLabelRequirement();
+      invalidateDocumentImportPreview();
+      return;
+    }
+    byId('obsidian-vault-label').value = source.label || source.name || '';
+    if (source.repo != null) byId('obsidian-repo').value = source.repo;
+    if (source.session_id != null) byId('obsidian-session').value = source.session_id;
+    if (source.scope) byId('obsidian-scope').value = source.scope;
+    if (source.memory_type) byId('obsidian-memory-type').value = source.memory_type;
+    byId('obsidian-source-mode').value = source.adapter === 'obsidian' || source.kind === 'obsidian'
+      ? 'obsidian' : 'documents';
+    updateSourceLabelRequirement();
+    updateDocumentImportMode();
+  }
+
+  async function previewObsidianImport() {
+    if (obsidianImport.running) return;
+    if (!requireNewSourceLabel()) return;
+    const selection = obsidianSelection();
+    if (!selection.uploadFiles.length) {
+      byId('obsidian-import-progress').textContent = selection.sourceMode === 'obsidian'
+        ? 'Choose a folder containing Markdown notes.'
+        : 'Choose supported documents to import.';
+      return;
+    }
+    invalidateDocumentImportPreview('');
+    const generation = obsidianImport.reviewGeneration;
+    const type = selection.sourceMode === 'obsidian' ? 'Markdown notes' : 'supported documents';
+    const ignored = selection.unsupported ? ` · ${selection.unsupported} unsupported files will not be uploaded` : '';
+    byId('obsidian-import-progress').textContent = `Previewing ${selection.uploadFiles.length} ${type}${selection.attachments.length ? ` and ${selection.attachments.length} attachment manifests` : ''}${ignored}…`;
+    byId('obsidian-preview').disabled = true;
+    try {
+      const preview = await obsidianApi('/workspaces/import-documents/preview', {
+        method: 'POST', body: obsidianFormData(selection),
+      });
+      if (generation !== obsidianImport.reviewGeneration) return;
+      if (!preview || typeof preview.review_token !== 'string' || !preview.review_token) {
+        throw new Error('The server did not bind this preview. Preview again.');
+      }
+      selection.reviewToken = preview.review_token;
+      obsidianImport.selection = selection;
+      obsidianImport.preview = preview;
+      byId('obsidian-confirmed').checked = false;
+      renderObsidianReport(obsidianImport.preview);
+      obsidianSummary(obsidianImport.preview);
+      byId('obsidian-run').disabled = false;
+    } catch (error) {
+      if (generation !== obsidianImport.reviewGeneration) return;
+      obsidianImport.selection = null;
+      obsidianImport.preview = null;
+      byId('obsidian-import-progress').textContent = `Preview failed: ${error.message}`;
+      byId('obsidian-run').disabled = true;
+    } finally {
+      byId('obsidian-preview').disabled = false;
+    }
+  }
+
+  async function pollObsidianImport(jobId, workspace) {
+    try {
+      const result = await obsidianApi(`/workspaces/import-documents/jobs/${encodeURIComponent(jobId)}?${query(workspace)}`);
+      obsidianImport.job = result;
+      renderObsidianReport(result);
+      obsidianSummary(result, 'Import');
+      if (!['complete', 'completed', 'partial', 'failed', 'cancelled'].includes(String(result.state || result.status || '').toLowerCase())) {
+        obsidianImport.poll = window.setTimeout(() => pollObsidianImport(jobId, workspace), 750);
+        return;
+      }
+      obsidianImport.running = false;
+      obsidianImport.poll = null;
+      obsidianImport.selection = null;
+      obsidianImport.preview = null;
+      byId('obsidian-confirmed').checked = false;
+      byId('obsidian-cancel').hidden = true;
+      byId('obsidian-run').disabled = true;
+      byId('obsidian-preview').disabled = false;
+      showNotice('Document import finished.');
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      byId('obsidian-import-progress').textContent = `Could not read import progress: ${error.message}`;
+      byId('obsidian-run').disabled = true;
+    }
+  }
+
+  async function runObsidianImport(event) {
+    event.preventDefault();
+    if (!requireNewSourceLabel()) return;
+    if (!byId('obsidian-confirmed').checked) {
+      byId('obsidian-import-progress').textContent = 'Confirm the selected scope before importing.';
+      byId('obsidian-confirmed').focus();
+      return;
+    }
+    const selection = obsidianImport.selection;
+    if (!selection || !selection.reviewToken) {
+      byId('obsidian-import-progress').textContent = 'Preview this exact selection before importing.';
+      byId('obsidian-run').disabled = true;
+      return;
+    }
+    const workspace = selection.fields.workspace;
+    const runBody = obsidianFormData(selection, {
+      confirmed: true, reviewToken: selection.reviewToken,
+    });
+    // The server token is one-time. Clear the client copy before the request so
+    // a double submit or ambiguous network failure cannot reuse it.
+    selection.reviewToken = '';
+    byId('obsidian-run').disabled = true;
+    byId('obsidian-preview').disabled = true;
+    byId('obsidian-import-progress').textContent = 'Starting local document import…';
+    obsidianImport.running = true;
+    obsidianImport.jobWorkspace = workspace;
+    try {
+      const result = await obsidianApi('/workspaces/import-documents/run', {
+        method: 'POST',
+        body: runBody,
+      });
+      obsidianImport.job = result;
+      renderObsidianReport(result);
+      obsidianSummary(result, 'Import');
+      const jobId = result.job_id || result.id;
+      if (jobId) {
+        byId('obsidian-cancel').hidden = false;
+        byId('obsidian-cancel').dataset.jobId = jobId;
+        byId('obsidian-cancel').dataset.workspace = workspace;
+        await pollObsidianImport(jobId, workspace);
+      }
+      else {
+        obsidianImport.running = false;
+        obsidianImport.selection = null;
+        obsidianImport.preview = null;
+        byId('obsidian-confirmed').checked = false;
+        byId('obsidian-run').disabled = true;
+        byId('obsidian-preview').disabled = false;
+        showNotice('Document import finished.');
+        await selectWorkspace(state.workspace);
+      }
+    } catch (error) {
+      obsidianImport.running = false;
+      obsidianImport.selection = null;
+      obsidianImport.preview = null;
+      byId('obsidian-confirmed').checked = false;
+      byId('obsidian-import-progress').textContent = `Import failed: ${error.message} Preview again before retrying.`;
+      byId('obsidian-run').disabled = true;
+      byId('obsidian-preview').disabled = false;
+    }
+  }
+
+  async function cancelObsidianImport() {
+    const button = byId('obsidian-cancel');
+    const jobId = button.dataset.jobId;
+    const workspace = button.dataset.workspace || obsidianImport.jobWorkspace;
+    if (!jobId || !workspace) return;
+    button.disabled = true;
+    const form = new FormData();
+    form.append('workspace', workspace);
+    try {
+      await obsidianApi(`/workspaces/import-documents/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: form });
+      byId('obsidian-import-progress').textContent = 'Cancellation requested; finishing the current document safely…';
+    } catch (error) {
+      byId('obsidian-import-progress').textContent = `Could not cancel import: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function openObsidianImport() {
+    const dialog = byId('obsidian-import-dialog');
+    byId('obsidian-confirmed').checked = false;
+    if (!obsidianImport.running) {
+      if (obsidianImport.poll) window.clearTimeout(obsidianImport.poll);
+      obsidianImport.preview = null;
+      obsidianImport.job = null;
+      obsidianImport.poll = null;
+      obsidianImport.selection = null;
+      obsidianImport.jobWorkspace = '';
+      delete byId('obsidian-cancel').dataset.jobId;
+      delete byId('obsidian-cancel').dataset.workspace;
+    }
+    byId('obsidian-workspace').value = state.workspace;
+    byId('obsidian-repo').value = '';
+    byId('obsidian-session').value = '';
+    byId('obsidian-vault-label').value = '';
+    if (!obsidianImport.running) {
+      byId('obsidian-import-progress').textContent = 'Choose individual files or a folder to preview its import.';
+    }
+    byId('obsidian-run').disabled = true;
+    byId('obsidian-preview').disabled = obsidianImport.running;
+    byId('obsidian-cancel').hidden = !obsidianImport.running;
+    if (!obsidianImport.running) renderObsidianReport(null);
+    await Promise.all([loadObsidianVaults(), loadDocumentFormats()]);
+    byId('obsidian-vault-id').value = '';
+    updateSourceLabelRequirement();
+    updateDocumentImportMode();
+    dialog.showModal();
+    byId('obsidian-import-files').focus();
   }
 
   function renderAnswer(result) {
@@ -2068,6 +2510,7 @@
       const active = control.dataset.graphTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-graph-tab-panel]').forEach(panel => {
       panel.hidden = panel.dataset.graphTabPanel !== tab;
@@ -2315,6 +2758,7 @@
       const active = control.dataset.provenanceTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-provenance-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.provenancePanel === tab));
     if (tab === 'audit') loadAudit();
@@ -2403,19 +2847,28 @@
     const request = beginScopedRequest('audit');
     const target = byId('audit-list');
     target.replaceChildren(empty('Loading audit records and receipts…'));
-    try {
-      const [audit, receipts, savings] = await Promise.all([
-        api(`/audit?${query(request.workspace)}&limit=100`),
-        api(`/receipts?${query(request.workspace)}&limit=100`),
-        api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
-      ]);
+    byId('savings-detail').replaceChildren(empty('Loading receipt-backed estimate…'));
+    const [auditResult, receiptsResult, savingsResult] = await Promise.allSettled([
+      api(`/audit?${query(request.workspace)}&limit=100`),
+      api(`/receipts?${query(request.workspace)}&limit=100`),
+      api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
+    ]);
       if (!isCurrentScopedRequest(request)) return;
-      renderSavingsDetail(savings);
-      renderAuditCards(auditItems(audit), receiptItems(receipts));
-    } catch (error) {
-      if (!isCurrentScopedRequest(request)) return;
-      target.replaceChildren(empty(`Could not load provenance records: ${error.message}`));
-    }
+      if (savingsResult.status === 'fulfilled') {
+        renderSavingsDetail(savingsResult.value);
+      } else {
+        byId('savings-detail').replaceChildren(empty(`Could not load context savings: ${savingsResult.reason.message}`));
+      }
+      const audit = auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : [];
+      const receipts = receiptsResult.status === 'fulfilled' ? receiptItems(receiptsResult.value) : [];
+      if (auditResult.status === 'rejected' && receiptsResult.status === 'rejected') {
+        target.replaceChildren(empty('Could not load audit records or receipts. Try again.'));
+      } else {
+        renderAuditCards(audit, receipts);
+      }
+      if (auditResult.status === 'rejected' || receiptsResult.status === 'rejected') {
+        showNotice('Some provenance data could not be loaded; available records remain visible.');
+      }
   }
 
   async function verifyReceipts() {
@@ -2452,6 +2905,7 @@
       const active = control.dataset.manageTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-manage-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.managePanel === tab));
     loadManageTab(tab);
@@ -3122,7 +3576,14 @@
     }
   }
 
-  function switchView(view) {
+  function switchView(view, { pushHistory = true } = {}) {
+    const validViews = ['today', 'ask', 'library', 'relations', 'provenance', 'manage'];
+    if (!validViews.includes(view)) view = 'today';
+    if (pushHistory && state.view !== view) {
+      const url = new URL(location.href);
+      url.searchParams.set('view', view);
+      window.history.pushState({ view }, '', url);
+    }
     state.view = view;
     all('[data-view-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.viewPanel === view));
     all('[data-view]').forEach(control => {
@@ -3138,6 +3599,11 @@
     if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
     if (view === 'manage') loadManageTab(state.manageTab);
     window.scrollTo({ top: 0, behavior: 'instant' });
+    const heading = byId(`${view}-title`);
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus({ preventScroll: true });
+    }
   }
 
   function applyTheme(theme) {
@@ -3173,6 +3639,18 @@
       state.workspace = '';
       renderWorkspaceNames();
       renderWorkspaceList();
+      renderMetricValues({ memories: 0, total_rows: 0, workspaces: 0, sessions: 0 });
+      byId('decision-list').replaceChildren(empty('Create a workspace in Manage to start reviewing memory.'));
+      const emptyActivity = node('tr');
+      const emptyActivityCell = node('td', '', 'No workspace selected yet.');
+      emptyActivityCell.colSpan = 5;
+      emptyActivity.append(emptyActivityCell);
+      byId('activity-body').replaceChildren(emptyActivity);
+      byId('proactive-list').replaceChildren(empty('Create a workspace to see proactive context.'));
+      byId('context-savings-summary-body').replaceChildren(empty('Create a workspace to start tracking context savings.'));
+      byId('context-savings-persistent-value').textContent = '—';
+      byId('context-savings-persistent-meta').textContent = 'Create a workspace to start tracking context savings.';
+      byId('context-savings-persistent-rate').textContent = '—';
       return;
     }
     select.disabled = false;
@@ -3202,7 +3680,8 @@
         const saved = localStorage.getItem('engraphis-ledger-view');
         if (['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
       } catch (_) {}
-      switchView(view);
+      const urlView = new URL(location.href).searchParams.get('view');
+      switchView(['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
     } catch (error) {
       if (error.status === 401 && await authenticateBrowser()) {
         location.reload();
@@ -3219,12 +3698,49 @@
     switchView('manage');
     switchManageTab(control.dataset.manage);
   }));
+  const planBadge = byId('plan-badge');
+  if (planBadge) {
+    planBadge.addEventListener('click', event => {
+      if (event.currentTarget.dataset.opensAccount === 'true') return;
+      event.preventDefault();
+      switchView('manage');
+      switchManageTab('plans');
+    });
+  }
   all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
     switchView('provenance');
     switchProvenanceTab(control.dataset.provenance);
   }));
   all('[data-provenance-tab]').forEach(control => control.addEventListener('click', () => switchProvenanceTab(control.dataset.provenanceTab)));
   all('[data-manage-tab]').forEach(control => control.addEventListener('click', () => switchManageTab(control.dataset.manageTab)));
+  function wireTabKeyboard(selector, dataKey, activate) {
+    const controls = all(selector);
+    controls.forEach((control, index) => {
+      control.tabIndex = control.getAttribute('aria-selected') === 'true' ? 0 : (index ? -1 : 0);
+      control.addEventListener('keydown', event => {
+        const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1
+          : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
+        let nextIndex = index;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = controls.length - 1;
+        else if (direction) nextIndex = (index + direction + controls.length) % controls.length;
+        else return;
+        event.preventDefault();
+        const next = controls[nextIndex];
+        next.focus();
+        activate(next.dataset[dataKey]);
+      });
+    });
+  }
+  wireTabKeyboard('[data-graph-tab]', 'graphTab', setGraphTab);
+  wireTabKeyboard('[data-provenance-tab]', 'provenanceTab', switchProvenanceTab);
+  wireTabKeyboard('[data-manage-tab]', 'manageTab', switchManageTab);
+  window.addEventListener('popstate', event => {
+    const view = event.state && event.state.view
+      ? event.state.view
+      : new URL(location.href).searchParams.get('view') || 'today';
+    switchView(view, { pushHistory: false });
+  });
 
   byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
   byId('ask-form').addEventListener('submit', askMemory);
@@ -3236,6 +3752,30 @@
   byId('memory-editor').addEventListener('submit', saveMemory);
   byId('import-button').addEventListener('click', () => byId('import-files').click());
   byId('import-files').addEventListener('change', event => importFiles(event.target.files));
+  byId('obsidian-import-button').addEventListener('click', openObsidianImport);
+  byId('obsidian-import-close').addEventListener('click', () => byId('obsidian-import-dialog').close());
+  byId('obsidian-preview').addEventListener('click', previewObsidianImport);
+  byId('obsidian-cancel').addEventListener('click', cancelObsidianImport);
+  byId('obsidian-import-form').addEventListener('submit', runObsidianImport);
+  byId('obsidian-source-mode').addEventListener('change', updateDocumentImportMode);
+  byId('obsidian-vault-id').addEventListener('change', applySelectedDocumentSource);
+  byId('obsidian-import-files').addEventListener('change', () => invalidateDocumentImportPreview());
+  byId('obsidian-import-folder').addEventListener('change', () => {
+    prefillNewSourceLabelFromFolder();
+    invalidateDocumentImportPreview();
+  });
+  [
+    ['obsidian-workspace', 'input'],
+    ['obsidian-repo', 'input'],
+    ['obsidian-session', 'input'],
+    ['obsidian-scope', 'change'],
+    ['obsidian-memory-type', 'change'],
+    ['obsidian-vault-label', 'input'],
+    ['obsidian-conflict', 'change'],
+  ].forEach(([id, eventName]) => {
+    byId(id).addEventListener(eventName, () => invalidateDocumentImportPreview());
+  });
+  byId('obsidian-report-filter').addEventListener('change', () => renderObsidianReport(obsidianImport.job || obsidianImport.preview));
 
   all('[data-graph-tab]').forEach(control => control.addEventListener('click', () => setGraphTab(control.dataset.graphTab)));
   byId('graph-fit').addEventListener('click', () => state.graphEngine && state.graphEngine.fit());

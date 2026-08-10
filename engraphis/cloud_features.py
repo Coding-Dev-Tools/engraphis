@@ -356,7 +356,7 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     )
     count = service.store.conn.execute(
         "SELECT COUNT(*) AS n FROM memories WHERE workspace_id=? "
-        "AND COALESCE(scope, 'workspace')!='session'",
+        "AND COALESCE(scope, 'workspace') NOT IN ('session', 'user')",
         (workspace_id,),
     ).fetchone()["n"]
     if count > MAX_MEMORIES:
@@ -366,7 +366,8 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
         "SELECT id, title, content, mtype, scope, ingested_at, last_access, valid_from, "
         "valid_to, valid_to_recorded_at, expired_at, subject_key, claim_kind, "
         "stability, importance, pinned, sensitivity, metadata, provenance "
-        "FROM memories WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
+        "FROM memories WHERE workspace_id=? "
+        "AND COALESCE(scope, 'workspace') NOT IN ('session', 'user') "
         "ORDER BY ingested_at, id",
         (workspace_id,),
     )

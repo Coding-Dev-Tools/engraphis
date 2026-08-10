@@ -896,7 +896,8 @@ def test_sync_quarantine_overwrite_removes_existing_vector(caplog):
     assert store.conn.execute(
         "SELECT 1 FROM mem_vectors WHERE id='mem_existing'"
     ).fetchone() is None
-    assert commits == [False]
+    # A separate provider is called only after the canonical quarantine/delete commits.
+    assert commits == [True]
     audit = store.conn.execute(
         "SELECT actor, action, target, detail FROM audit "
         "WHERE action='index_delete_failed'"
@@ -2619,7 +2620,9 @@ def test_sync_index_upsert_failure_keeps_canonical_vectors_and_batch_ownership(c
         report = syncer.apply_bundle(_bundle(3))
 
     assert report["added"] == 3
-    assert commits == [False, False, False]
+    # The separately-backed provider is published only after each canonical Store
+    # batch commits, so it owns its own durability boundary.
+    assert commits == [True, True, True]
     assert engine.store.conn.execute(
         "SELECT COUNT(*) FROM mem_vectors"
     ).fetchone()[0] == 3
@@ -2636,6 +2639,140 @@ def test_sync_index_upsert_failure_keeps_canonical_vectors_and_batch_ownership(c
         for index in range(3)
     ]
     assert "sensitive-index-detail" not in caplog.text
+
+
+def test_sync_late_store_failure_does_not_publish_external_vector(monkeypatch):
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, _vecs, meta=None, *, commit=True):
+            publications.append(("upsert", tuple(ids), commit))
+
+        def delete(self, ids, *, commit=True):
+            publications.append(("delete", tuple(ids), commit))
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=RecordingExternalIndex(),
+    )
+    original_audit = engine.store.audit
+
+    def fail_late(actor, action, target, detail="", *, commit=True):
+        if action == "sync_add":
+            raise RuntimeError("late sync store failure")
+        return original_audit(actor, action, target, detail, commit=commit)
+
+    monkeypatch.setattr(engine.store, "audit", fail_late)
+    with pytest.raises(RuntimeError, match="late sync store failure"):
+        syncer.apply_bundle(_bundle(1))
+
+    assert engine.store.get_memory("mem_0") is None
+    assert publications == []
+
+
+def test_hlc_conflict_variant_publishes_external_vector():
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, _vecs, meta=None, *, commit=True):
+            publications.extend(ids)
+
+        def delete(self, ids, *, commit=True):
+            del ids, commit
+
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+
+    def bundle(content, node):
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": node,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "same-hlc-id",
+                "content": content,
+                "ingested_at": 42.0,
+                "valid_from": 42.0,
+                "modified_hlc": format_modified_hlc(42, 1, node),
+            }],
+            "mem_links": [],
+        }
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=RecordingExternalIndex(),
+    )
+    syncer.apply_bundle(bundle("lower-node edit", lower_node), into_workspace="w")
+    publications.clear()
+    syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
+
+    conflict_id = engine.store.conn.execute(
+        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+    ).fetchone()["id"]
+    assert conflict_id in publications
+
+
+def test_hlc_conflict_successor_external_vector_matches_store_vector():
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    publications = []
+
+    class RecordingExternalIndex:
+        def upsert(self, ids, vecs, meta=None, *, commit=True):
+            publications.append((tuple(ids), vecs.copy(), meta))
+
+        def delete(self, ids, *, commit=True):
+            publications.append(("delete", tuple(ids), None))
+
+    lower_node = f"dev_{'0' * 26}"
+    higher_node = f"dev_{'1' * 26}"
+
+    def bundle(content, node):
+        return {
+            "format": SYNC_FORMAT,
+            "version": 2,
+            "device_id": node,
+            "workspace_name": "w",
+            "repos": {},
+            "memories": [{
+                "id": "same-hlc-id",
+                "content": content,
+                "ingested_at": 42.0,
+                "valid_from": 42.0,
+                "modified_hlc": format_modified_hlc(42, 1, node),
+            }],
+            "mem_links": [],
+        }
+
+    syncer = SyncEngine(
+        engine.store,
+        embedder=engine.embedder,
+        vector_index=RecordingExternalIndex(),
+    )
+    syncer.apply_bundle(bundle("lower-node edit", lower_node), into_workspace="w")
+    publications.clear()
+    syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
+
+    conflict_id = engine.store.conn.execute(
+        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+    ).fetchone()["id"]
+    # The preserved successor must be published to the separately-backed index with
+    # exactly the canonical vector the Store committed for its id.
+    published = [entry for entry in publications
+                 if entry[0] != "delete" and conflict_id in entry[0]]
+    assert published, "conflict successor was not published to the external index"
+    _, external_vector, external_meta = published[-1]
+    external_vector = np.asarray(external_vector, dtype=np.float32).reshape(-1)
+
+    stored = engine.store.get_vectors([conflict_id])[conflict_id]
+    assert external_vector.shape == stored.shape
+    np.testing.assert_allclose(external_vector, stored, rtol=0, atol=0)
+    assert external_meta == [{"model": syncer.embedding_space}]
 
 
 def test_sync_configured_embedder_failure_aborts_before_memory_write(caplog):

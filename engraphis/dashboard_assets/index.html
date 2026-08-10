@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260809-physics-guard">
 </head>
 <body data-theme="slate">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Ledger navigation">
       <div class="brand-row">
@@ -74,9 +75,26 @@
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="main-content" tabindex="-1">
       <p id="notice-text" class="sr-only" role="status" aria-live="polite"></p>
+      <div id="notice-banner" class="notice-banner" role="status" aria-live="polite" hidden></div>
       <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
+
+      <section class="persistent-savings-summary" id="context-savings-persistent" aria-labelledby="persistent-savings-title">
+        <div class="persistent-savings-copy">
+          <p class="eyebrow">Runtime savings</p>
+          <h2 id="persistent-savings-title">Estimated context saved</h2>
+          <p id="context-savings-persistent-meta">Loading receipt-backed estimate…</p>
+        </div>
+        <div class="persistent-savings-value">
+          <strong id="context-savings-persistent-value">—</strong>
+          <span>tokens avoided</span>
+        </div>
+        <div class="persistent-savings-action">
+          <span id="context-savings-persistent-rate" class="savings-inline-rate">—</span>
+          <button class="text-button" type="button" data-provenance="audit">View details</button>
+        </div>
+      </section>
 
       <section class="view active" data-view-panel="today" aria-labelledby="today-title">
         <div class="today-layout">
@@ -88,11 +106,20 @@
             </header>
 
             <div class="metrics" id="metrics" aria-live="polite">
-              <div class="metric"><strong>—</strong><span>Memories</span></div>
-              <div class="metric"><strong>—</strong><span>Visible memories</span></div>
+              <div class="metric"><strong>—</strong><span>Live memories</span></div>
+              <div class="metric"><strong>—</strong><span>All versions, including history</span></div>
               <div class="metric"><strong>—</strong><span>Workspaces</span></div>
               <div class="metric"><strong>—</strong><span>Sessions</span></div>
             </div>
+
+            <section class="content-section savings-overview-section" id="context-savings-summary">
+              <div class="section-heading">
+                <div><p class="eyebrow">Runtime savings</p><h2>Estimated context saved</h2></div>
+                <button class="text-button" type="button" data-provenance="audit">View receipt details</button>
+              </div>
+              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
+              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
+            </section>
 
             <section class="content-section">
               <div class="section-heading">
@@ -127,12 +154,6 @@
             <section class="rail-section">
               <p class="eyebrow">Memory composition</p>
               <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
-            </section>
-            <section class="rail-section" id="context-savings-summary">
-              <p class="eyebrow">Runtime savings</p>
-              <h2>Estimated context saved</h2>
-              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
-              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
             </section>
             <section class="rail-section rail-action">
               <p class="eyebrow">Local-first</p>
@@ -187,6 +208,7 @@
             <div class="header-actions">
               <button id="new-memory-button" class="primary-button" type="button">New memory</button>
               <button id="import-button" class="secondary-button" type="button">Import files</button>
+              <button id="obsidian-import-button" class="secondary-button" type="button">Import local documents</button>
               <input id="import-files" type="file" accept=".md,.txt,.json,.csv,.py,.js,.ts" multiple hidden>
             </div>
           </header>
@@ -561,6 +583,14 @@
           </section>
 
           <section id="manage-settings-panel" class="tab-panel" data-manage-panel="settings" role="tabpanel" aria-labelledby="manage-settings-tab">
+            <div class="settings-intro">
+              <div>
+                <p class="eyebrow">Settings · local preferences</p>
+                <h2>Make the workspace yours</h2>
+                <p>Choose how Engraphis looks and connects while keeping memory, recall, and storage local by default.</p>
+              </div>
+              <div class="settings-intro-status"><span class="status-dot" aria-hidden="true"></span><span>Local-first runtime</span></div>
+            </div>
             <div class="settings-grid">
               <section class="setting-card">
                 <p class="eyebrow">Interface</p>
@@ -635,6 +665,38 @@
         <div id="graph-connection-memory-list" class="graph-connection-memory-list" role="list" aria-live="polite"></div>
       </section>
     </div>
+  </dialog>
+
+  <dialog id="obsidian-import-dialog" class="graph-connections-dialog obsidian-import-dialog" aria-labelledby="obsidian-import-title" aria-describedby="obsidian-import-description">
+    <form id="obsidian-import-form" class="graph-connections-panel" novalidate>
+      <header class="graph-connections-header">
+        <div><p class="eyebrow">Local document import</p><h2 id="obsidian-import-title">Import local documents</h2></div>
+        <button id="obsidian-import-close" class="text-button" type="button">Close</button>
+      </header>
+      <p id="obsidian-import-description" class="graph-connections-meta">Choose individual files or a folder. Engraphis previews supported document formats before it writes anything; uploaded bytes are processed locally and are not kept as dashboard upload copies.</p>
+      <div class="settings-grid obsidian-import-grid">
+        <label>Import mode<select id="obsidian-source-mode"><option value="documents">Documents</option><option value="obsidian">Obsidian vault</option></select></label>
+        <label><span id="obsidian-files-label">Individual documents</span><input id="obsidian-import-files" type="file" multiple required aria-describedby="obsidian-import-progress"></label>
+        <label><span id="obsidian-folder-label">Document folder</span><input id="obsidian-import-folder" type="file" webkitdirectory directory multiple aria-describedby="obsidian-import-progress"></label>
+        <label>Saved source<select id="obsidian-vault-id"><option value="">New source</option></select></label>
+        <label>Source label<input id="obsidian-vault-label" maxlength="200" placeholder="Required for a new source" aria-required="true" required></label>
+        <label>Workspace<input id="obsidian-workspace" maxlength="200" required></label>
+        <label>Repository (optional)<input id="obsidian-repo" maxlength="200"></label>
+        <label>Session (optional)<input id="obsidian-session" maxlength="200"></label>
+        <label>Scope<select id="obsidian-scope"><option value="workspace">Workspace</option><option value="repo">Repository</option><option value="session">Session</option></select></label>
+        <label>Memory type<select id="obsidian-memory-type"><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option><option value="working">Working</option></select></label>
+        <label>When a document changed<select id="obsidian-conflict"><option value="error">Report conflict (default)</option><option value="replace">Create temporal successor</option><option value="new">Create a new memory</option></select></label>
+      </div>
+      <label class="obsidian-confirm"><input id="obsidian-confirmed" type="checkbox"> I confirm these local documents may be imported into the selected Engraphis scope.</label>
+      <div id="obsidian-import-progress" class="graph-connections-meta" role="status" aria-live="polite">Choose files or a folder to preview its import.</div>
+      <label>Show report<select id="obsidian-report-filter"><option value="all">All files</option><option value="import">Will import</option><option value="update">Will update</option><option value="skip">Skipped</option><option value="reject">Rejected / warnings</option></select></label>
+      <div id="obsidian-import-report" class="obsidian-import-report" role="log" aria-live="polite"><p class="empty-state">No preview yet.</p></div>
+      <div class="form-actions">
+        <button id="obsidian-preview" class="secondary-button" type="button">Preview import</button>
+        <button id="obsidian-cancel" class="secondary-button" type="button" hidden>Cancel import</button>
+        <button id="obsidian-run" class="primary-button" type="submit" disabled>Import documents</button>
+      </div>
+    </form>
   </dialog>
 
     <script src="/v2-assets/ledger.js?v=20260809-physics-guard"></script>
