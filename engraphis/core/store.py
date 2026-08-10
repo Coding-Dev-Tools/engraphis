@@ -17,16 +17,18 @@ import os
 import re
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 import unicodedata
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 import numpy as np
 
+from engraphis.private_state import ensure_owner_private_dir
 from engraphis.core import ids
 from engraphis.core.graph_layers import infer_graph_layer, normalize_graph_layer
 from engraphis.core.interfaces import (
@@ -50,6 +52,7 @@ from engraphis.core.poisoning import (
     pending_llm_consolidation_envelope,
     pending_llm_extraction_envelope,
 )
+from engraphis.core.documents import normalize_document_path
 from engraphis.core.retention_policy import (
     DEFAULT_STABILITY_DAYS,
     MAX_ACCESS_COUNT,
@@ -88,6 +91,13 @@ TOMBSTONE_EXPORT_CLASSES = frozenset({
     TOMBSTONE_NEVER_EXPORT,
     TOMBSTONE_REMOTE_ERASURE,
 })
+_SOURCE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_IMPORT_RECEIPT_COUNT_KEYS = frozenset({
+    "files_scanned", "files_imported", "files_updated", "files_skipped",
+    "files_renamed", "files_rejected", "files_missing", "files_errored",
+    "conflicts", "warnings", "attachments", "wikilinks", "aliases", "tags",
+})
+_MAX_RECEIPT_COUNT = 1_000_000_000
 USER_SCOPE_UNSUPPORTED = (
     "user scope is not supported until owner-aware memories are implemented; "
     "use workspace, repo, or session"
@@ -98,6 +108,17 @@ USER_SCOPE_UNSUPPORTED = (
 
 def now_ts() -> float:
     return time.time()
+
+
+def _content_free_source_error(value: Any) -> str:
+    """Persist an error code or one-way digest, never a source-derived message."""
+    raw = str(value or "")
+    normalized = raw.strip().casefold().replace(" ", "_")
+    if not normalized:
+        return ""
+    if re.fullmatch(r"[a-z0-9_.:-]{1,100}", normalized):
+        return normalized
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _escape_like(value: str) -> str:
@@ -131,6 +152,22 @@ def _close_connection_quietly(conn: Any) -> None:
         conn.close()
     except Exception:
         pass
+
+
+class ReadOnlyConnector(Protocol):
+    """Explicit contract for injected connectors used by a read-only ``Store``.
+
+    Writable compatibility remains the ordinary ``connector(path)`` call.  A
+    connector that also supports inspection must expose ``open_read_only(path)``
+    and open the already-existing regular file without creating, recovering, or
+    mutating the database or any sidecar.  Implementations should use their
+    driver's equivalent of SQLite ``mode=ro&immutable=1``.  Store rejects a bare
+    callable in read-only mode rather than guessing that it is safe.
+    """
+
+    def __call__(self, path: str) -> Any: ...
+
+    def open_read_only(self, path: str) -> Any: ...
 
 
 def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
@@ -356,7 +393,10 @@ def _receipt_metadata(metadata: dict) -> dict:
     allowed = {
         "mtype", "scope", "resolution", "retention", "extracted", "intent", "k",
         "result_count", "grounded", "citations", "relation", "layer", "graph_layers",
-        "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
+        "files_scanned", "files_indexed", "files_removed", "files_imported",
+        "files_updated", "files_renamed", "files_skipped", "files_rejected",
+        "files_missing", "files_errored", "conflicts", "warnings",
+        "attachments", "wikilinks", "aliases", "tags", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
         "retrieval_profile", "candidate_depth", "candidate_k_requested",
@@ -375,7 +415,13 @@ def _receipt_metadata(metadata: dict) -> dict:
         if safe_key not in allowed:
             continue
         value = metadata[key]
-        if safe_key == "token_usage":
+        if safe_key in _IMPORT_RECEIPT_COUNT_KEYS:
+            # Import summaries are counts, never arbitrary floats/labels.  Reject
+            # booleans and clamp adversarially large values so the durable public
+            # receipt stays predictable and bounded.
+            if type(value) is int:
+                out[safe_key] = max(0, min(_MAX_RECEIPT_COUNT, value))
+        elif safe_key == "token_usage":
             if not isinstance(value, dict):
                 continue
             numeric = {
@@ -429,6 +475,9 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "mtype", "scope", "resolution", "retention", "extracted", "intent", "k",
     "result_count", "grounded", "citations", "relation", "layer", "graph_layers",
     "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
+    "files_imported", "files_updated", "files_renamed", "files_skipped",
+    "files_rejected", "files_missing", "files_errored", "conflicts",
+    "warnings", "attachments", "wikilinks", "aliases", "tags",
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
@@ -437,12 +486,12 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
     "graph_index", "grounded_recall", "adaptive_context", "proactive_context", "smart_gateway",
-    "consolidate", "sync",
+    "consolidate", "sync", "document_import", "obsidian_import",
 }
 _PUBLIC_RECEIPT_STATUSES = {
     "ok", "add", "noop", "invalidate", "relate", "ingested",
     "postgres_schema", "grounded", "abstained", "promoted",
-    "indexed", "skipped", "error", "failed", "cancelled", "partial",
+    "indexed", "skipped", "error", "failed", "completed", "cancelled", "partial",
 }
 
 
@@ -546,7 +595,10 @@ def _public_receipt_row(row: dict) -> dict:
     ):
         return invalid
     for key, value in metadata.items():
-        if key == "token_usage":
+        if key in _IMPORT_RECEIPT_COUNT_KEYS:
+            if type(value) is not int or not 0 <= value <= _MAX_RECEIPT_COUNT:
+                return invalid
+        elif key == "token_usage":
             if not isinstance(value, dict):
                 return invalid
             allowed_usage = {
@@ -1017,23 +1069,30 @@ class Store:
         writer: it opens a checkpointed SQLite file with ``mode=ro&immutable=1`` and
         skips schema setup, migrations, backups, and the persistent WAL-mode pragma.
         It is for inspection tools (notably security dry-runs) whose safety contract
-        includes leaving a database and its sidecar files untouched.  A non-empty WAL
-        is rejected rather than silently scanning an incomplete immutable snapshot.
+        includes leaving a database and its sidecar files untouched. Non-empty WAL and
+        rollback-journal sidecars are rejected rather than silently scanning an
+        incomplete immutable snapshot. An injected connector must implement the
+        :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
+        callable is rejected before it can be invoked.
         """
         self.path = path
         self._connect = connect
         self.read_only = bool(read_only)
         if self.read_only and path == ":memory:":
             raise ValueError("read-only Store requires an existing database file")
-        if self.read_only and self._connect is None:
-            wal_path = Path(f"{path}-wal")
-            if wal_path.is_file() and wal_path.stat().st_size:
-                raise RuntimeError(
-                    "read-only Store requires a checkpointed database; active WAL found"
+        read_only_path: Optional[str] = None
+        if self.read_only:
+            if self._connect is not None and not callable(
+                getattr(self._connect, "open_read_only", None)
+            ):
+                raise TypeError(
+                    "read-only Store requires an injected connector with an "
+                    "open_read_only(path) method"
                 )
+            read_only_path = self._preflight_read_only_path(path)
         if path != ":memory:" and not self.read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        raw_conn = self._open_connection(path)
+        raw_conn = self._open_connection(read_only_path or path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
@@ -1050,9 +1109,9 @@ class Store:
         try:
             self.conn.execute("PRAGMA foreign_keys=ON")
             if self.read_only:
-                # ``query_only`` also protects injected connectors whose implementation
-                # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
-                # creating a temporary table here: a dry-run must not write anything.
+                # Defense in depth after the stdlib immutable URI or the injected
+                # connector's explicit immutable-open contract. Do not probe FTS5 by
+                # creating a temporary table here: an inspection must not write anything.
                 self.conn.execute("PRAGMA query_only=ON")
                 self._validate_read_only_ready()
                 row = self.conn.execute(
@@ -1087,6 +1146,8 @@ class Store:
         if self._connect is not None:
             # Injected factories own opening, keying, row_factory, and exception
             # translation (notably the SQLCipher backend).
+            if self.read_only:
+                return self._connect.open_read_only(path)  # type: ignore[attr-defined]
             return self._connect(path)
         if self.read_only:
             uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
@@ -1095,6 +1156,54 @@ class Store:
             conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _preflight_read_only_path(path: str) -> str:
+        """Validate one immutable snapshot path without creating or opening it.
+
+        The resolved regular file is returned so a connector cannot reinterpret a
+        relative path after validation.  Active WAL/rollback-journal state is
+        refused because an immutable connection would skip recovery and silently
+        expose an incomplete snapshot.
+        """
+        candidate = Path(path)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            ) from None
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        file_attributes = int(getattr(info, "st_file_attributes", 0))
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or bool(reparse_flag and file_attributes & reparse_flag)
+        ):
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            )
+        for suffix, label in (("-wal", "WAL"), ("-journal", "rollback journal")):
+            sidecar = Path(f"{candidate}{suffix}")
+            try:
+                sidecar_info = os.lstat(sidecar)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise RuntimeError(
+                    f"read-only Store could not validate the {label} sidecar"
+                ) from None
+            if sidecar_info.st_size:
+                raise RuntimeError(
+                    "read-only Store requires a checkpointed database; "
+                    f"active {label} found"
+                )
+        try:
+            return str(candidate.resolve(strict=True))
+        except OSError:
+            raise RuntimeError(
+                "read-only Store requires an existing regular database file"
+            ) from None
 
     def _validate_read_only_ready(self) -> None:
         """Fail closed unless the immutable snapshot can serve the current schema."""
@@ -1124,6 +1233,55 @@ class Store:
             raise RuntimeError(
                 "read-only Store requires a complete current schema; missing "
                 + ", ".join(missing)
+            )
+        source_security_objects = {
+            str(row["name"])
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('index','trigger')"
+            ).fetchall()
+        }
+        required_source_security_objects = {
+            "trg_job_session_scope_insert",
+            "trg_job_session_scope_update",
+            "idx_source_vaults_identity",
+            "trg_source_vault_scope_insert",
+            "trg_source_vault_scope_update",
+            "trg_source_import_scope_insert",
+            "trg_source_import_scope_update",
+            "trg_source_import_seen_job_insert",
+            "trg_source_import_seen_job_update",
+            "trg_source_import_job_insert",
+            "trg_source_import_job_update",
+        }
+        missing_source_security = sorted(
+            required_source_security_objects - source_security_objects
+        )
+        if missing_source_security:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                + ", ".join(missing_source_security)
+            )
+        job_columns = {
+            str(item["name"])
+            for item in self.conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "session_id" not in job_columns:
+            raise RuntimeError(
+                "read-only Store requires jobs.session_id for source import scope isolation"
+            )
+        source_vault_foreign_keys = {
+            (str(row["from"]), str(row["table"]), str(row["to"]))
+            for row in self.conn.execute(
+                "PRAGMA foreign_key_list(source_vaults)"
+            ).fetchall()
+        }
+        if not {
+            ("workspace_id", "workspaces", "id"),
+            ("repo_id", "repos", "id"),
+            ("session_id", "sessions", "id"),
+        }.issubset(source_vault_foreign_keys):
+            raise RuntimeError(
+                "read-only Store requires source_vaults scope foreign keys"
             )
         session_columns = {
             str(item["name"]) for item in self.conn.execute(
@@ -1175,6 +1333,45 @@ class Store:
                 "read-only Store requires a complete current schema; missing "
                 "memory_tombstones.export_class"
             )
+        source_import_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(source_imports)"
+            ).fetchall()
+        }
+        required_source_import_columns = {
+            "vault_id", "source_key", "relative_path", "memory_id",
+            "subject_key", "content_sha256", "canonical_sha256",
+            "last_seen_job_id", "state", "last_seen_at",
+        }
+        missing_source_import_columns = sorted(
+            required_source_import_columns - source_import_columns
+        )
+        if missing_source_import_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                + ", ".join(
+                    f"source_imports.{name}" for name in missing_source_import_columns
+                )
+            )
+        source_item_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(source_import_items)"
+            ).fetchall()
+        }
+        required_source_item_columns = {
+            "job_id", "source_id", "relative_path", "planned_action",
+            "source_format", "result_state", "warning_count", "error_code",
+        }
+        missing_source_item_columns = sorted(
+            required_source_item_columns - source_item_columns
+        )
+        if missing_source_item_columns:
+            raise RuntimeError(
+                "read-only Store requires a complete current schema; missing "
+                + ", ".join(
+                    f"source_import_items.{name}" for name in missing_source_item_columns
+                )
+            )
         row = self.conn.execute(
             "SELECT MAX(version) AS version FROM schema_migrations"
         ).fetchone()
@@ -1186,6 +1383,233 @@ class Store:
             )
         if not self._quick_check(self.conn):
             raise sqlite3.DatabaseError("read-only Store integrity check failed")
+
+    @classmethod
+    def snapshot_source_import_manifest(
+        cls, path: str, *, connect: Optional[ReadOnlyConnector] = None,
+    ) -> dict:
+        """Read an importer manifest without migrating or changing a database.
+
+        This is deliberately usable by previews against an older v13 database (and
+        against a not-yet-created database). Active WAL and rollback-journal state is
+        refused: immutable reads would otherwise silently miss recovered manifest
+        state. Injected connectors must opt in through ``open_read_only(path)``;
+        ordinary writable callables are never invoked here.
+        """
+        empty = {"schema_version": 0, "vaults": [], "items": []}
+        if path in (":memory:", ""):
+            return empty
+        db_path = Path(path)
+        try:
+            os.lstat(db_path)
+        except FileNotFoundError:
+            return empty
+        except OSError:
+            raise RuntimeError(
+                "import manifest database could not be inspected"
+            ) from None
+        if connect is not None and not callable(
+            getattr(connect, "open_read_only", None)
+        ):
+            raise TypeError(
+                "import manifest snapshot requires an injected connector with an "
+                "open_read_only(path) method"
+            )
+        resolved_path = cls._preflight_read_only_path(path)
+        db_path = Path(resolved_path)
+
+        def sidecar_state() -> dict[str, Optional[tuple[int, int, int, int]]]:
+            state: dict[str, Optional[tuple[int, int, int, int]]] = {}
+            for suffix in ("-wal", "-journal", "-shm"):
+                sidecar = Path(f"{db_path}{suffix}")
+                try:
+                    info = os.lstat(sidecar)
+                except FileNotFoundError:
+                    state[suffix] = None
+                except OSError:
+                    raise RuntimeError(
+                        "import manifest database sidecars could not be inspected"
+                    ) from None
+                else:
+                    state[suffix] = (
+                        int(info.st_dev), int(info.st_ino), int(info.st_size),
+                        int(info.st_mtime_ns),
+                    )
+            return state
+
+        version_fields = (
+            ("st_size", "st_mtime_ns")
+            if os.name == "nt"
+            else ("st_size", "st_mtime_ns", "st_ctime_ns")
+        )
+
+        def same_version(left, right) -> bool:
+            return cls._same_file(left, right) and all(
+                getattr(left, name, None) == getattr(right, name, None)
+                for name in version_fields
+            )
+
+        try:
+            before = os.lstat(db_path)
+            before_sidecars = sidecar_state()
+        except OSError:
+            raise RuntimeError(
+                "import manifest database could not be inspected"
+            ) from None
+
+        source_flags = (
+            os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            source_descriptor = os.open(str(db_path), source_flags)
+        except OSError:
+            raise RuntimeError(
+                "import manifest database could not be opened safely"
+            ) from None
+        try:
+            opened = os.fstat(source_descriptor)
+            attributes = int(getattr(opened, "st_file_attributes", 0))
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or bool(reparse_flag and attributes & reparse_flag)
+                or not same_version(before, opened)
+            ):
+                raise RuntimeError(
+                    "import manifest database changed while it was opened"
+                )
+
+            with tempfile.TemporaryDirectory(
+                prefix="engraphis-manifest-snapshot-",
+            ) as temp_root:
+                temp_directory = Path(temp_root)
+                ensure_owner_private_dir(temp_directory)
+                temp_path = temp_directory / "manifest.db"
+                output_flags = (
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                output_descriptor = os.open(str(temp_path), output_flags, 0o600)
+                try:
+                    fchmod = getattr(os, "fchmod", None)
+                    if fchmod is not None:
+                        fchmod(output_descriptor, 0o600)
+                    while True:
+                        chunk = os.read(source_descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(output_descriptor, view)
+                            if written <= 0:
+                                raise OSError("private snapshot copy made no progress")
+                            view = view[written:]
+                finally:
+                    os.close(output_descriptor)
+
+                try:
+                    after_copy = os.fstat(source_descriptor)
+                    current = os.lstat(db_path)
+                    current_sidecars = sidecar_state()
+                except OSError:
+                    raise RuntimeError(
+                        "import manifest database changed during snapshot"
+                    ) from None
+                if (
+                    not same_version(opened, after_copy)
+                    or not same_version(after_copy, current)
+                    or before_sidecars != current_sidecars
+                ):
+                    raise RuntimeError(
+                        "import manifest database changed during snapshot"
+                    )
+
+                if connect is not None:
+                    conn = connect.open_read_only(str(temp_path))
+                else:
+                    uri = temp_path.as_uri() + "?mode=ro&immutable=1"
+                    conn = sqlite3.connect(uri, uri=True)
+                    conn.row_factory = sqlite3.Row
+                try:
+                    conn.execute("PRAGMA query_only=ON")
+                    tables = {str(row[0]) for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()}
+                    version = 0
+                    if "schema_migrations" in tables:
+                        row = conn.execute(
+                            "SELECT MAX(version) FROM schema_migrations"
+                        ).fetchone()
+                        version = int(row[0]) if row and row[0] is not None else 0
+                    if not {"source_vaults", "source_imports"}.issubset(tables):
+                        result = {
+                            "schema_version": version, "vaults": [], "items": [],
+                        }
+                    else:
+                        vaults = [dict(row) for row in conn.execute(
+                            "SELECT v.id, v.kind, v.root_digest, v.display_name, "
+                            "v.workspace_id, v.repo_id, v.session_id, v.scope, "
+                            "v.memory_type, v.importer_version, v.created_at, "
+                            "v.updated_at, w.name AS workspace_name, "
+                            "r.name AS repo_name FROM source_vaults v "
+                            "JOIN workspaces w ON w.id=v.workspace_id "
+                            "LEFT JOIN repos r ON r.id=v.repo_id ORDER BY v.id"
+                        ).fetchall()]
+                        items = [dict(row) for row in conn.execute(
+                            "SELECT id, vault_id, source_key, relative_path, "
+                            "memory_id, subject_key, content_sha256, "
+                            "canonical_sha256, file_mtime_ns, file_size, "
+                            "importer_version, last_seen_job_id, state, "
+                            "first_imported_at, last_imported_at, last_seen_at, "
+                            "missing_at, last_error FROM source_imports "
+                            "ORDER BY vault_id, relative_path"
+                        ).fetchall()]
+                        repos = []
+                        sessions = []
+                        if {"repos", "workspaces"}.issubset(tables):
+                            repos = [dict(row) for row in conn.execute(
+                                "SELECT r.id, r.workspace_id, r.name, "
+                                "w.name AS workspace_name FROM repos r "
+                                "JOIN workspaces w ON w.id=r.workspace_id "
+                                "ORDER BY r.id"
+                            ).fetchall()]
+                            if "sessions" in tables:
+                                sessions = [dict(row) for row in conn.execute(
+                                    "SELECT s.id, s.workspace_id, s.repo_id, "
+                                    "w.name AS workspace_name, "
+                                    "r.name AS repo_name FROM sessions s "
+                                    "JOIN workspaces w ON w.id=s.workspace_id "
+                                    "LEFT JOIN repos r ON r.id=s.repo_id "
+                                    "ORDER BY s.id"
+                                ).fetchall()]
+                        result = {
+                            "schema_version": version, "vaults": vaults,
+                            "items": items, "repos": repos, "sessions": sessions,
+                        }
+                finally:
+                    conn.close()
+
+                try:
+                    after = os.lstat(db_path)
+                    after_handle = os.fstat(source_descriptor)
+                    after_sidecars = sidecar_state()
+                except OSError:
+                    raise RuntimeError(
+                        "import manifest database changed during snapshot"
+                    ) from None
+                if (
+                    not same_version(opened, after_handle)
+                    or not same_version(after_handle, after)
+                    or before_sidecars != after_sidecars
+                ):
+                    raise RuntimeError(
+                        "import manifest database changed during snapshot"
+                    )
+                return result
+        finally:
+            os.close(source_descriptor)
 
     @staticmethod
     def _raw_connection(conn):
@@ -1399,6 +1823,202 @@ class Store:
         if statement.strip():
             raise sqlite3.OperationalError("incomplete schema statement")
 
+    def _prepare_source_manifest_v15(self, previous_version: int) -> bool:
+        """Stage the v14 Obsidian-only manifest for a source-neutral rebuild.
+
+        SQLite cannot widen a table ``CHECK`` constraint in place.  Keep the
+        complete content-free manifest in temporary tables, drop children before
+        parents, let :data:`SCHEMA_SQL` create the v15 shape, then restore it in
+        the same migration transaction.  A failure rolls the primary database
+        back to v14; the durable pre-migration backup remains the final fallback.
+        """
+        if previous_version >= 15:
+            return False
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_vaults'"
+        ).fetchone()
+        if row is None:
+            return False
+        definition = str(row["sql"] or "")
+        if "'documents'" in definition:
+            return False
+        for name in (
+            "_source_vaults_v15", "_source_imports_v15", "_source_import_items_v15",
+        ):
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{name}")
+        self.conn.execute(
+            "CREATE TEMP TABLE _source_vaults_v15 AS SELECT * FROM source_vaults"
+        )
+        self.conn.execute(
+            "CREATE TEMP TABLE _source_imports_v15 AS SELECT * FROM source_imports"
+        )
+        self.conn.execute(
+            "CREATE TEMP TABLE _source_import_items_v15 AS SELECT * FROM source_import_items"
+        )
+        self.conn.execute("DROP TABLE source_import_items")
+        self.conn.execute("DROP TABLE source_imports")
+        self.conn.execute("DROP TABLE source_vaults")
+        return True
+
+    def _prepare_job_session_scope_v16(self) -> None:
+        """Install the nullable job session target before v16 triggers compile.
+
+        ``CREATE TABLE IF NOT EXISTS`` cannot add the column to an existing v15
+        jobs table, while the current source-manifest triggers reference it.  Do
+        the additive, idempotent repair inside the surrounding migration
+        transaction before executing :data:`SCHEMA_SQL`.  When v14 source
+        manifests are staged, also recover the session target for their jobs:
+        those legacy jobs predate ``jobs.session_id`` but their source vaults
+        already carry the authoritative session scope.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()
+        if row is None:
+            return
+        columns = {
+            str(item["name"])
+            for item in self.conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "session_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE jobs ADD COLUMN session_id TEXT "
+                "REFERENCES sessions(id) ON DELETE SET NULL"
+            )
+        staged_tables = {
+            str(item["name"])
+            for item in self.conn.execute(
+                "SELECT name FROM temp.sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required_staged_tables = {
+            "_source_vaults_v15", "_source_imports_v15", "_source_import_items_v15",
+        }
+        if not required_staged_tables.issubset(staged_tables):
+            # v15 (and later) databases carry the live source manifest rather than
+            # staged temp tables, but their jobs still predate ``jobs.session_id``.
+            # Backfill from the live v15 tables so the exact-session triggers added
+            # below never reject persisted lineage for legacy jobs.
+            self._backfill_job_session_scope_from_tables(
+                "source_vaults", "source_imports", "source_import_items",
+            )
+            return
+
+        # A legacy import job can be referenced by either the source manifest's
+        # last-seen pointer or an item row.  UNION makes duplicate references
+        # harmless while retaining a deterministic conflict check if corrupted
+        # data points one job at more than one session vault.
+        candidates = self.conn.execute(
+            "SELECT job_id, session_id FROM ("
+            "SELECT i.last_seen_job_id AS job_id, v.session_id "
+            "FROM temp._source_imports_v15 i "
+            "JOIN temp._source_vaults_v15 v ON v.id=i.vault_id "
+            "WHERE i.last_seen_job_id IS NOT NULL AND v.session_id IS NOT NULL "
+            "UNION "
+            "SELECT item.job_id, v.session_id "
+            "FROM temp._source_import_items_v15 item "
+            "JOIN temp._source_imports_v15 i ON i.id=item.source_id "
+            "JOIN temp._source_vaults_v15 v ON v.id=i.vault_id "
+            "WHERE item.job_id IS NOT NULL AND v.session_id IS NOT NULL"
+            ") ORDER BY job_id, session_id"
+        ).fetchall()
+        self._apply_job_session_backfill(candidates)
+
+    def _backfill_job_session_scope_from_tables(
+        self, vaults_table: str, imports_table: str, items_table: str,
+    ) -> None:
+        """Backfill ``jobs.session_id`` from a (temp or live) source manifest.
+
+        Shared by the staged v14 path and the live v15 path so legacy jobs that
+        predate ``jobs.session_id`` keep their authoritative vault session scope
+        before the v16 exact-session triggers compile.
+        """
+        try:
+            vault_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (vaults_table,),
+            ).fetchone() is not None
+            imports_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (imports_table,),
+            ).fetchone() is not None
+            items_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (items_table,),
+            ).fetchone() is not None
+        except Exception:  # noqa: BLE001 — a temp table may not be readable here
+            return
+        if not (vault_exists and imports_exists and items_exists):
+            return
+        candidates = self.conn.execute(
+            "SELECT job_id, session_id FROM ("
+            "SELECT i.last_seen_job_id AS job_id, v.session_id "
+            f"FROM {imports_table} i "
+            f"JOIN {vaults_table} v ON v.id=i.vault_id "
+            "WHERE i.last_seen_job_id IS NOT NULL AND v.session_id IS NOT NULL "
+            "UNION "
+            "SELECT item.job_id, v.session_id "
+            f"FROM {items_table} item "
+            f"JOIN {imports_table} i ON i.id=item.source_id "
+            f"JOIN {vaults_table} v ON v.id=i.vault_id "
+            "WHERE item.job_id IS NOT NULL AND v.session_id IS NOT NULL"
+            ") ORDER BY job_id, session_id"
+        ).fetchall()
+        self._apply_job_session_backfill(candidates)
+
+    def _apply_job_session_backfill(self, candidates) -> None:
+        """Apply a job→session backfill with the same conflict rules as the staged path."""
+        by_job: dict[str, str] = {}
+        for row in candidates:
+            job_id = str(row["job_id"])
+            session_id = str(row["session_id"])
+            prior = by_job.get(job_id)
+            if prior is not None and prior != session_id:
+                raise RuntimeError(
+                    "cannot backfill job session scope: staged job maps to "
+                    "multiple source sessions"
+                )
+            by_job[job_id] = session_id
+
+        for job_id, session_id in by_job.items():
+            current = self.conn.execute(
+                "SELECT session_id FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if current is None:
+                continue
+            current_session = current["session_id"]
+            if current_session is not None and str(current_session) != session_id:
+                raise RuntimeError(
+                    "cannot backfill job session scope: existing job session "
+                    "conflicts with its source vault"
+                )
+            if current_session is None:
+                self.conn.execute(
+                    "UPDATE jobs SET session_id=? WHERE id=?",
+                    (session_id, job_id),
+                )
+
+    def _restore_source_manifest_v15(self) -> None:
+        """Restore source identities staged by :meth:`_prepare_source_manifest_v15`."""
+        self.conn.execute(
+            "INSERT INTO source_vaults SELECT * FROM temp._source_vaults_v15"
+        )
+        self.conn.execute(
+            "INSERT INTO source_imports SELECT * FROM temp._source_imports_v15"
+        )
+        self.conn.execute(
+            "INSERT INTO source_import_items("
+            "id,job_id,source_id,relative_path,planned_action,result_state,"
+            "warning_count,error_code,created_at,finished_at) "
+            "SELECT id,job_id,source_id,relative_path,planned_action,result_state,"
+            "warning_count,error_code,created_at,finished_at "
+            "FROM temp._source_import_items_v15"
+        )
+        for name in (
+            "_source_import_items_v15", "_source_imports_v15", "_source_vaults_v15",
+        ):
+            self.conn.execute(f"DROP TABLE temp.{name}")
+
     # ── schema ──────────────────────────────────────────────────────────────
     def init_schema(self) -> None:
         objects = self.conn.execute(
@@ -1432,94 +2052,10 @@ class Store:
                 str(row["name"])
                 for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()
             }
-        memories_need_expired_at = (
-            "memories" in object_names and "expired_at" not in memory_columns
-        )
-        memories_need_valid_to = (
-            "memories" in object_names and "valid_to" not in memory_columns
-        )
         memories_need_modified_hlc = (
             "memories" in object_names and "modified_hlc" not in memory_columns
         )
         self._memories_need_modified_hlc = memories_need_modified_hlc
-        self._memories_need_valid_to = memories_need_valid_to
-        self._memories_need_expired_at = memories_need_expired_at
-        memory_entity_columns: set[str] = set()
-        if "memory_entities" in object_names:
-            memory_entity_columns = {
-                str(row["name"])
-                for row in self.conn.execute(
-                    "PRAGMA table_info(memory_entities)"
-                ).fetchall()
-            }
-        self._memory_entities_need_valid_to = (
-            "memory_entities" in object_names
-            and "valid_to" not in memory_entity_columns
-        )
-        self._memory_entities_need_expired_at = (
-            "memory_entities" in object_names
-            and "expired_at" not in memory_entity_columns
-        )
-        edge_columns: set[str] = set()
-        if "edges" in object_names:
-            edge_columns = {
-                str(row["name"])
-                for row in self.conn.execute("PRAGMA table_info(edges)").fetchall()
-            }
-        self._edges_need_valid_to = (
-            "edges" in object_names and "valid_to" not in edge_columns
-        )
-        self._edges_need_expired_at = (
-            "edges" in object_names and "expired_at" not in edge_columns
-        )
-        edge_support_columns: set[str] = set()
-        if "edge_supports" in object_names:
-            edge_support_columns = {
-                str(row["name"])
-                for row in self.conn.execute(
-                    "PRAGMA table_info(edge_supports)"
-                ).fetchall()
-            }
-        self._edge_supports_need_valid_to = (
-            "edge_supports" in object_names
-            and "valid_to" not in edge_support_columns
-        )
-        self._edge_supports_need_expired_at = (
-            "edge_supports" in object_names
-            and "expired_at" not in edge_support_columns
-        )
-        code_file_history_columns: set[str] = set()
-        if "code_file_history" in object_names:
-            code_file_history_columns = {
-                str(row["name"])
-                for row in self.conn.execute(
-                    "PRAGMA table_info(code_file_history)"
-                ).fetchall()
-            }
-        self._code_file_history_need_valid_to = (
-            "code_file_history" in object_names
-            and "valid_to" not in code_file_history_columns
-        )
-        self._code_file_history_need_expired_at = (
-            "code_file_history" in object_names
-            and "expired_at" not in code_file_history_columns
-        )
-        code_memory_link_columns: set[str] = set()
-        if "code_memory_links" in object_names:
-            code_memory_link_columns = {
-                str(row["name"])
-                for row in self.conn.execute(
-                    "PRAGMA table_info(code_memory_links)"
-                ).fetchall()
-            }
-        self._code_memory_links_need_valid_to = (
-            "code_memory_links" in object_names
-            and "valid_to" not in code_memory_link_columns
-        )
-        self._code_memory_links_need_expired_at = (
-            "code_memory_links" in object_names
-            and "expired_at" not in code_memory_link_columns
-        )
         session_columns: set[str] = set()
         if "sessions" in object_names:
             session_columns = {
@@ -1553,19 +2089,7 @@ class Store:
         needs_backup = bool(object_names) and (
             previous_version < SCHEMA_VERSION
             or mem_links_need_temporal_backfill
-            or memories_need_valid_to
-            or memories_need_expired_at
             or memories_need_modified_hlc
-            or getattr(self, "_memory_entities_need_valid_to", False)
-            or getattr(self, "_memory_entities_need_expired_at", False)
-            or getattr(self, "_edges_need_valid_to", False)
-            or getattr(self, "_edges_need_expired_at", False)
-            or getattr(self, "_edge_supports_need_valid_to", False)
-            or getattr(self, "_edge_supports_need_expired_at", False)
-            or getattr(self, "_code_file_history_need_valid_to", False)
-            or getattr(self, "_code_file_history_need_expired_at", False)
-            or getattr(self, "_code_memory_links_need_valid_to", False)
-            or getattr(self, "_code_memory_links_need_expired_at", False)
             or sessions_need_handoff
             or tombstones_need_export_class
             or sync_exports_need_table
@@ -1593,68 +2117,61 @@ class Store:
                 "PRAGMA table_info(operation_receipts)"
             ).fetchall()
         )
-        for table, needs_expired_at in (
-            (
-                "memories",
-                getattr(self, "_memories_need_valid_to", False)
-                or getattr(self, "_memories_need_expired_at", False),
-            ),
-            (
-                "memory_entities",
-                getattr(self, "_memory_entities_need_valid_to", False)
-                or getattr(self, "_memory_entities_need_expired_at", False),
-            ),
-            (
-                "edges",
-                getattr(self, "_edges_need_valid_to", False)
-                or getattr(self, "_edges_need_expired_at", False),
-            ),
-            (
-                "edge_supports",
-                getattr(self, "_edge_supports_need_valid_to", False)
-                or getattr(self, "_edge_supports_need_expired_at", False),
-            ),
-            (
-                "code_file_history",
-                getattr(self, "_code_file_history_need_valid_to", False)
-                or getattr(self, "_code_file_history_need_expired_at", False),
-            ),
-            (
-                "code_memory_links",
-                getattr(self, "_code_memory_links_need_valid_to", False)
-                or getattr(self, "_code_memory_links_need_expired_at", False),
-            ),
+        restore_source_manifest = self._prepare_source_manifest_v15(previous_version)
+        self._prepare_job_session_scope_v16()
+        if previous_version < 16:
+            # v15 source-job triggers bound only workspace/repo because generic
+            # jobs did not yet persist a session target. Recreate them through
+            # SCHEMA_SQL after installing ``jobs.session_id`` above.
+            for name in (
+                "trg_source_import_seen_job_insert",
+                "trg_source_import_seen_job_update",
+                "trg_source_import_job_insert",
+                "trg_source_import_job_update",
+            ):
+                self.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        # A partially upgraded v2 database can be missing one of the temporal
+        # columns that SCHEMA_SQL indexes.  Repair those columns before running
+        # the script; SQLite parses CREATE INDEX before the additive ALTER loop
+        # below gets a chance to run.  Keep ``valid_from`` out of this repair so
+        # the v4 code-link migration can still recognize and rebuild its legacy
+        # table-level uniqueness shape.
+        existing_tables = {
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table in (
+            "memories", "memory_entities", "edges", "edge_supports",
+            "code_file_history", "code_memory_links",
         ):
-            if needs_expired_at:
-                try:
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN valid_to REAL")
-                except sqlite3.OperationalError:
-                    pass
-                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN expired_at REAL")
+            if table not in existing_tables:
+                continue
+            columns = {
+                str(row[1])
+                for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for column in ("valid_to", "expired_at"):
+                if column not in columns:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} REAL")
         self._execute_script_transactional(SCHEMA_SQL)
+        if restore_source_manifest:
+            self._restore_source_manifest_v15()
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
         # Additive columns for DBs created before they existed — CREATE TABLE IF NOT
         # EXISTS above is a no-op on an already-existing table, so new columns need an
         # explicit, idempotent ALTER TABLE here (SQLite has no "ADD COLUMN IF NOT EXISTS").
-        #
-        # A few long-lived tables were introduced before their current bi-temporal
-        # ``expired_at`` field existed. Repair them here before any live indexes or
-        # queries mention that column, so partially migrated databases continue to
-        # open instead of crashing during startup.
         for stmt in (
             "ALTER TABLE memories ADD COLUMN sort_order REAL",
             "ALTER TABLE memories ADD COLUMN pinned_at REAL",
             "ALTER TABLE memories ADD COLUMN unpinned_at REAL",
             "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
-            "ALTER TABLE memories ADD COLUMN expired_at REAL",
             "ALTER TABLE memories ADD COLUMN subject_key TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN claim_kind TEXT DEFAULT ''",
             "ALTER TABLE memories ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE memories ADD COLUMN modified_hlc TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE memory_entities ADD COLUMN expired_at REAL",
-            "ALTER TABLE edges ADD COLUMN expired_at REAL",
-            "ALTER TABLE edge_supports ADD COLUMN expired_at REAL",
             "ALTER TABLE edges ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE entities ADD COLUMN normalized_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE entities ADD COLUMN canonical_method TEXT NOT NULL DEFAULT 'exact'",
@@ -1678,7 +2195,6 @@ class Store:
             "ALTER TABLE code_edges ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE code_edges ADD COLUMN ingested_at REAL",
             "ALTER TABLE code_edges ADD COLUMN expired_at REAL",
-            "ALTER TABLE code_memory_links ADD COLUMN expired_at REAL",
             "ALTER TABLE edges ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE edge_supports ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE memory_entities ADD COLUMN valid_to_recorded_at REAL",
@@ -1687,6 +2203,7 @@ class Store:
             "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
+            "ALTER TABLE jobs ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
             "ALTER TABLE memory_tombstones ADD COLUMN repo_id TEXT",
             "ALTER TABLE memory_tombstones ADD COLUMN export_class TEXT NOT NULL "
             "DEFAULT 'never_export' CHECK("
@@ -2861,6 +3378,14 @@ class Store:
     @contextmanager
     def _write_operation(self, name: str, *, commit: bool):
         """Isolate one compound write without settling a caller-owned transaction."""
+        # Inside ``defer_commits`` the caller's outer savepoint owns the whole
+        # operation.  Opening another savepoint here is legal but leaves it to be
+        # released by the deferral teardown; a failed helper that escapes the
+        # deferral context could otherwise strand an unreleased inner savepoint.
+        # Join the outer boundary directly so failure semantics stay with its owner.
+        if getattr(self.conn._pin, "defer_commits", 0):
+            yield
+            return
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         savepoint = ""
         try:
@@ -2885,6 +3410,336 @@ class Store:
                 self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
 
+    # ── local source-import manifest ─────────────────────────────────────────
+    def _authorize_source_workspace_id(self, workspace_id: str) -> str:
+        row = self.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (str(workspace_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("source import workspace was not found")
+        self._authorize_workspace(str(row["name"]))
+        return str(workspace_id)
+
+    def _source_vault_row(self, vault_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM source_vaults WHERE id=?", (str(vault_id),)
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        self._authorize_source_workspace_id(str(result["workspace_id"]))
+        return result
+
+    def _authorize_source_job(self, job_id: str) -> dict:
+        row = self.conn.execute(
+            "SELECT id, workspace_id, repo_id, kind FROM jobs WHERE id=?",
+            (str(job_id),),
+        ).fetchone()
+        if row is None or str(row["kind"]) not in {
+            "document_import", "obsidian_import",
+        }:
+            raise ValueError("source import job was not found")
+        result = dict(row)
+        self._authorize_source_workspace_id(str(result["workspace_id"]))
+        return result
+
+    def get_source_vault(self, vault_id: str) -> Optional[dict]:
+        return self._source_vault_row(vault_id)
+
+    def get_source_vault_by_root_digest(self, *, kind: str, root_digest: str,
+                                        workspace_id: str, repo_id: Optional[str] = None,
+                                        session_id: Optional[str] = None) -> Optional[dict]:
+        self._authorize_source_workspace_id(workspace_id)
+        row = self.conn.execute(
+            "SELECT * FROM source_vaults WHERE kind=? AND root_digest=? AND workspace_id=? "
+            "AND repo_id IS ? AND session_id IS ?",
+            (kind, root_digest, workspace_id, repo_id, session_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_source_vaults(self, *, workspace_id: Optional[str] = None,
+                           kind: Optional[str] = None, limit: int = 100) -> list[dict]:
+        clauses, params = [], []
+        if workspace_id is not None:
+            self._authorize_source_workspace_id(workspace_id)
+            clauses.append("workspace_id=?")
+            params.append(workspace_id)
+        if self.allowed_workspaces is not None:
+            names = sorted(str(name) for name in self.allowed_workspaces)
+            clauses.append(
+                "workspace_id IN (SELECT id FROM workspaces WHERE name IN ("
+                + ",".join("?" for _ in names) + "))"
+            )
+            params.extend(names)
+        if kind is not None:
+            clauses.append("kind=?")
+            params.append(kind)
+        sql = "SELECT * FROM source_vaults"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id LIMIT ?"
+        params.append(max(1, min(10_000, int(limit))))
+        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+
+    def register_source_vault(self, *, kind: str, root_digest: str, workspace_id: str,
+                              repo_id: Optional[str] = None, session_id: Optional[str] = None,
+                              display_name: str = "", scope: str = "workspace",
+                              memory_type: str = "semantic", importer_version: str = "",
+                              commit: bool = True) -> str:
+        """Create or refresh a local source-vault identity without storing its root."""
+        kind, root_digest = str(kind).strip(), str(root_digest).strip().casefold()
+        if kind not in {"documents", "obsidian"} or _SOURCE_DIGEST_RE.fullmatch(root_digest) is None:
+            raise ValueError(
+                "source collection requires kind='documents' or 'obsidian' and a root digest"
+            )
+        self._authorize_source_workspace_id(workspace_id)
+        try:
+            selected_scope = Scope(str(scope))
+        except ValueError as exc:
+            raise ValueError("source vault scope must be workspace, repo, or session") from exc
+        try:
+            selected_memory_type = MemoryType(str(memory_type))
+        except ValueError as exc:
+            raise ValueError("source vault memory_type is invalid") from exc
+        if selected_scope == Scope.WORKSPACE and (repo_id is not None or session_id is not None):
+            raise ValueError("workspace source vault scope cannot include a repo or session")
+        if selected_scope == Scope.REPO and (repo_id is None or session_id is not None):
+            raise ValueError("repo source vault scope requires repo_id and no session_id")
+        if repo_id is not None:
+            repo = self.conn.execute(
+                "SELECT workspace_id FROM repos WHERE id=?", (repo_id,)
+            ).fetchone()
+            if repo is None or str(repo["workspace_id"]) != str(workspace_id):
+                raise ValueError("repo_id does not belong to the source vault workspace")
+        if selected_scope == Scope.SESSION:
+            if session_id is None:
+                raise ValueError("session source vault scope requires session_id")
+            session = self.get_session(session_id)
+            if session is None or session["workspace_id"] != workspace_id:
+                raise ValueError("session_id does not belong to the source vault workspace")
+            if repo_id is not None and session.get("repo_id") != repo_id:
+                raise ValueError("session_id does not belong to the source vault repo")
+            repo_id = repo_id or session.get("repo_id")
+        safe_display_name = str(display_name or "")[:200]
+        safe_importer_version = str(importer_version or "")[:64]
+        stamp = now_ts()
+        with self._write_operation("source_vault", commit=commit):
+            existing = self.get_source_vault_by_root_digest(
+                kind=kind, root_digest=root_digest, workspace_id=workspace_id,
+                repo_id=repo_id, session_id=session_id,
+            )
+            if existing is not None:
+                self.conn.execute(
+                    "UPDATE source_vaults SET display_name=?, scope=?, memory_type=?, "
+                    "importer_version=?, updated_at=? WHERE id=?",
+                    (safe_display_name, selected_scope.value, selected_memory_type.value,
+                     safe_importer_version, stamp, existing["id"]),
+                )
+                return str(existing["id"])
+            vault_id = ids.new_id("vault")
+            self.conn.execute(
+                "INSERT INTO source_vaults(id, kind, root_digest, display_name, workspace_id, "
+                "repo_id, session_id, scope, memory_type, importer_version, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (vault_id, kind, root_digest, safe_display_name, workspace_id,
+                 repo_id, session_id, selected_scope.value, selected_memory_type.value,
+                 safe_importer_version, stamp, stamp),
+            )
+            return vault_id
+
+    def get_source_import_item(self, *, vault_id: str, source_key: str) -> Optional[dict]:
+        if self._source_vault_row(vault_id) is None:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM source_imports WHERE vault_id=? AND source_key=?",
+            (vault_id, source_key),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_source_import_items(self, *, vault_id: str, states: Optional[list[str]] = None,
+                                 limit: int = 10_000) -> list[dict]:
+        if self._source_vault_row(vault_id) is None:
+            return []
+        params: list[Any] = [vault_id]
+        sql = "SELECT * FROM source_imports WHERE vault_id=?"
+        if states is not None:
+            if not states:
+                return []
+            sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
+            params.extend(str(state) for state in states)
+        sql += " ORDER BY relative_path LIMIT ?"
+        params.append(max(1, min(100_000, int(limit))))
+        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+
+    def upsert_source_import_item(self, *, vault_id: str, source_key: str, relative_path: str,
+                                  source_id: Optional[str] = None,
+                                  memory_id: Optional[str] = None, subject_key: str = "",
+                                  content_sha256: str = "", canonical_sha256: str = "",
+                                  file_size: int = 0,
+                                  file_mtime_ns: Optional[int] = None,
+                                  importer_version: str = "", state: str = "imported",
+                                  import_id: Optional[str] = None,
+                                  last_error: str = "", seen_at: Optional[float] = None,
+                                  commit: bool = True) -> str:
+        """Atomically create/update one source identity; callers may join their memory write."""
+        if self._source_vault_row(vault_id) is None:
+            raise ValueError("source vault was not found")
+        try:
+            relative_path = normalize_document_path(relative_path)
+        except ValueError as exc:
+            raise ValueError(
+                "source import item requires a safe relative path and source key"
+            ) from exc
+        source_key = str(source_key).strip().casefold()
+        if _SOURCE_DIGEST_RE.fullmatch(source_key) is None:
+            raise ValueError("source import item requires a safe relative path and source key")
+        for label, digest in (
+            ("content_sha256", content_sha256),
+            ("canonical_sha256", canonical_sha256),
+        ):
+            value = str(digest or "").strip().casefold()
+            if value and _SOURCE_DIGEST_RE.fullmatch(value) is None:
+                raise ValueError(f"source import item {label} is invalid")
+        content_sha256 = str(content_sha256 or "").strip().casefold()
+        canonical_sha256 = str(canonical_sha256 or "").strip().casefold()
+        if state not in {"imported", "unchanged", "skipped", "rejected", "error", "conflict", "missing", "renamed"}:
+            raise ValueError("invalid source import item state")
+        stamp = now_ts() if seen_at is None else float(seen_at)
+        with self._write_operation("source_item", commit=commit):
+            existing = self.get_source_import_item(vault_id=vault_id, source_key=source_key)
+            item_id = (
+                str(existing["id"])
+                if existing is not None
+                else str(source_id or ids.new_id("source"))
+            )
+            if not item_id.startswith("src_"):
+                raise ValueError("source import item requires a typed source id")
+            self.conn.execute(
+                "INSERT INTO source_imports(id, vault_id, source_key, relative_path, memory_id, "
+                "subject_key, content_sha256, canonical_sha256, file_size, file_mtime_ns, importer_version, "
+                "last_seen_job_id, state, first_imported_at, last_imported_at, last_seen_at, "
+                "missing_at, last_error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?) "
+                "ON CONFLICT(vault_id, source_key) DO UPDATE SET relative_path=excluded.relative_path, "
+                "memory_id=COALESCE(excluded.memory_id, source_imports.memory_id), "
+                "subject_key=excluded.subject_key, content_sha256=excluded.content_sha256, "
+                "canonical_sha256=excluded.canonical_sha256, file_size=excluded.file_size, "
+                "file_mtime_ns=excluded.file_mtime_ns, "
+                "importer_version=excluded.importer_version, "
+                "last_seen_job_id=excluded.last_seen_job_id, state=excluded.state, "
+                "last_imported_at=excluded.last_imported_at, last_seen_at=excluded.last_seen_at, "
+                "missing_at=NULL, last_error=excluded.last_error",
+                (item_id, vault_id, source_key, relative_path, memory_id,
+                 str(subject_key or ""), content_sha256,
+                 canonical_sha256, max(0, int(file_size)), file_mtime_ns,
+                 str(importer_version or "")[:64], import_id, state, stamp, stamp, stamp,
+                 _content_free_source_error(last_error)),
+            )
+            return item_id
+
+    def rename_source_import_item(self, *, vault_id: str, source_key: str,
+                                  relative_path: str, commit: bool = True) -> bool:
+        if self._source_vault_row(vault_id) is None:
+            return False
+        try:
+            relative_path = normalize_document_path(relative_path)
+        except ValueError as exc:
+            raise ValueError("source import item requires a safe relative path") from exc
+        with self._write_operation("source_rename", commit=commit):
+            return bool(self.conn.execute(
+                "UPDATE source_imports SET relative_path=?, state='renamed', last_seen_at=?, "
+                "missing_at=NULL WHERE vault_id=? AND source_key=?",
+                (relative_path, now_ts(), vault_id, source_key),
+            ).rowcount)
+
+    def mark_source_import_items_missing(
+        self, *, vault_id: str, seen_before: float,
+        preserve_paths: Iterable[str] = (), commit: bool = True,
+    ) -> int:
+        if self._source_vault_row(vault_id) is None:
+            return 0
+        with self._write_operation("source_missing", commit=commit):
+            for relative_path in {str(path) for path in preserve_paths if str(path)}:
+                self.conn.execute(
+                    "UPDATE source_imports SET last_seen_at=? WHERE vault_id=? "
+                    "AND relative_path=? AND state NOT IN ('missing','conflict')",
+                    (float(seen_before), vault_id, relative_path),
+                )
+            return int(self.conn.execute(
+                "UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
+                "AND (last_seen_at IS NULL OR last_seen_at<?) "
+                "AND state NOT IN ('missing','conflict')",
+                (now_ts(), vault_id, float(seen_before)),
+            ).rowcount)
+
+    def get_source_import(self, import_id: str) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM source_imports WHERE id=?", (import_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        if self._source_vault_row(str(result["vault_id"])) is None:
+            return None
+        return result
+
+    def list_source_imports(self, *, vault_id: str, limit: int = 100) -> list[dict]:
+        if self._source_vault_row(vault_id) is None:
+            return []
+        return [dict(row) for row in self.conn.execute(
+            "SELECT * FROM source_imports WHERE vault_id=? ORDER BY last_seen_at DESC, id DESC LIMIT ?",
+            (vault_id, max(1, min(10_000, int(limit)))),
+        ).fetchall()]
+
+    def record_source_import_job_item(self, *, job_id: str,
+                                      relative_path: str, planned_action: str,
+                                      result_state: str = "pending",
+                                      source_id: Optional[str] = None,
+                                      source_format: str = "",
+                                      warning_count: int = 0, error_code: str = "",
+                                      commit: bool = True) -> str:
+        """Upsert one content-free per-job plan/result row."""
+        self._authorize_source_job(job_id)
+        try:
+            relative_path = normalize_document_path(relative_path)
+        except ValueError as exc:
+            raise ValueError("source import job item requires a safe relative path") from exc
+        planned = str(planned_action)
+        result = str(result_state)
+        source_format = str(source_format or "").strip()
+        if len(source_format) > 64 or re.fullmatch(r"[A-Za-z0-9_.+-]*", source_format) is None:
+            raise ValueError("invalid source import format")
+        if planned not in {"imported", "updated", "skipped", "rejected", "renamed", "missing", "conflict"}:
+            raise ValueError("invalid planned source import action")
+        if result not in {"pending", "imported", "updated", "skipped", "rejected", "renamed", "missing", "conflict", "error", "warning"}:
+            raise ValueError("invalid source import result")
+        stamp = now_ts()
+        with self._write_operation("source_job_item", commit=commit):
+            row = self.conn.execute(
+                "SELECT id FROM source_import_items WHERE job_id=? AND relative_path=? "
+                "AND planned_action=?",
+                (job_id, relative_path, planned),
+            ).fetchone()
+            item_id = str(row["id"]) if row is not None else ids.new_id("source")
+            self.conn.execute(
+                "INSERT INTO source_import_items(id, job_id, source_id, relative_path, "
+                "source_format, planned_action, result_state, warning_count, error_code, "
+                "created_at, finished_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id, relative_path, planned_action) "
+                "DO UPDATE SET source_id=COALESCE(excluded.source_id, source_import_items.source_id), "
+                "source_format=excluded.source_format, result_state=excluded.result_state, "
+                "warning_count=excluded.warning_count, "
+                "error_code=excluded.error_code, finished_at=excluded.finished_at",
+                (item_id, job_id, source_id, relative_path, source_format, planned, result,
+                 max(0, int(warning_count)), str(error_code or "")[:100], stamp,
+                 stamp if result != "pending" else None),
+            )
+            return item_id
+
+    def list_source_import_job_items(self, *, job_id: str, limit: int = 100_000) -> list[dict]:
+        self._authorize_source_job(job_id)
+        return [dict(row) for row in self.conn.execute(
+            "SELECT * FROM source_import_items WHERE job_id=? ORDER BY relative_path, id LIMIT ?",
+            (job_id, max(1, min(100_000, int(limit)))),
+        ).fetchall()]
+
     # ── tenancy ───────────────────────────────────────────────────────────────
     def _authorize_workspace(self, name: str) -> str:
         """When this Store is bound to a workspace allow-list, refuse to create or
@@ -2895,6 +3750,20 @@ class Store:
         if self.allowed_workspaces is not None and name not in self.allowed_workspaces:
             raise ValueError(f"workspace '{name}' is not permitted on this instance")
         return name
+
+    def _authorize_workspace_id(self, workspace_id: Optional[str]) -> Optional[str]:
+        """Apply the instance allow-list to an already-resolved workspace id."""
+        if self.allowed_workspaces is None:
+            return workspace_id
+        if workspace_id is None:
+            raise ValueError("workspace is not permitted on this instance")
+        row = self.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (str(workspace_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("workspace was not found")
+        self._authorize_workspace(str(row["name"]))
+        return workspace_id
 
     def create_workspace(self, name: str, *, settings: Optional[dict] = None) -> str:
         self._authorize_workspace(name)
@@ -2940,6 +3809,7 @@ class Store:
             raise
 
     def create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
+        self._authorize_workspace_id(workspace_id)
         rid = ids.new_id("repo")
         self.conn.execute(
             "INSERT INTO repos(id, workspace_id, name, root_path, vcs_remote, primary_lang, "
@@ -2952,6 +3822,7 @@ class Store:
 
     def get_or_create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
         """Return one scoped repository id, creating it atomically when absent."""
+        self._authorize_workspace_id(workspace_id)
         row = self.conn.execute(
             "SELECT id FROM repos WHERE workspace_id=? AND name=?", (workspace_id, name)
         ).fetchone()
@@ -2995,6 +3866,7 @@ class Store:
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None,
                       *, agent: str = "", user_id: str = "", goal: str = "",
                       commit: bool = True) -> str:
+        self._authorize_workspace_id(workspace_id)
         sid = ids.new_id("session")
         self.conn.execute(
             "INSERT INTO sessions(id, workspace_id, repo_id, agent, user_id, goal, status, "
@@ -3190,6 +4062,7 @@ class Store:
         internal compatibility path. Sync may separately preserve the empty pre-v13
         descriptive clock; ordinary local writes always mint a real HLC.
         """
+        self._authorize_workspace_id(rec.workspace_id)
         if (
             _enum(rec.scope) == Scope.USER.value
             and not _allow_legacy_user_scope
@@ -3428,6 +4301,11 @@ class Store:
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
         row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        if row is not None and self.allowed_workspaces is not None:
+            try:
+                self._authorize_workspace_id(row["workspace_id"])
+            except ValueError:
+                return None
         return _row_to_record(row) if row else None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
@@ -3450,6 +4328,11 @@ class Store:
             rows = self.conn.fetchall(
                 f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
             for row in rows:
+                if self.allowed_workspaces is not None:
+                    try:
+                        self._authorize_workspace_id(row["workspace_id"])
+                    except ValueError:
+                        continue
                 out[row["id"]] = _row_to_record(row)
         return out
 
@@ -4004,6 +4887,37 @@ class Store:
         ).fetchone() is not None
 
     @classmethod
+    def _secure_erase_targets(cls, conn, memory_id: str) -> list[str]:
+        """Include deterministic sync-conflict successors in one erase operation."""
+        if not cls._has_table(conn, "memories"):
+            return [memory_id]
+        rows = conn.execute(
+            "SELECT id, metadata, provenance FROM memories"
+        ).fetchall()
+        parents: dict[str, set[str]] = {}
+        for row in rows:
+            metadata = _loads(row["metadata"], {})
+            provenance = _loads(row["provenance"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            provenance = provenance if isinstance(provenance, dict) else {}
+            sync_conflict = metadata.get("sync_conflict")
+            candidates = {provenance.get("conflict_of")}
+            if isinstance(sync_conflict, dict):
+                candidates.add(sync_conflict.get("memory_id"))
+            for parent in candidates:
+                parent_id = str(parent or "")
+                if parent_id:
+                    parents.setdefault(parent_id, set()).add(str(row["id"]))
+        targets = [memory_id]
+        seen = {memory_id}
+        for parent in targets:
+            for child in sorted(parents.get(parent, set())):
+                if child not in seen:
+                    seen.add(child)
+                    targets.append(child)
+        return targets
+
+    @classmethod
     def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
         """Remove a memory and all known local derivatives from one SQLite database.
 
@@ -4214,8 +5128,19 @@ class Store:
         for pattern in patterns:
             for candidate in parent.glob(pattern):
                 try:
-                    if candidate.is_file() and candidate.resolve() != primary:
-                        found.append(candidate.resolve())
+                    stat_result = candidate.lstat()
+                    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                    if candidate.is_symlink() or (
+                        reparse and getattr(stat_result, "st_file_attributes", 0) & reparse
+                    ):
+                        continue
+                    resolved = candidate.resolve()
+                    if (
+                        resolved != primary
+                        and resolved.parent == parent
+                        and resolved.is_file()
+                    ):
+                        found.append(resolved)
                 except OSError:
                     continue
         return sorted(set(found), key=lambda value: str(value))
@@ -4236,31 +5161,41 @@ class Store:
             # the destructive transaction means the deletion and terminal tombstone
             # commit (or roll back) as one unit.
             device_id = self.device_id()
-            current = self._erase_memory_rows(self.conn, memory_id, actor=actor)
-            if not current["present"]:
-                raise KeyError(f"no memory with id '{memory_id}'")
-            export_marker = self.get_memory_sync_export(memory_id)
-            if (
-                export_marker is not None
-                and export_marker["workspace_id"] == current.get("workspace_id")
-            ):
-                export_class = TOMBSTONE_REMOTE_ERASURE
-                tombstone_workspace_id = export_marker["workspace_id"]
-                tombstone_repo_id = export_marker["repo_id"]
-            else:
-                export_class = TOMBSTONE_NEVER_EXPORT
-                tombstone_workspace_id = current.get("workspace_id")
-                tombstone_repo_id = current.get("repo_id")
-            # Current scope/sensitivity cannot prove that an id ever crossed a sync
-            # boundary. Only the durable content-free marker can authorize a remote
-            # erasure; absent or scope-conflicting evidence fails closed to local-only.
-            self.add_memory_tombstone(
-                memory_id, deleted_at=now_ts(),
-                device_id=device_id,
-                workspace_id=tombstone_workspace_id,
-                repo_id=tombstone_repo_id,
-                export_class=export_class,
+            targets = self._secure_erase_targets(self.conn, memory_id)
+            current_rows = []
+            for target_id in targets:
+                marker = self.get_memory_sync_export(target_id)
+                current = self._erase_memory_rows(self.conn, target_id, actor=actor)
+                if current["present"]:
+                    current_rows.append((target_id, current, marker))
+            current = next(
+                (row for row in current_rows if row[0] == memory_id), None
             )
+            if current is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            primary_export_class = TOMBSTONE_NEVER_EXPORT
+            for target_id, erased, export_marker in current_rows:
+                if (
+                    export_marker is not None
+                    and export_marker["workspace_id"] == erased.get("workspace_id")
+                ):
+                    export_class = TOMBSTONE_REMOTE_ERASURE
+                    tombstone_workspace_id = export_marker["workspace_id"]
+                    tombstone_repo_id = export_marker["repo_id"]
+                else:
+                    export_class = TOMBSTONE_NEVER_EXPORT
+                    tombstone_workspace_id = erased.get("workspace_id")
+                    tombstone_repo_id = erased.get("repo_id")
+                # Current scope/sensitivity cannot prove that an id ever crossed a
+                # sync boundary. Only the durable content-free marker can authorize
+                # a remote erasure; absent or scope-conflicting evidence fails closed.
+                self.add_memory_tombstone(
+                    target_id, deleted_at=now_ts(), device_id=device_id,
+                    workspace_id=tombstone_workspace_id,
+                    repo_id=tombstone_repo_id, export_class=export_class,
+                )
+                if target_id == memory_id:
+                    primary_export_class = export_class
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.commit()
         except BaseException:
@@ -4276,10 +5211,11 @@ class Store:
             conn = None
             try:
                 conn = self._open_connection(str(backup))
-                erased = self._erase_memory_rows(conn, memory_id, actor="secure_erase")
+                for target_id in targets:
+                    self._erase_memory_rows(conn, target_id, actor="secure_erase")
                 conn.commit()
                 self._checkpoint_and_vacuum(conn, durable=True)
-                if erased["present"]:
+                if current_rows:
                     backup_processed += 1
             except Exception:  # pragma: no cover - keyed/corrupt/locked backups vary by deployment
                 backup_failed += 1
@@ -4292,7 +5228,7 @@ class Store:
         return {
             "id": memory_id,
             "status": "securely_erased",
-            "export_class": export_class,
+            "export_class": primary_export_class,
             "maintenance": maintenance,
             "recognised_backups_erased": backup_processed,
             "recognised_backups_failed": backup_failed,
@@ -5980,13 +6916,25 @@ class Store:
             source_ids = set().union(*(
                 set(_provenance_memory_ids(edge.provenance)) for edge in edges
             )) if edges else set()
-            memories = self.get_memories(sorted(source_ids))
+            support_rows = self.edge_supports_in_scope(
+                [edge.id for edge in edges], at=valid_at, flt=flt,
+            ) if edges else []
+            support_ids = {str(row["memory_id"]) for row in support_rows
+                           if row.get("memory_id")}
+            memories = self.get_memories(sorted(source_ids | support_ids))
+            supports_by_edge: dict[str, set[str]] = {}
+            for support in support_rows:
+                supports_by_edge.setdefault(str(support["edge_id"]), set()).add(
+                    str(support["memory_id"])
+                )
             for edge in edges:
                 if not _edge_is_prompt_eligible(edge.provenance):
                     continue
-                sources = _provenance_memory_ids(edge.provenance)
+                sources = set(_provenance_memory_ids(edge.provenance))
+                sources.update(supports_by_edge.get(edge.id, set()))
                 if sources and not all(
                     (memory := memories.get(memory_id))
+                    and (flt is None or memory_matches_filter(memory, flt, at=valid_at))
                     and _row_is_prompt_eligible(memory.provenance, memory.metadata)
                     for memory_id in sources
                 ):
@@ -6321,15 +7269,13 @@ class Store:
     def link_memory_symbol(self, *, repo_id: str, symbol_id: str, memory_id: str,
                            relation: str = "mentions", confidence: float = 1.0,
                            commit: bool = True) -> str:
-        # The partial unique index makes the check-and-insert safe across concurrent
-        # callers. Keep the whole sequence in one write operation and read the winner
-        # back after INSERT OR IGNORE; returning the freshly generated id after a
-        # uniqueness conflict would violate the idempotency contract.
+        # Keep the existence check and insert in one serialized write operation.
+        # Separate statements otherwise allow two threads to observe no live link
+        # before either INSERT runs, defeating the idempotent API contract.
         with self._write_operation("link_memory_symbol", commit=commit):
             existing = self.conn.execute(
                 "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
-                "AND memory_id=? AND relation=? AND valid_to IS NULL "
-                "AND expired_at IS NULL",
+                "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
                 (repo_id, symbol_id, memory_id, relation),
             ).fetchone()
             if existing is not None:
@@ -6344,13 +7290,7 @@ class Store:
                 (link_id, repo_id, symbol_id, memory_id, relation,
                  max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
             )
-            winner = self.conn.execute(
-                "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
-                "AND memory_id=? AND relation=? AND valid_to IS NULL "
-                "AND expired_at IS NULL",
-                (repo_id, symbol_id, memory_id, relation),
-            ).fetchone()
-            return winner["id"] if winner is not None else link_id
+            return link_id
 
     def clear_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
         stamp = now_ts()
@@ -6558,28 +7498,32 @@ class Store:
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
-                     interaction_level: str = "") -> str:
+                     interaction_level: str = "", ts: Optional[float] = None) -> str:
         # Events are not memories, but are durable, searchable agent context too. Do
         # not create a side channel that can retain a credential after memory capture is
         # blocked.
         reject_secrets((("event content", content), ("event refs", refs)))
         eid = ids.new_id("event")
-        owns_session_transaction = False
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        event_ts = _finite_timestamp(ts, "event timestamp")
+        if event_ts is None:
+            event_ts = now_ts()
         try:
             if session_id:
-                owns_session_transaction = self.begin_session_write(
+                self.begin_session_write(
                     session_id, workspace_id=workspace_id, repo_id=repo_id or None
                 )
             self.conn.execute(
                 "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
                 "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
                 (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
-                 interaction_level, now_ts()),
+                 interaction_level, event_ts),
             )
-            self.conn.commit()
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.commit()
             return eid
         except BaseException:
-            if (owns_session_transaction
+            if (owns_transaction
                     and self.conn.transaction_owned_by_current_thread()):
                 self.conn.rollback()
             raise
@@ -7802,6 +8746,16 @@ class Store:
         p = f"{alias}." if alias else ""
         where: list[str] = []
         params: list[Any] = []
+        if self.allowed_workspaces is not None:
+            names = sorted(str(name) for name in self.allowed_workspaces)
+            if not names:
+                where.append("0")
+            else:
+                marks = ",".join("?" for _ in names)
+                where.append(
+                    f"{p}workspace_id IN (SELECT id FROM workspaces WHERE name IN ({marks}))"
+                )
+                params.extend(names)
         if flt:
             if flt.workspace_id:
                 where.append(f"{p}workspace_id=?")

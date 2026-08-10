@@ -291,6 +291,47 @@ def test_explicit_owner_private_env_file_loads_without_overriding_process_env(
     assert overridden.stdout.strip() == "https://operator.example.test"
 
 
+def test_trusted_env_parser_supports_documented_values_without_interpolation() -> None:
+    parsed = config._parse_trusted_env(
+        "# generated and operator-managed values\n"
+        "\n"
+        "ENGRAPHIS_DB_PATH=C:\\Users\\O'Brien\\Memory Vault\\engraphis.db\n"
+        "ENGRAPHIS_CSP=\"default-src 'self'; frame-ancestors 'none'\"\n"
+        "ENGRAPHIS_HSTS='max-age=31536000; includeSubDomains' # TLS only\n"
+        'ENGRAPHIS_LLM_EXTRA_HEADERS={"X-Literal":"${HOME}","X-Title":"engraphis"}\n'
+        "ENGRAPHIS_DUPLICATE=first\n"
+        "export ENGRAPHIS_DUPLICATE=second\n"
+    )
+
+    assert parsed == {
+        "ENGRAPHIS_DB_PATH": r"C:\Users\O'Brien\Memory Vault\engraphis.db",
+        "ENGRAPHIS_CSP": "default-src 'self'; frame-ancestors 'none'",
+        "ENGRAPHIS_HSTS": "max-age=31536000; includeSubDomains",
+        "ENGRAPHIS_LLM_EXTRA_HEADERS": (
+            '{"X-Literal":"${HOME}","X-Title":"engraphis"}'
+        ),
+        "ENGRAPHIS_DUPLICATE": "second",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "lowercase=value\n",
+        "ENGRAPHIS_BROKEN\n",
+        'ENGRAPHIS_CSP="unterminated\n',
+        "ENGRAPHIS_CSP='unterminated\n",
+        'ENGRAPHIS_CSP="valid" trailing\n',
+        "ENGRAPHIS_TOKEN=do-not-print\x00suffix\n",
+    ],
+)
+def test_trusted_env_parser_rejects_malformed_syntax_without_echoing_values(raw) -> None:
+    with pytest.raises(ValueError, match="trusted config contains invalid syntax") as caught:
+        config._parse_trusted_env(raw)
+
+    assert "do-not-print" not in str(caught.value)
+
+
 def test_explicit_env_file_path_must_be_absolute(tmp_path) -> None:
     environment = dict(os.environ)
     environment["ENGRAPHIS_ENV_FILE"] = "relative.env"

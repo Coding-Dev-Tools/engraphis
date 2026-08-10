@@ -46,6 +46,89 @@ def test_receipts_are_content_free_and_tamper_evident():
     }
 
 
+def test_obsidian_import_receipt_keeps_only_bounded_counts():
+    store = Store(":memory:")
+    try:
+        wid = store.get_or_create_workspace("private-vault-workspace")
+        receipt = store.record_receipt(
+            "obsidian_import", workspace_id=wid, target_count=3, status="partial",
+            metadata={
+                "files_scanned": 5, "files_imported": 3, "files_updated": 1,
+                "files_renamed": 1, "files_skipped": 1, "files_rejected": 0,
+                "files_missing": 1, "files_errored": 0, "conflicts": 2,
+                "warnings": 2, "attachments": 4, "wikilinks": 6,
+                "aliases": 2, "tags": 9, "vault_path": "C:/private/vault",
+                "title": "private title",
+            },
+        )
+        assert receipt["operation"] == "obsidian_import"
+        assert receipt["metadata"] == {
+            "files_scanned": 5, "files_imported": 3, "files_updated": 1,
+            "files_renamed": 1, "files_skipped": 1, "files_rejected": 0,
+            "files_missing": 1, "files_errored": 0, "conflicts": 2,
+            "warnings": 2, "attachments": 4, "wikilinks": 6,
+            "aliases": 2, "tags": 9,
+        }
+        assert "private" not in json.dumps(receipt)
+        assert store.verify_receipts(workspace_id=wid)["valid"] is True
+
+        adversarial = store.record_receipt(
+            "obsidian_import", workspace_id=wid,
+            metadata={
+                "files_scanned": 10**30,
+                "files_imported": -10,
+                "files_updated": True,
+                "files_skipped": 1.5,
+                "warnings": "private warning text",
+            },
+        )
+        assert adversarial["metadata"] == {
+            "files_imported": 0,
+            "files_scanned": 1_000_000_000,
+        }
+        assert "private warning" not in json.dumps(adversarial)
+        assert store.verify_receipts(workspace_id=wid)["valid"] is True
+    finally:
+        store.close()
+
+
+def test_completed_obsidian_import_receipt_has_public_terminal_status():
+    store = Store(":memory:")
+    try:
+        wid = store.get_or_create_workspace("obsidian-complete")
+        receipt = store.record_receipt(
+            "obsidian_import", workspace_id=wid, status="completed",
+            metadata={"files_imported": 1},
+        )
+        assert receipt["status"] == "completed"
+    finally:
+        store.close()
+
+
+def test_document_import_receipt_is_public_and_content_free():
+    store = Store(":memory:")
+    try:
+        workspace_id = store.get_or_create_workspace("documents-receipt")
+        payload = store.record_receipt(
+            "document_import", workspace_id=workspace_id, status="completed",
+            target_count=4,
+            metadata={
+                "files_imported": 3, "files_skipped": 1,
+                "warnings": 2, "source_path": "C:/private/customer/files",
+                "document_title": "Confidential roadmap",
+            },
+        )
+        assert payload["operation"] == "document_import"
+        assert payload["status"] == "completed"
+        assert payload["metadata"] == {
+            "files_imported": 3, "files_skipped": 1, "warnings": 2,
+        }
+        assert "private" not in str(payload).casefold()
+        assert "confidential" not in str(payload).casefold()
+    finally:
+        store.close()
+
+
 def test_short_user_controlled_receipt_labels_are_never_stored_verbatim():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("w")

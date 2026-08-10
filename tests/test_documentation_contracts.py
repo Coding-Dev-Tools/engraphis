@@ -232,10 +232,10 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
     erasure = _read("docs/SECURE_ERASURE.md")
     schema = _read("engraphis/core/schema.py")
 
-    assert "SCHEMA_VERSION = 15" in schema
-    assert agents.count("`SCHEMA_VERSION = 15`") == 2
-    assert "schema 15" in readme
-    assert "schema 15" in changelog
+    assert "SCHEMA_VERSION = 16" in schema
+    assert agents.count("`SCHEMA_VERSION = 16`") == 2
+    assert "schema 16" in readme
+    assert "schema 16" in changelog
 
     for document in (agents, readme, changelog, sync, erasure):
         normalized = " ".join(document.split())
@@ -247,6 +247,29 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
     assert "never leave the device" in normalized_sync
     assert "cannot later be upgraded" in normalized_sync
     assert "only a non-secret workspace/repo record" in erasure
+
+
+def test_document_import_docs_describe_the_source_neutral_contract() -> None:
+    readme = _read("README.md")
+    agents = _read("AGENTS.md")
+    guide = _read("docs/DOCUMENT_IMPORT.md")
+    obsidian = _read("docs/OBSIDIAN_IMPORT.md")
+
+    for document in (readme, guide):
+        assert "engraphis import documents" in document
+        assert "--dry-run" in document
+        assert "--yes" in document
+    for format_name in (
+        "Markdown", "reStructuredText", "HTML", "JSON", "CSV", "DOCX", "ODT",
+        "RTF", "XLSX", "ODS", "PPTX", "ODP", "EPUB", "Source code",
+    ):
+        assert format_name in guide
+    for safety_term in ("symlink", "secret", "unsupported", "resumable", "temporal", "conflict"):
+        assert safety_term in guide
+    assert "SCHEMA_VERSION = 16" in agents
+    assert "source-neutral" in agents
+    assert "rich Markdown adapter" in obsidian
+    assert "DOCUMENT_IMPORT.md" in obsidian
 
 
 def test_consolidation_docs_expose_only_live_public_options() -> None:

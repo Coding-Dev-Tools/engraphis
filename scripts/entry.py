@@ -32,6 +32,7 @@ COMMANDS = {
     "consolidate": "scripts.consolidate:main",
     "graph": "scripts.graph_cli:main",
     "graph-server": "scripts.graph_server:main",
+    "import": "scripts.importer:main",
     "update": "scripts.update:main",
 }
 
@@ -50,6 +51,7 @@ commands:
   consolidate    run consolidation over stored memories
   graph          query the knowledge graph
   graph-server   run the graph server
+  import         import local Markdown, text, and document collections
   update         check for and install a newer Engraphis release
 
 Run `engraphis <command> --help` for a command's options.

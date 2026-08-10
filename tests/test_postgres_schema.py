@@ -6,7 +6,8 @@ import pytest
 
 from engraphis.backends import postgres_schema
 from engraphis.core.interfaces import SchemaSnapshot, SearchFilter
-from engraphis.service import MemoryService
+import engraphis.service as service_module
+from engraphis.service import MAX_CONTENT_CHARS, MemoryService
 
 
 class _Cursor:
@@ -358,6 +359,32 @@ def test_service_never_persists_postgres_dsn(monkeypatch):
     }, default=str)
     assert dsn not in serialized
     assert "secret" not in serialized
+
+
+def test_empty_postgres_chunk_result_returns_without_indexing(monkeypatch):
+    snapshot = SchemaSnapshot(
+        title="PostgreSQL schema: empty",
+        text="x" * (MAX_CONTENT_CHARS + 1),
+        metadata={"database": "empty", "source_digest": "digest"},
+    )
+
+    class _Introspector:
+        def inspect(self, supplied, *, schemas=None):
+            return snapshot
+
+    class _EmptyExtractor:
+        def extract(self, _text):
+            return []
+
+    monkeypatch.setattr(
+        postgres_schema, "get_postgres_introspector", lambda: _Introspector()
+    )
+    monkeypatch.setattr(service_module, "ChunkingExtractor", _EmptyExtractor)
+    service = MemoryService.create(":memory:")
+
+    assert service.import_postgres_schema(
+        "postgresql://local/empty", workspace="acme"
+    ) == {"workspace": "acme", "stored": 0, "entities": 0, "relations": 0}
 
 
 def test_large_postgres_snapshot_keeps_every_chunk_distinct(monkeypatch):

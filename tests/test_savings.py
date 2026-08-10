@@ -255,6 +255,21 @@ def test_grouped_context_savings_uses_the_same_time_and_release_filters():
     assert summary["csv"].splitlines()[0].startswith("group_key,token_counter,")
 
 
+def test_ungrouped_context_savings_honors_csv_format():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    wid = service.store.get_or_create_workspace("ungrouped-csv")
+    service.store.record_receipt(
+        "recall",
+        workspace_id=wid,
+        metadata={"token_usage": _usage(100, 40, counter="engraphis.regex.v1")},
+    )
+
+    summary = service.context_savings(workspace="ungrouped-csv", format="csv")
+
+    assert summary["csv"].splitlines()[0].startswith("token_counter,receipt_count,")
+    assert "engraphis.regex.v1" in summary["csv"]
+
+
 def test_grouped_context_savings_separates_counters_and_rejects_invalid_saved():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("grouped-counters")

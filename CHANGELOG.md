@@ -5,12 +5,35 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.6] - 2026-08-08
+
+Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
+local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
+stronger release and evaluation evidence.
+
+### Added
+
+- A dependency-free, source-neutral local document importer for Markdown, plain text,
+  reStructuredText, HTML, JSON/JSONL, CSV/TSV, configuration/XML text, and stdlib-readable
+  source code, RTF, DOCX/ODT, XLSX/ODS, PPTX/ODP, and EPUB documents, with existing local
+  adapters for PDF text, image OCR, and explicitly local-model audio/video transcription.
+  `engraphis import documents` and the
+  dashboard’s **Import local documents** flow
+  provide strict previews, safe per-file reporting, resumable source manifests, temporal
+  re-import history, and explicit conflict choices. Obsidian remains the rich Markdown adapter.
+- Offline, repeatable Obsidian-vault import with strict dry-run previews, source
+  safety exclusions, resumable per-note progress, temporal re-import history, and
+  a trusted-owner dashboard wizard that uploads only `.md` note bytes plus content-free
+  attachment manifests. It ships through
+  `engraphis import obsidian`, the `engraphis-import` console alias, and a deprecated
+  v1 seed-script wrapper that maps legacy namespaces to v2 workspaces.
+
 ### Security
 
 - Fail closed on new `user`-scope memory writes until records carry an immutable owner identity;
   preserve historical reads and the existing promotion rejection instead of presenting
   workspace-bound rows as private personal memory.
-- Load optional dotenv configuration only from the owner-private
+- Parse bounded dotenv-style configuration without an optional runtime dependency, and load it only from the owner-private
   `~/.engraphis/config.env` or an absolute owner-private file selected by
   `ENGRAPHIS_ENV_FILE`; arbitrary working-directory `.env` files are not a trust boundary.
 - Clarify Cloud Sync credential-origin binding, secret-manager-only unattended credentials,
@@ -19,11 +42,30 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Advance through schema 15: schema 12 classifies content-free erasure markers so local-only
   `never_export` markers remain private and only validated `remote_erasure` markers may cross
   sync boundaries; schema 13 adds per-memory hybrid logical clocks for deterministic
-  descriptive-state sync; schema 14-15 add the local source-import manifest for document
-  and note-collection tracking with scope-security triggers.
+  descriptive-state sync and durable, content-free proof that a memory crossed a sync boundary;
+  schema 14 adds Obsidian collection and import manifests; schema 15 generalizes them to
+  source-neutral `documents` and `obsidian` adapters, preserves temporal source lineage, enforces
+  adapter/job and target-scope integrity, and retains only bounded, content-free per-job
+  format/result metadata. Schema 16 persists the optional session target on import jobs and
+  enforces exact session equality for source lineage and job items.
+- Bind each trusted-owner dashboard document or Obsidian run to an expiring, owner-session-bound,
+  one-time preview token over the exact note/document bytes, attachment manifest, target, source,
+  and conflict policy; invalidate changed client previews and keep job polling and cancellation
+  bound to the workspace where the job started.
+- Make read-only Store inspection write-free for SQLite and injected/SQLCipher connectors:
+  require injected connectors to expose `open_read_only(path)`, open existing checkpointed files
+  with `mode=ro&immutable=1` plus `PRAGMA query_only=ON`, and reject missing paths or active
+  WAL/rollback journals before a connector can create or recover state.
 
 ### Fixed
 
+- Publish separately backed vector-index changes for service memory-title edits only after the
+  canonical Store row, FTS mirror, portable vector, audit, and commit succeed; late Store failures
+  publish nothing, while post-commit provider failures preserve canonical state and record
+  content-free repair debt.
+- Defer separately backed vector-index upserts and deletes during sync until each canonical apply
+  batch commits, coalesce repeated IDs, publish nothing on late Store failure, and record
+  content-free repair debt if the provider fails after commit.
 - Synchronize the portable memory skill with the live Smart nine-tool and Classic 34-tool
   surfaces, including the two intentionally narrower Smart overlap schemas, trust/origin fields,
   planner and response bounds, context-savings filters, receipt anchors, and expanded health
@@ -46,6 +88,24 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Document the official LongMemEval-V2 six-variant, five-budget execution matrix end to end,
   including clean-checkout completion receipts, exact source-question coverage, privacy-safe
   export binding, matched `context_k=2` comparators, and memory-type count evidence.
+
+### Added
+
+- Dashboard Settings panel and startup banner now display the running Engraphis
+  version, fetched from the existing `/api/info` endpoint.
+
+### Fixed
+
+- Wrap `engraphis_get_memory` post-inspect body in error-redaction try/except
+  matching all other Smart gateway tools, preventing internal SQL errors and
+  file paths from leaking through FastMCP error responses.
+- Fix malformed SQLite URI on Windows in `_keyword_search` and `/api/memories`
+  fallback paths: use `Path.resolve().as_uri()` instead of bare string
+  interpolation, matching the store's URI construction.
+- Apply `_graph_csv()` limit enforcement to the `/graph` endpoint's `layers`
+  parameter, matching all other graph endpoints.
+- Log a warning when `ENGRAPHIS_LLM_EXTRA_HEADERS` contains invalid JSON
+  instead of silently dropping the headers.
 
 ## [1.5] - 2026-08-04
 

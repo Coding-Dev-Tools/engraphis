@@ -10,6 +10,7 @@ recursive-include engraphis/dashboard_assets/vendor *
 include engraphis/commercial_manifest.json
 include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md
 include docs/RECALL_RECOVERY.md
+include docs/DOCUMENT_IMPORT.md docs/OBSIDIAN_IMPORT.md
 include docs/images/context-efficiency.svg
 include pyproject.toml
 include .env.example requirements.txt

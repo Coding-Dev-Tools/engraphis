@@ -31,6 +31,8 @@ PREFIXES = {
     "audit": "aud",
     "device": "dev",
     "receipt": "rcpt",
+    "vault": "vlt",
+    "source": "src",
 }
 
 
