@@ -1731,6 +1731,71 @@ def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     assert history["edges"][0]["ghost"] is True
 
 
+def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
+    service, _alpha, _beta, _gamma = _seed_service()
+    other_workspace_id = service.store.get_or_create_workspace("other")
+    other_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Evidence from another workspace.",
+        workspace_id=other_workspace_id, scope=Scope.WORKSPACE,
+    ))
+    service.store.conn.execute(
+        "DELETE FROM edge_supports WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
+        "VALUES ('edge_ab', ?, 'manual', 1.0)", (other_memory,)
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
+    )
+
+    assert "edge_ab" not in {edge["id"] for edge in history["edges"]}
+
+
+def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    source = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="source", fqname="source",
+        file="source.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    target = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    edge_id = service.store.add_code_edge(
+        repo_id=repo_id, src=source, dst=target, relation="calls", commit=False,
+    )
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE code_edges SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, include_memory_nodes=False,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert {node["id"] for node in history["nodes"]} >= {
+        f"code:{source}", f"code:{target}",
+    }
+    code_edge = next(
+        edge for edge in history["edges"] if edge["id"] == f"code-edge:{edge_id}"
+    )
+    assert code_edge["ghost"] is True
+
+
 def test_graph_history_does_not_expose_support_learned_after_known_at():
     service, _alpha, _beta, _gamma = _seed_service()
     support = service.store.conn.execute(
