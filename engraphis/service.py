@@ -7708,6 +7708,40 @@ class MemoryService:
             raise ValidationError("time range values must be finite timestamps")
         if lower_time is not None and upper_time is not None and lower_time > upper_time:
             raise ValidationError("time_from must be less than or equal to time_to")
+
+        # Classify physical entity visibility across the complete workspace history
+        # before applying the entity candidate cap. The same set-wise result is reused
+        # below for canonical endpoint pruning so the edge index is scanned only once.
+        visibility_rows = self.store.conn.execute(
+            "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
+            "MAX(CASE "
+            "WHEN visibility_support.edge_id IS NULL THEN 1 "
+            "WHEN visibility_memory.id IS NOT NULL "
+            "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
+            "ELSE 0 END) AS public_edge "
+            "FROM edges visibility_edge "
+            "LEFT JOIN edge_supports visibility_support "
+            "ON visibility_support.edge_id=visibility_edge.id "
+            "LEFT JOIN memories visibility_memory "
+            "ON visibility_memory.id=visibility_support.memory_id "
+            "WHERE visibility_edge.workspace_id=? "
+            "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
+            "visibility_edge.src, visibility_edge.dst",
+            (wid,),
+        ).fetchall()
+        historical_touching_ids = {
+            str(row[key])
+            for row in visibility_rows
+            for key in ("src", "dst")
+            if row[key]
+        }
+        historically_public_ids = {
+            str(row[key])
+            for row in visibility_rows if bool(row["public_edge"])
+            for key in ("src", "dst")
+            if row[key]
+        }
+
         entity_sql = (
             "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
             "normalized_name, canonical_method, canonical_confidence, created_at "
@@ -7724,39 +7758,27 @@ class MemoryService:
                 marks = ",".join("?" for _ in clean_types)
                 entity_sql += f" AND etype IN ({marks})"
                 entity_params.extend(clean_types)
-        # Fetch with generous headroom; the entity cap applies after
-        # session-scope pruning so private evidence cannot crowd out
-        # public entities in the candidate set.
-        entity_sql += " ORDER BY canonical_id, id LIMIT ?"
-        entity_params.append(MAX_GRAPH_ANALYSIS_ENTITIES * 3 + 1)
-        raw_entity_rows = [dict(row) for row in self.store.conn.execute(
-            entity_sql, entity_params
-        ).fetchall()]
-        # _graph_entity_visibility_sql requires an EXISTS check against
-        # memories. Apply it before the cap so session-private evidence
-        # does not consume the candidate budget.
+        # Page until the cap is reached after session-scope pruning so private
+        # evidence cannot crowd out public entities in the candidate set.
         entity_rows = []
-        for start in range(0, len(raw_entity_rows), 500):
-            chunk = raw_entity_rows[start:start + 500]
-            chunk_ids = [row.get("id") for row in chunk]
-            if not chunk_ids:
-                continue
-            marks = ",".join("?" for _ in chunk_ids)
-            visible = {
-                r["id"] for r in self.store.conn.execute(
-                    f"SELECT DISTINCT entity.id FROM entities entity "
-                    f"WHERE entity.id IN ({marks}) AND "
-                    + _graph_entity_visibility_sql("entity"),
-                    chunk_ids,
-                ).fetchall()
-            }
-            for row in chunk:
-                if row.get("id") in visible:
+        entity_batch_size = 500
+        entity_offset = 0
+        while True:
+            raw_entity_rows = [dict(row) for row in self.store.conn.execute(
+                entity_sql + " ORDER BY canonical_id, id LIMIT ? OFFSET ?",
+                [*entity_params, entity_batch_size, entity_offset],
+            ).fetchall()]
+            for row in raw_entity_rows:
+                entity_id = str(row.get("id") or "")
+                if entity_id not in historical_touching_ids \
+                        or entity_id in historically_public_ids:
                     entity_rows.append(row)
                     if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
                         break
-            if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+            if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES \
+                    or len(raw_entity_rows) < entity_batch_size:
                 break
+            entity_offset += len(raw_entity_rows)
 
         edge_sql = (
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
@@ -7871,48 +7893,6 @@ class MemoryService:
                 "graph analysis exceeds the relation candidate limit; filter by repository"
             )
 
-        # Classify physical entity visibility across the complete workspace history in
-        # one set-wise pass.  The previous per-entity predicate rescanned the workspace
-        # edge index three times for every entity.  Keep its exact privacy semantics:
-        # entities with no edge history, a support-less/manual edge, or any non-session
-        # support are public; identities whose complete history is session-only are not.
-        # This physical-ID filter must run before canonical grouping so a public alias
-        # cannot pull a private alias into ``member_ids``. Repository filtering is applied
-        # only to the later scene-selection pass, never to this privacy classification.
-        visibility_rows = self.store.conn.execute(
-            "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
-            "MAX(CASE "
-            "WHEN visibility_support.edge_id IS NULL THEN 1 "
-            "WHEN visibility_memory.id IS NOT NULL "
-            "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
-            "ELSE 0 END) AS public_edge "
-            "FROM edges visibility_edge "
-            "LEFT JOIN edge_supports visibility_support "
-            "ON visibility_support.edge_id=visibility_edge.id "
-            "LEFT JOIN memories visibility_memory "
-            "ON visibility_memory.id=visibility_support.memory_id "
-            "WHERE visibility_edge.workspace_id=? "
-            "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst",
-            (wid,),
-        ).fetchall()
-        historical_touching_ids = {
-            str(row[key])
-            for row in visibility_rows
-            for key in ("src", "dst")
-            if row[key]
-        }
-        historically_public_ids = {
-            str(row[key])
-            for row in visibility_rows if bool(row["public_edge"])
-            for key in ("src", "dst")
-            if row[key]
-        }
-        entity_rows = [
-            entity for entity in entity_rows
-            if str(entity["id"]) not in historical_touching_ids
-            or str(entity["id"]) in historically_public_ids
-        ]
         touching_ids = {
             str(row[key])
             for row in visibility_rows
@@ -8218,6 +8198,36 @@ class MemoryService:
                 enriched["memory_type"] = metadata[0]
                 enriched["support_time"] = metadata[1]
             enriched_supports.append(enriched)
+        if prune_entities:
+            matching_edge_ids = {
+                str(support.get("edge_id") or "")
+                for support in support_rows
+                if str(support.get("memory_id") or "") in support_memory_meta
+            }
+            edge_rows = [
+                edge for edge in edge_rows
+                if str(edge.get("id") or "").startswith("code-edge:")
+                or str(edge.get("id") or "") in matching_edge_ids
+            ]
+            endpoints = {
+                str(edge.get(key) or "")
+                for edge in edge_rows
+                for key in ("src", "dst") if edge.get(key)
+            }
+            canonical_by_member = {
+                str(entity.get("id") or ""): str(
+                    entity.get("canonical_id") or entity.get("id") or ""
+                )
+                for entity in entity_rows
+            }
+            endpoint_canonicals = {
+                canonical_by_member.get(endpoint, endpoint) for endpoint in endpoints
+            }
+            entity_rows = [
+                entity for entity in entity_rows
+                if str(entity.get("canonical_id") or entity.get("id") or "")
+                in endpoint_canonicals
+            ]
 
         memory_rows: list[dict] = []
         memory_link_rows: list[dict] = []

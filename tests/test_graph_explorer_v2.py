@@ -1716,6 +1716,27 @@ def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
     }
 
 
+def test_graph_scene_history_collision_uses_consistent_ghost_node_id():
+    entities = [
+        {"id": "live", "canonical_id": "canon", "name": "Current", "etype": "concept"},
+        {"id": "historical", "canonical_id": "canon", "name": "Former", "etype": "concept"},
+        {"id": "other", "canonical_id": "other", "name": "Other", "etype": "concept"},
+    ]
+    edges = [
+        {"id": "live-edge", "src": "live", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+        {"id": "ghost-edge", "src": "historical", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "ghost": True, "provenance": "{}"},
+    ]
+
+    scene = build_graph_scene("w", entities, edges, [], include_history=True)
+    nodes_by_id = {node["id"]: node for node in scene["nodes"]}
+
+    assert len(nodes_by_id) == len(scene["nodes"])
+    assert nodes_by_id["canon"].get("ghost") is not True
+    assert nodes_by_id["canon:ghost"]["ghost"] is True
+
+
 def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     service, _alpha, _beta, _gamma = _seed_service()
     closed_at = time.time() + 10.0
