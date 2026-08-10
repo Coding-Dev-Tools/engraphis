@@ -11,6 +11,89 @@ Minor release advancing the v2 engine through schema 16 with deterministic sync 
 local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
 stronger release and evaluation evidence.
 
+### Changed
+
+- The Ledger knowledge graph now defaults to evidence-mass Galaxy gravity. The `galaxy-v6`
+  scene contract retains the magnitude of degree, PageRank, support, and repository evidence;
+  one mass value determines both visibly distinct star radius and gravitational pull. Deterministic
+  mass-ranked cores and orbital bands form local solar systems. The highest-evidence node becomes
+  the central black hole, rendered at least twice the ordinary evidence radius so its event horizon
+  remains visible at minimum Node size. Deterministic logarithmic arms seed a non-uniform disk, and
+  a fixed-step leapfrog clock advances eccentric, differential system orbits through an
+  evidence-derived core-plus-halo potential. Gravity now treats the dominant evidence node as
+  the explicit black-hole source: its field is `240` at the default slider and `864` at maximum,
+  while local solar-system, bridge, and drag gravity receives exactly half (`120` and `432`). The
+  smooth response remains true-zero and monotonic, and the rest of the core community contributes
+  through the softened halo rather than silently inflating the black-hole node's mass. External
+  solar systems also exert a weaker softened mutual field on one another: nearby evidence-heavy
+  systems perturb each other without requiring a relation edge, while the black hole remains the
+  dominant galaxy-wide potential.
+  The controlled centre pull is also doubled, retaining an immediate radial response rather than
+  hiding the stronger field behind a slower projector. Galaxy dynamics no
+  longer depend on D3 alpha decay, render cadence, or
+  force-directed settling. Galactic and local-system motion now uses a `0.021328125` fixed timestep,
+  another 30% slower than the preceding `0.03046875` cadence, while direct pointer movement remains responsive.
+  Every live seed coordinate and local orbit begins another 20% inward, putting
+  system centers at 40% of the original Galaxy radius. While live, the black-hole frame follows a
+  controlled inward spiral: Gravity 0 holds the loose seeded radius, and default/maximum convergence
+  now advances the same inward trajectory at 70% of its immediately preceding speed. Gravity slider input also
+  applies an immediate, reversible system-center response without changing local geometry or velocity:
+  its full range spans 40% radius contraction, and default-to-maximum visibly contracts about 31%
+  synchronously while maximum gravity retains its 3.6x field;
+  outward attempts still receive a 110% radial counter-projection and can never increase their
+  radius. Link distance now drives same-system evidence springs with twice the prior response and
+  a squared scale curve. Its default is now `8`, giving connected nodes a 0.25x rest length, 75%
+  tighter than the preceding default, while the full range still spans 1/16x tight orbits through
+  25x loose orbits without allowing
+  cross-system relations to collapse the galaxy. A bounded mass-weighted positional relation
+  constraint makes Link distance respond immediately while preserving each solar system's centre
+  of mass. Orbital separation now owns an explicit same-system safety envelope instead of relying
+  on an imperceptible softening side effect: both its positional response and cushion scale are
+  doubled, spanning zero added space through 30 world units while preserving evidence-mass centre
+  of mass and removing closing energy. Dense projections retain the requested
+  compact radius and report unavoidable projected overlap instead of silently expanding the disk.
+  Near the core, the direct close-encounter term is 25% lower and its weight moves into the smooth
+  halo, reducing ejection without weakening the total evidence-mass field. Legacy layouts and
+  `/api/graph` remain available.
+
+### Fixed
+
+- Replace the packed-disk Galaxy regression with persistent softened-Newtonian dynamics. Galaxy
+  phase space is isolated from Compact and other legacy layouts, angular momentum is preserved
+  across layout changes, and large stars are visibly distinct. A smooth evidence-mass field keeps
+  each solar system bound while direct star-to-star gravity supplies smaller organic perturbations;
+  evidence bridges remain visible provenance without injecting non-central orbital energy or
+  relation springs compressing the scene into a graph blob. Dragging now leaves the fixed-step
+  Galaxy clock live without alpha changes, global reheats, reseeding, or detaching any global force.
+  The pointer owns exactly one moving mass source while every live body follows its softened
+  inverse-square gravity, whether linked or unlinked; distance and evidence mass determine the
+  response, and explicit relations only strengthen it. A bounded once-per-physics-slice projection
+  makes nearby unlinked bodies visibly follow without teleporting, freezing the rest of the graph,
+  or depending on pointer-event frequency. Pointer events update only the source position and
+  field membership—the gravitational response is sampled by the 30 Hz physics clock. The selected
+  Link orbit supplies a safe periapsis,
+  tangential momentum is retained, and release adds no wake or impulse. Freeze remains the sole
+  explicit motion gate. The explicit **Reheat layout** action now gives Galaxy a finite custom-
+  solver relaxation burst (30 extra steps, or 12 for large live scenes) instead of merely ensuring
+  its already-running clock exists; repeated clicks coalesce, current orbital phase is preserved,
+  and no D3 alpha, random kick, or orbital reseed is introduced.
+- Eliminate false Galaxy "reheating" caused by two local solvers fighting each other every tick.
+  Link distance and Orbital separation now share the same lower-bound target, the redundant live
+  velocity spring no longer injects energy alongside the positional constraint, and close-range
+  separation dissipates closing radial motion. Correction-distance diagnostics expose whether a
+  system is genuinely settling without changing its orbital phase or waking D3.
+- Stabilize dense solar systems and high-degree hubs without weakening their gravity. Link and
+  Orbital-separation constraints now sample one immutable phase and apply one simultaneous,
+  mass-balanced update per node instead of stacking an update for every incident edge. Aggregate
+  position and contact-velocity caps prevent a hub slingshot, while a system-relative speed fuse
+  damps only anomalous member motion and preserves each free system's center-of-mass orbit.
+- Show unlinked entities in new Ledger and Classic graph views by default so isolated evidence is
+  not silently omitted. The toolbar still switches to a linked-only view, and persisted user or
+  saved-view preferences remain authoritative.
+- Keep large Galaxy scenes interactive by replacing quadratic entity-visibility scans with
+  set-wise privacy pruning, driving evidence lookups from the requested relation IDs, and making
+  Ledger retries cancel and supersede stale scene requests safely.
+
 ### Added
 
 - A dependency-free, source-neutral local document importer for Markdown, plain text,
@@ -225,7 +308,7 @@ tombstones remain global.
 
 ### Upgrade notes
 
-- `engraphis-mcp` now exposes nine Smart tools instead of 33 direct tools. Clients that depend on
+- `engraphis-mcp` now exposes nine Smart tools instead of 34 direct tools. Clients that depend on
   the former names should switch their server command to `engraphis-mcp-classic`; HTTP clients can
   use `engraphis-mcp-http --classic`.
 - Existing v2 databases migrate automatically to schema 9 on first open; the change is additive
@@ -237,7 +320,7 @@ tombstones remain global.
 
 - Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes nine compact tools:
   sessions, prompt-ready recall, durable memory, discovery, validated read/action execution, and
-  governed record read/update plus conflict review. `engraphis-mcp-classic` preserves the former 33
+  governed record read/update plus conflict review. `engraphis-mcp-classic` preserves the former 34
   direct tool names and legacy alias response shapes for pinned integrations.
 - The first-party `@engraphis/pi` package under `integrations/pi` exposes that Smart MCP surface
   as native Pi tools, verifies the Engraphis 1.4.x handshake, and ships with independent npm

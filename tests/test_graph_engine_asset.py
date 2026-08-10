@@ -20,6 +20,7 @@ The properties guarded here are the ones whose failure is silent in a browser:
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -71,7 +72,9 @@ const window = {};
 globalThis.requestAnimationFrame = () => {};
 const store = {}, calls = {}, invocations = {};
 const fg = new Proxy({}, {
-  get: (_target, prop) => prop === 'd3Force' ? (function(name, force) {
+  get: (_target, prop) => prop === 'screen2GraphCoords' && typeof store.screen2GraphCoords === 'function'
+    ? store.screen2GraphCoords
+    : prop === 'd3Force' ? (function(name, force) {
     /* d3Force(name) is a getter and d3Force(name, force) is a setter. Modelling that
        distinction keeps the behavioural force tests below honest. */
     if (arguments.length === 1) return store.d3Forces && store.d3Forces[name];
@@ -138,7 +141,10 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260809-physics-guard" in eager
+    assert any(
+        re.fullmatch(r"/static/dashboard\.js\?v=[A-Za-z0-9._-]+", item)
+        for item in eager
+    )
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -158,10 +164,13 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     branch runs its dependency is already in scope.
     """
     source = DASHBOARD.read_text(encoding="utf-8")
-    assert "script.src='/static/vendor/force-graph.min.js?v=20260809-csp'" in source
-    assert (
-        "script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard'"
-        in source
+    assert re.search(
+        r"script\.src='/static/vendor/force-graph\.min\.js\?v=[A-Za-z0-9._-]+'",
+        source,
+    )
+    assert re.search(
+        r"script\.src='/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+'",
+        source,
     )
     render = source[source.index("function graphRender("):]
     render = render[: render.index("\nfunction ")]
@@ -281,7 +290,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
+        "/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -296,7 +305,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
+        "/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -401,6 +410,2483 @@ def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() 
     assert "if (sun) r *= 1.7" not in ASSET.read_text(encoding="utf-8")
     assert "if(sun)r*=1.7;" not in CLASSIC_DASHBOARD.read_text(encoding="utf-8")
     assert "if(sun)r*=1.7;" not in DASHBOARD.read_text(encoding="utf-8")
+
+
+@requires_node
+def test_galaxy_evidence_mass_is_sanitized_and_authoritative_for_radius() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'fallback', degree: 5 },
+          { id: 'light', degree: 1, gravity_mass: 2, visual_radius: 9 },
+          { id: 'heavy', degree: 2, gravity_mass: 8, visual_radius: 3 },
+          { id: 'ghost', degree: 99, gravity_mass: 0, visual_radius: 12, ghost: true },
+        ];
+        I.sanitizeEvidenceMetrics(nodes, 5);
+        const ordered = nodes.filter(n => !n.ghost).sort((a, b) => a.gravity_mass - b.gravity_mass);
+        const clusterSmall = I.evidenceNodeRadius({ cluster: true, gravity_mass: 4 }, 3);
+        const clusterLarge = I.evidenceNodeRadius({ cluster: true, gravity_mass: 16 }, 3);
+        emit({
+          nodes,
+          monotonic: ordered.every((n, i) => !i || n.visual_radius >= ordered[i - 1].visual_radius),
+          scaled: I.evidenceNodeRadius(nodes[0], 6) / I.evidenceNodeRadius(nodes[0], 3),
+          clusterRatio: clusterLarge / clusterSmall,
+          fallbackAgain: I.fallbackGravityMass(5, 5),
+        });
+        """
+    )
+    by_id = {node["id"]: node for node in report["nodes"]}
+    assert by_id["fallback"]["gravity_mass"] == report["fallbackAgain"] == 16
+    def radius(mass: float) -> float:
+        return 1.5 + 2.0 * mass ** (2.0 / 3.0)
+    assert by_id["fallback"]["visual_radius"] == pytest.approx(radius(16))
+    assert by_id["light"]["visual_radius"] == pytest.approx(radius(2))
+    assert by_id["heavy"]["visual_radius"] == pytest.approx(radius(8))
+    assert by_id["ghost"]["gravity_mass"] == 0
+    assert report["monotonic"] is True
+    assert report["scaled"] == pytest.approx(2)
+    assert report["clusterRatio"] == pytest.approx(radius(16) / radius(4))
+
+
+@requires_node
+def test_global_black_hole_radius_is_exactly_double_at_every_node_size_endpoint() -> None:
+    report = _run_node(
+        """
+        const ordinary = { id: 'ordinary', gravity_mass: 8, visual_radius: 9 };
+        const community = { ...ordinary, id: 'community', anchor_role: 'community' };
+        const global = { ...ordinary, id: 'global', anchor_role: 'global' };
+        const sizes = [1, 3, 12];
+        emit({ sizes: sizes.map(size => ({
+          size,
+          ordinary: I.evidenceNodeRadius(ordinary, size),
+          community: I.evidenceNodeRadius(community, size),
+          global: I.evidenceNodeRadius(global, size),
+        })), masses: [ordinary.gravity_mass, community.gravity_mass, global.gravity_mass] });
+        """
+    )
+    for sample in report["sizes"]:
+        assert sample["community"] == pytest.approx(sample["ordinary"])
+        assert sample["global"] == pytest.approx(sample["ordinary"] * 2)
+    assert report["masses"] == [8, 8, 8]
+    source = ASSET.read_text(encoding="utf-8")
+    assignment = source[source.index("data.nodes.forEach(n => {"):
+                        source.index("const labelCap", source.index("data.nodes.forEach(n => {"))]
+    assert "n.radius = galaxyMode" in assignment
+    adornment = source[source.index("function paintGalaxyAnchorAdornment"):
+                       source.index("function styleNode", source.index("function paintGalaxyAnchorAdornment"))]
+    assert "finitePositive(node.radius" in adornment
+
+
+@requires_node
+def test_softened_galaxy_gravity_obeys_mass_distance_and_momentum_invariants() -> None:
+    report = _run_node(
+        """
+        const run = (distance, sourceMass, sourceCommunity = 'system') => {
+          const nodes = [
+            { id: 'target', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 2, community_id: 'system' },
+            { id: 'source', x: distance, y: 0, vx: 0, vy: 0, gravity_mass: sourceMass, community_id: sourceCommunity },
+          ];
+          I.applyGalaxyGravity(nodes, { gravity: 4, softening: 0.0001, alpha: 1 });
+          return nodes;
+        };
+        const near = run(10, 4), far = run(20, 4), doubled = run(10, 8);
+        const coincident = [
+          { id: 'a', x: 0, y: 0, gravity_mass: 2, community_id: 'same' },
+          { id: 'b', x: 0, y: 0, gravity_mass: 3, community_id: 'same' },
+        ];
+        I.applyGalaxyGravity(coincident, { gravity: 4, softening: 8, alpha: 1 });
+        const isolated = run(10, 4, 'other');
+        emit({
+          inverseSquare: far[0].vx / near[0].vx,
+          linearMass: doubled[0].vx / near[0].vx,
+          momentum: 2 * near[0].vx + 4 * near[1].vx,
+          coincidentFinite: coincident.every(n => Number.isFinite(n.vx) && Number.isFinite(n.vy)),
+          isolated: isolated.map(n => [n.vx, n.vy]),
+        });
+        """
+    )
+    assert report["inverseSquare"] == pytest.approx(0.25, rel=2e-4)
+    assert report["linearMass"] == pytest.approx(2)
+    assert report["momentum"] == pytest.approx(0, abs=1e-12)
+    assert report["coincidentFinite"] is True
+    assert report["isolated"] == [[0, 0], [0, 0]]
+
+
+@requires_node
+def test_galaxy_central_well_contracts_systems_monotonically_and_preserves_momentum() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'l1', x: -170, y: 0, vx: 0, vy: 0, gravity_mass: 2, community_id: 'left' },
+          { id: 'l2', x: -150, y: 0, vx: 0, vy: 0, gravity_mass: 3, community_id: 'left' },
+          { id: 'right', x: 180, y: 0, vx: 0, vy: 0, gravity_mass: 5, community_id: 'right' },
+          { id: 'top', x: 0, y: 210, vx: 0, vy: 0, gravity_mass: 4, community_id: 'top' },
+        ];
+        const distance = nodes => {
+          const centers = I.communityCenters(nodes);
+          const a = centers.get('left'), b = centers.get('right'), c = centers.get('top');
+          return Math.hypot(a.x - b.x, a.y - b.y)
+            + Math.hypot(a.x - c.x, a.y - c.y)
+            + Math.hypot(b.x - c.x, b.y - c.y);
+        };
+        const advance = gravity => {
+          const nodes = fixture();
+          I.applyGalaxyCentralGravity(nodes, {
+            gravity, softening: 40, alpha: 1, accelerationCap: 1000,
+          });
+          nodes.forEach(node => { node.x += node.vx; node.y += node.vy; });
+          return { nodes, span: distance(nodes) };
+        };
+        const initial = distance(fixture()), low = advance(24), high = advance(72);
+        const coincident = [
+          { id: 'a', x: 0, y: 0, gravity_mass: 2, community_id: 'a' },
+          { id: 'b', x: 0, y: 0, gravity_mass: 3, community_id: 'b' },
+        ];
+        const stats = I.applyGalaxyCentralGravity(coincident, {
+          gravity: 100, softening: 40, alpha: 1,
+        });
+        const capped = [
+          { id: 'light', x: -1, y: 0, vx: 0, vy: 0, gravity_mass: 2, community_id: 'light' },
+          { id: 'heavy', x: 1, y: 0, vx: 0, vy: 0, gravity_mass: 8, community_id: 'heavy' },
+        ];
+        const cappedStats = I.applyGalaxyCentralGravity(capped, {
+          gravity: 10000, softening: 0.1, alpha: 1, accelerationCap: 0.4,
+        });
+        emit({
+          initial, low: low.span, high: high.span,
+          momentum: [
+            high.nodes.reduce((sum, node) => sum + node.gravity_mass * node.vx, 0),
+            high.nodes.reduce((sum, node) => sum + node.gravity_mass * node.vy, 0),
+          ],
+          rigidSystem: [
+            high.nodes[0].vx - high.nodes[1].vx,
+            high.nodes[0].vy - high.nodes[1].vy,
+          ],
+          coincidentFinite: coincident.every(node => Number.isFinite(node.vx) && Number.isFinite(node.vy)),
+          systems: stats.systems,
+          capped: capped.map(node => node.vx),
+          cappedMomentum: capped.reduce(
+            (sum, node) => sum + node.gravity_mass * node.vx, 0
+          ),
+          cappedPairs: cappedStats.applied,
+        });
+        """
+    )
+    assert report["initial"] > report["low"] > report["high"]
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["rigidSystem"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["coincidentFinite"] is True
+    assert report["systems"] == 2
+    assert report["capped"][0] == pytest.approx(0.4)
+    assert report["capped"][1] == pytest.approx(-0.1)
+    assert report["cappedMomentum"] == pytest.approx(0, abs=1e-12)
+    assert report["cappedPairs"] == 1
+    source = ASSET.read_text(encoding="utf-8")
+    assert "function galaxyGravityConstant(setting)" in source
+    assert "function galaxySmoothstep(value)" in source
+    assert "const boost = 1 + 0.25 * galaxySmoothstep(value / 48)" in source
+    assert "function applyGalaxyCentralGravity(nodes, options)" in source
+    assert "GALAXY_CENTER_SCALE" not in source
+    central = source[source.index("function applyGalaxyCentralGravity"):
+                     source.index("function applyCommunityBridgeGravity")]
+    assert "driftX" not in central
+
+
+@requires_node
+def test_unlinked_solar_systems_exert_bounded_mass_aware_near_field_gravity() -> None:
+    report = _run_node(
+        """
+        const fixture = distance => [
+          { id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 50,
+            community_id: 'core', anchor_role: 'global' },
+          { id: 'left-star', x: 100, y: 0, vx: 0, vy: 0, gravity_mass: 8,
+            community_id: 'left' },
+          { id: 'left-planet', x: 104, y: 2, vx: 0, vy: 0, gravity_mass: 2,
+            community_id: 'left' },
+          { id: 'right-star', x: 100 + distance, y: 0, vx: 0, vy: 0, gravity_mass: 4,
+            community_id: 'right' },
+        ];
+        const run = distance => {
+          const nodes = fixture(distance);
+          const stats = I.applyGalaxyMutualSystemGravity(nodes, {
+            gravity: 48, strengthFraction: 0.12, softening: 1,
+            accelerationCap: 0, exactLimit: 64,
+          });
+          return { nodes, stats };
+        };
+        const near = run(40), far = run(100);
+        const large = [{ id: 'core', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 100,
+          community_id: 'core', anchor_role: 'global' }];
+        for (let index = 0; index < 100; index++) large.push({
+          id: 's' + index,
+          x: 100 + (index % 10) * 20, y: -90 + Math.floor(index / 10) * 20,
+          gravity_mass: 1 + index % 7, community_id: 'system-' + index,
+        });
+        const largeStats = I.applyGalaxyMutualSystemGravity(large, {
+          gravity: 48, strengthFraction: 0.12, softening: 40,
+          accelerationCap: 10, exactLimit: 64, theta: 0.85,
+        });
+        emit({
+          nearAcceleration: Math.hypot(near.nodes[1].vx, near.nodes[1].vy),
+          farAcceleration: Math.hypot(far.nodes[1].vx, far.nodes[1].vy),
+          blackHole: [near.nodes[0].vx, near.nodes[0].vy],
+          rigid: [near.nodes[1].vx - near.nodes[2].vx,
+            near.nodes[1].vy - near.nodes[2].vy],
+          momentum: near.nodes.slice(1).reduce((sum, node) => ({
+            x: sum.x + node.gravity_mass * node.vx,
+            y: sum.y + node.gravity_mass * node.vy,
+          }), { x: 0, y: 0 }),
+          nearStats: near.stats,
+          largeStats,
+          finite: large.every(node => Number.isFinite(node.vx) && Number.isFinite(node.vy)),
+        });
+        """
+    )
+    assert report["nearAcceleration"] > report["farAcceleration"] > 0
+    assert report["blackHole"] == [0, 0]
+    assert report["rigid"] == pytest.approx([0, 0], abs=1e-12)
+    assert [report["momentum"]["x"], report["momentum"]["y"]] == pytest.approx(
+        [0, 0], abs=1e-12
+    )
+    assert report["nearStats"]["systems"] == 2
+    assert report["nearStats"]["interactions"] == 1
+    assert report["largeStats"]["approximations"] > 0
+    assert report["largeStats"]["traversals"] < 100 * 100
+    assert report["finite"] is True
+
+
+@requires_node
+def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_layer() -> None:
+    report = _run_node(
+        """
+        const ratio = (high, low) => high / low;
+        const pairAcceleration = gravity => {
+          const nodes = [
+            { id: 'a', community_id: 'one', gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'b', community_id: 'one', gravity_mass: 1, x: 30, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxyGravity(nodes, { gravity, softening: 12, alpha: 1 });
+          return Math.abs(nodes[0].vx);
+        };
+        const haloAcceleration = gravity => {
+          const nodes = [
+            { id: 'star', anchor_role: 'community', community_id: 'one',
+              gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'one', gravity_mass: 1,
+              x: 30, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxySystemHaloGravity(nodes, {
+            gravity, softening: 12, smoothFraction: 0.85, accelerationCap: 100,
+          });
+          return Math.abs(nodes[1].vx - nodes[0].vx);
+        };
+        const centralAcceleration = gravity => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              gravity_mass: 8, x: 0, y: 0 },
+            { id: 'system', community_id: 'outer', gravity_mass: 2, x: 120, y: 0 },
+          ];
+          return Math.abs(I.galaxyBlackHoleField(nodes, {
+            gravity, softening: 40, accelerationCap: 100,
+          }).systems[0].ax);
+        };
+        const bridgeAcceleration = gravity => {
+          const nodes = [
+            { id: 'a', community_id: 'left', gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'b', community_id: 'right', gravity_mass: 1, x: 80, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyCommunityBridgeGravity(nodes, [{
+            source_community: 'left', target_community: 'right', physics_strength: 0.8,
+          }], { gravity, softening: 30, alpha: 1 });
+          return Math.abs(nodes[0].vx);
+        };
+        const localSeedSpeedSquared = gravity => {
+          const nodes = [
+            { id: 'star', anchor_role: 'community', community_id: 'one',
+              gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'one', gravity_mass: 1,
+              x: 30, y: 0, vx: 0, vy: 0 },
+          ];
+          I.seedGalaxyOrbits(nodes, 9, gravity, 12, false, 0.15);
+          const speed = Math.hypot(nodes[1].vx - nodes[0].vx,
+            nodes[1].vy - nodes[0].vy);
+          return speed * speed;
+        };
+        const systemSeedSpeedSquared = gravity => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              gravity_mass: 8, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'system', anchor_role: 'community', community_id: 'outer',
+              gravity_mass: 2, x: 120, y: 0, vx: 0, vy: 0 },
+          ];
+          I.seedGalaxySystemOrbits(nodes, 9, gravity, 40, false);
+          const speed = Math.hypot(nodes[1].vx - nodes[0].vx,
+            nodes[1].vy - nodes[0].vy);
+          return speed * speed;
+        };
+        const settings = [0, 1, 12, 24, 48, 72, 100];
+        const response = settings.map(I.galaxyGravityConstant);
+        const legacy = setting => setting * (772 + 11 * setting) / 2600;
+        const fullRange = Array.from({ length: 101 }, (_, setting) => setting);
+        const centralCap = (gravity, explicit) => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              gravity_mass: 1000, x: 0, y: 0 },
+            { id: 'near', community_id: 'outer', gravity_mass: 1000, x: 1, y: 0 },
+          ];
+          const options = { gravity, softening: 0.1 };
+          if (explicit !== undefined) options.accelerationCap = explicit;
+          const item = I.galaxyBlackHoleField(nodes, options).systems[0];
+          return Math.hypot(item.ax, item.ay);
+        };
+        const compatibilityCentralCap = gravity => {
+          const nodes = [
+            { id: 'left', community_id: 'left', gravity_mass: 1000,
+              x: -0.5, y: 0, vx: 0, vy: 0 },
+            { id: 'right', community_id: 'right', gravity_mass: 1000,
+              x: 0.5, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxyCentralGravity(nodes, { gravity, softening: 0.1 });
+          return Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy)));
+        };
+        const localHaloCap = gravity => {
+          const nodes = [
+            { id: 'star', anchor_role: 'community', community_id: 'one',
+              gravity_mass: 1000, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'near', community_id: 'one', gravity_mass: 1000,
+              x: 0.01, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxySystemHaloGravity(nodes, {
+            gravity, softening: 0.1, smoothFraction: 0.85,
+          });
+          return Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy)));
+        };
+        emit({
+          response,
+          endpoints: [I.galaxyGravityConstant(48), I.galaxyGravityConstant(100)],
+          split: {
+            blackHole: [I.galaxyBlackHoleGravityConstant(48),
+              I.galaxyBlackHoleGravityConstant(100)],
+            local: [I.galaxyLocalGravityConstant(48),
+              I.galaxyLocalGravityConstant(100)],
+          },
+          clamps: [I.galaxyGravityConstant(-1), I.galaxyGravityConstant(101),
+            I.galaxyGravityConstant(Infinity), I.galaxyGravityConstant(NaN)],
+          caps: [centralCap(48), centralCap(100), centralCap(100, 1)],
+          compatibilityCaps: [compatibilityCentralCap(48), compatibilityCentralCap(100)],
+          localCaps: [localHaloCap(48), localHaloCap(100)],
+          neverWeaker: fullRange.every(setting =>
+            I.galaxyGravityConstant(setting) >= legacy(setting) - 1e-12),
+          fullRangeMonotone: fullRange.slice(1).every((setting, index) =>
+            I.galaxyGravityConstant(setting) > I.galaxyGravityConstant(index)),
+          ratios: {
+            pair: ratio(pairAcceleration(100), pairAcceleration(48)),
+            halo: ratio(haloAcceleration(100), haloAcceleration(48)),
+            central: ratio(centralAcceleration(100), centralAcceleration(48)),
+            bridge: ratio(bridgeAcceleration(100), bridgeAcceleration(48)),
+            localSeed: ratio(localSeedSpeedSquared(100), localSeedSpeedSquared(48)),
+            systemSeed: ratio(systemSeedSpeedSquared(100), systemSeedSpeedSquared(48)),
+          },
+        });
+        """
+    )
+    assert report["endpoints"] == [120, 432]
+    assert report["split"]["blackHole"] == [240, 864]
+    assert report["split"]["local"] == [120, 432]
+    assert report["split"]["local"] == [
+        value * 0.5 for value in report["split"]["blackHole"]
+    ]
+    assert report["clamps"] == [0, 432, 0, 0]
+    assert report["caps"] == pytest.approx([25, 90, 1])
+    assert report["compatibilityCaps"] == pytest.approx([25, 90])
+    assert report["localCaps"] == pytest.approx([12.5, 45])
+    assert report["response"][0] == 0
+    assert all(
+        right > left
+        for left, right in zip(report["response"], report["response"][1:])
+    )
+    assert report["neverWeaker"] is True
+    assert report["fullRangeMonotone"] is True
+    assert all(value == pytest.approx(3.6, rel=1e-12) for value in report["ratios"].values())
+
+
+@requires_node
+def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> None:
+    report = _run_node(
+        """
+        const local = [
+          { id: 'star', community_id: 'solar', gravity_mass: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', gravity_mass: 1,
+            x: 120, y: 0, vx: 0, vy: 0 },
+        ];
+        I.applyGalaxyGravity(local, { gravity: 48, softening: 40, alpha: 1 });
+        const central = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 8, x: 0, y: 0 },
+          { id: 'outer', community_id: 'outer', gravity_mass: 1, x: 120, y: 0 },
+        ];
+        const centralField = I.galaxyBlackHoleField(central, {
+          gravity: 48, softening: 40, haloScale: 1e9, accelerationCap: 1e9,
+        });
+        const withBulge = I.galaxyBlackHoleField([
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 8, x: 0, y: 0 },
+          { id: 'bulge', community_id: 'core', gravity_mass: 100, x: 5, y: 0 },
+          { id: 'outer', community_id: 'outer', gravity_mass: 1, x: 120, y: 0 },
+        ], { gravity: 48, softening: 40, accelerationCap: 1e9 });
+        emit({
+          constants: [I.galaxyBlackHoleGravityConstant(48),
+            I.galaxyLocalGravityConstant(48)],
+          accelerationRatio: Math.abs(centralField.systems[0].ax / local[1].vx),
+          masses: [withBulge.coreMass, withBulge.haloMass, withBulge.totalMass],
+        });
+        """
+    )
+    assert report["constants"] == [240, 120]
+    assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
+    assert report["masses"] == [8, 101, 109]
+
+
+@requires_node
+def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> None:
+    report = _run_node(
+        """
+        const system = (prefix, community, role = 'community') => [
+          { id: prefix + '-star', anchor_role: role, community_id: community,
+            gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: prefix + '-planet', community_id: community,
+            gravity_mass: 1, x: 30, y: 0, vx: 0, vy: 0 },
+        ];
+        const regularPair = system('regular-pair', 'regular');
+        const corePair = system('core-pair', 'core');
+        const pairs = [...regularPair, ...corePair];
+        I.applyGalaxyGravity(pairs, {
+          effectiveGravity: I.galaxyGravityConstant(48),
+          pairFraction: 0.15,
+          corePairFraction: 0.1125,
+          coreCommunity: 'core',
+          softening: 12,
+        });
+        const pairAcceleration = [Math.abs(regularPair[0].vx), Math.abs(corePair[0].vx)];
+        const pairMomentum = [regularPair, corePair].map(members => members.reduce(
+          (sum, node) => sum + node.gravity_mass * node.vx, 0
+        ));
+
+        const regularHalo = system('regular-halo', 'regular');
+        const coreHalo = system('core-halo', 'core');
+        I.applyGalaxySystemHaloGravity([...regularHalo, ...coreHalo], {
+          gravity: 48,
+          smoothFraction: 0.85,
+          coreSmoothFraction: 0.8875,
+          coreCommunity: 'core',
+          softening: 12,
+          accelerationCap: 100,
+        });
+        const relativeX = members => members[1].vx - members[0].vx;
+        const haloAcceleration = [Math.abs(relativeX(regularHalo)),
+          Math.abs(relativeX(coreHalo))];
+        const haloMomentum = [regularHalo, coreHalo].map(members => members.reduce(
+          (sum, node) => sum + node.gravity_mass * node.vx, 0
+        ));
+
+        const regularCombined = system('regular-combined', 'regular');
+        const coreCombined = system('core-combined', 'core');
+        const combined = [...regularCombined, ...coreCombined];
+        I.applyGalaxyGravity(combined, {
+          effectiveGravity: I.galaxyGravityConstant(48), pairFraction: 0.15, corePairFraction: 0.1125,
+          coreCommunity: 'core', softening: 12,
+        });
+        I.applyGalaxySystemHaloGravity(combined, {
+          gravity: 48, smoothFraction: 0.85, coreSmoothFraction: 0.8875,
+          coreCommunity: 'core', softening: 12, accelerationCap: 100,
+        });
+
+        const seededCore = system('seeded', 'core', 'global');
+        I.seedGalaxyOrbits(seededCore, 17, 48, 12, false, 0.15, 0.75);
+        const seededAcceleration = I.galaxyAccelerations(seededCore, [], [], {
+          gravity: 48, softening: 12, central: false,
+          localPairFraction: 0.15, corePairMultiplier: 0.75,
+        });
+        const relativeSpeed = Math.hypot(
+          seededCore[1].vx - seededCore[0].vx,
+          seededCore[1].vy - seededCore[0].vy
+        );
+        const radialAcceleration = -(
+          seededAcceleration.get(seededCore[1]).ax
+          - seededAcceleration.get(seededCore[0]).ax
+        );
+
+        const coincident = [
+          { id: 'global', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 4, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'same', community_id: 'core', gravity_mass: 1,
+            x: 0, y: 0, vx: 0, vy: 0 },
+        ];
+        const finiteAcceleration = I.galaxyAccelerations(coincident, [], [], {
+          gravity: 100, softening: 0.1, central: false,
+          localPairFraction: 0.15, corePairMultiplier: 0.75,
+        });
+        const halfStep = [{ id: 'half', community_id: 'single', gravity_mass: 1,
+          x: 3, y: -2, vx: 2, vy: -4 }];
+        const oldStep = halfStep.map(node => ({ ...node }));
+        I.integrateGalaxyLeapfrog(halfStep, [], [], {
+          gravity: 0, central: false, timestep: 0.021328125,
+          velocityDecay: 0, speedLimit: 100, includeCollisions: false,
+        });
+        I.integrateGalaxyLeapfrog(oldStep, [], [], {
+          gravity: 0, central: false, timestep: 0.03046875,
+          velocityDecay: 0, speedLimit: 100, includeCollisions: false,
+        });
+        emit({
+          pairAcceleration,
+          pairMomentum,
+          haloAcceleration,
+          haloMomentum,
+          combined: [Math.abs(relativeX(regularCombined)),
+            Math.abs(relativeX(coreCombined))],
+          seedLaw: [relativeSpeed * relativeSpeed / 30, radialAcceleration],
+          driftRatio: [(halfStep[0].x - 3) / (oldStep[0].x - 3),
+            (halfStep[0].y + 2) / (oldStep[0].y + 2)],
+          finite: [...finiteAcceleration.values()].every(value =>
+            Number.isFinite(value.ax) && Number.isFinite(value.ay)),
+        });
+        """
+    )
+    assert report["pairAcceleration"][1] / report["pairAcceleration"][0] == pytest.approx(0.75)
+    assert report["haloAcceleration"][1] / report["haloAcceleration"][0] == pytest.approx(
+        0.8875 / 0.85
+    )
+    assert report["combined"][1] == pytest.approx(report["combined"][0], rel=1e-12)
+    assert report["pairMomentum"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["haloMomentum"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
+    assert report["driftRatio"] == pytest.approx([0.7, 0.7])
+    assert report["finite"] is True
+    assert "const GALAXY_MOTION_RATE = 0.455;" in ASSET.read_text(encoding="utf-8")
+    assert "const GALAXY_FIXED_TIMESTEP = 0.021328125;" in ASSET.read_text(encoding="utf-8")
+
+
+@requires_node
+def test_system_halo_matches_seed_law_and_preserves_free_system_com() -> None:
+    report = _run_node(
+        """
+        const free = [
+          { id: 'star', system_anchor_id: 'star', anchor_role: 'community',
+            community_id: 'free', gravity_mass: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'inner', system_anchor_id: 'star', orbit_tier: 1,
+            community_id: 'free', gravity_mass: 2, x: 16, y: 0, vx: 0, vy: 0 },
+          { id: 'outer', system_anchor_id: 'star', orbit_tier: 2,
+            community_id: 'free', gravity_mass: 1, x: 28, y: 0, vx: 0, vy: 0 },
+        ];
+        const stats = I.applyGalaxySystemHaloGravity(free, {
+          gravity: 100, softening: 12, smoothFraction: 0.85,
+        });
+        const momentum = free.reduce((sum, node) => sum
+          + node.gravity_mass * node.vx, 0);
+        const firstOrder = free.slice(1).map(node => node.__galaxyOrbitOrder.tier);
+        free[1].x = 80; free[2].x = 10;
+        free.forEach(node => { node.vx = 0; node.vy = 0; });
+        I.applyGalaxySystemHaloGravity(free, {
+          gravity: 100, softening: 12, smoothFraction: 0.85,
+        });
+
+        const freePair = [
+          { id: 'a', anchor_role: 'community', community_id: 'pair',
+            gravity_mass: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'b', community_id: 'pair', gravity_mass: 1,
+            x: 24, y: 0, vx: 0, vy: 0 },
+        ];
+        const freeAcceleration = I.galaxyAccelerations(freePair, [], [], {
+          gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
+        });
+        const freeRelative = freeAcceleration.get(freePair[1]).ax
+          - freeAcceleration.get(freePair[0]).ax;
+        const expectedFree = -I.galaxyGravityConstant(100) * 9 * 24
+          / Math.pow(24 * 24 + 12 * 12, 1.5);
+
+        const pinnedPair = freePair.map((node, index) => ({ ...node,
+          id: index ? 'planet' : 'black-hole',
+          anchor_role: index ? 'none' : 'global', vx: 0, vy: 0,
+        }));
+        const pinnedAcceleration = I.galaxyAccelerations(pinnedPair, [], [], {
+          gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
+        });
+        const expectedPinned = -I.galaxyGravityConstant(100)
+          * (0.85 * 9 + 0.15 * 8) * 24
+          / Math.pow(24 * 24 + 12 * 12, 1.5);
+        const seededPair = freePair.map(node => ({ ...node, vx: 0, vy: 0 }));
+        I.seedGalaxyOrbits(seededPair, 72, 100, 12, false, 0.15);
+        const seededAcceleration = I.galaxyAccelerations(seededPair, [], [], {
+          gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
+        });
+        const relativeVelocity = Math.hypot(
+          seededPair[1].vx - seededPair[0].vx,
+          seededPair[1].vy - seededPair[0].vy
+        );
+        const seededRadialAcceleration = -(
+          seededAcceleration.get(seededPair[1]).ax
+            - seededAcceleration.get(seededPair[0]).ax
+        );
+        const degenerate = [
+          { id: 'solo', community_id: 'one', gravity_mass: 2, x: 0, y: 0 },
+          { id: 'ghost', community_id: 'one', ghost: true,
+            gravity_mass: 2, x: 0, y: 0 },
+          { id: 'tie-a', community_id: 'tie', gravity_mass: 2, x: 5, y: 5 },
+          { id: 'tie-b', community_id: 'tie', gravity_mass: 2, x: 5, y: 5 },
+        ];
+        I.applyGalaxySystemHaloGravity(degenerate, {
+          gravity: 100, softening: 12, smoothFraction: 0.85,
+        });
+        const pathological = [
+          { id: 'massive', anchor_role: 'community', community_id: 'huge',
+            gravity_mass: 1000, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'near', community_id: 'huge', gravity_mass: 1000,
+            x: 0.01, y: 0, vx: 0, vy: 0 },
+        ];
+        I.applyGalaxySystemHaloGravity(pathological, {
+          gravity: 10000, softening: 0.1, smoothFraction: 0.85,
+        });
+        emit({ stats, momentum, firstOrder,
+          frozenOrder: free.slice(1).map(node => node.__galaxyOrbitOrder.tier),
+          freeRelative, expectedFree,
+          pinned: [pinnedAcceleration.get(pinnedPair[0]),
+            pinnedAcceleration.get(pinnedPair[1])],
+          expectedPinned,
+          seedLaw: [relativeVelocity * relativeVelocity / 24,
+            seededRadialAcceleration],
+          capped: pathological.map(node => Math.hypot(node.vx, node.vy)),
+          cappedMomentum: pathological.reduce((sum, node) => sum
+            + node.gravity_mass * node.vx, 0),
+          finite: degenerate.every(node => node.ghost || [node.vx, node.vy]
+            .every(value => value === undefined || Number.isFinite(value))),
+        });
+        """
+    )
+    assert report["stats"] == {"communities": 1, "satellites": 2}
+    assert report["momentum"] == pytest.approx(0, abs=1e-12)
+    assert report["firstOrder"] == report["frozenOrder"] == [1, 2]
+    assert report["freeRelative"] == pytest.approx(report["expectedFree"], rel=1e-12)
+    assert report["pinned"][0] == {"ax": 0, "ay": 0}
+    assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
+    assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
+    assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
+    assert max(report["capped"]) <= 45
+    assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
+    assert report["finite"] is True
+
+
+@requires_node
+def test_black_hole_composite_field_is_mass_aware_differential_and_linear_cost() -> None:
+    report = _run_node(
+        """
+        const fixture = coreScale => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 8 * coreScale, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'bulge', anchor_role: 'community', community_id: 'core',
+            gravity_mass: 2 * coreScale, x: 8, y: 0, vx: 0, vy: 0 },
+          { id: 'inner-a', community_id: 'inner', gravity_mass: 3,
+            x: 78, y: 0, vx: 0, vy: 0 },
+          { id: 'inner-b', community_id: 'inner', gravity_mass: 2,
+            x: 84, y: 2, vx: 0, vy: 0 },
+          { id: 'outer', community_id: 'outer', gravity_mass: 1,
+            x: 240, y: 0, vx: 0, vy: 0 },
+        ];
+        const weakNodes = fixture(1), strongNodes = fixture(2);
+        const weak = I.galaxyBlackHoleField(weakNodes, {
+          gravity: 48, softening: 36, accelerationCap: 100,
+        });
+        const strong = I.galaxyBlackHoleField(strongNodes, {
+          gravity: 48, softening: 36, accelerationCap: 100,
+        });
+        I.applyGalaxyBlackHoleGravity(weakNodes, {
+          gravity: 48, softening: 36, accelerationCap: 100,
+        });
+        const inner = weak.systems.find(item => item.center.id === 'inner');
+        const outer = weak.systems.find(item => item.center.id === 'outer');
+        const strongInner = strong.systems.find(item => item.center.id === 'inner');
+        const many = Array.from({ length: 600 }, (_, index) => ({
+          id: index ? 'n' + index : 'bh',
+          anchor_role: index ? 'none' : 'global',
+          community_id: 'c' + index,
+          gravity_mass: 1 + index % 7,
+          x: index ? Math.cos(index * 2.399) * (40 + Math.sqrt(index) * 9) : 0,
+          y: index ? Math.sin(index * 2.399) * (40 + Math.sqrt(index) * 9) : 0,
+        }));
+        const started = Date.now();
+        const manyField = I.galaxyBlackHoleField(many, {
+          gravity: 48, softening: 36,
+        });
+        emit({
+          anchor: weak.anchor.id,
+          masses: [weak.coreMass, weak.haloMass],
+          traversals: weak.traversals,
+          differential: [inner.omega, outer.omega],
+          massRatio: Math.hypot(strongInner.ax, strongInner.ay)
+            / Math.hypot(inner.ax, inner.ay),
+          inward: weakNodes.filter(node => node.community_id !== 'core')
+            .map(node => node.x * node.vx + node.y * node.vy),
+          rigidInner: [weakNodes[2].vx - weakNodes[3].vx,
+            weakNodes[2].vy - weakNodes[3].vy],
+          many: { traversals: manyField.traversals, systems: manyField.systems.length,
+            elapsed: Date.now() - started },
+        });
+        """
+    )
+    assert report["anchor"] == "black-hole"
+    assert report["masses"] == [8, 8]
+    assert report["traversals"] == 3
+    assert report["differential"][0] > report["differential"][1] > 0
+    assert report["massRatio"] > 1.5
+    assert all(dot < 0 for dot in report["inward"])
+    assert report["rigidInner"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["many"]["traversals"] == 600
+    assert report["many"]["systems"] == 599
+    assert report["many"]["elapsed"] < 500
+
+
+@requires_node
+def test_global_anchor_stays_exactly_centered_without_packing_the_disk() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          ['black-hole', 16, 'core', 0, 0, 'global'],
+          ['bulge', 4, 'core', 12, 3, 'community'],
+          ['inner-star', 5, 'inner', 80, 0, 'community'],
+          ['inner-planet', 2, 'inner', 92, 4, 'none'],
+          ['outer-star', 4, 'outer', 240, 0, 'community'],
+          ['outer-planet', 1, 'outer', 252, -3, 'none'],
+        ].map(([id, gravity_mass, community_id, x, y, anchor_role]) => ({
+          id, gravity_mass, community_id, x, y, vx: 0, vy: 0,
+          radius: 4, anchor_role,
+        }));
+        I.seedGalaxyOrbits(nodes, 19, 100, 8, false);
+        I.seedGalaxySystemOrbits(nodes, 19, 100, 40, false);
+        let exact = true;
+        for (let step = 0; step < 90; step++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], {
+            gravity: 100, softening: 8, centralSoftening: 40,
+            timestep: 0.75, velocityDecay: 0.0005, speedLimit: 48,
+            collisionPadding: 1.5, collisionStrength: 0.7, collisionIterations: 2,
+          });
+          const anchor = nodes[0];
+          exact = exact && anchor.x === 0 && anchor.y === 0
+            && anchor.vx === 0 && anchor.vy === 0;
+        }
+        const centers = [...I.communityCenters(nodes).values()];
+        let minimumSystemDistance = Infinity;
+        for (let left = 0; left < centers.length; left++) for (
+          let right = left + 1; right < centers.length; right++
+        ) minimumSystemDistance = Math.min(minimumSystemDistance,
+          Math.hypot(centers[left].x - centers[right].x,
+            centers[left].y - centers[right].y));
+        emit({ exact, finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+          .every(Number.isFinite)), minimumSystemDistance });
+        """
+    )
+    assert report["exact"] is True
+    assert report["finite"] is True
+    assert report["minimumSystemDistance"] > 40
+
+
+@requires_node
+def test_actual_shaped_multi_member_galaxy_stays_bound_for_1800_steps() -> None:
+    report = _run_node(
+        """
+        const nodes = [{
+          id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          gravity_mass: 24, visual_radius: 10, radius: 10,
+          galactic_radius: 0, x: 0, y: 0, vx: 0, vy: 0,
+        }];
+        const links = [];
+        for (let system = 1; system <= 24; system++) {
+          const galacticRadius = 140 + system * 16;
+          const phase = system * 2.399963229728653;
+          const centerX = Math.cos(phase) * galacticRadius;
+          const centerY = Math.sin(phase) * galacticRadius * 0.82;
+          for (let member = 0; member < 6; member++) {
+            const localRadius = member === 0 ? 0 : 12 + member * 5;
+            const localPhase = phase + member * 1.2566370614;
+            nodes.push({
+              id: `s${system}-n${member}`,
+              anchor_role: member === 0 ? 'community' : 'none',
+              community_id: `system-${system}`,
+              gravity_mass: member === 0 ? 5 + system % 4 : 1 + (member % 3) * 0.5,
+              visual_radius: member === 0 ? 5 : 2 + member % 2,
+              radius: member === 0 ? 5 : 2 + member % 2,
+              galactic_radius: galacticRadius,
+              galactic_phase: phase,
+              x: centerX + Math.cos(localPhase) * localRadius,
+              y: centerY + Math.sin(localPhase) * localRadius,
+              vx: 0, vy: 0,
+            });
+            if (member > 0) links.push({
+              source: `s${system}-n0`, target: `s${system}-n${member}`,
+              rest_length: localRadius, spring_strength: 0.08,
+            });
+          }
+        }
+        I.seedGalaxyOrbits(nodes, 91027, 100, 32, false, 0.15);
+        I.seedGalaxySystemOrbits(nodes, 91027, 100, 40, false);
+        const percentile = (values, fraction) => {
+          const sorted = values.slice().sort((a, b) => a - b);
+          return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))];
+        };
+        const snapshot = () => {
+          const centers = [...I.communityCenters(nodes).values()]
+            .filter(center => center.id !== 'core');
+          const systemRadii = centers.map(center => Math.hypot(center.x, center.y));
+          const nodeRadii = nodes.slice(1).map(node => Math.hypot(node.x, node.y));
+          return {
+            median: percentile(systemRadii, 0.5),
+            p95: percentile(systemRadii, 0.95),
+            maxNode: Math.max(...nodeRadii),
+          };
+        };
+        const orbitalEnergy = () => {
+          const field = I.galaxyBlackHoleField(nodes, { gravity: 100, softening: 40 });
+          const g = I.galaxyGravityConstant(100);
+          return field.systems.reduce((sum, item) => {
+            let vx = 0, vy = 0;
+            item.center.nodes.forEach(node => {
+              vx += node.gravity_mass * node.vx;
+              vy += node.gravity_mass * node.vy;
+            });
+            vx /= item.center.mass; vy /= item.center.mass;
+            const kinetic = 0.5 * item.center.mass * (vx * vx + vy * vy);
+            const potential = -item.center.mass * g * (
+              field.coreMass / Math.sqrt(item.radius * item.radius + 40 * 40)
+              + field.haloMass / Math.sqrt(
+                item.radius * item.radius + field.haloScale * field.haloScale
+              )
+            );
+            return sum + kinetic + potential;
+          }, 0);
+        };
+        const initial = snapshot();
+        const initialEnergy = orbitalEnergy();
+        let minimumMedian = initial.median, maximumP95 = initial.p95;
+        let maximumNode = initial.maxNode, minimumEnergy = initialEnergy;
+        let maximumEnergy = initialEnergy, exactCenter = true, speedCaps = 0;
+        for (let step = 0; step < 1800; step++) {
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
+            gravity: 100, softening: 32, centralSoftening: 40,
+            timestep: 0.021328125, velocityDecay: 0.00005, speedLimit: 48,
+            localPairFraction: 0.15, corePairMultiplier: 0.75,
+            includeBridges: false, includeRelations: true, orbitScale: 0.25,
+            relationStrengthMultiplier: 2, relationForceCap: 1.6,
+            relationAccelerationCap: 3.2,
+            includeCollisions: false, collisionPadding: 1.5,
+            collisionStrength: 0.7, collisionIterations: 1,
+            inwardConvergence: true, wallClockSeconds: 1 / 30,
+          });
+          if (tick.speedCapped) speedCaps++;
+          const sample = snapshot();
+          minimumMedian = Math.min(minimumMedian, sample.median);
+          maximumP95 = Math.max(maximumP95, sample.p95);
+          maximumNode = Math.max(maximumNode, sample.maxNode);
+          const energy = orbitalEnergy();
+          minimumEnergy = Math.min(minimumEnergy, energy);
+          maximumEnergy = Math.max(maximumEnergy, energy);
+          const anchor = nodes[0];
+          exactCenter = exactCenter && anchor.x === 0 && anchor.y === 0
+            && anchor.vx === 0 && anchor.vy === 0;
+        }
+        let overlaps = 0, minimumSeparation = Infinity, minimumSystemDiameter = Infinity;
+        const bySystem = new Map();
+        nodes.slice(1).forEach(node => {
+          if (!bySystem.has(node.community_id)) bySystem.set(node.community_id, []);
+          bySystem.get(node.community_id).push(node);
+        });
+        bySystem.forEach(members => {
+          let diameter = 0;
+          for (let left = 0; left < members.length; left++) for (
+            let right = left + 1; right < members.length; right++
+          ) {
+            const separation = Math.hypot(members[left].x - members[right].x,
+              members[left].y - members[right].y);
+            minimumSeparation = Math.min(minimumSeparation, separation);
+            diameter = Math.max(diameter, separation);
+            if (separation < members[left].radius + members[right].radius) overlaps++;
+          }
+          minimumSystemDiameter = Math.min(minimumSystemDiameter, diameter);
+        });
+        emit({ initial, final: snapshot(), minimumMedian, maximumP95, maximumNode,
+          energyDrift: (maximumEnergy - minimumEnergy) / Math.abs(initialEnergy),
+          exactCenter, speedCaps, overlaps, minimumSeparation, minimumSystemDiameter,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["exactCenter"] is True
+    assert report["speedCaps"] == 0
+    # The controlled projection deliberately permits painted envelopes to overlap as it draws
+    # every orbit inward. Collision impulses remain off here because they can create the
+    # outward/ejection response this mode forbids; the systems must still retain real extent.
+    assert report["overlaps"] <= 18
+    assert report["minimumSeparation"] > 0.1
+    assert report["minimumSystemDiameter"] > 15
+    assert report["minimumMedian"] > report["initial"]["median"] * 0.05
+    assert report["maximumP95"] < report["initial"]["p95"] * 1.45
+    assert report["maximumNode"] < report["initial"]["maxNode"] * 1.45
+
+
+@requires_node
+def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track() -> None:
+    report = _run_node(
+        """
+        const nodes = [{ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          gravity_mass: 24, radius: 10, x: 0, y: 0, vx: 0, vy: 0 }];
+        for (let system = 1; system <= 50; system++) {
+          const members = system === 50 ? 5 : 6;
+          const radius = 105 + system * 5.5;
+          const phase = system * 2.399963229728653;
+          for (let member = 0; member < members; member++) {
+            const localRadius = member === 0 ? 0 : 8 + member * 3.5;
+            const localPhase = phase + member * 1.2566370614;
+            nodes.push({
+              id: `s${system}-n${member}`,
+              anchor_role: member === 0 ? 'community' : 'none',
+              community_id: `s${system}`,
+              gravity_mass: member === 0 ? 5 + system % 4 : 1 + (member % 3) * 0.5,
+              radius: member === 0 ? 5 : 2,
+              x: Math.cos(phase) * radius + Math.cos(localPhase) * localRadius,
+              y: Math.sin(phase) * radius * 0.82 + Math.sin(localPhase) * localRadius,
+              vx: 0, vy: 0,
+            });
+          }
+        }
+        I.seedGalaxyOrbits(nodes, 91027, 100, 32, false, 0.15, 0.75);
+        I.seedGalaxySystemOrbits(nodes, 91027, 100, 40, false);
+        const systemSnapshot = () => new Map([...I.communityCenters(nodes).values()]
+          .filter(center => center.id !== 'core')
+          .map(center => [center.id, Math.hypot(center.x, center.y)]));
+        const initial = systemSnapshot();
+        let previous = new Map(initial), monotone = true, speedCaps = 0, maxSpeed = 0;
+        const started = Date.now();
+        for (let step = 0; step < 1800; step++) {
+          const tick = I.integrateGalaxyLeapfrog(nodes, [], [], {
+            gravity: 100, softening: 32, centralSoftening: 40, timestep: 0.021328125,
+            velocityDecay: 0.00005, speedLimit: 48, localPairFraction: 0.15,
+            corePairMultiplier: 0.75, includeBridges: false, includeRelations: false,
+            includeCollisions: false, inwardConvergence: true, wallClockSeconds: 1 / 30,
+          });
+          speedCaps += tick.speedCapped ? 1 : 0;
+          systemSnapshot().forEach((radius, id) => {
+            monotone = monotone && radius <= previous.get(id) + 1e-8;
+            previous.set(id, radius);
+          });
+          nodes.slice(1).forEach(node => {
+            maxSpeed = Math.max(maxSpeed, Math.hypot(node.vx, node.vy));
+          });
+        }
+        const ratios = [...previous.entries()].map(([id, radius]) => radius / initial.get(id))
+          .sort((left, right) => left - right);
+        emit({
+          nodes: nodes.length, monotone, speedCaps, maxSpeed,
+          ratioMin: ratios[0], ratioMedian: ratios[Math.floor(ratios.length / 2)],
+          ratioMax: ratios[ratios.length - 1], elapsed: Date.now() - started,
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["nodes"] == 300
+    assert report["monotone"] is True
+    # The established emergency cap remains 48. Strong inner encounters may touch it, but
+    # must be rare rather than a persistent artefact that erases the disk's angular motion.
+    assert report["speedCaps"] < 180
+    assert report["maxSpeed"] <= 48 + 1e-10
+    # A full wall-clock minute advances the former convergence trajectory at 45.5% speed,
+    # while retaining the maximum field's 3.6x response. Individual escape attempts may
+    # receive the extra 10% inward correction but cannot eject outward.
+    maximum_track = 0.75 ** (3.6 * 0.455)
+    assert report["ratioMedian"] == pytest.approx(maximum_track, abs=1e-8)
+    assert report["ratioMax"] <= maximum_track + 1e-8
+    assert report["ratioMin"] > maximum_track * 0.75
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert report["finite"] is True
+    assert report["elapsed"] < 6000
+
+
+@requires_node
+def test_black_hole_adornment_is_bounded_and_does_not_change_hit_geometry() -> None:
+    report = _run_node(
+        """
+        const calls = { arcs: 0, ellipses: 0, fills: 0, strokes: 0, gradients: 0 };
+        const ctx = {
+          save() {}, restore() {}, beginPath() {},
+          arc() { calls.arcs++; }, ellipse() { calls.ellipses++; },
+          fill() { calls.fills++; }, stroke() { calls.strokes++; },
+          createRadialGradient() { calls.gradients++; return { addColorStop() {} }; },
+          set fillStyle(value) {}, set strokeStyle(value) {}, set lineWidth(value) {},
+        };
+        const global = { id: 'bh', x: 0, y: 0, radius: 9,
+          color: '#8f7cff', anchor_role: 'global' };
+        const community = { id: 'star', x: 20, y: 0, radius: 5,
+          color: '#63d8cb', anchor_role: 'community' };
+        const ordinary = { id: 'planet', x: 30, y: 0, radius: 3,
+          color: '#ffffff', anchor_role: 'none' };
+        const before = [global.radius, community.radius, ordinary.radius];
+        const painted = [
+          I.paintGalaxyAnchorAdornment(ctx, global, 1, '#a58cff', false),
+          I.paintGalaxyAnchorAdornment(ctx, global, 1, '#a58cff', true),
+          I.paintGalaxyAnchorAdornment(ctx, community, 1, '#63d8cb', false),
+          I.paintGalaxyAnchorAdornment(ctx, ordinary, 1, '#ffffff', false),
+        ];
+        emit({ calls, painted, before,
+          after: [global.radius, community.radius, ordinary.radius] });
+        """
+    )
+    assert report["painted"] == [1, 1, 1, 0]
+    assert report["before"] == report["after"] == [9, 5, 3]
+    assert report["calls"]["gradients"] == 1
+    assert report["calls"]["ellipses"] == 1
+    assert report["calls"]["arcs"] >= 3
+    assert report["calls"]["fills"] >= 2
+    assert report["calls"]["strokes"] >= 3
+    source = ASSET.read_text(encoding="utf-8")
+    style_node = source[source.index("function styleNode(node, ctx, scale)"):
+                        source.index("function applyChrome", source.index("function styleNode(node, ctx, scale)"))]
+    assert "state.settings.mode === 'galaxy'" in style_node
+    assert style_node.count("paintGalaxyAnchorAdornment(") == 2
+
+
+@requires_node
+def test_galaxy_black_hole_seeds_inward_epicycles_with_tangential_rotation() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'anchor', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 16,
+            community_id: 'core', anchor_role: 'global' },
+          { id: 'inner', x: 70, y: 0, vx: 0, vy: 0, gravity_mass: 2,
+            community_id: 'inner' },
+          { id: 'outer', x: 180, y: 0, vx: 0, vy: 0, gravity_mass: 1,
+            community_id: 'outer' },
+        ];
+        I.seedGalaxySystemOrbits(nodes, 91, 48, 40, false);
+        const radius = node => Math.hypot(node.x, node.y);
+        const radialVelocity = node => node.x * node.vx + node.y * node.vy;
+        const initial = nodes.slice(1).map(node => ({
+          radius: radius(node), radial: radialVelocity(node),
+          angular: node.x * node.vy - node.y * node.vx,
+        }));
+        for (let index = 0; index < 120; index++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], {
+              gravity: 48, softening: 8, centralSoftening: 40, timestep: 0.021328125,
+            velocityDecay: 0.02, speedLimit: 100, collisionStrength: 0,
+          });
+        }
+        emit({
+          initial,
+          final: nodes.slice(1).map(node => ({
+            radius: radius(node),
+            angular: node.x * node.vy - node.y * node.vx,
+          })),
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+        });
+        """
+    )
+    # Every system begins settling toward the black-hole well; neither seed may fly outward.
+    assert all(item["radial"] < 0 for item in report["initial"])
+    assert all(
+        0.5 * initial["radius"] < final["radius"] < 1.5 * initial["radius"]
+        for initial, final in zip(report["initial"], report["final"])
+    )
+    assert all(abs(item["angular"]) > 1e-6 for item in report["initial"])
+    assert all(abs(item["angular"]) > 1e-6 for item in report["final"])
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0])
+
+
+@requires_node
+def test_galaxy_relation_springs_are_local_mass_aware_and_momentum_symmetric() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'heavy', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 4, community_id: 'solar' },
+          { id: 'light', x: 30, y: 0, vx: 0, vy: 0, gravity_mass: 1, community_id: 'solar' },
+          { id: 'remote', x: 80, y: 0, vx: 0, vy: 0, gravity_mass: 2, community_id: 'remote' },
+          { id: 'history', x: 12, y: 0, vx: 0, vy: 0, gravity_mass: 0,
+            community_id: 'solar', ghost: true },
+        ];
+        const stretched = fixture();
+        const stretchedStats = I.applyGalaxyRelationSprings(stretched, [
+          { source: 'heavy', target: 'light', rest_length: 20, spring_strength: 0.1 },
+          { source: 'light', target: 'remote', rest_length: 20, spring_strength: 0.2 },
+          { source: 'heavy', target: 'remote', rest_length: 20, spring_strength: 0.2,
+            ghost: true, physics_strength: 0 },
+          { source: 'heavy', target: 'history', rest_length: 20, spring_strength: 0.2 },
+        ], { alpha: 1, orbitScale: 1 });
+        const compressed = fixture();
+        I.applyGalaxyRelationSprings(compressed, [
+          { source: 'heavy', target: 'light', rest_length: 20, spring_strength: 0.1 },
+        ], { alpha: 1, orbitScale: 2 });
+        emit({
+          stretched: stretched.map(node => [node.vx, node.vy]),
+          compressed: compressed.map(node => [node.vx, node.vy]),
+          applied: stretchedStats.applied,
+          momentum: stretched.reduce(
+            (sum, node) => sum + node.gravity_mass * node.vx, 0
+          ),
+        });
+        """
+    )
+    assert report["stretched"][0] == pytest.approx([0.2, 0])
+    assert report["stretched"][1] == pytest.approx([-0.8, 0])
+    assert report["stretched"][2] == pytest.approx([0, 0])
+    assert report["stretched"][3] == pytest.approx([0, 0])
+    assert report["compressed"][0] == pytest.approx([-0.2, 0])
+    assert report["compressed"][1] == pytest.approx([0.8, 0])
+    assert report["compressed"][2] == pytest.approx([0, 0])
+    assert report["compressed"][3] == pytest.approx([0, 0])
+    assert report["applied"] == 1
+    assert report["momentum"] == pytest.approx(0, abs=1e-12)
+
+
+@requires_node
+def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response() -> None:
+    report = _run_node(
+        """
+        const spring = setting => {
+          const nodes = [
+            { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
+              gravity_mass: 4, radius: 1, community_id: 'solar' },
+            { id: 'planet', x: 10, y: 0, vx: 0, vy: 0,
+              gravity_mass: 1, radius: 1, community_id: 'solar' },
+          ];
+          const link = { source: 'star', target: 'planet',
+            rest_length: 20, spring_strength: 0.1 };
+          const orbitScale = I.galaxyRelationOrbitScale(setting);
+          const stats = I.applyGalaxyRelationSprings(nodes, [link], {
+            alpha: 1, orbitScale, strengthMultiplier: 2,
+            forceCap: 1.6, accelerationCap: 3.2,
+          });
+          return {
+            orbitScale,
+            target: I.galaxySpringDistance(link, orbitScale),
+            velocities: nodes.map(node => node.vx),
+            momentum: nodes.reduce(
+              (sum, node) => sum + node.gravity_mass * node.vx, 0),
+            stats,
+          };
+        };
+        const ordinary = [
+          { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
+            gravity_mass: 4, radius: 1, community_id: 'solar' },
+          { id: 'planet', x: 10, y: 0, vx: 0, vy: 0,
+            gravity_mass: 1, radius: 1, community_id: 'solar' },
+        ];
+        I.applyGalaxyRelationSprings(ordinary, [{
+          source: 'star', target: 'planet', rest_length: 20, spring_strength: 0.1,
+        }], { alpha: 1, orbitScale: 0.25, forceCap: 1.6, accelerationCap: 3.2 });
+        emit({
+          tight: spring(4), baseline: spring(8), reference: spring(16), loose: spring(80),
+          ordinary: ordinary.map(node => node.vx),
+          constraint: (() => {
+            const make = () => [
+              { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
+                gravity_mass: 4, radius: 1, community_id: 'solar' },
+              { id: 'planet', x: 10, y: 0, vx: 0, vy: 0,
+                gravity_mass: 1, radius: 1, community_id: 'solar' },
+            ];
+            const link = { source: 'star', target: 'planet',
+              rest_length: 20, spring_strength: 0.1 };
+            const run = setting => {
+              const nodes = make();
+              const beforeCom = (nodes[0].x * 4 + nodes[1].x) / 5;
+              const stats = I.applyGalaxyRelationDistanceConstraints(nodes, [link], {
+                orbitScale: I.galaxyRelationOrbitScale(setting), strengthMultiplier: 2,
+                wallClockSeconds: 1 / 30, rate: 24, maxCorrection: 12,
+              });
+              return {
+                distance: Math.abs(nodes[1].x - nodes[0].x),
+                beforeCom, afterCom: (nodes[0].x * 4 + nodes[1].x) / 5, stats,
+              };
+            };
+            return { tight: run(8), loose: run(80) };
+          })(),
+        });
+        """
+    )
+    assert report["tight"]["orbitScale"] == pytest.approx(1 / 16)
+    assert report["baseline"]["orbitScale"] == pytest.approx(0.25)
+    assert report["reference"]["orbitScale"] == pytest.approx(1)
+    assert report["loose"]["orbitScale"] == pytest.approx(25)
+    assert report["tight"]["target"] == pytest.approx(1.25)
+    assert report["baseline"]["target"] == pytest.approx(5)
+    assert report["loose"]["target"] == pytest.approx(500)
+    assert report["baseline"]["velocities"] == pytest.approx(
+        [value * 2 for value in report["ordinary"]]
+    )
+    assert report["tight"]["velocities"][0] > 0
+    assert report["loose"]["velocities"][0] < 0
+    assert report["constraint"]["tight"]["distance"] < 10
+    assert report["constraint"]["loose"]["distance"] > 10
+    assert report["constraint"]["tight"]["stats"]["applied"] == 1
+    assert report["constraint"]["loose"]["stats"]["applied"] == 1
+    assert report["constraint"]["tight"]["afterCom"] == pytest.approx(
+        report["constraint"]["tight"]["beforeCom"], abs=1e-12
+    )
+    assert report["constraint"]["loose"]["afterCom"] == pytest.approx(
+        report["constraint"]["loose"]["beforeCom"], abs=1e-12
+    )
+    assert all(
+        item["momentum"] == pytest.approx(0, abs=1e-12)
+        for item in (report["tight"], report["baseline"], report["loose"])
+    )
+
+
+@requires_node
+def test_orbital_separation_has_double_strength_and_preserves_local_mass_center() -> None:
+    report = _run_node(
+        """
+        const run = setting => {
+          const nodes = [
+            { id: 'star', x: 0, y: 0, vx: 0, vy: 0, radius: 3,
+              gravity_mass: 4, community_id: 'solar' },
+            { id: 'planet', x: 10, y: 0, vx: 0, vy: 0, radius: 3,
+              gravity_mass: 1, community_id: 'solar' },
+            { id: 'other-system', x: 1, y: 0, vx: 0, vy: 0, radius: 3,
+              gravity_mass: 2, community_id: 'other' },
+          ];
+          const beforeCom = (nodes[0].x * 4 + nodes[1].x) / 5;
+          const otherBefore = [nodes[2].x, nodes[2].y, nodes[2].vx, nodes[2].vy];
+          const padding = I.galaxyOrbitalSeparationPadding(setting);
+          const strength = I.galaxyOrbitalSeparationStrength(setting);
+          const stats = I.applyGalaxyCollisions(nodes, {
+            padding, strength, iterations: 1, sameCommunityOnly: true,
+          });
+          return {
+            padding, strength, stats,
+            distance: Math.hypot(nodes[1].x - nodes[0].x, nodes[1].y - nodes[0].y),
+            beforeCom, afterCom: (nodes[0].x * 4 + nodes[1].x) / 5,
+            otherBefore,
+            otherAfter: [nodes[2].x, nodes[2].y, nodes[2].vx, nodes[2].vy],
+          };
+        };
+        emit({ off: run(0), default: run(48), maximum: run(120) });
+        """
+    )
+    assert report["off"]["padding"] == 0
+    assert report["off"]["strength"] == 0
+    assert report["off"]["distance"] == pytest.approx(10)
+    assert report["default"]["padding"] == pytest.approx(12)
+    assert report["default"]["strength"] == pytest.approx(0.8)
+    assert report["default"]["distance"] == pytest.approx(16.4)
+    assert report["maximum"]["padding"] == pytest.approx(30)
+    assert report["maximum"]["strength"] == pytest.approx(1)
+    assert report["maximum"]["distance"] == pytest.approx(36)
+    for item in (report["default"], report["maximum"]):
+        assert item["stats"]["overlaps"] == 1
+        assert item["afterCom"] == pytest.approx(item["beforeCom"], abs=1e-12)
+        assert item["otherAfter"] == item["otherBefore"]
+
+
+@requires_node
+def test_link_and_orbital_separation_share_one_settling_target_without_jitter() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'star', x: 0, y: 0, vx: 0, vy: 0, radius: 3,
+            gravity_mass: 4, community_id: 'solar' },
+          { id: 'planet', x: 10, y: 0, vx: 0, vy: 0, radius: 3,
+            gravity_mass: 1, community_id: 'solar' },
+        ];
+        const links = [{ source: 'star', target: 'planet', rest_length: 20,
+          spring_strength: 0.1 }];
+        const options = {
+          gravity: 0, central: false, timestep: 0.021328125, velocityDecay: 0.00005,
+          speedLimit: 48, includeCollisions: false,
+          includeRelations: true, includeRelationSprings: false, orbitScale: 0.25,
+          relationStrengthMultiplier: 2, relationConstraintRate: 24,
+          relationConstraintMaxCorrection: 12, relationPadding: 12,
+          wallClockSeconds: 1 / 30,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 12,
+          orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8, localRelativeSpeedLimit: 16,
+        };
+        const distances = [Math.hypot(nodes[1].x - nodes[0].x,
+          nodes[1].y - nodes[0].y)];
+        const corrections = [];
+        let speedCaps = 0;
+        for (let step = 0; step < 120; step++) {
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          distances.push(Math.hypot(nodes[1].x - nodes[0].x,
+            nodes[1].y - nodes[0].y));
+          corrections.push(tick.relationConstraint.correctedDistance
+            + tick.orbitalSeparation.correctionDistance);
+          speedCaps += tick.speedCapped ? 1 : 0;
+        }
+        emit({
+          distances, corrections, speedCaps,
+          finalVelocity: nodes.map(node => [node.vx, node.vy]),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["speedCaps"] == 0
+    assert all(
+        current >= previous - 1e-10
+        for previous, current in zip(report["distances"], report["distances"][1:])
+    )
+    assert report["distances"][-1] == pytest.approx(18, abs=1e-8)
+    assert max(report["corrections"][-20:]) < report["corrections"][0] * 1e-6
+    assert [value for velocity in report["finalVelocity"] for value in velocity] == pytest.approx(
+        [0, 0, 0, 0], abs=1e-10
+    )
+
+
+@requires_node
+def test_dense_hub_constraints_are_simultaneous_order_independent_and_bounded() -> None:
+    report = _run_node(
+        """
+        const make = () => {
+          const nodes = [{ id: 'hub', x: 0, y: 0, vx: 0, vy: 0,
+            gravity_mass: 12, radius: 8, community_id: 'dense' }];
+          for (let index = 0; index < 24; index++) nodes.push({
+            id: 'leaf-' + index, x: 90 + index * 0.2, y: -18 + index * 1.5,
+            vx: 0, vy: 0, gravity_mass: 1, radius: 2, community_id: 'dense',
+          });
+          return nodes;
+        };
+        const links = Array.from({ length: 24 }, (_, index) => ({
+          source: 'hub', target: 'leaf-' + index,
+          rest_length: 20, spring_strength: 0.1,
+        }));
+        const run = reverse => {
+          const nodes = make();
+          const beforeCom = nodes.reduce((sum, node) => ({
+            x: sum.x + node.gravity_mass * node.x,
+            y: sum.y + node.gravity_mass * node.y,
+            mass: sum.mass + node.gravity_mass,
+          }), { x: 0, y: 0, mass: 0 });
+          const stats = I.applyGalaxyRelationDistanceConstraints(
+            nodes, reverse ? [...links].reverse() : links,
+            { orbitScale: 0.25, strengthMultiplier: 2,
+              wallClockSeconds: 1 / 30, rate: 24, maxCorrection: 12, padding: 12 }
+          );
+          const afterCom = nodes.reduce((sum, node) => ({
+            x: sum.x + node.gravity_mass * node.x,
+            y: sum.y + node.gravity_mass * node.y,
+            mass: sum.mass + node.gravity_mass,
+          }), { x: 0, y: 0, mass: 0 });
+          return {
+            phase: Object.fromEntries(nodes.map(node => [node.id, [node.x, node.y]])),
+            before: [beforeCom.x / beforeCom.mass, beforeCom.y / beforeCom.mass],
+            after: [afterCom.x / afterCom.mass, afterCom.y / afterCom.mass],
+            stats,
+          };
+        };
+        emit({ forward: run(false), reverse: run(true) });
+        """
+    )
+    assert report["forward"]["stats"]["applied"] == 24
+    assert report["forward"]["stats"]["aggregateLimited"] is True
+    assert report["forward"]["stats"]["maximumNodeShift"] == pytest.approx(12)
+    assert report["forward"]["after"] == pytest.approx(report["forward"]["before"], abs=1e-12)
+    assert report["reverse"]["after"] == pytest.approx(report["reverse"]["before"], abs=1e-12)
+    for node_id, phase in report["forward"]["phase"].items():
+        assert report["reverse"]["phase"][node_id] == pytest.approx(phase, abs=1e-12)
+
+
+@requires_node
+def test_dense_orbital_contacts_and_hot_members_receive_one_bounded_system_update() -> None:
+    report = _run_node(
+        """
+        const nodes = [{ id: 'hub', x: 0, y: 0, vx: 0, vy: 0,
+          gravity_mass: 12, radius: 8, community_id: 'dense' }];
+        for (let index = 0; index < 20; index++) {
+          const angle = index / 20 * Math.PI * 2;
+          nodes.push({ id: 'leaf-' + index,
+            x: Math.cos(angle) * 6, y: Math.sin(angle) * 6,
+            vx: -Math.sin(angle) * (index === 3 ? 90 : 4),
+            vy: Math.cos(angle) * (index === 3 ? 90 : 4),
+            gravity_mass: 1, radius: 2, community_id: 'dense' });
+        }
+        const beforeCom = nodes.reduce((sum, node) => ({
+          x: sum.x + node.gravity_mass * node.x,
+          y: sum.y + node.gravity_mass * node.y,
+          mass: sum.mass + node.gravity_mass,
+        }), { x: 0, y: 0, mass: 0 });
+        const separation = I.applyGalaxyOrbitalSeparation(nodes, {
+          padding: 12, strength: 0.8, maxCorrection: 4, maxVelocityCorrection: 8,
+        });
+        const afterPositionCom = nodes.reduce((sum, node) => ({
+          x: sum.x + node.gravity_mass * node.x,
+          y: sum.y + node.gravity_mass * node.y,
+          mass: sum.mass + node.gravity_mass,
+        }), { x: 0, y: 0, mass: 0 });
+        const beforeMomentum = nodes.reduce((sum, node) => ({
+          x: sum.x + node.gravity_mass * node.vx,
+          y: sum.y + node.gravity_mass * node.vy,
+        }), { x: 0, y: 0 });
+        const velocity = I.stabilizeGalaxySystemVelocities(nodes, { limit: 16 });
+        const afterMomentum = nodes.reduce((sum, node) => ({
+          x: sum.x + node.gravity_mass * node.vx,
+          y: sum.y + node.gravity_mass * node.vy,
+        }), { x: 0, y: 0 });
+        const mass = beforeCom.mass;
+        const centerVx = afterMomentum.x / mass, centerVy = afterMomentum.y / mass;
+        emit({ separation, velocity,
+          positionComBefore: [beforeCom.x / mass, beforeCom.y / mass],
+          positionComAfter: [afterPositionCom.x / mass, afterPositionCom.y / mass],
+          momentumBefore: beforeMomentum, momentumAfter: afterMomentum,
+          maximumFinalRelativeSpeed: Math.max(...nodes.map(node =>
+            Math.hypot(node.vx - centerVx, node.vy - centerVy))),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["separation"]["overlaps"] > 20
+    assert report["separation"]["aggregateLimited"] is True
+    assert report["separation"]["maximumNodeShift"] <= 4 + 1e-12
+    assert report["separation"]["maximumVelocityShift"] <= 8 + 1e-12
+    assert report["positionComAfter"] == pytest.approx(report["positionComBefore"], abs=1e-12)
+    assert report["velocity"]["limitedSystems"] == 1
+    assert report["maximumFinalRelativeSpeed"] == pytest.approx(16, abs=1e-10)
+    assert [report["momentumAfter"]["x"], report["momentumAfter"]["y"]] == pytest.approx(
+        [report["momentumBefore"]["x"], report["momentumBefore"]["y"]], abs=1e-10
+    )
+
+
+@requires_node
+def test_drag_follow_uses_softened_source_mass_gravity_and_preserves_tangent() -> None:
+    report = _run_node(
+        """
+        const run = ({ mass = 12, distance = 60, gravity = 48 } = {}) => {
+          const source = { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
+            radius: 2, gravity_mass: mass, community_id: 'solar' };
+          const follower = { id: 'planet', x: distance, y: 0, vx: 0, vy: 3,
+            radius: 2, gravity_mass: 1, community_id: 'solar' };
+          const remote = { id: 'remote', x: 200, y: 40, vx: 2, vy: -1,
+            radius: 2, gravity_mass: 1, community_id: 'remote' };
+          const beforeRemote = [remote.x, remote.y, remote.vx, remote.vy];
+          const stats = I.applyDraggedNodeGravity(source, [{
+            node: follower,
+            link: { source: 'star', target: 'planet', rest_length: 20,
+              spring_strength: 0.1 },
+          }, { node: remote, link: null, proximity: 'field' }], {
+            gravity, linkSetting: 8, softening: 12, duration: 6,
+            maximumPull: 36, maximumImpulse: 8, padding: 1.5 });
+          return {
+            follower: [follower.x, follower.y, follower.vx, follower.vy],
+            remote: [remote.x, remote.y, remote.vx, remote.vy],
+            beforeRemote, stats,
+          };
+        };
+        const coincidentSource = { id: 'same-star', x: 0, y: 0,
+          gravity_mass: 12, community_id: 'same' };
+        const coincident = { id: 'same-planet', x: 0, y: 0, vx: 1, vy: 2,
+          gravity_mass: 1, community_id: 'same' };
+        const coincidentStats = I.applyDraggedNodeGravity(coincidentSource,
+          [{ node: coincident }], { gravity: 100 });
+        emit({
+          heavy: run(), light: run({ mass: 6 }),
+          near: run({ distance: 60 }), far: run({ distance: 120 }),
+          zero: run({ gravity: 0 }),
+          coincident: [coincident.x, coincident.y, coincident.vx, coincident.vy],
+          coincidentStats,
+        });
+        """
+    )
+    assert report["heavy"]["stats"]["applied"] == 2
+    assert report["heavy"]["stats"]["maximumAcceleration"] == pytest.approx(
+        report["light"]["stats"]["maximumAcceleration"] * 2, rel=1e-12
+    )
+    assert report["near"]["stats"]["maximumAcceleration"] > report["far"]["stats"][
+        "maximumAcceleration"
+    ]
+    assert report["near"]["stats"]["maximumPull"] <= 36
+    assert report["far"]["stats"]["maximumPull"] <= 36
+    assert report["heavy"]["follower"][0] < 60
+    assert report["heavy"]["follower"][2] < 0
+    assert report["heavy"]["follower"][3] == pytest.approx(3)
+    assert report["heavy"]["remote"] != report["heavy"]["beforeRemote"]
+    assert report["heavy"]["remote"][0] < report["heavy"]["beforeRemote"][0]
+    assert report["heavy"]["remote"][1] < report["heavy"]["beforeRemote"][1]
+    assert report["zero"]["follower"] == pytest.approx([60, 0, 0, 3])
+    assert report["coincident"] == pytest.approx([0, 0, 1, 2])
+    assert report["coincidentStats"]["applied"] == 0
+
+
+@requires_node
+def test_live_drag_force_is_fixed_step_acceleration_not_pointer_displacement() -> None:
+    report = _run_node(
+        """
+        const primary = { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
+          radius: 2, gravity_mass: 12, community_id: 'solar' };
+        const follower = { id: 'planet', x: 60, y: 0, vx: 0, vy: 3,
+          radius: 2, gravity_mass: 1, community_id: 'solar' };
+        const before = [follower.x, follower.y, follower.vx, follower.vy];
+        const stats = I.applyDraggedNodeAcceleration(primary, [{ node: follower }], {
+          gravity: 48, softening: 12,
+        });
+        const expected = I.galaxyLocalGravityConstant(48) * 2 * 12 * 60
+          / Math.pow(60 * 60 + 12 * 12, 1.5);
+        emit({ before, after: [follower.x, follower.y, follower.vx, follower.vy],
+          stats, expected });
+        """
+    )
+    assert report["stats"]["applied"] == 1
+    assert report["stats"]["maximumPull"] == 0
+    assert report["stats"]["maximumAcceleration"] == pytest.approx(
+        report["expected"], rel=1e-12
+    )
+    assert report["after"][:2] == report["before"][:2]
+    assert report["after"][2] == pytest.approx(-report["expected"])
+    assert report["after"][3] == pytest.approx(report["before"][3])
+
+
+@requires_node
+def test_galaxy_collision_uses_evidence_mass_without_injecting_system_momentum() -> None:
+    report = _run_node(
+        """
+        const contact = [
+          { id: 'star', x: 0, y: 0, vx: 0, vy: 0, radius: 6, gravity_mass: 4 },
+          { id: 'planet', x: 10, y: 0, vx: 0, vy: 0, radius: 6, gravity_mass: 1 },
+          { id: 'remote', x: 100, y: 0, vx: 0, vy: 0, radius: 2, gravity_mass: 8 },
+        ];
+        const stats = I.applyGalaxyCollisions(contact, {
+          padding: 0, strength: 1, iterations: 1,
+        });
+        const coincident = [
+          { id: 'a', x: 0, y: 0, radius: 3, gravity_mass: 2 },
+          { id: 'b', x: 0, y: 0, radius: 3, gravity_mass: 5 },
+        ];
+        I.applyGalaxyCollisions(coincident, { padding: 0, strength: 0.7, iterations: 2 });
+        const sparse = Array.from({ length: 120 }, (_, index) => ({
+          id: 's' + index, x: index * 30, y: 0, radius: 2, gravity_mass: 1,
+        }));
+        const sparseStats = I.applyGalaxyCollisions(sparse, {
+          padding: 0, strength: 1, iterations: 1,
+        });
+        const tangent = [
+          { id: 'left', x: 0, y: 0, vx: 0, vy: 1, radius: 6, gravity_mass: 1 },
+          { id: 'right', x: 10, y: 0, vx: 0, vy: 0, radius: 6, gravity_mass: 1 },
+        ];
+        const closing = [
+          { id: 'heavy', x: 0, y: 0, vx: 1, vy: 0, radius: 6, gravity_mass: 4 },
+          { id: 'light', x: 10, y: 0, vx: -2, vy: 0, radius: 6, gravity_mass: 1 },
+        ];
+        const angular = bodies => bodies.reduce((sum, node) => sum
+          + node.gravity_mass * (node.x * node.vy - node.y * node.vx), 0);
+        const kinetic = bodies => bodies.reduce((sum, node) => sum
+          + 0.5 * node.gravity_mass * (node.vx * node.vx + node.vy * node.vy), 0);
+        const angularBefore = angular(tangent);
+        const kineticBefore = kinetic(closing);
+        I.applyGalaxyCollisions(tangent, { padding: 0, strength: 1, iterations: 1 });
+        I.applyGalaxyCollisions(closing, { padding: 0, strength: 1, iterations: 1 });
+        emit({
+          positions: contact.map(node => [node.x, node.y]),
+          velocities: contact.map(node => [node.vx, node.vy]),
+          momentum: [
+            contact.reduce((sum, node) => sum + node.gravity_mass * node.vx, 0),
+            contact.reduce((sum, node) => sum + node.gravity_mass * node.vy, 0),
+          ],
+          overlaps: stats.overlaps,
+          coincidentFinite: coincident.every(node => Number.isFinite(node.vx)
+            && Number.isFinite(node.vy)),
+          sparsePairs: sparseStats.pairs,
+          quadratic: sparse.length * sparse.length,
+          angularBefore,
+          angularAfter: angular(tangent),
+          kineticBefore,
+          kineticAfter: kinetic(closing),
+          closingMomentum: closing.reduce(
+            (sum, node) => sum + node.gravity_mass * node.vx, 0
+          ),
+        });
+        """
+    )
+    assert report["positions"][0] == pytest.approx([-0.4, 0])
+    assert report["positions"][1] == pytest.approx([11.6, 0])
+    assert report["velocities"][0] == pytest.approx([0, 0])
+    assert report["velocities"][1] == pytest.approx([0, 0])
+    assert report["velocities"][2] == pytest.approx([0, 0])
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["overlaps"] == 1
+    assert report["coincidentFinite"] is True
+    assert report["sparsePairs"] < report["quadratic"] // 20
+    assert report["angularAfter"] == pytest.approx(report["angularBefore"], abs=1e-12)
+    assert report["kineticAfter"] <= report["kineticBefore"]
+    assert report["closingMomentum"] == pytest.approx(2, abs=1e-12)
+
+
+@requires_node
+def test_galaxy_leapfrog_is_fixed_step_deterministic_and_does_not_depend_on_alpha() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'sun', x: 0, y: 0, vx: 0, vy: 0, radius: 5,
+            gravity_mass: 8, community_id: 'solar' },
+          { id: 'planet', x: 28, y: 0, vx: 0, vy: 0, radius: 2,
+            gravity_mass: 1, community_id: 'solar' },
+        ];
+        const first = fixture(), second = fixture(), damped = fixture(), conserved = fixture();
+        I.seedGalaxyOrbits(first, 77, 12, 8, false);
+        I.seedGalaxyOrbits(second, 77, 12, 8, false);
+        I.seedGalaxyOrbits(conserved, 77, 12, 8, false);
+        const seeded = first.map(node => [node.x, node.y, node.vx, node.vy]);
+        const step = nodes => I.integrateGalaxyLeapfrog(nodes, [], [], {
+          gravity: 12, softening: 8, central: false, timestep: 0.25,
+          velocityDecay: 0.012, speedLimit: 18, collisionPadding: 0,
+          collisionStrength: 0, collisionIterations: 1,
+        });
+        const initialAngular = first[1].x * first[1].vy - first[1].y * first[1].vx;
+        let firstStep = step(first);
+        step(second);
+        for (let i = 0; i < 159; i++) { step(first); step(second); }
+        const energy = nodes => {
+          const kinetic = nodes.reduce((sum, node) => sum + 0.5 * node.gravity_mass
+            * (node.vx * node.vx + node.vy * node.vy), 0);
+          const dx = nodes[1].x - nodes[0].x, dy = nodes[1].y - nodes[0].y;
+          return kinetic - (I.galaxyGravityConstant(12) * 8)
+            / Math.sqrt(dx * dx + dy * dy + 64);
+        };
+        const angularMomentum = nodes => nodes.reduce((sum, node) => sum + node.gravity_mass
+          * (node.x * node.vy - node.y * node.vx), 0);
+        const energyStart = energy(conserved), angularStart = angularMomentum(conserved);
+        for (let i = 0; i < 400; i++) I.integrateGalaxyLeapfrog(conserved, [], [], {
+          gravity: 12, softening: 8, central: false, timestep: 0.1,
+          velocityDecay: 0, speedLimit: 100, collisionStrength: 0,
+        });
+        damped[0].vx = 6; damped[0].vy = -2;
+        const beforeDamping = 0.5 * damped[0].gravity_mass
+          * (damped[0].vx * damped[0].vx + damped[0].vy * damped[0].vy);
+        const dampingStep = I.integrateGalaxyLeapfrog(damped, [], [], {
+          gravity: 0, central: false, timestep: 1, velocityDecay: 0.2,
+          speedLimit: 100, collisionStrength: 0,
+        });
+        emit({
+          seeded,
+          firstStep, initialAngular,
+          first: first.map(node => [node.x, node.y, node.vx, node.vy]),
+          second: second.map(node => [node.x, node.y, node.vx, node.vy]),
+          finite: first.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+          maximumSpeed: Math.max(...first.map(node => Math.hypot(node.vx, node.vy))),
+          beforeDamping, afterDamping: dampingStep.kinetic,
+          energyStart, energyEnd: energy(conserved), angularStart,
+          angularEnd: angularMomentum(conserved),
+        });
+        """
+    )
+    # A fixed sequence is repeatable and changes the seeded orbit without a D3 alpha input.
+    assert [value for node in report["first"] for value in node] == pytest.approx(
+        [value for node in report["second"] for value in node]
+    )
+    assert report["firstStep"]["bodies"] == 2
+    assert report["initialAngular"] != 0
+    assert report["finite"] is True
+    assert report["maximumSpeed"] <= 18
+    assert report["first"][1][:2] != pytest.approx(report["seeded"][1][:2])
+    assert report["afterDamping"] < report["beforeDamping"]
+    assert report["energyEnd"] == pytest.approx(report["energyStart"], rel=0.03)
+    assert report["angularEnd"] == pytest.approx(report["angularStart"], rel=0.03)
+    source = ASSET.read_text(encoding="utf-8")
+    integrator = source[source.index("function integrateGalaxyLeapfrog"):
+                        source.index("function fallbackCommunityBridges")]
+    assert "alpha" not in integrator
+    assert "kick-drift-kick" in integrator
+
+
+@requires_node
+def test_galaxy_inward_convergence_is_monotone_wall_clock_bound_and_keeps_orbits_tangential() -> None:
+    report = _run_node(
+        """
+        const options = {
+          gravity: 48, central: true, timestep: 0.021328125, velocityDecay: 0,
+          speedLimit: 1000, includeCollisions: false, inwardConvergence: true,
+          wallClockSeconds: 1 / 30,
+        };
+        const anchor = { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          gravity_mass: 100, radius: 12, x: 0, y: 0, vx: 0, vy: 0 };
+        const body = { id: 'outer', community_id: 'outer', gravity_mass: 1, radius: 2,
+          x: 120, y: 0, vx: 0, vy: 0 };
+        const nodes = [anchor, body];
+        let previous = Math.hypot(body.x, body.y), monotone = true;
+        for (let index = 0; index < 1800; index++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], options);
+          const radius = Math.hypot(body.x, body.y);
+          monotone = monotone && radius <= previous + 1e-10;
+          previous = radius;
+        }
+        const outbound = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 100, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'escape', community_id: 'outer', gravity_mass: 1, radius: 2,
+            x: 100, y: 0, vx: 30, vy: 0 },
+        ];
+        const escapeOptions = { ...options, gravity: 0 };
+        const escape = I.integrateGalaxyLeapfrog(outbound, [], [], escapeOptions);
+        const escapedRadius = Math.hypot(outbound[1].x, outbound[1].y);
+        const candidateRadius = 100 + 30 * options.timestep;
+        const attemptedOutward = candidateRadius - 100;
+        const counteracted = candidateRadius - escapedRadius;
+        const tangent = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 100, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'orbit', community_id: 'outer', gravity_mass: 1, radius: 2,
+            x: 120, y: 20, vx: 3, vy: 11 },
+        ];
+        const initial = new Map([['outer', { radius: 100 }]]);
+        const unitX = tangent[1].x / Math.hypot(tangent[1].x, tangent[1].y);
+        const unitY = tangent[1].y / Math.hypot(tangent[1].x, tangent[1].y);
+        const tangentBefore = tangent[1].vx * -unitY + tangent[1].vy * unitX;
+        const direct = I.applyGalaxyInwardConvergence(tangent, tangent[0], initial,
+          { wallClockSeconds: 1 / 30 });
+        const postX = tangent[1].x / Math.hypot(tangent[1].x, tangent[1].y);
+        const postY = tangent[1].y / Math.hypot(tangent[1].x, tangent[1].y);
+        const tangentAfter = tangent[1].vx * -postY + tangent[1].vy * postX;
+        const localSystem = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 100, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', community_id: 'solar', gravity_mass: 4,
+            x: 100, y: 0, vx: 1, vy: 3 },
+          { id: 'planet', community_id: 'solar', gravity_mass: 1,
+            x: 112, y: 0, vx: -2, vy: 8 },
+        ];
+        const localCenter = I.communityCenters(localSystem).get('solar');
+        const localInitial = new Map([['solar', {
+          radius: Math.hypot(localCenter.x, localCenter.y),
+        }]]);
+        const internalBefore = Math.hypot(
+          localSystem[2].x - localSystem[1].x, localSystem[2].y - localSystem[1].y);
+        const relativeVelocityBefore = [
+          localSystem[2].vx - localSystem[1].vx,
+          localSystem[2].vy - localSystem[1].vy,
+        ];
+        I.applyGalaxyInwardConvergence(localSystem, localSystem[0], localInitial,
+          { wallClockSeconds: 1 / 30, gravity: 48, timestep: 0.021328125 });
+        const internalAfter = Math.hypot(
+          localSystem[2].x - localSystem[1].x, localSystem[2].y - localSystem[1].y);
+        const relativeVelocityAfter = [
+          localSystem[2].vx - localSystem[1].vx,
+          localSystem[2].vy - localSystem[1].vy,
+        ];
+        const dense = Array.from({ length: 512 }, (_, index) => ({
+          id: `n${index}`, x: 40 + (index % 32), y: 30 + Math.floor(index / 32),
+          vx: index % 3 - 1, vy: index % 5 - 2, community_id: `dense-${index}`,
+        }));
+        dense.unshift({ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          x: 0, y: 0, vx: 0, vy: 0 });
+        let denseInitial = new Map([...I.communityCenters(dense).entries()].map(
+          ([id, center]) => [id, { radius: Math.hypot(center.x, center.y) }]));
+        const started = Date.now();
+        let denseReport;
+        for (let index = 0; index < 120; index++) {
+          denseReport = I.applyGalaxyInwardConvergence(dense, dense[0], denseInitial,
+            { wallClockSeconds: 1 / 30 });
+          denseInitial = new Map([...I.communityCenters(dense).entries()].map(
+            ([id, center]) => [id, { radius: Math.hypot(center.x, center.y) }]));
+        }
+        emit({
+          minuteRadius: previous, monotone,
+          anchor: [anchor.x, anchor.y, anchor.vx, anchor.vy],
+          escapedRadius, attemptedOutward, counteracted,
+          outboundVelocity: outbound[1].vx,
+          tangentBefore, tangentAfter, direct,
+          internalBefore, internalAfter,
+          relativeVelocityBefore, relativeVelocityAfter,
+          finite: nodes.concat(outbound, tangent, dense).every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          denseElapsed: Date.now() - started,
+          denseApplied: denseReport.applied,
+          factors: [0, 48, 100].map(gravity =>
+            I.galaxyInwardConvergenceFactor(60, gravity)),
+          rates: [0, 48, 100].map(gravity =>
+            I.galaxyInwardConvergencePerMinute(gravity)),
+          convergence: escape.convergence,
+        });
+        """
+    )
+    assert report["factors"][0] == pytest.approx(1, abs=1e-12)
+    assert report["factors"][1] == pytest.approx(0.75**0.455, abs=1e-12)
+    assert report["factors"][2] == pytest.approx(0.75 ** (3.6 * 0.455), abs=1e-12)
+    assert report["rates"][0] == pytest.approx(0, abs=1e-12)
+    assert report["rates"][1] == pytest.approx(1 - 0.75**0.455, abs=1e-12)
+    assert report["rates"][2] > 0.35
+    assert report["minuteRadius"] == pytest.approx(120 * 0.75**0.455, abs=1e-8)
+    assert report["monotone"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    # A 0.63984375-unit escape attempt ends 0.063984375 units inside its initial radius: the field
+    # counteracts exactly 110% of the attempted outward displacement.
+    assert report["escapedRadius"] == pytest.approx(99.936015625, abs=1e-8)
+    assert report["counteracted"] == pytest.approx(
+        1.1 * report["attemptedOutward"], abs=1e-8
+    )
+    assert report["outboundVelocity"] == pytest.approx(-3, abs=1e-12)
+    assert report["tangentAfter"] == pytest.approx(report["tangentBefore"], abs=1e-12)
+    assert report["internalAfter"] == pytest.approx(report["internalBefore"], abs=1e-12)
+    assert report["relativeVelocityAfter"] == pytest.approx(
+        report["relativeVelocityBefore"], abs=1e-12
+    )
+    assert report["finite"] is True
+    assert report["denseApplied"] == 512
+    assert report["denseElapsed"] < 1500
+    assert report["convergence"]["overrides"] == 1
+
+
+@requires_node
+def test_gravity_setting_has_immediate_reversible_system_density_response() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 20, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star-a', anchor_role: 'community', community_id: 'a',
+            gravity_mass: 6, x: 120, y: 20, vx: 1, vy: 3 },
+          { id: 'planet-a', community_id: 'a', gravity_mass: 1,
+            x: 132, y: 20, vx: -2, vy: 7 },
+          { id: 'star-b', anchor_role: 'community', community_id: 'b',
+            gravity_mass: 4, x: -180, y: 80, vx: -1, vy: -2 },
+        ];
+        const radius = (nodes, id) => {
+          const center = I.communityCenters(nodes).get(id);
+          return Math.hypot(center.x, center.y);
+        };
+        const direct = fixture(), stepped = fixture();
+        const before = {
+          radius: radius(direct, 'a'),
+          diameter: Math.hypot(direct[2].x - direct[1].x, direct[2].y - direct[1].y),
+          phase: direct.map(node => [node.x, node.y, node.vx, node.vy]),
+        };
+        const tightened = I.applyGalaxyGravitySettingResponse(direct, 48, 100);
+        const tight = {
+          radius: radius(direct, 'a'),
+          diameter: Math.hypot(direct[2].x - direct[1].x, direct[2].y - direct[1].y),
+          phase: direct.map(node => [node.x, node.y, node.vx, node.vy]),
+        };
+        const loosened = I.applyGalaxyGravitySettingResponse(direct, 100, 48);
+        [60, 80, 100].reduce((previous, setting) => {
+          I.applyGalaxyGravitySettingResponse(stepped, previous, setting);
+          return setting;
+        }, 48);
+        emit({
+          before, tight,
+          roundTrip: direct.map(node => [node.x, node.y, node.vx, node.vy]),
+          stepped: stepped.map(node => [node.x, node.y, node.vx, node.vy]),
+          expectedRatio: I.galaxyImmediateGravityRadiusScale(100)
+            / I.galaxyImmediateGravityRadiusScale(48),
+          tightened, loosened,
+        });
+        """
+    )
+    assert report["tightened"]["systems"] == 2
+    assert report["tightened"]["moved"] == 3
+    assert report["tightened"]["maximumShift"] > 10
+    assert report["tight"]["radius"] / report["before"]["radius"] == pytest.approx(
+        report["expectedRatio"], rel=1e-12
+    )
+    assert report["tight"]["diameter"] == pytest.approx(
+        report["before"]["diameter"], abs=1e-12
+    )
+    # Density changes translate whole systems; the black hole, internal velocities, and
+    # reversible round trip remain exact.
+    assert report["tight"]["phase"][0] == report["before"]["phase"][0]
+    assert [item[2:] for item in report["tight"]["phase"]] == [
+        item[2:] for item in report["before"]["phase"]
+    ]
+    assert report["loosened"]["ratio"] == pytest.approx(
+        1 / report["expectedRatio"], rel=1e-12
+    )
+    for actual, expected in zip(report["roundTrip"], report["before"]["phase"]):
+        assert actual == pytest.approx(expected, abs=1e-12)
+    for actual, expected in zip(report["stepped"], report["tight"]["phase"]):
+        assert actual == pytest.approx(expected, abs=1e-12)
+
+
+@requires_node
+def test_unequal_mass_local_seed_remains_a_bound_two_body_orbit() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'star', anchor_role: 'global', community_id: 'solar',
+            gravity_mass: 8, x: 0, y: 0, vx: 0, vy: 0, radius: 4 },
+          { id: 'planet', community_id: 'solar',
+            gravity_mass: 1, x: 24, y: 0, vx: 0, vy: 0, radius: 2 },
+        ];
+        I.seedGalaxyOrbits(nodes, 31, 48, 7.68, false);
+        let minimum = Infinity, maximum = 0, centered = true;
+        for (let step = 0; step < 1200; step++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], {
+            gravity: 48, softening: 7.68, central: false,
+            timestep: 0.525, velocityDecay: 0, speedLimit: 100,
+            collisionStrength: 0,
+          });
+          const separation = Math.hypot(
+            nodes[1].x - nodes[0].x, nodes[1].y - nodes[0].y
+          );
+          minimum = Math.min(minimum, separation);
+          maximum = Math.max(maximum, separation);
+          centered = centered && nodes[0].x === 0 && nodes[0].y === 0
+            && nodes[0].vx === 0 && nodes[0].vy === 0;
+        }
+        emit({ minimum, maximum, centered,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)) });
+        """
+    )
+    assert report["centered"] is True
+    assert report["finite"] is True
+    assert report["minimum"] >= 23.9
+    assert report["maximum"] <= 24.2
+
+
+@requires_node
+def test_galaxy_motion_diagnostics_are_mass_weighted_finite_and_read_only() -> None:
+    report = _run_node(
+        """
+        const clean = [
+          { id: 'heavy', x: 2, y: 0, vx: 3, vy: 4, gravity_mass: 4 },
+          { id: 'light', x: -2, y: 0, vx: -2, vy: 0, gravity_mass: 1 },
+          { id: 'history', x: Infinity, y: 0, vx: NaN, vy: 0, ghost: true },
+        ];
+        const before = JSON.stringify(clean);
+        const diagnostics = I.galaxyMotionDiagnostics(clean);
+        const dirty = I.galaxyMotionDiagnostics([
+          { id: 'bad', x: NaN, y: 0, vx: Infinity, vy: 0, gravity_mass: 2 },
+        ]);
+        emit({ diagnostics, dirty, unchanged: JSON.stringify(clean) === before });
+        """
+    )
+    diagnostics = report["diagnostics"]
+    assert diagnostics["bodies"] == 2
+    assert diagnostics["invalidBodies"] == 0
+    assert diagnostics["totalMass"] == 5
+    assert diagnostics["centerX"] == pytest.approx(1.2)
+    assert diagnostics["centerY"] == 0
+    assert [diagnostics["momentumX"], diagnostics["momentumY"]] == pytest.approx([10, 16])
+    assert diagnostics["kineticEnergy"] == pytest.approx(52)
+    assert diagnostics["angularMomentum"] == pytest.approx(12.8)
+    assert diagnostics["maxSpeed"] == pytest.approx(5)
+    assert report["dirty"]["invalidBodies"] == 1
+    assert all(math.isfinite(report["dirty"][key]) for key in (
+        "totalMass", "centerX", "centerY", "momentum", "kineticEnergy", "maxSpeed"
+    ))
+    assert report["unchanged"] is True
+
+
+@requires_node
+def test_fixed_step_speed_guard_uses_one_common_scale_and_preserves_momentum() -> None:
+    report = _run_node(
+        """
+        const bodies = [
+          { id: 'heavy', x: 0, y: 0, gravity_mass: 10, vx: 10, vy: 0 },
+          { id: 'light', x: 100, y: 0, gravity_mass: 1, vx: -100, vy: 0 },
+          { id: 'invalid', x: 0, y: 100, gravity_mass: 2, vx: NaN, vy: Infinity },
+          { id: 'history', x: 0, y: -100, gravity_mass: 0, vx: 99, vy: -99, ghost: true },
+        ];
+        I.integrateGalaxyLeapfrog(bodies, [], [], {
+          gravity: 0, central: false, includeBridges: false, includeRelations: false,
+          includeCollisions: false, timestep: 0.001, velocityDecay: 0, speedLimit: 14.4,
+        });
+        emit({
+          velocities: bodies.map(node => [node.vx, node.vy]),
+          momentum: [
+            bodies.filter(node => !node.ghost).reduce(
+              (sum, node) => sum + node.gravity_mass * node.vx, 0
+            ),
+            bodies.filter(node => !node.ghost).reduce(
+              (sum, node) => sum + node.gravity_mass * node.vy, 0
+            ),
+          ],
+          maximum: Math.max(...bodies.filter(node => !node.ghost)
+            .map(node => Math.hypot(node.vx, node.vy))),
+        });
+        """
+    )
+    assert report["velocities"][0] == pytest.approx([1.44, 0])
+    assert report["velocities"][1] == pytest.approx([-14.4, 0])
+    assert report["velocities"][2] == pytest.approx([0, 0])
+    assert report["velocities"][3] == pytest.approx([99, -99])
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-12)
+    assert report["maximum"] == pytest.approx(14.4)
+
+
+@requires_node
+def test_barnes_hut_matches_exact_fixture_with_subquadratic_traversal() -> None:
+    report = _run_node(
+        """
+        const fixture = Array.from({ length: 80 }, (_, i) => ({
+          id: 'n' + i, x: (i % 10) * 12 + (i % 3), y: Math.floor(i / 10) * 11,
+          vx: 0, vy: 0, gravity_mass: 1 + (i % 5), community_id: 'large',
+        }));
+        const exact = fixture.map(n => ({ ...n })), approximate = fixture.map(n => ({ ...n }));
+        I.applyGalaxyGravity(exact, { gravity: 2, softening: 5, alpha: 1, exactLimit: 1000 });
+        const stats = I.applyGalaxyGravity(approximate, {
+          gravity: 2, softening: 5, alpha: 1, exactLimit: 64, theta: 0.85,
+        });
+        let error = 0, signal = 0;
+        exact.forEach((node, i) => {
+          error += (node.vx - approximate[i].vx) ** 2 + (node.vy - approximate[i].vy) ** 2;
+          signal += node.vx ** 2 + node.vy ** 2;
+        });
+        emit({
+          relativeRms: Math.sqrt(error / signal), stats, quadratic: fixture.length ** 2,
+          momentum: [
+            approximate.reduce((sum, node) => sum + node.gravity_mass * node.vx, 0),
+            approximate.reduce((sum, node) => sum + node.gravity_mass * node.vy, 0),
+          ],
+        });
+        """
+    )
+    assert report["stats"]["approximations"] > 0
+    assert report["stats"]["traversals"] < report["quadratic"]
+    assert report["relativeRms"] < 0.25
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-10)
+
+
+@requires_node
+def test_community_bridge_force_scales_with_evidence_and_preserves_momentum() -> None:
+    report = _run_node(
+        """
+        const run = strength => {
+          const nodes = [
+            { id: 'left', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 2, community_id: 'left' },
+            { id: 'right', x: 20, y: 0, vx: 0, vy: 0, gravity_mass: 4, community_id: 'right' },
+          ];
+          const stats = I.applyCommunityBridgeGravity(nodes, [{
+            source_community: 'left', target_community: 'right', physics_strength: strength,
+          }], { gravity: 4, softening: 8, alpha: 1 });
+          return { nodes, stats };
+        };
+        const weak = run(0.4), strong = run(0.8), none = run(0);
+        emit({
+          ratio: strong.nodes[0].vx / weak.nodes[0].vx,
+          momentum: 2 * strong.nodes[0].vx + 4 * strong.nodes[1].vx,
+          applied: strong.stats.bridges,
+          none: none.nodes.map(n => [n.vx, n.vy]),
+        });
+        """
+    )
+    assert report["ratio"] == pytest.approx(2)
+    assert report["momentum"] == pytest.approx(0, abs=1e-12)
+    assert report["applied"] == 1
+    assert report["none"] == [[0, 0], [0, 0]]
+
+
+@requires_node
+def test_orbital_seed_is_deterministic_tangential_and_one_shot() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'sun', x: 0, y: 0, gravity_mass: 8, community_id: 's' },
+          { id: 'planet', x: 20, y: 0, gravity_mass: 1, community_id: 's' },
+        ];
+        const first = fixture(), second = fixture(), reduced = fixture();
+        const haunted = fixture().concat([{
+          id: 'history', x: 10, y: 10, vx: 9, vy: -7, gravity_mass: 0,
+          community_id: 's', ghost: true,
+        }]);
+        I.seedGalaxyOrbits(first, 42, 48, 8, false);
+        I.seedGalaxyOrbits(second, 42, 48, 8, false);
+        const initial = first.map(n => [n.vx, n.vy]);
+        first[1].vx = 123; first[1].vy = -456;
+        I.seedGalaxyOrbits(first, 42, 48, 8, false);
+        I.seedGalaxyOrbits(reduced, 42, 48, 8, true);
+        I.seedGalaxyOrbits(reduced, 42, 48, 8, false);
+        I.seedGalaxyOrbits(haunted, 42, 48, 8, false);
+        emit({
+          deterministic: initial,
+          second: second.map(n => [n.vx, n.vy]),
+          tangentialDot: 20 * initial[1][0],
+          oneShot: [first[1].vx, first[1].vy],
+          reduced: reduced.map(n => [n.vx, n.vy]),
+          ghost: [haunted[2].vx, haunted[2].vy],
+          hauntedMomentum: [
+            8 * haunted[0].vx + haunted[1].vx,
+            8 * haunted[0].vy + haunted[1].vy,
+          ],
+        });
+        """
+    )
+    assert report["deterministic"] == report["second"]
+    assert report["tangentialDot"] == pytest.approx(0, abs=1e-12)
+    assert report["oneShot"] == [123, -456]
+    assert report["reduced"] == [[0, 0], [0, 0]]
+    assert report["ghost"] == [0, 0]
+    assert report["hauntedMomentum"] == pytest.approx([0, 0], abs=1e-10)
+
+
+@requires_node
+def test_system_orbital_seed_preserves_barycentre_and_hierarchical_motion() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'a', x: -100, y: 0, gravity_mass: 16, community_id: 'a' },
+          { id: 'b', x: 80, y: 0, gravity_mass: 9, community_id: 'b' },
+          { id: 'c', x: 0, y: 120, gravity_mass: 4, community_id: 'c' },
+        ];
+        const first = fixture(), second = fixture(), reduced = fixture(), late = fixture();
+        I.seedGalaxySystemOrbits(first, 91, 48, 40, false);
+        I.seedGalaxySystemOrbits(second, 91, 48, 40, false);
+        const totalMass = first.reduce((sum, node) => sum + node.gravity_mass, 0);
+        const bx = first.reduce((sum, node) => sum + node.x * node.gravity_mass, 0) / totalMass;
+        const by = first.reduce((sum, node) => sum + node.y * node.gravity_mass, 0) / totalMass;
+        const initial = first.map(node => [node.vx, node.vy]);
+        first[0].vx = 123; first[0].vy = -456;
+        I.seedGalaxySystemOrbits(first, 91, 48, 40, false);
+        I.seedGalaxySystemOrbits(reduced, 91, 48, 40, true);
+        I.seedGalaxySystemOrbits(reduced, 91, 48, 40, false);
+        Object.defineProperty(late[0], '__galaxySystemOrbitSeeded', {
+          value: true, writable: true, configurable: true,
+        });
+        Object.defineProperty(late[1], '__galaxySystemOrbitSeeded', {
+          value: true, writable: true, configurable: true,
+        });
+        late[0].vx = 1; late[0].vy = 2;
+        late[1].vx = -16 / 9; late[1].vy = -32 / 9;
+        I.seedGalaxySystemOrbits(late, 91, 48, 40, false);
+        emit({
+          deterministic: initial,
+          second: second.map(node => [node.vx, node.vy]),
+          radialDots: second.map(node => (node.x - bx) * node.vx + (node.y - by) * node.vy),
+          momentum: [
+            second.reduce((sum, node) => sum + node.gravity_mass * node.vx, 0),
+            second.reduce((sum, node) => sum + node.gravity_mass * node.vy, 0),
+          ],
+          angularSpeeds: second.map(node => {
+            const dx = node.x - bx, dy = node.y - by;
+            return Math.abs(dx * node.vy - dy * node.vx) / (dx * dx + dy * dy);
+          }),
+          moving: second.every(node => Math.hypot(node.vx, node.vy) > 0),
+          oneShot: [first[0].vx, first[0].vy],
+          reduced: reduced.map(node => [node.vx, node.vy]),
+          late: late.map(node => [node.vx, node.vy]),
+          lateSeeded: late.every(node => node.__galaxySystemOrbitSeeded),
+        });
+        """
+    )
+    assert report["deterministic"] == report["second"]
+    # A shared barycentre correction removes net galaxy momentum. It can add a uniform
+    # translation, so every absolute velocity need not be exactly tangential; the angular
+    # rates must nevertheless remain differential rather than a solid-body constant.
+    assert max(report["angularSpeeds"]) - min(report["angularSpeeds"]) > 1e-6
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-10)
+    assert report["moving"] is True
+    assert report["oneShot"] == [123, -456]
+    assert report["reduced"] == [[0, 0], [0, 0], [0, 0]]
+    assert report["late"][0] == pytest.approx([1, 2])
+    assert report["late"][1] == pytest.approx([-16 / 9, -32 / 9])
+    assert report["late"][2] == pytest.approx([0, 0])
+    assert report["lateSeeded"] is True
+
+
+@requires_node
+def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
+    report = _run_engine(
+        """
+        const linkForce = {
+          id(value) { this.idValue = value; return this; },
+          distance(value) { this.distanceValue = value; return this; },
+          strength(value) { this.strengthValue = value; return this; },
+        };
+        globalThis.d3 = {
+          forceLink: () => linkForce,
+          forceCollide: () => ({ iterations() { return this; } }),
+        };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          meta: { layout_seed: 73, scene_hash: 'scene' },
+          communities: [{ id: 'left' }, { id: 'right' }],
+          community_bridges: [{
+            id: 'bridge', source_community: 'left', target_community: 'right',
+            physics_strength: 0.8,
+          }],
+          nodes: [
+            { id: 'a', x: -20, y: 0, gravity_mass: 1, visual_radius: 3, community_id: 'left' },
+            { id: 'b', x: 0, y: 0, gravity_mass: 4, visual_radius: 7, community_id: 'left' },
+            { id: 'c', x: 30, y: 0, gravity_mass: 2, visual_radius: 5, community_id: 'right' },
+          ],
+              edges: [
+            { id: 'internal', source: 'a', target: 'b', rest_length: 20, spring_strength: 0.16 },
+            { id: 'cross', source: 'b', target: 'c', rest_length: 30, spring_strength: 0.2 },
+            { id: 'ghost', source: 'a', target: 'c', rest_length: 10, spring_strength: 0.2, ghost: true, physics_strength: 0 },
+          ],
+        });
+        const exported = api.exportData();
+        emit({
+          mode: api.state().settings.mode,
+          sizeBy: api.state().sizeBy,
+          forces: {
+            charge: store.d3Forces.charge === null,
+            link: store.d3Forces.link === null,
+            x: store.d3Forces.x === null,
+            y: store.d3Forces.y === null,
+            galaxy: store.d3Forces.galaxy === null,
+            center: store.d3Forces.galaxyCenter === null,
+            relations: store.d3Forces.galaxyRelations === null,
+            defaultCenter: store.d3Forces.center === null,
+            bridges: store.d3Forces.communityBridges === null,
+          },
+          radii: Object.fromEntries(store.graphData.nodes.map(node => [node.id, node.radius])),
+          d3Budget: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+          diagnostics: api.physicsDiagnostics(),
+          exported: {
+            seed: exported.meta.layout_seed,
+            communities: exported.communities.length,
+            bridges: exported.community_bridges.length,
+          },
+          positions: store.graphData.nodes.map(node => [node.x, node.y]),
+        });
+        """
+    )
+    assert report["mode"] == "galaxy"
+    assert report["sizeBy"] == "mass"
+    assert report["forces"] == {
+        "charge": True,
+        "link": True,
+        "x": True,
+        "y": True,
+        "galaxy": True,
+        "center": True,
+        "relations": True,
+        "defaultCenter": True,
+        "bridges": True,
+    }
+    def radius(mass: float) -> float:
+        return 1.5 + 2.0 * mass ** (2.0 / 3.0)
+    assert report["radii"]["a"] == pytest.approx(radius(1))
+    assert report["radii"]["b"] == pytest.approx(radius(4))
+    assert report["radii"]["c"] == pytest.approx(radius(2))
+    assert report["d3Budget"] == [0, 0, 0]
+    assert report["diagnostics"]["timestep"] == pytest.approx(0.021328125)
+    assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
+    assert report["diagnostics"]["reducedMotion"] is True
+    assert report["exported"] == {"seed": 73, "communities": 2, "bridges": 1}
+    assert report["positions"] == [[-20, 0], [0, 0], [30, 0]]
+
+
+@requires_node
+def test_collapsed_galaxy_systems_sum_live_mass_and_use_square_root_radius() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          communities: [{ id: 'left' }, { id: 'right' }],
+          nodes: [
+            { id: 'a', x: 0, y: 0, gravity_mass: 4, visual_radius: 5, community_id: 'left' },
+            { id: 'history', x: 5, y: 0, gravity_mass: 0, visual_radius: 9, community_id: 'left', ghost: true },
+            { id: 'b', x: 30, y: 0, gravity_mass: 9, visual_radius: 8, community_id: 'right' },
+            { id: 'old', x: 60, y: 0, gravity_mass: 0, visual_radius: 6, community_id: 'archive', ghost: true },
+          ],
+          edges: [
+            { source: 'a', target: 'b' },
+            { source: 'a', target: 'history', ghost: true, physics_strength: 0 },
+              ],
+            });
+            api.setScope({ showUnlinked: true, minDegree: 0 });
+            api.setCollapse(true);
+        emit(store.graphData.nodes.map(node => ({
+          id: node.id, members: node.members, mass: node.gravity_mass,
+          visualRadius: node.visual_radius, radius: node.radius, ghost: node.ghost,
+        })).sort((a, b) => a.id.localeCompare(b.id)));
+        """
+    )
+    archive, left, right = report
+    def radius(mass: float) -> float:
+        return 1.5 + 2.0 * mass ** (2.0 / 3.0)
+    assert archive == {
+        "id": "cluster-archive", "members": 1, "mass": 0,
+        "visualRadius": 0, "radius": 2.5, "ghost": True,
+    }
+    assert {key: left[key] for key in ("id", "members", "mass", "ghost")} == {
+        "id": "cluster-left", "members": 2, "mass": 4, "ghost": False,
+    }
+    assert left["visualRadius"] == pytest.approx(radius(4))
+    assert left["radius"] == pytest.approx(radius(4))
+    assert {key: right[key] for key in ("id", "members", "mass", "ghost")} == {
+        "id": "cluster-right", "members": 1, "mass": 9, "ghost": False,
+    }
+    assert right["visualRadius"] == pytest.approx(radius(9))
+    assert right["radius"] == pytest.approx(radius(9))
+
+
+@requires_node
+def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        const scene = chain(600);
+        scene.meta = { layout_seed: 91 };
+        scene.nodes.forEach((node, index) => { node.x = index - 300; node.y = (index % 7) * 3; });
+        api.setData(scene);
+        const nodes = store.graphData.nodes;
+        emit({
+          mode: api.state().settings.mode,
+          total: nodes.length,
+          pinned: nodes.filter(node => Number.isFinite(node.fx) && Number.isFinite(node.fy)).length,
+          finite: nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y)),
+          same: nodes.every(node => node.fx === node.x && node.fy === node.y),
+          seeded: [[nodes[0].x, nodes[0].y], [nodes.at(-1).x, nodes.at(-1).y]],
+          cooldown: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+          forces: ['galaxy', 'galaxyCenter', 'galaxyRelations', 'communityBridges',
+            'charge', 'link'].map(name => store.d3Forces[name] === null),
+        });
+        """
+    )
+    assert report == {
+        "mode": "galaxy",
+        "total": 601,
+        "pinned": 601,
+        "finite": True,
+        "same": True,
+        "seeded": [[-300, 0], [300, 15]],
+        "cooldown": [0, 0, 0],
+        "forces": [True, True, True, True, True, True],
+    }
+
+
+@requires_node
+def test_galaxy_reheat_unfreeze_and_drag_never_reseed_orbital_velocity() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData({
+          meta: { layout_seed: 42 },
+          nodes: [
+            { id: 'sun', x: 0, y: 0, gravity_mass: 8, visual_radius: 8, community_id: 's' },
+            { id: 'planet', x: 20, y: 0, gravity_mass: 1, visual_radius: 3, community_id: 's' },
+          ],
+          edges: [{ source: 'sun', target: 'planet', rest_length: 20, spring_strength: 0.1 }],
+        });
+        const planet = store.graphData.nodes.find(node => node.id === 'planet');
+        const initial = [planet.vx, planet.vy];
+        api.reheat();
+        const reheated = [planet.vx, planet.vy];
+        api.freeze(true);
+        api.freeze(false);
+        const unfrozen = [planet.vx, planet.vy];
+        store.onNodeDragStart(planet);
+        store.onNodeDragEnd(planet);
+        const dragged = [planet.vx, planet.vy];
+
+        const full = G.create(el, { reducedMotion: () => true });
+        full.setRenderMode('full');
+        full.setData(chain(400));
+        emit({ initial, reheated, unfrozen, dragged,
+          d3Calls: {
+            alpha: calls.d3AlphaTarget || 0,
+            resets: invocations.resetCountdown || 0,
+            reheats: invocations.d3ReheatSimulation || 0,
+          },
+        });
+        """
+    )
+    assert abs(report["initial"][1]) > 0
+    assert report["reheated"] == pytest.approx(report["initial"])
+    assert report["unfrozen"] == pytest.approx(report["initial"])
+    assert report["dragged"] == pytest.approx(report["initial"])
+    assert report["d3Calls"] == {"alpha": 0, "resets": 0, "reheats": 0}
+
+
+@requires_node
+def test_live_galaxy_fills_only_missing_compatibility_coordinates_once() -> None:
+    report = _run_engine(
+        """
+        const scene = {
+          meta: { layout_seed: 321 },
+          nodes: [
+            { id: 'server', x: 120, y: -30, gravity_mass: 8, community_id: 'system' },
+            { id: 'missing-a', gravity_mass: 2, community_id: 'system' },
+            { id: 'missing-b', gravity_mass: 1, community_id: 'other' },
+          ],
+          edges: [
+            { source: 'server', target: 'missing-a' },
+            { source: 'missing-a', target: 'missing-b' },
+          ],
+        };
+        const snapshot = nodes => nodes.map(node => [node.id, node.x, node.y, node.vx, node.vy]);
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData(scene);
+        const initial = snapshot(store.graphData.nodes);
+        api.reheat();
+        api.freeze(true);
+        api.freeze(false);
+        const afterExplicitActions = snapshot(store.graphData.nodes);
+
+        const second = G.create(el, { reducedMotion: () => false });
+        second.setData(scene);
+        emit({
+          initial,
+          afterExplicitActions,
+          repeated: snapshot(store.graphData.nodes),
+          allFinite: initial.every(item => item.slice(1).every(Number.isFinite)),
+          d3Budget: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+          d3Wakes: {
+            alpha: calls.d3AlphaTarget || 0,
+            resets: invocations.resetCountdown || 0,
+            reheats: invocations.d3ReheatSimulation || 0,
+          },
+        });
+        """
+    )
+    assert report["allFinite"] is True
+    assert report["initial"][0][1:3] == [120, -30]
+    for initial, after, repeated in zip(
+        report["initial"], report["afterExplicitActions"], report["repeated"]
+    ):
+        assert initial[0] == after[0] == repeated[0]
+        assert initial[1:] == pytest.approx(after[1:])
+        assert initial[1:] == pytest.approx(repeated[1:])
+    assert report["d3Budget"] == [0, 0, 0]
+    assert report["d3Wakes"] == {"alpha": 0, "resets": 0, "reheats": 0}
+
+
+@requires_node
+def test_galaxy_phase_is_isolated_from_legacy_layouts_and_restores_server_seed() -> None:
+    report = _run_engine(
+        """
+        const scene = {
+          meta: { layout_seed: 17 },
+          nodes: [
+            { id: 'sun', x: -40, y: 3, gravity_mass: 8, community_id: 's' },
+            { id: 'planet', x: 25, y: -4, gravity_mass: 1, community_id: 's' },
+          ],
+          edges: [{ source: 'sun', target: 'planet' }],
+        };
+
+        const first = G.create(el, { reducedMotion: () => true });
+        first.setPreset('compact');
+        first.setData(scene);
+        const legacyDiscardedServer = store.graphData.nodes.map(node => node.x == null);
+        first.setPreset('galaxy');
+        const firstGalaxy = store.graphData.nodes.map(node => [node.id, node.x, node.y]);
+
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(scene);
+        const byId = Object.fromEntries(store.graphData.nodes.map(node => [node.id, node]));
+        byId.sun.x = -22; byId.sun.y = 11; byId.sun.vx = 1.25; byId.sun.vy = -0.5;
+        byId.planet.x = 31; byId.planet.y = 9; byId.planet.vx = -2; byId.planet.vy = 0.75;
+        api.setPreset('compact');
+        store.graphData.nodes.forEach((node, index) => {
+          node.x = 700 + index * 100; node.y = -900; node.vx = 40; node.vy = -40;
+        });
+        api.setPreset('galaxy');
+        emit({
+          legacyDiscardedServer,
+          firstGalaxy,
+          restored: store.graphData.nodes.map(node => [
+            node.id, node.x, node.y, node.vx, node.vy,
+          ]),
+          d3Budget: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+        });
+        """
+    )
+    assert report["legacyDiscardedServer"] == [True, True]
+    assert report["firstGalaxy"] == [["sun", -40, 3], ["planet", 25, -4]]
+    assert report["restored"] == [
+        ["sun", -22, 11, 1.25, -0.5],
+        ["planet", 31, 9, -2, 0.75],
+    ]
+    assert report["d3Budget"] == [0, 0, 0]
 
 
 @requires_node
@@ -823,6 +3309,7 @@ def test_a_dashboard_sync_that_turns_freeze_off_reheats_the_renderer() -> None:
     report = _run_engine(
         """
         const api = G.create(el, {});
+        api.setPreset('compact');
         api.setData(chain(2));
         api.freeze(true);
         const before = invocations.d3ReheatSimulation || 0;
@@ -850,13 +3337,17 @@ def test_reduced_motion_keeps_auto_fit_instant_while_physics_stays_live() -> Non
         store.getGraphBbox = { x: [-10, 10], y: [-10, 10] };
         const api = G.create(el, { reducedMotion: () => true });
         api.setData(chain(2));
-        emit({ timers, center: store.centerAt, zoom: store.zoom, cooldown: store.cooldownTime });
+        emit({ timers, center: store.centerAt, zoom: store.zoom,
+          cooldown: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+          reduced: api.physicsDiagnostics().reducedMotion,
+        });
         """
     )
     assert report["timers"] == [0]
     assert report["center"][-1] == 0
     assert report["zoom"][-1] == 0
-    assert report["cooldown"] == 2200
+    assert report["cooldown"] == [0, 0, 0]
+    assert report["reduced"] is True
 
 
 def test_legacy_flow_particles_use_small_directional_arrows() -> None:
@@ -918,8 +3409,9 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
                cyberAutoPause: store.autoPauseRedraw });
         """
     )
-    # Small galaxy graph: the animation is affordable, so the engine keeps driving frames.
-    assert report["smallAutoPause"] is False
+    # The custom 30 Hz physical clock invalidates only when it advances; force-graph's separate
+    # full-rate redraw loop remains parked even while the affordable starfield is present.
+    assert report["smallAutoPause"] is True
     assert report["smallStars"] > 0, "canvas stub never reached the starfield"
     # Large galaxy graph: no starfield, and the redraw loop is handed back to force-graph.
     assert report["bigStars"] == 0
@@ -1007,8 +3499,8 @@ def test_hovering_a_node_asks_for_a_redraw() -> None:
 
 
 @requires_node
-def test_unlinked_entities_are_shown_only_when_the_engine_is_told_to() -> None:
-    """The lever the dashboard has to pull for its "Show unlinked nodes" checkbox."""
+def test_unlinked_entities_are_shown_by_default_and_can_be_hidden() -> None:
+    """The default graph is complete, while the user can still request a linked-only view."""
     report = _run_engine(
         """
         const seen = [];
@@ -1017,13 +3509,16 @@ def test_unlinked_entities_are_shown_only_when_the_engine_is_told_to() -> None:
           nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
           links: [{ source: 'a', target: 'b' }],
         });
+        const shown = seen[seen.length - 1];
+        api.setScope({ showUnlinked: false });
         const hidden = seen[seen.length - 1];
         api.setScope({ showUnlinked: true });
-        emit({ hidden, shown: seen[seen.length - 1] });
+        emit({ hidden, shown, restored: seen[seen.length - 1] });
         """
     )
     assert report["hidden"] == 2
     assert report["shown"] == 3
+    assert report["restored"] == 3
 
 
 #: Executes the *real* ``graphRenderEngine`` source against stubs.  Only its collaborators are
@@ -1368,49 +3863,153 @@ def test_node_labels_use_the_active_theme_text_colour() -> None:
 
 
 @requires_node
-def test_drag_release_contract_keeps_physics_live() -> None:
-    """A dragged node is temporarily pinned, released, and settled exactly once."""
-    source = ASSET.read_text(encoding="utf-8")
-    end = source[source.index("const endManualDrag = event => {"):]
-    end = end[:end.index("      const moveManualDrag", 1)]
-    finish = source[source.index("function finishNodeDrag(node) {"):]
-    finish = finish[:finish.index("    /* A drag uses", 1)]
-    assert ".enableNodeDrag(false)" in source
-    assert "node.fx = undefined;" in finish
-    assert "node.fy = undefined;" in finish
-    assert "finishNodeDrag(current.node);" in end
-    assert "function reheatLiveLayout(dragging = false)" in source
-    assert "function finishNodeDrag(node)" in source
-    assert "if (typeof fg.onNodeDragStart === 'function')" in source
-    assert "fg.onNodeDragStart(node =>" in source
-    assert "fg.onNodeDragEnd(node => finishNodeDrag(node))" in source
-    assert "reheatLiveLayout(false);" in source
-
-
-def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
-    """The connected-node spring is bounded and drag cannot restart global forces forever."""
-    source = ASSET.read_text(encoding="utf-8")
-    assert "function makeDragFollowForce()" in source
-    assert "activeDragLinks.forEach(link =>" in source
-    assert "Math.max(MIN_DRAG_PULL, Math.min(MAX_DRAG_PULL" in source
-    assert "const MIN_DRAG_PULL = 4;" in source
-    assert "const MAX_DRAG_PULL = 18;" in source
-    assert "fg.d3Force('dragFollow', dragFollowForce);" in source
-    assert "function setDragSimulationBudget(active)" in source
-    assert "function isolateDragPhysics()" in source
-    assert "function restoreDragPhysics()" in source
-    assert "['charge', 'x', 'y', 'radial', 'collide', 'center']" in source
-    assert "if (dragIsolated) isolateDragPhysics();" in source
-    assert "fg.cooldownTime(5000)" in source
-    assert "fg.cooldownTicks(260)" in source
-    assert "fg.cooldownTime(Infinity)" not in source
-    assert "fg.cooldownTicks(Infinity)" not in source
-    assert source.index("fg.d3Force('dragFollow', dragFollowForce);") < source.index("fg.d3Force('velocityGuard', velocityGuardForce);")
+def test_drag_release_is_kinematic_and_never_wakes_unrelated_systems() -> None:
+    """Pointer placement changes one node without touching global alpha or other bodies."""
+    report = _run_engine(
+        """
+        const linkForce = {
+          id() { return this; }, distance() { return this; }, strength() { return this; },
+        };
+        globalThis.d3 = {
+          forceLink: () => linkForce,
+          forceCollide: () => ({ iterations() { return this; } }),
+        };
+        store.d3Forces = { center: { vendorDefault: true } };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'dragged', x: -20, y: 0, gravity_mass: 4, community_id: 'local' },
+            { id: 'neighbour', x: 0, y: 0, gravity_mass: 2, community_id: 'local' },
+            { id: 'orphan', x: 80, y: 30, gravity_mass: 7, community_id: 'remote' },
+          ],
+          edges: [{ source: 'dragged', target: 'neighbour', rest_length: 20, spring_strength: 0.1 }],
+        });
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        const byId = Object.fromEntries(store.graphData.nodes.map(node => [node.id, node]));
+        byId.dragged.vx = 9; byId.dragged.vy = -7;
+        byId.neighbour.vx = 3; byId.neighbour.vy = 4;
+        byId.orphan.vx = -5; byId.orphan.vy = 6;
+        const untouched = () => ['neighbour', 'orphan'].map(id => {
+          const node = byId[id];
+          return [id, node.x, node.y, node.vx, node.vy, node.fx, node.fy];
+        });
+        const wakes = () => ({
+          alphaTarget: calls.d3AlphaTarget || 0,
+          alphaDecay: calls.d3AlphaDecay || 0,
+          resets: invocations.resetCountdown || 0,
+          reheats: invocations.d3ReheatSimulation || 0,
+        });
+        const before = { untouched: untouched(), wakes: wakes() };
+        store.onNodeDragStart(byId.dragged);
+        const duringForces = ['charge', 'galaxy', 'galaxyCenter', 'galaxyRelations',
+          'communityBridges', 'link', 'x', 'y', 'radial', 'collide', 'center',
+          'velocityGuard']
+          .map(name => store.d3Forces[name] === null);
+        byId.dragged.x = byId.dragged.fx = 35;
+        byId.dragged.y = byId.dragged.fy = 12;
+        const during = { untouched: untouched(), wakes: wakes() };
+        store.onNodeDragEnd(byId.dragged);
+        setTimeout(() => emit({
+          before, during,
+          after: { untouched: untouched(), wakes: wakes() },
+          duringForces,
+          dragged: [byId.dragged.x, byId.dragged.y, byId.dragged.vx, byId.dragged.vy,
+            byId.dragged.fx, byId.dragged.fy],
+          restored: {
+            linkRemoved: store.d3Forces.link === null,
+            galaxy: typeof store.d3Forces.galaxy,
+            galaxyCenter: typeof store.d3Forces.galaxyCenter,
+            relations: typeof store.d3Forces.galaxyRelations,
+            bridges: typeof store.d3Forces.communityBridges,
+            guard: typeof store.d3Forces.velocityGuard,
+            centerRemoved: store.d3Forces.center === null,
+          },
+        }), 0);
+        """
+    )
+    assert all(report["duringForces"])
+    assert report["before"]["untouched"] == report["during"]["untouched"]
+    assert report["before"]["untouched"] == report["after"]["untouched"]
+    assert report["during"]["wakes"]["alphaTarget"] == report["before"]["wakes"]["alphaTarget"]
+    assert report["after"]["wakes"] == report["during"]["wakes"]
+    for key in ("alphaDecay", "resets", "reheats"):
+        assert report["during"]["wakes"][key] == report["before"]["wakes"][key]
+    assert report["dragged"] == [35, 12, 9, -7, None, None]
+    assert report["restored"] == {
+        "linkRemoved": True,
+        "galaxy": "object",
+        "galaxyCenter": "object",
+        "relations": "object",
+        "bridges": "object",
+        "guard": "object",
+        "centerRemoved": True,
+    }
 
 
 @requires_node
-def test_unfreezing_restores_the_live_simulation_budget_after_a_frozen_render() -> None:
-    """A render while frozen must not leave its one-tick budget behind on unfreeze."""
+def test_galaxy_drag_never_touches_d3_alpha_or_countdown() -> None:
+    report = _run_engine(
+        """
+        globalThis.d3 = {};
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'a', x: 0, y: 0, gravity_mass: 4, community_id: 'a' },
+            { id: 'b', x: 80, y: 0, gravity_mass: 2, community_id: 'b' },
+          ],
+          edges: [],
+        });
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        const dragged = store.graphData.nodes[0];
+        api.reheat();
+        const before = {
+          alpha: calls.d3AlphaTarget || 0,
+          resets: invocations.resetCountdown || 0,
+          reheats: invocations.d3ReheatSimulation || 0,
+        };
+        store.onNodeDragStart(dragged);
+        store.onNodeDragEnd(dragged);
+        emit({
+          alphaStops: (calls.d3AlphaTarget || 0) - before.alpha,
+          countdownResets: (invocations.resetCountdown || 0) - before.resets,
+          reheats: (invocations.d3ReheatSimulation || 0) - before.reheats,
+        });
+        """
+    )
+    assert report == {"alphaStops": 0, "countdownResets": 0, "reheats": 0}
+
+
+def test_drag_keeps_galaxy_live_without_any_d3_reheat_path() -> None:
+    """Dragging fixes one moving source; it must not detach or wake global physics."""
+    source = ASSET.read_text(encoding="utf-8")
+    assert "function isolateDragPhysics()" not in source
+    assert "function restoreDragPhysics()" not in source
+    assert "if (activeDragNode) return false" not in source
+    assert "fixedNodeId: activeDragNode ? activeDragNode.id : null" in source
+    assert "GALAXY_DRAG_GRAVITY_CAPTURE_RADIUS" in source
+    assert "GALAXY_DRAG_GRAVITY_MULTIPLIER = 2" in source
+    assert "dragSource: activeDragNode" in source
+    begin = source[source.index("function beginNodeDrag(node) {"):]
+    begin = begin[: begin.index("    function finishNodeDrag", 1)]
+    finish = source[source.index("function finishNodeDrag(node) {"):]
+    finish = finish[: finish.index("    /* A drag uses", 1)]
+    forbidden = ("prepareReheat(", "softReheat(", "resetCountdown(",
+                 "d3AlphaTarget(", "d3AlphaDecay(", "d3ReheatSimulation(")
+    assert not any(call in begin for call in forbidden)
+    assert not any(call in finish for call in forbidden)
+    assert "cancelGalaxyDynamics(" not in begin
+    assert "setSimulationBudget(false" not in begin
+    follow = source[source.index("function followDraggedNode(node) {"):]
+    follow = follow[: follow.index("    function beginNodeDrag", 1)]
+    assert "applyDraggedNodeGravity(" not in follow
+    assert "dragFollowers = captureDragFollowers(node)" in follow
+    assert "reheatLiveLayout" not in source
+    assert "makeDragFollowForce" not in source
+
+
+@requires_node
+def test_galaxy_freeze_keeps_d3_fully_stopped_before_and_after_unfreeze() -> None:
+    """Galaxy resumes its own clock; it must never reactivate D3's position integrator."""
 
     report = _run_engine(
         """
@@ -1430,8 +4029,8 @@ def test_unfreezing_restores_the_live_simulation_budget_after_a_frozen_render() 
         });
         """
     )
-    assert report["frozen"] == {"time": 0, "ticks": 1, "warmup": 0}
-    assert report["resumed"] == {"time": 2200, "ticks": 160, "warmup": 40}
+    assert report["frozen"] == {"time": 0, "ticks": 0, "warmup": 0}
+    assert report["resumed"] == {"time": 0, "ticks": 0, "warmup": 0}
 
 
 @requires_node
@@ -1443,17 +4042,432 @@ def test_freeze_is_the_physics_gate_even_with_reduced_motion() -> None:
         const reheats = () => invocations.d3ReheatSimulation || 0;
         const api = G.create(el, { reducedMotion: () => true });
         api.setData(chain(2));
-        const started = { time: store.cooldownTime, ticks: store.cooldownTicks, reheats: reheats() };
+        const started = { budget: [store.cooldownTime, store.cooldownTicks],
+          diagnostics: api.physicsDiagnostics(), reheats: reheats() };
         api.freeze(true);
-        const frozen = { alpha: store.d3AlphaDecay, reheats: reheats() };
+        const frozen = { diagnostics: api.physicsDiagnostics(), reheats: reheats() };
         api.freeze(false);
-        emit({ started, frozen, resumed: { alpha: store.d3AlphaDecay, reheats: reheats() } });
+        emit({ started, frozen,
+          resumed: { diagnostics: api.physicsDiagnostics(), reheats: reheats() } });
         """
     )
-    assert report["started"] == {"time": 2200, "ticks": 160, "reheats": 1}
-    assert report["frozen"]["alpha"] == 1
-    assert report["resumed"]["alpha"] == 0.035
-    assert report["resumed"]["reheats"] == 2
+    assert report["started"]["budget"] == [0, 0]
+    assert report["started"]["diagnostics"]["reducedMotion"] is True
+    assert report["frozen"]["diagnostics"]["frozen"] is True
+    assert report["resumed"]["diagnostics"]["frozen"] is False
+    assert report["started"]["reheats"] == report["frozen"]["reheats"] == report["resumed"]["reheats"] == 0
+
+
+@requires_node
+def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
+    report = _run_engine(
+        """
+        let nextFrame = 1;
+        const frameQueue = new Map();
+        window.requestAnimationFrame = callback => {
+          const id = nextFrame++;
+          frameQueue.set(id, callback);
+          return id;
+        };
+        window.cancelAnimationFrame = id => frameQueue.delete(id);
+        const flush = timestamp => {
+          const batch = [...frameQueue.values()];
+          frameQueue.clear();
+          batch.forEach(callback => callback(timestamp));
+        };
+        let hidden = false, visibilityHandler = null;
+        globalThis.document = {
+          get hidden() { return hidden; },
+          addEventListener(name, handler) {
+            if (name === 'visibilitychange') visibilityHandler = handler;
+          },
+          removeEventListener(name, handler) {
+            if (name === 'visibilitychange' && visibilityHandler === handler) visibilityHandler = null;
+          },
+        };
+
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'heavy', x: -20, y: 0, gravity_mass: 4, community_id: 'one' },
+            { id: 'light', x: 20, y: 0, gravity_mass: 1, community_id: 'one' },
+          ],
+          edges: [{ source: 'heavy', target: 'light' }],
+        });
+        const actualNodes = store.graphData.nodes;
+        const expectedNodes = actualNodes.map(node => ({ ...node }));
+        I.integrateGalaxyLeapfrog(expectedNodes, store.graphData.links, [], {
+          gravity: 48,
+          softening: 32,
+          centralSoftening: 38.4,
+          bridgeSoftening: 30.72,
+          exactLimit: 64,
+          theta: 0.85,
+          localPairFraction: 0.15,
+          corePairMultiplier: 0.75,
+              includeBridges: false,
+              includeRelations: true,
+              includeRelationSprings: false,
+              orbitScale: 0.25,
+              relationStrengthMultiplier: 2,
+              relationForceCap: 1.6,
+              relationAccelerationCap: 3.2,
+              relationConstraintRate: 24,
+              relationConstraintMaxCorrection: 12,
+              relationPadding: 12,
+              includeOrbitalSeparation: true,
+              orbitalSeparationPadding: 12,
+              orbitalSeparationStrength: 0.8,
+              orbitalSeparationMaxCorrection: 4,
+              orbitalSeparationMaxVelocityCorrection: 8,
+              localRelativeSpeedLimit: 16,
+          timestep: 0.021328125,
+          inwardConvergence: true,
+          wallClockSeconds: 1 / 30,
+          velocityDecay: 0.00005,
+          speedLimit: 48,
+          includeCollisions: false,
+          collisionPadding: 1.5,
+          collisionStrength: 0.7,
+          collisionIterations: 1,
+        });
+        flush(100);
+        const first = {
+          actual: actualNodes.map(node => [node.x, node.y, node.vx, node.vy]),
+          expected: expectedNodes.map(node => [node.x, node.y, node.vx, node.vy]),
+          diagnostics: api.physicsDiagnostics(),
+          budget: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
+          d3ForcesOff: ['charge', 'link', 'center', 'galaxy', 'galaxyCenter',
+            'galaxyRelations', 'communityBridges', 'collide', 'velocityGuard']
+            .every(name => store.d3Forces[name] === null),
+        };
+
+        api.freeze(true);
+        const frozenPositions = actualNodes.map(node => [node.x, node.y, node.vx, node.vy]);
+        flush(5000);
+        const frozen = {
+          positions: actualNodes.map(node => [node.x, node.y, node.vx, node.vy]),
+          diagnostics: api.physicsDiagnostics(),
+          queued: frameQueue.size,
+        };
+        api.freeze(false);
+        flush(9000);
+        const resumed = api.physicsDiagnostics();
+
+        hidden = true;
+        visibilityHandler();
+        const hiddenPositions = actualNodes.map(node => [node.x, node.y, node.vx, node.vy]);
+        flush(50000);
+        const whileHidden = {
+          positions: actualNodes.map(node => [node.x, node.y, node.vx, node.vy]),
+          diagnostics: api.physicsDiagnostics(),
+        };
+        hidden = false;
+        visibilityHandler();
+        flush(100000);
+        const visibleAgain = api.physicsDiagnostics();
+
+        const dragged = actualNodes[0], unrelated = actualNodes[1];
+        store.onNodeDragStart(dragged);
+        const unrelatedBeforeDrag = [unrelated.x, unrelated.y, unrelated.vx, unrelated.vy];
+        dragged.x = dragged.fx = 75;
+        dragged.y = dragged.fy = 25;
+        flush(100100);
+        const duringDrag = [unrelated.x, unrelated.y, unrelated.vx, unrelated.vy];
+        const stepsBeforeRelease = api.physicsDiagnostics().steps;
+        store.onNodeDragEnd(dragged);
+        flush(100200);
+        const releaseFrame = {
+          unrelated: [unrelated.x, unrelated.y, unrelated.vx, unrelated.vy],
+          steps: api.physicsDiagnostics().steps,
+          dragged: [dragged.x, dragged.y, dragged.vx, dragged.vy, dragged.fx, dragged.fy],
+        };
+        flush(100234);
+        const afterDragEvolution = api.physicsDiagnostics();
+
+        api.pause();
+        const pausedSteps = api.physicsDiagnostics().steps;
+        flush(200000);
+        const paused = api.physicsDiagnostics();
+        api.resume();
+        flush(300000);
+        const resumedAfterPause = api.physicsDiagnostics();
+        api.destroy();
+        emit({
+          first,
+          frozenPositions,
+          frozen,
+          resumed,
+          hiddenPositions,
+          whileHidden,
+          visibleAgain,
+          unrelatedBeforeDrag,
+          duringDrag,
+          stepsBeforeRelease,
+          releaseFrame,
+          afterDragEvolution,
+          pausedSteps,
+          paused,
+          resumedAfterPause,
+          queuedAfterDestroy: frameQueue.size,
+          d3Wakes: {
+            alpha: calls.d3AlphaTarget || 0,
+            resets: invocations.resetCountdown || 0,
+            reheats: invocations.d3ReheatSimulation || 0,
+          },
+        });
+        """
+    )
+    for actual, expected in zip(report["first"]["actual"], report["first"]["expected"]):
+        assert actual == pytest.approx(expected)
+    first = report["first"]["diagnostics"]
+    assert report["first"]["budget"] == [0, 0, 0]
+    assert report["first"]["d3ForcesOff"] is True
+    assert first["frames"] == first["steps"] == first["lastSubsteps"] == 1
+    assert first["timestep"] == pytest.approx(0.021328125)
+    assert first["velocityDecay"] == pytest.approx(0.00005)
+    assert first["reducedMotion"] is True
+    assert first["kineticEnergy"] > 0
+    assert first["speedCapActivations"] == 0
+
+    assert report["frozen"]["positions"] == report["frozenPositions"]
+    assert report["frozen"]["diagnostics"]["frozen"] is True
+    assert report["frozen"]["diagnostics"]["steps"] == 1
+    assert report["frozen"]["queued"] == 0
+    # Resuming after a long wall-clock gap performs one ordinary step, never three catch-up steps.
+    assert report["resumed"]["steps"] == 2
+    assert report["resumed"]["lastSubsteps"] == 1
+
+    assert report["whileHidden"]["positions"] == report["hiddenPositions"]
+    assert report["whileHidden"]["diagnostics"]["steps"] == 2
+    assert report["whileHidden"]["diagnostics"]["hidden"] is True
+    assert report["visibleAgain"]["steps"] == 3
+    assert report["visibleAgain"]["lastSubsteps"] == 1
+
+    # Dragging owns only the primary node. The custom clock keeps integrating its related
+    # body around that moving mass source, without waking D3 or running catch-up substeps.
+    assert report["duringDrag"] != report["unrelatedBeforeDrag"]
+    assert report["releaseFrame"]["unrelated"] != report["unrelatedBeforeDrag"]
+    assert 3 < report["stepsBeforeRelease"] <= 6
+    assert report["stepsBeforeRelease"] < report["releaseFrame"]["steps"] \
+        <= report["stepsBeforeRelease"] + 3
+    assert report["afterDragEvolution"]["steps"] \
+        == report["releaseFrame"]["steps"] + 1
+    assert all(value is not None for value in report["releaseFrame"]["dragged"][:4])
+    assert report["releaseFrame"]["dragged"][4:] == [None, None]
+
+    assert report["paused"]["steps"] == report["pausedSteps"] \
+        == report["afterDragEvolution"]["steps"]
+    assert report["paused"]["running"] is False
+    assert report["resumedAfterPause"]["steps"] == report["pausedSteps"] + 1
+    assert report["queuedAfterDestroy"] == 0
+    assert report["d3Wakes"] == {"alpha": 0, "resets": 0, "reheats": 0}
+
+
+@requires_node
+def test_explicit_galaxy_reheat_runs_a_bounded_physical_relaxation_burst() -> None:
+    report = _run_engine(
+        """
+        let nextFrame = 1;
+        const frameQueue = new Map();
+        window.requestAnimationFrame = callback => {
+          const id = nextFrame++;
+          frameQueue.set(id, callback);
+          return id;
+        };
+        window.cancelAnimationFrame = id => frameQueue.delete(id);
+        const flush = timestamp => {
+          const batch = [...frameQueue.values()];
+          frameQueue.clear();
+          batch.forEach(callback => callback(timestamp));
+        };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 20,
+              community_id: 'core', anchor_role: 'global' },
+            { id: 'unlinked-star', x: 140, y: 0, vx: 0, vy: 2, gravity_mass: 6,
+              community_id: 'outer' },
+          ],
+          edges: [],
+        });
+        flush(100);
+        flush(134);
+        const star = store.graphData.nodes.find(node => node.id === 'unlinked-star');
+        const before = {
+          phase: [star.x, star.y, star.vx, star.vy],
+          diagnostics: api.physicsDiagnostics(),
+        };
+        api.reheat();
+        const queued = api.physicsDiagnostics();
+        [200, 234, 268, 302, 336].forEach(flush);
+        const after = {
+          phase: [star.x, star.y, star.vx, star.vy],
+          diagnostics: api.physicsDiagnostics(),
+        };
+        api.reheat();
+        const recoalesced = api.physicsDiagnostics();
+        api.freeze(true);
+        emit({
+          before, queued, after, recoalesced,
+          frozen: api.physicsDiagnostics(),
+          d3: {
+            alpha: calls.d3AlphaTarget || 0,
+            resets: invocations.resetCountdown || 0,
+            reheats: invocations.d3ReheatSimulation || 0,
+          },
+        });
+        """
+    )
+    assert report["queued"]["reheatActivations"] == 1
+    assert report["queued"]["reheatStepsRemaining"] == 30
+    assert report["queued"]["reheatStepsApplied"] == 0
+    assert report["after"]["diagnostics"]["reheatStepsApplied"] == 10
+    assert report["after"]["diagnostics"]["reheatStepsRemaining"] == 20
+    assert report["after"]["diagnostics"]["lastReheatSubsteps"] == 2
+    assert report["after"]["diagnostics"]["steps"] \
+        == report["before"]["diagnostics"]["steps"] + 15
+    assert report["after"]["phase"] != pytest.approx(report["before"]["phase"])
+    assert report["recoalesced"]["reheatActivations"] == 2
+    assert report["recoalesced"]["reheatStepsRemaining"] == 30
+    assert report["frozen"]["reheatStepsRemaining"] == 0
+    assert report["d3"] == {"alpha": 0, "resets": 0, "reheats": 0}
+
+
+@requires_node
+def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() -> None:
+    """Pointer ownership never freezes the graph; one source stays fixed while neighbours move."""
+
+    report = _run_engine(
+        """
+        let nextFrame = 1;
+        const frameQueue = new Map();
+        window.requestAnimationFrame = callback => {
+          const id = nextFrame++;
+          frameQueue.set(id, callback);
+          return id;
+        };
+        window.cancelAnimationFrame = id => frameQueue.delete(id);
+        const flush = timestamp => {
+          const batch = [...frameQueue.values()];
+          frameQueue.clear();
+          batch.forEach(callback => callback(timestamp));
+        };
+        const windowListeners = Object.create(null);
+        window.addEventListener = (name, handler) => { windowListeners[name] = handler; };
+        window.removeEventListener = (name, handler) => {
+          if (windowListeners[name] === handler) delete windowListeners[name];
+        };
+        const elementListeners = Object.create(null);
+        el.addEventListener = (name, handler) => { elementListeners[name] = handler; };
+        el.removeEventListener = (name, handler) => {
+          if (elementListeners[name] === handler) delete elementListeners[name];
+        };
+        el.querySelector = selector => selector === 'canvas' ? {
+          getBoundingClientRect: () => ({ left: 0, top: 0 }),
+        } : null;
+        store.screen2GraphCoords = (x, y) => ({ x, y });
+
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'heavy', x: -30, y: 0, gravity_mass: 4, community_id: 'one' },
+            { id: 'light', x: 30, y: 0, gravity_mass: 1, community_id: 'one' },
+            { id: 'moon', x: 50, y: 20, gravity_mass: 1, community_id: 'one' },
+            { id: 'remote', x: 140, y: -35, gravity_mass: 1, community_id: 'two' },
+          ],
+          edges: [{ source: 'heavy', target: 'light' }],
+        });
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        flush(100);
+        const nodes = Object.fromEntries(store.graphData.nodes.map(node => [node.id, node]));
+        const pointer = (type, x, y) => ({
+          type, button: 0, isPrimary: true, pointerId: 7, clientX: x, clientY: y,
+          preventDefault() {}, stopPropagation() {},
+        });
+        const unrelatedPhase = () => [nodes.remote.x, nodes.remote.y, nodes.remote.vx, nodes.remote.vy];
+        const followerPhase = () => [nodes.light.x, nodes.light.y, nodes.light.vx, nodes.light.vy];
+        const moonPhase = () => [nodes.moon.x, nodes.moon.y, nodes.moon.vx, nodes.moon.vy];
+        const candidatePhase = () => [nodes.heavy.x, nodes.heavy.y, nodes.heavy.vx, nodes.heavy.vy];
+
+        const beforeDown = {
+          unrelated: unrelatedPhase(), follower: followerPhase(), moon: moonPhase(),
+          candidate: candidatePhase(),
+          steps: api.physicsDiagnostics().steps,
+        };
+        elementListeners.pointerdown(pointer('pointerdown', nodes.heavy.x, nodes.heavy.y));
+        const afterDown = {
+          unrelated: unrelatedPhase(), follower: followerPhase(), moon: moonPhase(),
+          candidate: candidatePhase(),
+          steps: api.physicsDiagnostics().steps,
+        };
+        // Pointer-down alone is not a drag, and it must not suspend the Galaxy clock.
+        flush(5000);
+        const heldBeforeMove = {
+          unrelated: unrelatedPhase(), follower: followerPhase(), moon: moonPhase(),
+          candidate: candidatePhase(),
+          steps: api.physicsDiagnostics().steps,
+        };
+        windowListeners.pointermove(pointer('pointermove', nodes.heavy.x + 90, nodes.heavy.y + 45));
+        const placedCandidate = candidatePhase();
+        flush(6000);
+        const duringDrag = {
+          unrelated: unrelatedPhase(), follower: followerPhase(), moon: moonPhase(),
+          candidate: candidatePhase(), followers: api.physicsDiagnostics().dragFollowers,
+          steps: api.physicsDiagnostics().steps,
+          dragging: api.physicsDiagnostics().dragging,
+        };
+        windowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
+        const releaseSteps = api.physicsDiagnostics().steps;
+        flush(7000); // physics continues immediately; no restore/isolation frame exists
+        const releaseFrame = { unrelated: unrelatedPhase(), steps: api.physicsDiagnostics().steps };
+        flush(7034);
+        const evolvedSteps = api.physicsDiagnostics().steps;
+
+        // A click also leaves the ordinary clock live.
+        const clickBefore = candidatePhase();
+        const clickBeforeSteps = api.physicsDiagnostics().steps;
+        elementListeners.pointerdown(pointer('pointerdown', nodes.heavy.x, nodes.heavy.y));
+        flush(9000);
+        const clickHeld = candidatePhase();
+        const clickHeldSteps = api.physicsDiagnostics().steps;
+        windowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
+        const clickReleased = candidatePhase();
+        const clickReleaseSteps = api.physicsDiagnostics().steps;
+        flush(9034);
+        const clickEvolvedSteps = api.physicsDiagnostics().steps;
+
+        emit({
+          beforeDown, afterDown, heldBeforeMove, duringDrag,
+          placedCandidate, releaseSteps, releaseFrame, evolvedSteps,
+          clickBefore, clickHeld, clickReleased, clickBeforeSteps, clickHeldSteps,
+          clickReleaseSteps, clickEvolvedSteps,
+          d3Wakes: {
+            alpha: calls.d3AlphaTarget || 0,
+            resets: invocations.resetCountdown || 0,
+            reheats: invocations.d3ReheatSimulation || 0,
+          },
+        });
+        """
+    )
+    assert report["afterDown"] == report["beforeDown"]
+    assert report["heldBeforeMove"]["steps"] > report["beforeDown"]["steps"]
+    assert report["heldBeforeMove"]["unrelated"] != report["beforeDown"]["unrelated"]
+    assert report["duringDrag"]["unrelated"] != report["heldBeforeMove"]["unrelated"]
+    assert report["duringDrag"]["follower"] != report["beforeDown"]["follower"]
+    assert report["duringDrag"]["moon"] != report["beforeDown"]["moon"]
+    assert report["duringDrag"]["candidate"] == pytest.approx(report["placedCandidate"])
+    assert report["duringDrag"]["steps"] > report["heldBeforeMove"]["steps"]
+    assert report["duringDrag"]["dragging"] == "heavy"
+    assert set(report["duringDrag"]["followers"]) == {"light", "moon", "remote"}
+    assert report["releaseFrame"]["unrelated"] != report["duringDrag"]["unrelated"]
+    assert report["releaseFrame"]["steps"] > report["releaseSteps"]
+    assert report["evolvedSteps"] > report["releaseSteps"]
+    assert report["clickHeldSteps"] > report["clickBeforeSteps"]
+    assert report["clickHeld"] != pytest.approx(report["clickBefore"])
+    assert report["clickReleased"] == pytest.approx(report["clickHeld"])
+    assert report["clickEvolvedSteps"] > report["clickReleaseSteps"]
+    assert report["d3Wakes"] == {"alpha": 0, "resets": 0, "reheats": 0}
 
 
 def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
@@ -1470,7 +4484,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat'")
     assert d3 < force_graph < renderer
     assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
@@ -1549,9 +4563,8 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
         api.setCollapse(true);
         const whileCollapsed = shownIds();
         const expanding = api.zoomToNode('c');
-        // The recording renderer has no simulation tick to assign fresh coordinates after
-        // expansion. The Ledger reveal helper retries on the next animation frame; model that
-        // settled frame here before asserting the second camera attempt.
+        // Galaxy preserves the coordinates from the expanded scene instead of throwing them
+        // away and waiting for a fresh simulation tick.
         const rendered = (store.graphData.nodes || []).find(n => n.id === 'c');
         rendered.x = 20; rendered.y = 2;
         const focused = api.zoomToNode('c');
@@ -1566,9 +4579,9 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
     assert "lonely" not in report["filtered"]["shown"]
     # A collapsed view really is showing only bubbles...
     assert report["whileCollapsed"] == ["cluster-0"]
-    # ...so focusing a named entity has to expand it. A live force graph assigns fresh positions
-    # on its next frame, which Ledger's reveal helper retries before centering the node.
-    assert report["expanding"] is False
+    # ...so focusing a named entity expands it. Galaxy retains its known scene coordinate and
+    # can center immediately instead of waiting for a second simulation frame.
+    assert report["expanding"] is True
     assert report["focused"] is True
     assert report["collapsed"] is False
     assert "c" in report["afterFocus"], "the entity is still not on the canvas"
@@ -1637,7 +4650,7 @@ def test_appearance_only_changes_do_not_restart_the_layout() -> None:
         const repaintsAfter = calls.nodeCanvasObject;
 
         // A genuine change to the visible set still has to reach force-graph.
-        api.setScope({ showUnlinked: true, minDegree: 0 });
+        api.setScope({ showUnlinked: false, minDegree: 1 });
         emit({
           seeded, paintOnly, afterScope: calls.graphData, before, recoloured,
           repaintsBefore, repaintsAfter, shown: store.graphData.nodes.length,
@@ -1646,7 +4659,7 @@ def test_appearance_only_changes_do_not_restart_the_layout() -> None:
     )
     assert report["paintOnly"] == report["seeded"], "an appearance change restarted the layout"
     assert report["afterScope"] > report["seeded"], "a real view change never reached the canvas"
-    assert report["shown"] == 13
+    assert report["shown"] == 12
     # Skipping the reseed must not mean skipping the paint.
     assert report["recoloured"] != report["before"]
     assert report["repaintsAfter"] > report["repaintsBefore"]
@@ -1663,6 +4676,7 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     report = _run_engine(
         """
         const api = G.create(el, {});
+        api.setPreset('compact');
         api.setData(chain(40));
         const small = {
           time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
@@ -1693,8 +4707,8 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     assert report["big"]["alpha"] > report["small"]["alpha"]
     assert report["big"]["velocity"] > report["small"]["velocity"]
     # Freeze, not the OS visual-motion preference, is the explicit static-layout control.
-    assert report["frozen"]["time"] == 2200
-    assert report["frozen"]["ticks"] == 160
+    assert report["frozen"]["time"] == 0
+    assert report["frozen"]["ticks"] == 0
 
 
 @requires_node
@@ -1716,6 +4730,7 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
         const bump = (api, patch) => { const before = reheats(); api.setSettings(patch); return reheats() - before; };
 
         const api = G.create(el, {});
+        api.setPreset('compact');
         api.setData(chain(40));
         const layout = {
           repel: bump(api, { repel: 260 }),
@@ -1733,6 +4748,7 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
         };
 
         const reduced = G.create(el, { reducedMotion: () => true });
+        reduced.setPreset('compact');
         reduced.setData(chain(40));
         const reducedMotion = bump(reduced, { repel: 260 });
         emit({ layout, paint, reducedMotion });
@@ -1770,6 +4786,7 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
           forceCollide: () => ({ iterations(value) { this.value = value; return this; } }),
         };
         const api = G.create(el, {});
+        api.setPreset('compact');
         api.setRenderMode('full');
         // Keep this below the responsive full-graph ceiling. Larger full graphs deliberately
         // take the deterministic, centred layout so a complete workspace cannot lock the UI.
@@ -1806,6 +4823,7 @@ def test_full_graph_beyond_responsive_force_budget_is_centred_and_responds_to_gr
         """
         const span = nodes => Math.max(...nodes.map(node => node.x)) - Math.min(...nodes.map(node => node.x));
         const api = G.create(el, {});
+        api.setPreset('compact');
         api.setRenderMode('full');
         // `chain` supplies N+1 nodes, so this is one past the live-force ceiling.
         api.setData(chain(600));
@@ -1965,6 +4983,7 @@ def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() ->
         D3_STUB
         + """
         const api = G.create(el, { reducedMotion: () => true });
+        api.setPreset('compact');
 
         api.setData(chain(40));
         const small = collide.iterations;
@@ -2411,18 +5430,23 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     assert "if (!manualDrag.dragged)" in move
     assert move.index("if (Math.hypot(dx, dy) < 3)") < move.index("const node = manualDrag.node;")
     assert "node.x = node.fx = point.x + manualDrag.offsetX;" in move
-    assert "node.vx = 0;" in move
-    assert "node.vy = 0;" in move
-    assert "function makeDragFollowForce()" in source
+    assert "node.vx = 0;" not in move
+    begin = source[source.index("function beginNodeDrag(node) {"):
+                   source.index("function finishNodeDrag(node) {")]
+    assert "node.vx = 0;" in begin
+    assert "node.vy = 0;" not in move
+    assert "node.vy = 0;" in begin
     assert "node.fx = undefined;" in source
     assert "node.fy = undefined;" in source
-    assert "Math.max(MIN_DRAG_PULL, Math.min(MAX_DRAG_PULL" in source
+    assert "activeDragLinks" not in source
+    assert "other.vx" not in move
+    assert "other.vy" not in move
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 
 
 def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
-    """Live drag physics stays bounded while slider bursts remain coalesced."""
+    """Explicit slider changes coalesce while pointer placement has no wake mechanism."""
     source = ASSET.read_text(encoding="utf-8")
     vendor = VENDOR.read_text(encoding="utf-8")
     primary_vendor = PRIMARY_VENDOR.read_text(encoding="utf-8")
@@ -2433,17 +5457,17 @@ def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
     assert ".enableNodeDrag(false)" in source
     assert "node.fx = undefined;" in source
     assert "node.fy = undefined;" in source
-    assert "function reheatLiveLayout(dragging = false)" in source
     assert "function schedulePhysicsUpdate()" in source
     assert "physicsReheatPending" in source
     assert "cancelAutoFit();" in source
     assert "function prepareReheat()" in source
     assert "function supportsSoftAlpha()" in source
-    assert "function softReheat(dragging = false)" in source
-    assert "fg.d3AlphaTarget(dragging || activeDragNode ? DRAG_ALPHA_TARGET : SETTINGS_ALPHA_TARGET);" in source
+    assert "function softReheat()" in source
+    assert "fg.d3AlphaTarget(SETTINGS_ALPHA_TARGET);" in source
     assert "fg.resetCountdown();" in source
-    assert "softReheat(dragging);" in source
-    assert "function makeDragFollowForce()" in source
+    assert "softReheat();" in source
+    assert "DRAG_ALPHA_TARGET" not in source
+    assert "DRAG_SETTLE_DELAY_MS" not in source
     assert "d3AlphaTarget" in vendor and "resetCountdown" in vendor
     assert "d3AlphaTarget" in primary_vendor and "resetCountdown" in primary_vendor
 

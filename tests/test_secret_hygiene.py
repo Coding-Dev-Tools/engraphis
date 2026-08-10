@@ -206,6 +206,77 @@ def test_secure_erase_removes_sync_conflict_successors():
     } >= {original_id, successor_id}
 
 
+def test_secure_erase_deletes_transitive_successors_from_external_vector_index():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    grandchild_id = ids.new_id("memory")
+    for memory_id, parent_id in ((successor_id, original_id), (grandchild_id, successor_id)):
+        engine.store.add_memory(MemoryRecord(
+            id=memory_id,
+            content="Losing secret copy.",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+            metadata={"sync_conflict": {"memory_id": parent_id}},
+            provenance={"conflict_of": parent_id, "trusted": False},
+        ))
+
+    class RecordingExternalIndex:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+
+    index = RecordingExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "deleted"
+    assert len(index.deleted) == 1
+    assert set(index.deleted[0][0]) == {original_id, successor_id, grandchild_id}
+    assert index.deleted[0][1] is True
+    assert all(engine.store.get_memory(memory_id) is None for memory_id in index.deleted[0][0])
+
+
+def test_secure_erase_reports_external_failure_after_erasing_all_successors():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    engine.store.add_memory(MemoryRecord(
+        id=successor_id,
+        content="Losing secret copy.",
+        workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+        metadata={"sync_conflict": {"memory_id": original_id}},
+        provenance={"conflict_of": original_id, "trusted": False},
+    ))
+
+    class FailingExternalIndex:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+            raise RuntimeError("external index unavailable")
+
+    index = FailingExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "failed"
+    assert "external_index_limitation" in result
+    assert index.deleted == [((original_id, successor_id), True)]
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
+
+
 def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")

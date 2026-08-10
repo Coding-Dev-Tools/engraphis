@@ -1722,6 +1722,46 @@ def test_get_memories_chunks_past_the_variable_limit(store, monkeypatch):
     assert len(calls) == 4                         # ceil(7 / 2)
 
 
+def test_edge_supports_scoped_lookup_drives_from_requested_edge_ids(store, monkeypatch):
+    """Large scene evidence batches must not rescan the workspace per IN chunk."""
+    from engraphis.core import store as store_mod
+
+    workspace_id = store.get_or_create_workspace("support-lookup")
+    other_workspace = store.get_or_create_workspace("other-support-lookup")
+    for index in range(5):
+        store.upsert_edge(Edge(
+            id=f"edge_{index}", src=f"source_{index}", dst=f"target_{index}",
+            relation="related", workspace_id=workspace_id,
+            provenance={"memory_id": f"mem_{index}"},
+        ))
+    store.upsert_edge(Edge(
+        id="other_edge", src="other_source", dst="other_target",
+        relation="related", workspace_id=other_workspace,
+        provenance={"memory_id": "mem_other"},
+    ))
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 2)
+    calls: list[str] = []
+    original = store_mod._SerializedConnection.execute
+
+    def capture_execute(connection, statement, *args, **kwargs):
+        if "FROM edge_supports s" in statement:
+            calls.append(statement)
+        return original(connection, statement, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod._SerializedConnection, "execute", capture_execute)
+
+    supports = store.edge_supports_in_scope(
+        ["edge_0", "edge_1", "edge_2", "edge_3", "edge_4", "other_edge"],
+        flt=SearchFilter(workspace_id=workspace_id),
+    )
+
+    assert [row["edge_id"] for row in supports] == [
+        "edge_0", "edge_1", "edge_2", "edge_3", "edge_4",
+    ]
+    assert len(calls) == 3
+    assert all("CROSS JOIN edges e ON e.id=s.edge_id" in statement for statement in calls)
+
+
 # ── regression: LIKE wildcards in the non-FTS5 lexical fallback ───────────────
 
 def test_fts_fallback_escapes_like_wildcards(store):

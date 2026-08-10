@@ -1,6 +1,7 @@
 """Unified local dashboard tests for the public open-core boundary."""
 import ast
 import io
+import re
 import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
-from engraphis import cloud_features  # noqa: E402
+from engraphis import __version__, cloud_features  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.core.interfaces import MemoryType, Scope  # noqa: E402
@@ -77,26 +78,36 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'href="/"' in classic.text
         assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
         assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
+        assert 'id="graph-show-iso" data-onchange="h49" checked' in classic.text
         assert client.get("/v2-assets/ledger.css").status_code == 200
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'" in ledger_js.text
-        assert "/v2-assets/ledger.css?v=20260809-physics-guard" in page.text
-        assert "/v2-assets/ledger.js?v=20260809-physics-guard" in page.text
+        assert re.search(
+            r"'/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+'", ledger_js.text
+        )
+        assert re.search(r"/v2-assets/ledger\.css\?v=[A-Za-z0-9._-]+", page.text)
+        assert re.search(r"/v2-assets/ledger\.js\?v=[A-Za-z0-9._-]+", page.text)
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js?v=20260809-csp" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260809-physics-guard" in classic_js.text
+        assert re.search(
+            r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
+        )
         assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
+        assert bootstrap.json()["version"] == __version__
         assert bootstrap.json()["stats"]["memories"] >= 1
         savings = client.get("/api/context-savings", params={"workspace": "demo"})
         assert savings.status_code == 200
         assert savings.json()["format"] == "engraphis-context-savings/1"
+        global_savings = client.get("/api/context-savings")
+        assert global_savings.status_code == 200
+        assert global_savings.json()["scope"] == {"workspace": "all"}
+        assert global_savings.json()["workspace_count"] == 2
         filtered = client.get(
             "/api/context-savings",
             params={"workspace": "demo", "from_ts": 0, "to_ts": 9_999_999_999,
@@ -105,7 +116,37 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert filtered.status_code == 200
         assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
         assert "Estimated context saved" in page.text
-        assert 'class="content-section savings-overview-section" id="context-savings-summary"' in page.text
+        assert 'class="persistent-savings-summary manage-savings-summary" id="context-savings-persistent"' in page.text
+        assert 'class="content-section savings-overview-section" id="context-savings-summary"' not in page.text
+
+
+def test_bound_dashboard_bootstraps_with_no_visible_workspace(monkeypatch, tmp_path):
+    """A stale/empty allow-list must render a repairable empty state, not a 400 boot."""
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "bound-empty.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "vector_backend", "numpy")
+    monkeypatch.setattr(settings, "allowed_workspaces", ["workspace-that-is-gone"])
+    monkeypatch.setattr(settings, "api_token", "")
+    from engraphis.dashboard_app import create_app
+
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+        response = client.get("/api/bootstrap")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspaces"] == []
+    assert payload["stats"] == {
+        "workspace": None,
+        "memories": 0,
+        "by_type": {},
+        "total_rows": 0,
+        "workspaces": 0,
+        "sessions": 0,
+        "schema_version": 16,
+        "prompt_eligibility": {},
+        "embedding": {},
+    }
 
 
 def test_dashboard_memory_reads_use_the_active_store_for_memory_databases(monkeypatch):
@@ -749,16 +790,30 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-full"' not in page.text
         assert '>Show all nodes<' not in page.text
         assert 'id="graph-show-unlinked"' in page.text
+        assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
         assert 'id="graph-tune-unlinked"' not in page.text
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
-        assert "const GRAPH_INITIAL_NODE_LIMIT = 320;" in script.text
+        assert "const GRAPH_INITIAL_NODE_LIMIT = 300;" in script.text
+        assert "const GRAPH_INITIAL_EDGE_LIMIT = 900;" in script.text
         assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
-        assert "&full=true" in script.text
+        assert "function graphLoadKey(" in script.text
+        assert "function isCurrentGraphLoad(request)" in script.text
+        assert "function retryGraphLoad()" in script.text
+        assert "function releaseGraphAssetsAttempt(attempt)" in script.text
+        assert "if (!force && state.graphLoadPromise && state.graphLoadKey === key)" in script.text
+        assert "previousController.abort()" in script.text
+        assert "Promise.race([" in script.text
+        assert "timeoutPromise" in script.text
+        assert "/graph/scene?" in script.text
+        assert "&level=${level}" in script.text
+        assert "&include_memory_nodes=false" in script.text
+        assert "&include_history=true" in script.text
         assert "&connected_only=true" in script.text
+        assert "item.degree != null ? item.degree : item.weighted_degree" in script.text
         assert "style: 'cyber'" in script.text
         assert "renderMode: targetMode" in script.text
         assert "loadGraph({ force: true })" in script.text

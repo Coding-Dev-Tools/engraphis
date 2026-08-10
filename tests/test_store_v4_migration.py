@@ -4,6 +4,8 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -669,6 +671,47 @@ def test_stale_private_backup_stage_is_swept_before_migration(tmp_path):
     Store(str(db)).close()
 
     assert not stale.exists()
+    assert _quick_check(Path(f"{db}.pre-migration-v4.bak")) == "ok"
+
+
+def test_stale_backup_journal_is_swept_before_migration(tmp_path):
+    db = tmp_path / "stale-journal-v3.db"
+    _prepare_v3(db)
+    stale_journal = Path(f"{db}.pre-migration-v4.bak.tmp-1-2-3-journal")
+    stale_journal.write_text("private crash residue", encoding="utf-8")
+
+    Store(str(db)).close()
+
+    assert not stale_journal.exists()
+    assert _quick_check(Path(f"{db}.pre-migration-v4.bak")) == "ok"
+
+
+def test_concurrent_migration_rechecks_schema_after_writer_lock(
+        monkeypatch, tmp_path):
+    """A waiter must observe the first process's committed migration, not replay it."""
+    db = tmp_path / "concurrent-v3.db"
+    _prepare_v3(db)
+    original_state = Store._schema_migration_state
+    first_state = threading.local()
+    ready = threading.Barrier(2)
+
+    def synchronized_state(self):
+        state = original_state(self)
+        if not getattr(first_state, "seen", False):
+            first_state.seen = True
+            ready.wait(timeout=10)
+        return state
+
+    monkeypatch.setattr(Store, "_schema_migration_state", synchronized_state)
+
+    def open_and_close(_index):
+        store = Store(str(db))
+        store.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(open_and_close, range(2)))
+
+    assert _version(db) == SCHEMA_VERSION
     assert _quick_check(Path(f"{db}.pre-migration-v4.bak")) == "ok"
 
 

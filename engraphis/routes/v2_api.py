@@ -503,6 +503,7 @@ def health():
 
 @router.get("/bootstrap")
 def bootstrap():
+    from engraphis import __version__
     lic = get_license()
     current_service = service()
     wss = _run(current_service.list_workspaces).get("workspaces") or []
@@ -515,6 +516,24 @@ def bootstrap():
             wss,
             key=lambda item: (int(item.get("memories") or 0), str(item.get("name") or "")),
         ).get("name")
+    if current_service.allowed_workspaces is not None and not wss:
+        # A bound deployment must never fall back to a global aggregate when its
+        # allow-list has no visible workspace.  ``stats()`` correctly rejects that
+        # request for tenant isolation, but bootstrap is also the dashboard's empty
+        # state and must remain loadable so the operator can repair the binding.
+        bootstrap_stats = {
+            "workspace": None,
+            "memories": 0,
+            "by_type": {},
+            "total_rows": 0,
+            "workspaces": 0,
+            "sessions": 0,
+            "schema_version": getattr(current_service.store, "schema_version", None),
+            "prompt_eligibility": {},
+            "embedding": {},
+        }
+    else:
+        bootstrap_stats = _run(current_service.stats, workspace=scoped_stats_workspace)
     emb = None
     try:
         from engraphis.backends.embedder_deterministic import DeterministicEmbedder
@@ -528,9 +547,10 @@ def bootstrap():
     except Exception:  # noqa: BLE001
         pass
     return {
+        "version": __version__,
         "license": lic,
         "workspaces": wss,
-        "stats": _run(current_service.stats, workspace=scoped_stats_workspace),
+        "stats": bootstrap_stats,
         "embedder": emb,
         # Non-blocking best-known update snapshot; the dashboard renders an "update
         # available" banner from this and a background refresh warms the cache.
@@ -1562,7 +1582,9 @@ def context_savings(
     format: Optional[str] = None,
     group_by: Optional[str] = None,
 ):
-    ws = workspace or _require_ws()
+    ws = workspace.strip() if isinstance(workspace, str) else None
+    if isinstance(ws, str) and not ws:
+        raise _invalid_request()
     return _run(
         service().context_savings,
         workspace=ws,
@@ -1590,8 +1612,9 @@ def receipts_export(workspace: Optional[str] = None):
     ws = workspace or _require_ws()
     from fastapi.responses import JSONResponse
     body = _run(service().export_receipts, workspace=ws)
+    safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
     fname = "engraphis-receipts-%s-%s.json" % (
-        (ws or "workspace").replace("/", "_"),
+        safe_ws,
         __import__("time").strftime("%Y%m%d"),
     )
     return JSONResponse(body, headers={
@@ -2171,38 +2194,80 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
                 min_support: int = Query(default=1, ge=0, le=1_000_000),
                 min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
                 include_code: bool = False, code_overlay: Optional[bool] = None,
+                connected_only: bool = False,
+                include_history: bool = False,
+                include_memory_nodes: bool = True,
                 include_weak_co_occurs: Optional[bool] = None,
                 include_weak_cooccurrence: Optional[bool] = None,
                 node_limit: Optional[int] = Query(default=None, ge=1, le=300),
                 edge_limit: Optional[int] = Query(default=None, ge=0, le=900)):
     """Complete or focused evidence-backed graph scene with deterministic identity."""
     ws = workspace or _require_ws()
+    # ``full`` was the public Ledger value before graph scenes split the focused
+    # ``overview`` response from the canonical ``complete`` projection. Keep the alias
+    # at the HTTP boundary so a browser with a stale graph asset cannot turn a valid full
+    # graph request into the generic 400 "invalid request" response. Legacy full scenes
+    # were entity-only; preserve that bounded projection even if the stale client omitted
+    # the newer ``include_memory_nodes=false`` flag. Ignore stale overview caps as well:
+    # complete scenes enforce their own safety ceiling and must not be sampled.
+    legacy_full = level.strip().lower() == "full"
+    scene_level = "complete" if legacy_full else level
+    if legacy_full:
+        include_memory_nodes = False
+        node_limit = None
+        edge_limit = None
     weak_cooccurrence = (
         include_weak_cooccurrence
         if include_weak_cooccurrence is not None else
         include_weak_co_occurs
         if include_weak_co_occurs is not None else
-        level.strip().lower() == "complete"
+        scene_level.strip().lower() == "complete"
     )
     code_enabled = include_code if code_overlay is None else code_overlay
-    if level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
+    if scene_level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
         # This is route-owned, parameter-only validation.  It keeps the precise dashboard
         # guidance without ever serializing a service exception.
         raise HTTPException(status_code=400, detail={
             "error": "complete scenes do not accept node_limit or edge_limit; "
                      "use graph filters instead of silently truncating the chart",
         })
-    return _run(
-        service().graph_scene, workspace=ws, level=level,
-        center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),
-        repo=repo, layers=_graph_csv(layers), relations=_graph_csv(relations),
-        entity_types=_graph_csv(entity_types), memory_types=_graph_csv(memory_types),
-        as_of=as_of, valid_at=valid_at, known_at=known_at,
-        time_from=time_from, time_to=time_to, depth=depth,
-        min_support=min_support, min_confidence=min_confidence,
-        include_weak_cooccurrence=weak_cooccurrence,
-        include_code=code_enabled, node_limit=node_limit, edge_limit=edge_limit,
-    )
+    graph_kwargs = {
+        "workspace": ws, "level": scene_level,
+        "center_id": center_id, "system_id": system_id, "seeds": _graph_csv(seeds),
+        "repo": repo, "layers": _graph_csv(layers), "relations": _graph_csv(relations),
+        "entity_types": _graph_csv(entity_types), "memory_types": _graph_csv(memory_types),
+        "as_of": as_of, "valid_at": valid_at, "known_at": known_at,
+        "time_from": time_from, "time_to": time_to, "depth": depth,
+        "min_support": min_support, "min_confidence": min_confidence,
+        "include_weak_cooccurrence": weak_cooccurrence,
+        "include_code": code_enabled, "connected_only": connected_only,
+        "include_history": include_history, "include_memory_nodes": include_memory_nodes,
+        "node_limit": node_limit, "edge_limit": edge_limit,
+    }
+
+    def run_scene():
+        try:
+            return service().graph_scene(**graph_kwargs)
+        except ValidationError as exc:
+            # Code overlay is optional evidence. A broad workspace can exceed the bounded
+            # code candidate budget, and older Ledger clients may request it without the
+            # repository filter that makes the query safe. Keep the entity graph usable and
+            # make the degraded state explicit instead of turning the whole scene into the
+            # generic 400 "invalid request" response.
+            if not (code_enabled and not repo and "code overlay" in str(exc).lower()
+                    and "filter" in str(exc).lower() and "repository" in str(exc).lower()):
+                raise
+            fallback_kwargs = {**graph_kwargs, "include_code": False}
+            scene = service().graph_scene(**fallback_kwargs)
+            meta = scene.get("meta")
+            if isinstance(meta, dict):
+                meta["degraded"] = True
+                meta["degraded_reason"] = "code_overlay_requires_repository_filter"
+                meta["requested_include_code"] = True
+                meta["include_code"] = False
+            return scene
+
+    return _run(run_scene)
 
 
 @router.get("/graph/suggest")

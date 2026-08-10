@@ -6,7 +6,7 @@
 <link rel="icon" type="image/x-icon" href="/classic-assets/engraphis.ico">
 <link rel="icon" type="image/png" sizes="32x32" href="/classic-assets/favicon-32.png">
 <title>Engraphis</title>
-<link rel="stylesheet" href="/classic-assets/dashboard.css?v=20260809-physics-guard">
+<link rel="stylesheet" href="/classic-assets/dashboard.css?v=20260810-galaxy-gravity">
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -70,7 +70,6 @@
 <div class="stat-grid" id="stat-grid"></div>
 <div class="overview-ledger-grid">
 <div class="card"><div class="card-head">Memory types</div><div id="ov-types"></div></div>
-<div class="card" id="ov-savings"><div class="card-head">Estimated context saved</div><div class="empty">Loading receipt-backed estimate…</div></div>
 <div class="card"><div class="card-head">Analytics <span id="ov-lock" class="pill pill-muted" data-csp-style="s9"></span></div><div id="ov-analytics"><div class="empty" data-csp-style="s10">Loading…</div></div></div>
 </div>
 </div>
@@ -154,7 +153,7 @@
 </div>
 </div>
 <div class="gx-body">
-<label class="gx-chip" data-csp-style="s197" title="Show entities that have no relations (unlinked nodes). Hidden by default to keep the graph readable."><input type="checkbox" id="graph-show-iso" data-onchange="h49"><span class="gx-dot" data-csp-style="s198"></span>Show unlinked nodes</label>
+<label class="gx-chip" data-csp-style="s197" title="Include entities that have no relations (unlinked nodes). Shown by default."><input type="checkbox" id="graph-show-iso" data-onchange="h49" checked><span class="gx-dot" data-csp-style="s198"></span>Show unlinked nodes</label>
 <button class="btn btn-ghost btn-sm" id="graph-show-all" type="button" data-onclick="h152" aria-pressed="false" title="Load every node, including unconnected entities, for this graph view">Show all nodes</button>
 <div class="gx-h">Layout</div>
 <div class="gx-cards">
@@ -351,6 +350,6 @@
      graph view. dashboard.js fetches both on demand from graphRender(); see loadForceGraph()
      and loadGraphEngine(). scripts/externalize_dashboard_assets.py enforces both halves:
      they stay out of this file, and the lazy references still have to resolve. -->
-<script src="/classic-assets/dashboard.js?v=20260809-physics-guard"></script>
+<script src="/classic-assets/dashboard.js?v=20260810-galaxy-explicit-reheat"></script>
 </body>
 </html>

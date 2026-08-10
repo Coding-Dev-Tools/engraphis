@@ -23,7 +23,7 @@
     graphDataAsOf: null,
     graphMeta: null,
     graphMode: 'overview',
-    graphShowUnlinked: false,
+    graphShowUnlinked: true,
     graphEngine: null,
     graphLoadPromise: null,
     graphLoadWorkspace: '',
@@ -31,6 +31,9 @@
     graphLoadIncludeCode: false,
     graphLoadShowUnlinked: false,
     graphLoadAsOf: null,
+    graphLoadKey: '',
+    graphLoadRequest: 0,
+    graphRetryPending: false,
     graphLoadController: null,
     graphConnectionsRequest: 0,
     graphConnectionsController: null,
@@ -44,6 +47,7 @@
     scopedRequests: Object.create(null),
     syncStatus: null,
     license: null,
+    releaseVersion: '',
   };
 
   const byId = id => document.getElementById(id);
@@ -100,7 +104,8 @@
       state.scopedRequests[kind] = number(state.scopedRequests[kind]) + 1;
     });
   };
-  const GRAPH_INITIAL_NODE_LIMIT = 320;
+  const GRAPH_INITIAL_NODE_LIMIT = 300;
+  const GRAPH_INITIAL_EDGE_LIMIT = 900;
   const GRAPH_FULL_NODE_LIMIT = 20_000;
   const GRAPH_LOAD_TIMEOUT_MS = 12_000;
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
@@ -111,7 +116,7 @@
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
     { id: 'graph-repel', key: 'repel', fallback: 48 },
-    { id: 'graph-link', key: 'link', fallback: 16 },
+    { id: 'graph-link', key: 'link', fallback: 8 },
     { id: 'graph-gravity', key: 'gravity', fallback: 48 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
     { id: 'graph-text-size', key: 'font', fallback: 12 },
@@ -122,6 +127,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 48, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -133,7 +139,7 @@
     },
     schema: {
       preset: 'communities', style: 'cyber', color: 'community', palette: 'theme',
-      layers: { ...GRAPH_DEFAULT_LAYERS }, minDegree: 1, depth: 2, showUnlinked: false, includeCode: false,
+      layers: { ...GRAPH_DEFAULT_LAYERS }, minDegree: 1, depth: 2, showUnlinked: true, includeCode: false,
     },
     people: {
       preset: 'radial', style: 'galaxy', color: 'community', palette: 'aurora',
@@ -152,6 +158,7 @@
     communities: 'Islands',
     radial: 'Radial',
     constellation: 'Constellation',
+    galaxy: 'Galaxy gravity',
   };
   const GRAPH_STYLE_NOTES = {
     cyber: 'Iridescent PVD over graphite — cyan, violet, and magenta across each node.',
@@ -346,15 +353,42 @@
   }
 
   let graphAssetsPromise = null;
-  function loadScript(src, globalName) {
+  let graphAssetsController = null;
+  let graphAssetsRetry = 0;
+  const graphAssetSource = source => graphAssetsRetry ? `${source}&retry=${graphAssetsRetry}` : source;
+  function loadScript(src, globalName, signal) {
     if (window[globalName]) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const script = document.createElement('script');
+      let settled = false;
+      const cleanup = () => {
+        if (signal) signal.removeEventListener('abort', abort);
+      };
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback(value);
+      };
+      const abort = () => {
+        script.remove();
+        const error = new Error(`loading ${globalName} was aborted`);
+        error.name = 'AbortError';
+        finish(reject, error);
+      };
       script.src = src;
+      script.dataset.engraphisGraphAsset = 'true';
       script.onload = () => window[globalName]
-        ? resolve()
-        : reject(new Error(`${globalName} did not register`));
-      script.onerror = () => reject(new Error(`could not load ${src}`));
+        ? finish(resolve)
+        : finish(reject, new Error(`${globalName} did not register`));
+      script.onerror = () => finish(reject, new Error(`could not load ${src}`));
+      if (signal) {
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        signal.addEventListener('abort', abort, { once: true });
+      }
       document.head.append(script);
     });
   }
@@ -362,22 +396,38 @@
   function ensureGraphAssets() {
     if (window.ForceGraph && window.EngraphisGraph) return Promise.resolve();
     if (!graphAssetsPromise) {
+      const controller = new AbortController();
       const attempt = loadScript(
-        '/v2-assets/vendor/d3.min.js?v=20260727-final',
-        'd3',
+        graphAssetSource('/v2-assets/vendor/d3.min.js?v=20260727-final'),
+        'd3', controller.signal,
       ).then(() => loadScript(
-        '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
-        'ForceGraph',
+        graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
+        'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260809-physics-guard',
-        'EngraphisGraph',
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat'),
+        'EngraphisGraph', controller.signal,
       ));
       graphAssetsPromise = attempt;
+      graphAssetsController = controller;
       attempt.catch(() => {
         if (graphAssetsPromise === attempt) graphAssetsPromise = null;
+        if (graphAssetsPromise === null) graphAssetsController = null;
       });
     }
     return graphAssetsPromise;
+  }
+
+  function releaseGraphAssetsAttempt(attempt) {
+    // A browser can leave a script fetch pending indefinitely. Do not let that stale promise
+    // become a permanent single-flight lock: remove its fetches and give the next explicit
+    // reload a unique URL so it cannot join the browser's already-stalled request.
+    if (graphAssetsPromise !== attempt) return;
+    graphAssetsPromise = null;
+    const controller = graphAssetsController;
+    graphAssetsController = null;
+    graphAssetsRetry += 1;
+    if (controller) controller.abort();
+    all('script[data-engraphis-graph-asset="true"]').forEach(script => script.remove());
   }
 
   function showNotice(message) {
@@ -506,6 +556,7 @@
       : access === 'trial' ? 'TRIAL'
         : access === 'lapsed' ? 'BILLING'
           : trial ? 'TRY PRO' : 'GET PRO';
+    badge.hidden = access === 'inactive' && trial;
     const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
       : access === 'lapsed' ? 'Update billing in Plans and billing'
         : trial ? 'Start the 3-day Pro trial in Plans and billing'
@@ -690,11 +741,20 @@
     });
   }
 
-  function savingsQuery(workspace, preset = 'all') {
-    const base = query(workspace);
-    if (preset === 'current') return `${base}&release_version=1.6`;
-    if (preset === '7d') return `${base}&from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
+  function savingsQuery(preset = 'all') {
+    const base = '';
+    if (preset === 'current' && state.releaseVersion) {
+      return `release_version=${encodeURIComponent(state.releaseVersion)}`;
+    }
+    if (preset === '7d') return `from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
     return base;
+  }
+
+  function savingsScopeLabel(payload) {
+    if (payload && payload.scope && payload.scope.workspace === 'all') {
+      return ` across ${number(payload.workspace_count).toLocaleString()} visible workspaces`;
+    }
+    return '';
   }
 
   function formatSavingsTokens(value) {
@@ -703,28 +763,6 @@
 
   function savingsRatio(value) {
     return Math.max(0, Math.min(1, number(value)));
-  }
-
-  function savingsMetric(estimate) {
-    const ratio = savingsRatio(estimate.savings_ratio);
-    const hero = node('div', 'savings-hero');
-    const value = node('div', 'savings-value');
-    value.append(
-      node('strong', 'savings-number', formatSavingsTokens(estimate.saved_tokens)),
-      node('span', 'savings-unit', 'tokens avoided'),
-    );
-    const rate = node('div', 'savings-rate');
-    rate.append(
-      node('strong', 'savings-rate-value', `${(ratio * 100).toFixed(1)}%`),
-      node('span', 'savings-rate-label', 'estimated reduction'),
-    );
-    hero.append(value, rate);
-    const progress = document.createElement('progress');
-    progress.className = 'savings-progress';
-    progress.max = 1;
-    progress.value = ratio;
-    progress.setAttribute('aria-label', `${(ratio * 100).toFixed(1)}% estimated context reduction`);
-    return { hero, progress };
   }
 
   function savingsCounts(payload) {
@@ -739,8 +777,8 @@
   }
 
   function renderSavingsOverview(payload) {
-    const target = byId('context-savings-summary-body');
     const { estimate, eligible, excluded } = savingsCounts(payload);
+    const scopeLabel = savingsScopeLabel(payload);
     const persistentValue = byId('context-savings-persistent-value');
     const persistentMeta = byId('context-savings-persistent-meta');
     const persistentRate = byId('context-savings-persistent-rate');
@@ -749,32 +787,15 @@
       if (persistentMeta) persistentMeta.textContent = meta;
       if (persistentRate) persistentRate.textContent = rate;
     };
-    if (!target) {
-      setPersistent('—', 'Savings estimate unavailable.');
-      return;
-    }
-    target.replaceChildren();
     if (!eligible) {
       setPersistent('—', excluded ? `${excluded} excluded or unclassified deliveries so far.` : 'Tracking starts with the first eligible delivery.');
-      target.append(
-        empty('No receipt-backed context savings yet.'),
-        node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'} so far.`),
-      );
       return;
     }
-    const metric = savingsMetric(estimate);
     const ratio = savingsRatio(estimate.savings_ratio);
     setPersistent(
       formatSavingsTokens(estimate.saved_tokens),
-      `Across ${eligible.toLocaleString()} eligible context deliveries · ${estimate.confidence || 'unknown'} confidence`,
+      `Across ${eligible.toLocaleString()} eligible context deliveries${scopeLabel} · ${estimate.confidence || 'unknown'} confidence`,
       `${(ratio * 100).toFixed(1)}% estimated reduction`,
-    );
-    target.append(
-      metric.hero,
-      metric.progress,
-      node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
-      node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
-      node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}.`),
     );
   }
 
@@ -782,12 +803,13 @@
     const target = byId('savings-detail');
     if (!target) return;
     const { estimate, eligible, excluded } = savingsCounts(payload);
+    const scopeLabel = savingsScopeLabel(payload);
     target.replaceChildren();
     const header = node('div', 'savings-detail-header');
     header.append(
       node('strong', 'savings-number', `${formatSavingsTokens(estimate.saved_tokens)} tokens`),
       node('span', '', eligible
-        ? `${eligible} eligible deliveries · ${(number(estimate.savings_ratio) * 100).toFixed(1)}% estimated reduction`
+        ? `${eligible} eligible deliveries${scopeLabel} · ${(number(estimate.savings_ratio) * 100).toFixed(1)}% estimated reduction`
         : 'No eligible estimates in this range.'),
     );
     const presets = node('div', 'savings-presets');
@@ -945,16 +967,13 @@
     renderTypeBars(stats);
   }
 
-  async function loadSavings(workspace, epoch) {
+  async function loadSavings(epoch) {
     try {
-      const payload = await api(`/context-savings?${savingsQuery(workspace)}`);
+      const payload = await api(`/context-savings?${savingsQuery()}`);
       if (epoch !== state.refreshEpoch) return;
       renderSavingsOverview(payload);
     } catch (error) {
       if (epoch !== state.refreshEpoch) return;
-      const message = `Could not load savings: ${error.message}`;
-      const target = byId('context-savings-summary-body');
-      if (target) target.replaceChildren(empty(message));
       const persistentValue = byId('context-savings-persistent-value');
       const persistentMeta = byId('context-savings-persistent-meta');
       const persistentRate = byId('context-savings-persistent-rate');
@@ -1053,7 +1072,6 @@
     try {
       const results = await Promise.allSettled([
         loadStats(name, epoch),
-        loadSavings(name, epoch),
         loadMemories(name, epoch),
         loadToday(name, epoch),
       ]);
@@ -1063,7 +1081,10 @@
       renderWorkspaceList();
       if (state.view === 'relations') await loadGraph();
       if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
-      if (state.view === 'manage') await loadManageTab(state.manageTab);
+      if (state.view === 'manage') {
+        await loadSavings(epoch);
+        await loadManageTab(state.manageTab);
+      }
     } catch (error) {
       if (epoch === state.refreshEpoch) showNotice(`Could not refresh ${name}: ${error.message}`);
     }
@@ -1861,26 +1882,54 @@
     }
   }
 
+  function graphCommunityIndex(value) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const source = text(value);
+    let hash = 0;
+    for (let index = 0; index < source.length; index += 1) hash = ((hash * 31) + source.charCodeAt(index)) | 0;
+    return Math.abs(hash);
+  }
+
+  function optionalGraphNumber(value) {
+    return value == null || value === '' ? undefined : number(value);
+  }
+
   function graphNodes(payload) {
     const source = payload.nodes || payload.entities || [];
     return source.map(item => ({
+      ...item,
       id: item.id,
       name: item.label || item.name || item.id,
       label: item.label || item.name || item.id,
       etype: item.etype || item.type || 'person_or_concept',
       nodeKind: item.node_kind || item.kind || '',
-      degree: number(item.degree),
-      community: Number.isFinite(Number(item.community)) ? Number(item.community) : undefined,
-      repo: item.repo || '',
+      degree: number(item.degree != null ? item.degree : item.weighted_degree),
+      community: item.community_id != null ? graphCommunityIndex(item.community_id)
+        : (item.community != null ? graphCommunityIndex(item.community) : undefined),
+      community_id: item.community_id == null ? item.community : item.community_id,
+      gravity_mass: optionalGraphNumber(item.gravity_mass),
+      visual_radius: optionalGraphNumber(item.visual_radius),
+      anchor_role: item.anchor_role || '',
+      x: Number.isFinite(Number(item.x)) ? Number(item.x) : undefined,
+      y: Number.isFinite(Number(item.y)) ? Number(item.y) : undefined,
+      repo_names: Array.isArray(item.repo_names) ? item.repo_names.filter(name => typeof name === 'string') : [],
+      // The legacy engine reads `repo`; scene-aware engines use `repo_names`. Keeping both
+      // makes filtering work during an asset-cache transition without mutating scene data.
+      repo: item.repo || (Array.isArray(item.repo_names) ? item.repo_names.join(' ') : ''),
       topic: item.topic || '',
       valid_from: item.valid_from,
       valid_to: item.valid_to,
+      ghost: item.ghost === true,
+      member_count: optionalGraphNumber(item.member_count),
+      visible_by_default: item.visible_by_default !== false,
     }));
   }
 
   function graphLinks(payload) {
     const source = payload.edges || payload.links || [];
     return source.map((item, index) => ({
+      ...item,
       id: item.id || `edge-${index}`,
       source: item.from || (item.source && (item.source.id || item.source)),
       target: item.to || (item.target && (item.target.id || item.target)),
@@ -1888,6 +1937,13 @@
       layer: item.layer || 'semantic',
       valid_from: item.valid_from,
       valid_to: item.valid_to,
+      rest_length: optionalGraphNumber(item.rest_length),
+      spring_strength: optionalGraphNumber(item.spring_strength),
+      physics_strength: optionalGraphNumber(item.physics_strength),
+      strength: optionalGraphNumber(item.strength),
+      ghost: item.ghost === true,
+      bridge: item.bridge === true,
+      visible_by_default: item.visible_by_default !== false,
     })).filter(item => item.source && item.target);
   }
 
@@ -2113,8 +2169,39 @@
         ? 'Full node graph always includes unlinked nodes and never collapses clusters.'
         : '';
     });
-    const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Islands';
+    updateGraphGalaxyControls();
+    const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Galaxy gravity';
     byId('graph-mode').textContent = `${full ? 'Full node graph' : 'Responsive overview'} · ${preset}`;
+  }
+
+  function graphIsGalaxy() {
+    return byId('graph-preset').value === 'galaxy';
+  }
+
+  function graphSizeBy() {
+    return graphIsGalaxy() ? 'evidence_mass' : byId('graph-size').value;
+  }
+
+  function updateGraphGalaxyControls() {
+    const galaxy = graphIsGalaxy();
+    const size = byId('graph-size');
+    if (galaxy) {
+      if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
+      size.value = 'evidence_mass';
+      size.disabled = true;
+      size.title = 'Galaxy gravity sizes stars by evidence mass.';
+    } else {
+      size.disabled = false;
+      size.title = '';
+      if (size.value === 'evidence_mass') size.value = size.dataset.legacyValue || 'degree';
+    }
+    const labels = galaxy
+      ? ['Orbital separation', 'Link distance · tight ↔ loose', 'Gravity strength · loose ↔ tight']
+      : ['Repel force', 'Link distance', 'Centre gravity'];
+    ['graph-repel-label', 'graph-link-label', 'graph-gravity-label'].forEach((id, index) => {
+      const label = byId(id);
+      if (label) label.textContent = labels[index];
+    });
   }
 
   function setChoicePressed(selector, dataKey, selected) {
@@ -2135,6 +2222,7 @@
     setChoicePressed('[data-graph-color-choice]', 'graphColorChoice', color);
     setChoicePressed('[data-graph-palette-choice]', 'graphPaletteChoice', palette);
     byId('graph-style-note').textContent = GRAPH_STYLE_NOTES[style] || GRAPH_STYLE_NOTES.classic;
+    updateGraphGalaxyControls();
     syncGraphSavedViews();
   }
 
@@ -2316,7 +2404,7 @@
 
   function restoreGraphPreferences() {
     const preset = graphPreference('preset', byId('graph-preset').value,
-      ['original', 'compact', 'communities', 'radial', 'constellation']);
+      ['original', 'compact', 'communities', 'radial', 'constellation', 'galaxy']);
     const style = graphPreference('style', byId('graph-style').value,
       ['classic', 'galaxy', 'solar', 'cyber']);
     const color = graphPreference('color', byId('graph-color').value,
@@ -2348,7 +2436,7 @@
     byId('graph-collapse').checked = graphPreference('collapse', byId('graph-collapse').checked) === true;
     byId('graph-ghosts').checked = graphPreference('ghosts', byId('graph-ghosts').checked) !== false;
     byId('graph-size').value = graphPreference('size', byId('graph-size').value,
-      ['degree', 'betweenness']);
+      ['degree', 'betweenness', 'evidence_mass']);
     // Freeze is deliberately session-only. A previously frozen arrangement must not make a
     // freshly opened graph look broken; physics starts live until the person clicks Freeze.
     state.graphFrozen = false;
@@ -2436,7 +2524,7 @@
         graph.setLayers(graphLayerState());
         graph.setRepoFilter(repoFilter);
         graph.setAsOf(graphAsOfTimestamp());
-        graph.setSizeBy(byId('graph-size').value);
+        graph.setSizeBy(graphSizeBy());
         graph.setBridges(byId('graph-bridges').checked);
         graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
         graph.setGhosts(byId('graph-ghosts').checked);
@@ -2470,7 +2558,7 @@
     syncGraphTuning({ ...graphPresetTuning(preset), flowSpeed: 45 });
     setGraphMinDegree(1, false);
     setGraphDepth(2, false);
-    setGraphShowUnlinked(false, false);
+    setGraphShowUnlinked(true, false);
     setGraphLayers(GRAPH_DEFAULT_LAYERS);
     clearGraphSavedView();
     if (state.graphEngine) {
@@ -2596,6 +2684,31 @@
     return timestamp === null ? '' : `&as_of=${encodeURIComponent(timestamp / 1000)}`;
   }
 
+  function graphLoadKey(workspace, mode, includeCode, showUnlinked, asOf, repo) {
+    return JSON.stringify([workspace, mode, includeCode, showUnlinked, asOf, repo || '']);
+  }
+
+  function isCurrentGraphLoad(request) {
+    return Boolean(request
+      && request.id === state.graphLoadRequest
+      && request.key === state.graphLoadKey
+      && request.workspace === state.workspace
+      && request.mode === state.graphMode
+      && request.includeCode === state.graphIncludeCode
+      && request.showUnlinked === state.graphShowUnlinked
+      && request.asOf === graphAsOfTimestamp());
+  }
+
+  function retryGraphLoad() {
+    // A Retry click starts a new request rather than inheriting a timed-out promise. Keep its
+    // pending state local to the button so rapid clicks cannot repeatedly cancel fresh work.
+    if (state.graphRetryPending) return;
+    state.graphRetryPending = true;
+    Promise.resolve(loadGraph({ force: true })).finally(() => {
+      state.graphRetryPending = false;
+    });
+  }
+
   async function loadGraph({ force = false } = {}) {
     if (!state.workspace) return;
     if (!force && state.graphWorkspace === state.workspace
@@ -2611,49 +2724,107 @@
     const targetIncludeCode = state.graphIncludeCode;
     const targetShowUnlinked = state.graphShowUnlinked;
     const targetAsOf = graphAsOfTimestamp();
+    const targetRepo = (byId('graph-repo-filter').value || '').trim();
     const fullGraph = targetMode === 'full';
-    if (state.graphLoadPromise && state.graphLoadWorkspace === targetWorkspace
-      && state.graphLoadMode === targetMode && state.graphLoadIncludeCode === targetIncludeCode
-      && state.graphLoadShowUnlinked === targetShowUnlinked
-      && state.graphLoadAsOf === targetAsOf) {
+    const key = graphLoadKey(
+      targetWorkspace, targetMode, targetIncludeCode, targetShowUnlinked, targetAsOf, targetRepo,
+    );
+    if (!force && state.graphLoadPromise && state.graphLoadKey === key) {
       return state.graphLoadPromise;
     }
-    if (state.graphLoadPromise && state.graphLoadController) state.graphLoadController.abort();
+    const request = {
+      id: state.graphLoadRequest + 1,
+      key,
+      workspace: targetWorkspace,
+      mode: targetMode,
+      includeCode: targetIncludeCode,
+      showUnlinked: targetShowUnlinked,
+      asOf: targetAsOf,
+    };
+    const controller = new AbortController();
+    const previousController = state.graphLoadController;
+    // Publish the new identity before cancelling the old request. Its timeout/error handler
+    // then becomes a no-op even when the next request has identical filters (a true retry).
+    state.graphLoadRequest = request.id;
+    state.graphLoadKey = key;
+    state.graphLoadWorkspace = targetWorkspace;
+    state.graphLoadMode = targetMode;
+    state.graphLoadIncludeCode = targetIncludeCode;
+    state.graphLoadShowUnlinked = targetShowUnlinked;
+    state.graphLoadAsOf = targetAsOf;
+    state.graphLoadController = controller;
+    if (previousController && !previousController.signal.aborted) previousController.abort();
     byId('graph-empty').hidden = false;
     byId('graph-empty').textContent = fullGraph
       ? 'Loading every available graph node…'
       : 'Loading the responsive evidence graph…';
     const task = (async () => {
-      const controller = new AbortController();
-      state.graphLoadController = controller;
-      const timeout = window.setTimeout(
-        () => controller.abort(),
-        fullGraph ? GRAPH_FULL_LOAD_TIMEOUT_MS : GRAPH_LOAD_TIMEOUT_MS,
-      );
+      const assets = ensureGraphAssets();
+      const deadline = fullGraph ? GRAPH_FULL_LOAD_TIMEOUT_MS : GRAPH_LOAD_TIMEOUT_MS;
+      let rejectTimeout;
+      const timeoutPromise = new Promise((_, reject) => {
+        rejectTimeout = reject;
+      });
+      const timeout = window.setTimeout(() => {
+        releaseGraphAssetsAttempt(assets);
+        if (!controller.signal.aborted) controller.abort();
+        const error = new Error('graph loading timed out');
+        error.name = 'AbortError';
+        rejectTimeout(error);
+      }, deadline);
       try {
-        const limit = fullGraph ? GRAPH_FULL_NODE_LIMIT : GRAPH_INITIAL_NODE_LIMIT;
-        const complete = fullGraph ? '&full=true' : '';
+        const level = fullGraph ? 'complete' : 'overview';
+        const limits = fullGraph ? ''
+          : `&node_limit=${GRAPH_INITIAL_NODE_LIMIT}&edge_limit=${GRAPH_INITIAL_EDGE_LIMIT}`;
         const connectedOnly = !fullGraph && !targetShowUnlinked ? '&connected_only=true' : '';
         const includeCode = targetIncludeCode ? '&include_code=true' : '';
+        const codeRepo = targetIncludeCode && targetRepo
+          ? `&repo=${encodeURIComponent(targetRepo)}` : '';
         const asOf = targetAsOf === null ? '' : `&as_of=${encodeURIComponent(targetAsOf / 1000)}`;
-        const [payload] = await Promise.all([
-          api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${connectedOnly}${includeCode}${asOf}`, { signal: controller.signal }),
-          ensureGraphAssets(),
+        const history = targetAsOf === null ? '' : '&include_history=true';
+        // Complete Ledger views are canonical entity projections. Memory nodes remain available
+        // to compatible callers, but must not change the existing entity evidence click path.
+        const memoryProjection = fullGraph ? '&include_memory_nodes=false' : '';
+        const [payload] = await Promise.race([
+          Promise.all([
+            api(`/graph/scene?${query(targetWorkspace)}&level=${level}${limits}${connectedOnly}${includeCode}${codeRepo}${asOf}${history}${memoryProjection}`, { signal: controller.signal }),
+            assets,
+          ]),
+          timeoutPromise,
         ]);
-        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
-          || state.graphIncludeCode !== targetIncludeCode
-          || state.graphShowUnlinked !== targetShowUnlinked
-          || graphAsOfTimestamp() !== targetAsOf) return;
-        const data = { nodes: graphNodes(payload), links: graphLinks(payload), suggestions: payload.suggestions || [] };
+        if (!isCurrentGraphLoad(request)) return;
+        const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : payload;
+        const data = {
+          nodes: graphNodes(scene),
+          links: graphLinks(scene),
+          suggestions: scene.suggestions || [],
+          communities: scene.communities || [],
+          community_bridges: scene.community_bridges || scene.bridges || [],
+          meta: scene.meta || payload.meta || {},
+          metadata: scene.metadata || payload.metadata || {},
+          layout_seed: scene.layout_seed ?? (scene.meta && scene.meta.layout_seed) ?? (payload.meta && payload.meta.layout_seed),
+        };
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
         state.graphDataIncludeCode = targetIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
-        state.graphMeta = payload.meta || {
-          nodes_available: data.nodes.length,
-          nodes_complete: fullGraph,
+        const sceneMeta = scene.meta || payload.meta || {};
+        if (sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter') {
+          state.graphIncludeCode = false;
+          state.graphDataIncludeCode = false;
+          setGraphLayers({ ...graphLayerState(), code: false });
+          saveGraphPreferences();
+          showNotice('Code overlay skipped for this workspace. Choose a repository filter to include code relationships.');
+        }
+        state.graphMeta = {
+          ...sceneMeta,
+          nodes_available: sceneMeta.nodes_available == null ? (sceneMeta.total_nodes == null
+            ? data.nodes.length : sceneMeta.total_nodes) : sceneMeta.nodes_available,
+          nodes_complete: sceneMeta.nodes_complete == null
+            ? (sceneMeta.truncated == null ? fullGraph : !sceneMeta.truncated)
+            : sceneMeta.nodes_complete,
         };
         if (state.graphEngine) state.graphEngine.destroy();
         if (typeof window.EngraphisGraph === 'undefined') throw new Error('graph engine asset is unavailable');
@@ -2683,7 +2854,7 @@
           graph.setLayers(graphLayerState());
           graph.setRepoFilter(byId('graph-repo-filter').value);
           graph.setAsOf(graphAsOfTimestamp());
-          graph.setSizeBy(byId('graph-size').value);
+          graph.setSizeBy(graphSizeBy());
           graph.setBridges(byId('graph-bridges').checked);
           graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
           graph.setGhosts(byId('graph-ghosts').checked);
@@ -2694,9 +2865,9 @@
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
         updateGraphFacts(data);
-        updateGraphLayerCounts(data, payload.layers);
+        updateGraphLayerCounts(data, scene.layers || payload.layers);
       } catch (error) {
-        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode) return;
+        if (!isCurrentGraphLoad(request)) return;
         byId('graph-empty').hidden = false;
         byId('graph-empty').textContent = error && error.name === 'AbortError'
           ? `${fullGraph ? 'Full graph' : 'Graph'} loading timed out. Choose Retry to try again.`
@@ -2706,11 +2877,6 @@
         if (state.graphLoadController === controller) state.graphLoadController = null;
       }
     })();
-    state.graphLoadWorkspace = targetWorkspace;
-    state.graphLoadMode = targetMode;
-    state.graphLoadIncludeCode = targetIncludeCode;
-    state.graphLoadShowUnlinked = targetShowUnlinked;
-    state.graphLoadAsOf = targetAsOf;
     state.graphLoadPromise = task;
     try {
       return await task;
@@ -2722,6 +2888,7 @@
         state.graphLoadIncludeCode = false;
         state.graphLoadShowUnlinked = false;
         state.graphLoadAsOf = null;
+        state.graphLoadKey = '';
       }
     }
   }
@@ -2851,24 +3018,24 @@
     const [auditResult, receiptsResult, savingsResult] = await Promise.allSettled([
       api(`/audit?${query(request.workspace)}&limit=100`),
       api(`/receipts?${query(request.workspace)}&limit=100`),
-      api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
+      api(`/context-savings?${savingsQuery(state.savingsPreset)}`),
     ]);
-      if (!isCurrentScopedRequest(request)) return;
-      if (savingsResult.status === 'fulfilled') {
-        renderSavingsDetail(savingsResult.value);
-      } else {
-        byId('savings-detail').replaceChildren(empty(`Could not load context savings: ${savingsResult.reason.message}`));
-      }
-      const audit = auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : [];
-      const receipts = receiptsResult.status === 'fulfilled' ? receiptItems(receiptsResult.value) : [];
-      if (auditResult.status === 'rejected' && receiptsResult.status === 'rejected') {
-        target.replaceChildren(empty('Could not load audit records or receipts. Try again.'));
-      } else {
-        renderAuditCards(audit, receipts);
-      }
-      if (auditResult.status === 'rejected' || receiptsResult.status === 'rejected') {
-        showNotice('Some provenance data could not be loaded; available records remain visible.');
-      }
+    if (!isCurrentScopedRequest(request)) return;
+    if (savingsResult.status === 'fulfilled') {
+      renderSavingsDetail(savingsResult.value);
+    } else {
+      byId('savings-detail').replaceChildren(empty(`Could not load context savings: ${savingsResult.reason.message}`));
+    }
+    const audit = auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : [];
+    const receipts = receiptsResult.status === 'fulfilled' ? receiptItems(receiptsResult.value) : [];
+    if (auditResult.status === 'rejected' && receiptsResult.status === 'rejected') {
+      target.replaceChildren(empty('Could not load audit records or receipts. Try again.'));
+    } else {
+      renderAuditCards(audit, receipts);
+    }
+    if (auditResult.status === 'rejected' || receiptsResult.status === 'rejected') {
+      showNotice('Some provenance data could not be loaded; available records remain visible.');
+    }
   }
 
   async function verifyReceipts() {
@@ -3597,7 +3764,10 @@
     } catch (_) {}
     if (view === 'relations') loadGraph();
     if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
-    if (view === 'manage') loadManageTab(state.manageTab);
+    if (view === 'manage') {
+      loadSavings(state.refreshEpoch);
+      loadManageTab(state.manageTab);
+    }
     window.scrollTo({ top: 0, behavior: 'instant' });
     const heading = byId(`${view}-title`);
     if (heading) {
@@ -3622,6 +3792,9 @@
   async function refreshBootstrap(preferred = '') {
     const bootstrap = await api('/bootstrap');
     renderUpdateBanner(bootstrap.update);
+    if (typeof bootstrap.version === 'string' && bootstrap.version.trim()) {
+      state.releaseVersion = bootstrap.version.trim();
+    }
     state.workspaces = bootstrap.workspaces || [];
     state.license = bootstrap.license || state.license;
     updatePlanBadge();
@@ -3647,7 +3820,6 @@
       emptyActivity.append(emptyActivityCell);
       byId('activity-body').replaceChildren(emptyActivity);
       byId('proactive-list').replaceChildren(empty('Create a workspace to see proactive context.'));
-      byId('context-savings-summary-body').replaceChildren(empty('Create a workspace to start tracking context savings.'));
       byId('context-savings-persistent-value').textContent = '—';
       byId('context-savings-persistent-meta').textContent = 'Create a workspace to start tracking context savings.';
       byId('context-savings-persistent-rate').textContent = '—';
@@ -3834,6 +4006,7 @@
     if (state.graphEngine) settings = state.graphEngine.setPreset(preset);
     syncGraphTuning(settings);
     updateGraphModeControls();
+    if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
     clearGraphSavedView();
     syncGraphChoices();
     saveGraphPreferences();
@@ -3904,7 +4077,7 @@
   all('[data-graph-saved-view]').forEach(control => control.addEventListener('click', () => applyGraphView(control.dataset.graphSavedView)));
   byId('graph-save-view').addEventListener('click', saveCurrentGraphView);
   byId('graph-reset-tuning').addEventListener('click', resetGraphTuning);
-  byId('graph-retry').addEventListener('click', () => loadGraph({ force: true }));
+  byId('graph-retry').addEventListener('click', retryGraphLoad);
   byId('graph-bridges').addEventListener('change', event => {
     if (state.graphEngine) state.graphEngine.setBridges(event.target.checked);
     saveGraphPreferences();
@@ -3923,7 +4096,7 @@
     saveGraphPreferences();
   });
   byId('graph-size').addEventListener('change', event => {
-    if (state.graphEngine) state.graphEngine.setSizeBy(event.target.value);
+    if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
     saveGraphPreferences();
   });
   byId('graph-export').addEventListener('click', () => {

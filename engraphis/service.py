@@ -38,6 +38,7 @@ from engraphis import __version__
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.graph_scene import (
+    ALGORITHM_VERSION as GRAPH_SCENE_ALGORITHM_VERSION,
     build_canonical_graph,
     build_graph_scene,
     is_broad_search_fragment,
@@ -243,7 +244,9 @@ def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -
     )
 
 
-def _graph_edge_history_visibility_sql(edge_alias: str, *, at: float) -> str:
+def _graph_edge_history_visibility_sql(
+    edge_alias: str, *, at: float, known_at: Optional[float] = None,
+) -> str:
     """Visibility predicate for a time-travel graph payload.
 
     The ordinary graph reader asks whether evidence is public *at now*.  The Time
@@ -254,6 +257,7 @@ def _graph_edge_history_visibility_sql(edge_alias: str, *, at: float) -> str:
     hidden in either case.
     """
     anchor = repr(float(at))
+    known_anchor = repr(float(known_at)) if known_at is not None else repr(time.time())
     return (
         "(NOT EXISTS (SELECT 1 FROM edge_supports history_support "
         f"WHERE history_support.edge_id={edge_alias}.id) OR EXISTS ("
@@ -262,9 +266,13 @@ def _graph_edge_history_visibility_sql(edge_alias: str, *, at: float) -> str:
         f"WHERE history_support.edge_id={edge_alias}.id "
         "AND (history_support.valid_from IS NULL "
         f"OR history_support.valid_from<={anchor}) "
+        "AND (history_support.ingested_at IS NULL "
+        f"OR history_support.ingested_at<={known_anchor}) "
         "AND history_support.expired_at IS NULL "
         "AND (history_memory.valid_from IS NULL "
         f"OR history_memory.valid_from<={anchor}) "
+        "AND (history_memory.ingested_at IS NULL "
+        f"OR history_memory.ingested_at<={known_anchor}) "
         "AND history_memory.expired_at IS NULL "
         "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
     )
@@ -952,6 +960,14 @@ def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
 
 
 def _auto_migrate_v1_if_needed(db_path: str) -> None:
+    """Serialize legacy-database recovery and migration across processes."""
+    from engraphis.config import _migration_lock
+
+    with _migration_lock(Path(db_path).expanduser()):
+        _auto_migrate_v1_if_needed_unlocked(db_path)
+
+
+def _auto_migrate_v1_if_needed_unlocked(db_path: str) -> None:
     """If *db_path* is an existing v1-shaped SQLite file, migrate it to the v2 schema
     in place before :class:`~engraphis.core.engine.MemoryEngine` (via ``Store``) ever
     touches it.
@@ -1271,6 +1287,20 @@ class MemoryService:
                 raise ValidationError(f"no repo named '{rp}' in workspace '{ws}' yet")
         return wid, rid
 
+    def _visible_workspace_ids(self) -> list[str]:
+        """Return workspace ids visible to the current caller for global accounting."""
+        rows = self.store.conn.execute(
+            "SELECT id, name FROM workspaces ORDER BY name"
+        ).fetchall()
+        visible: list[str] = []
+        for row in rows:
+            try:
+                self._clean_ws(row["name"])
+            except ValidationError:
+                continue
+            visible.append(str(row["id"]))
+        return visible
+
     def _authorize_workspace(self, ws: str) -> str:
         """Enforce the server-side workspace binding. When this instance is bound to a set
         of workspaces (``ENGRAPHIS_WORKSPACES``), no caller may read or write a workspace
@@ -1348,12 +1378,13 @@ class MemoryService:
         not have an identity and retain the established single-tenant behaviour.
         """
         user = _authenticated_principal()
-        existing = self._lookup_workspace(ws)
-        if existing is not None:
-            return existing
         owner = user["email"] if user is not None else ""
         workspace_settings = {"visibility": "personal", "owner": owner} if owner else None
-        return self.store.create_workspace(ws, settings=workspace_settings)
+        # The read-then-create sequence used to race when two first-use requests
+        # arrived together.  The Store helper serializes the insert and re-reads the
+        # winner, so retries converge on one workspace instead of surfacing a UNIQUE
+        # constraint error to the caller.
+        return self.store.get_or_create_workspace(ws, settings=workspace_settings)
 
     def _enforce_personal_access(self, ws: str) -> None:
         """Block access to another user's personal folder. No current user (single-tenant,
@@ -6154,7 +6185,7 @@ class MemoryService:
     def context_savings(
         self,
         *,
-        workspace: str,
+        workspace: Optional[str] = None,
         repo: Optional[str] = None,
         from_ts: Any = None,
         to_ts: Any = None,
@@ -6162,9 +6193,16 @@ class MemoryService:
         format: Optional[str] = None,
         group_by: Optional[str] = None,
     ) -> dict:
-        """Return receipt-backed context savings for an optional time/release window."""
-        ws = self._clean_ws(workspace)
+        """Return receipt-backed context savings for an optional time/release window.
+
+        Omitting ``workspace`` aggregates the complete visible local history. The summary
+        contains only validated, content-free receipt counters; workspace-scoped callers
+        retain the existing isolation behavior.
+        """
+        ws = self._clean_ws(workspace) if workspace is not None else None
         rp = _clean_name(repo, field="repo") if repo else None
+        if ws is None and rp is not None:
+            raise ValidationError("repo requires workspace")
         from_value = _optional_timestamp(from_ts, field="from_ts")
         to_value = _optional_timestamp(to_ts, field="to_ts")
         if from_value is not None and to_value is not None and from_value > to_value:
@@ -6173,16 +6211,26 @@ class MemoryService:
             release_version = normalize_release_version(release_version)
             if not release_version:
                 raise ValidationError("release_version must be a semantic version")
-        wid, rid = self._require_scope(ws, rp)
+        if ws is None:
+            wid = None
+            rid = None
+            visible_workspace_ids = self._visible_workspace_ids()
+        else:
+            wid, rid = self._require_scope(ws, rp)
+            visible_workspace_ids = None
         fmt = str(format or "json").strip().casefold()
         if fmt not in ("json", "csv"):
             raise ValidationError("format must be 'json' or 'csv'")
         gb = str(group_by or "").strip().casefold() if group_by else ""
         base = {
             "format": "engraphis-context-savings/1",
-            "scope": {"workspace": ws, **({"repo": rp} if rp else {})},
+            "scope": ({"workspace": ws, **({"repo": rp} if rp else {})}
+                      if ws is not None else {"workspace": "all"}),
+            **({"workspace_count": len(visible_workspace_ids)}
+               if visible_workspace_ids is not None else {}),
             **self.store.context_savings(
                 workspace_id=wid,
+                workspace_ids=visible_workspace_ids,
                 repo_id=rid,
                 from_ts=from_value,
                 to_ts=to_value,
@@ -6197,6 +6245,7 @@ class MemoryService:
                 )
             rows = self.store.context_savings_grouped(
                 workspace_id=wid,
+                workspace_ids=visible_workspace_ids,
                 repo_id=rid,
                 group_by=gb,
                 from_ts=from_value,
@@ -7556,7 +7605,9 @@ class MemoryService:
                           time_to: Optional[float] = None,
                           include_weak_cooccurrence: bool = True,
                           include_code: bool = False,
-                          include_complete_rows: bool = False) -> tuple:
+                          include_complete_rows: bool = False,
+                          include_history: bool = False,
+                          include_memory_nodes: bool = True) -> tuple:
         """Load one transactionally consistent graph snapshot and generation state."""
         clean_workspace = self._clean_ws(workspace)
         workspace_id = self._lookup_workspace(clean_workspace)
@@ -7579,6 +7630,8 @@ class MemoryService:
                 include_weak_cooccurrence=include_weak_cooccurrence,
                 include_code=include_code,
                 include_complete_rows=include_complete_rows,
+                include_history=include_history,
+                include_memory_nodes=include_memory_nodes,
             )
             index_info = self._graph_index_info(rows[1]) if rows[1] else {
                 "generation": 0,
@@ -7605,7 +7658,9 @@ class MemoryService:
                                    time_to: Optional[float] = None,
                                    include_weak_cooccurrence: bool = True,
                                    include_code: bool = False,
-                                   include_complete_rows: bool = False) -> tuple:
+                                   include_complete_rows: bool = False,
+                                   include_history: bool = False,
+                                   include_memory_nodes: bool = True) -> tuple:
         """Load the complete scoped graph for deterministic server-side ranking.
 
         This is intentionally read-only. Graph population is an explicit write/index
@@ -7655,9 +7710,8 @@ class MemoryService:
         entity_sql = (
             "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
             "normalized_name, canonical_method, canonical_confidence, created_at "
-            "FROM entities entity WHERE workspace_id=? AND "
-            + _graph_entity_visibility_sql("entity", at=t)
-            + " AND (created_at IS NULL OR created_at<=?)"
+            "FROM entities entity WHERE workspace_id=? "
+            "AND (created_at IS NULL OR created_at<=?)"
         )
         entity_params: list[Any] = [wid, known_t]
         if repo_id:
@@ -7670,30 +7724,33 @@ class MemoryService:
                 entity_sql += f" AND etype IN ({marks})"
                 entity_params.extend(clean_types)
         entity_sql += " ORDER BY canonical_id, id LIMIT ?"
-        entity_params.append(MAX_GRAPH_ANALYSIS_ENTITIES + 1)
+        entity_params.append(MAX_GRAPH_ANALYSIS_ENTITIES * 3 + 1)
         entity_rows = [dict(row) for row in self.store.conn.execute(
             entity_sql, entity_params
         ).fetchall()]
-        if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
-            if include_complete_rows:
-                raise GraphSceneCapacityExceeded(
-                    resource="entity rows", count=len(entity_rows),
-                    limit=MAX_GRAPH_ANALYSIS_ENTITIES,
-                )
-            raise ValidationError(
-                "graph analysis exceeds the entity candidate limit; filter by repository"
-            )
 
         edge_sql = (
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
-            "valid_from, valid_to, ingested_at, expired_at, provenance FROM edges "
-            "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
-            "AND (valid_to IS NULL OR ?<valid_to "
-            "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-            "AND (ingested_at IS NULL OR ingested_at<=?) "
-            "AND (expired_at IS NULL OR ?<expired_at)"
+            "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
+            "provenance FROM edges WHERE workspace_id=? "
         )
-        edge_params: list[Any] = [wid, t, t, known_t, known_t, known_t]
+        if include_history:
+            edge_sql += (
+                "AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND expired_at IS NULL AND "
+                + _graph_edge_history_visibility_sql("edges", at=t, known_at=known_t)
+            )
+            edge_params: list[Any] = [wid, t, known_t]
+        else:
+            edge_sql += (
+                "AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (valid_to IS NULL OR ?<valid_to "
+                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                "AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)"
+            )
+            edge_params = [wid, t, t, known_t, known_t, known_t]
         if repo_id:
             edge_sql += " AND (repo_id=? OR repo_id IS NULL)"
             edge_params.append(repo_id)
@@ -7705,7 +7762,10 @@ class MemoryService:
         # legacy/manual edges remain visible for compatibility; an edge that does carry
         # evidence must have a current non-session support.
         restrict_sessions = True
-        evidence_filter = True
+        # History visibility is enforced by ``_graph_edge_history_visibility_sql``.
+        # The ordinary evidence predicate below is intentionally live-only and would
+        # otherwise erase the closed relations that history mode is meant to expose.
+        evidence_filter = not include_history
         prune_entities = bool(
             clean_memory_types or lower_time is not None or upper_time is not None
         )
@@ -7759,6 +7819,18 @@ class MemoryService:
         edge_rows = [dict(row) for row in self.store.conn.execute(
             edge_sql, edge_params
         ).fetchall()]
+        if include_history:
+            for edge in edge_rows:
+                valid_to_value = edge.get("valid_to")
+                recorded_at = edge.get("valid_to_recorded_at")
+                try:
+                    edge["ghost"] = bool(
+                        valid_to_value is not None
+                        and float(valid_to_value) <= t
+                        and (recorded_at is None or float(recorded_at) <= known_t)
+                    )
+                except (TypeError, ValueError):
+                    edge["ghost"] = False
         if len(edge_rows) > MAX_GRAPH_ANALYSIS_EDGES:
             if include_complete_rows:
                 raise GraphSceneCapacityExceeded(
@@ -7769,22 +7841,52 @@ class MemoryService:
                 "graph analysis exceeds the relation candidate limit; filter by repository"
             )
 
-        # ``_graph_entity_visibility_sql`` classifies session privacy across the full
-        # history, but it cannot decide whether the public evidence was known at this
-        # particular pair of anchors. Remove evidence-bearing identities with no
-        # temporally visible touching relation; truly manual/isolated entities remain.
-        touching_sql = (
-            "SELECT src, dst FROM edges WHERE workspace_id=?"
-        )
-        touching_params: list[Any] = [wid]
-        if repo_id:
-            touching_sql += " AND (repo_id=? OR repo_id IS NULL)"
-            touching_params.append(repo_id)
+        # Classify physical entity visibility across the complete workspace history in
+        # one set-wise pass.  The previous per-entity predicate rescanned the workspace
+        # edge index three times for every entity.  Keep its exact privacy semantics:
+        # entities with no edge history, a support-less/manual edge, or any non-session
+        # support are public; identities whose complete history is session-only are not.
+        # This physical-ID filter must run before canonical grouping so a public alias
+        # cannot pull a private alias into ``member_ids``. Repository filtering is applied
+        # only to the later scene-selection pass, never to this privacy classification.
+        visibility_rows = self.store.conn.execute(
+            "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
+            "MAX(CASE "
+            "WHEN visibility_support.edge_id IS NULL THEN 1 "
+            "WHEN visibility_memory.id IS NOT NULL "
+            "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
+            "ELSE 0 END) AS public_edge "
+            "FROM edges visibility_edge "
+            "LEFT JOIN edge_supports visibility_support "
+            "ON visibility_support.edge_id=visibility_edge.id "
+            "LEFT JOIN memories visibility_memory "
+            "ON visibility_memory.id=visibility_support.memory_id "
+            "WHERE visibility_edge.workspace_id=? "
+            "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
+            "visibility_edge.src, visibility_edge.dst",
+            (wid,),
+        ).fetchall()
+        historical_touching_ids = {
+            str(row[key])
+            for row in visibility_rows
+            for key in ("src", "dst")
+            if row[key]
+        }
+        historically_public_ids = {
+            str(row[key])
+            for row in visibility_rows if bool(row["public_edge"])
+            for key in ("src", "dst")
+            if row[key]
+        }
+        entity_rows = [
+            entity for entity in entity_rows
+            if str(entity["id"]) not in historical_touching_ids
+            or str(entity["id"]) in historically_public_ids
+        ]
         touching_ids = {
             str(row[key])
-            for row in self.store.conn.execute(
-                touching_sql, touching_params
-            ).fetchall()
+            for row in visibility_rows
+            if not repo_id or row["repo_id"] in (None, repo_id)
             for key in ("src", "dst")
             if row[key]
         }
@@ -7808,6 +7910,15 @@ class MemoryService:
             or canonical_by_id.get(str(entity["id"]), str(entity["id"]))
             in visible_canonical_ids
         ]
+        if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="entity rows", count=len(entity_rows),
+                    limit=MAX_GRAPH_ANALYSIS_ENTITIES,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the entity candidate limit; filter by repository"
+            )
 
         if include_code:
             repo_sql = "SELECT id, name FROM repos WHERE workspace_id=?"
@@ -7927,6 +8038,45 @@ class MemoryService:
         support_rows = self.store.edge_supports_in_scope(
             edge_ids, flt=scene_filter, limit=MAX_GRAPH_ANALYSIS_SUPPORTS + 1
         )
+        if include_history:
+            live_support_keys = {
+                (str(row.get("edge_id") or ""), str(row.get("memory_id") or ""),
+                 str(row.get("source_kind") or ""))
+                for row in support_rows
+            }
+            historical_supports: list[dict] = []
+            for start in range(0, len(edge_ids), 500):
+                chunk = edge_ids[start:start + 500]
+                if not chunk:
+                    continue
+                marks = ",".join("?" for _ in chunk)
+                rows = self.store.conn.execute(
+                    "SELECT support.edge_id, support.memory_id, support.source_kind, "
+                    "support.confidence, support.valid_from, support.valid_to, "
+                    "support.valid_to_recorded_at, support.ingested_at, "
+                    "support.expired_at, support.provenance FROM edge_supports support "
+                    "JOIN memories memory ON memory.id=support.memory_id "
+                    f"WHERE support.edge_id IN ({marks}) "
+                    "AND (support.valid_from IS NULL OR support.valid_from<=?) "
+                    "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
+                    "AND support.expired_at IS NULL "
+                    "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
+                    "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
+                    "AND memory.expired_at IS NULL "
+                    "AND COALESCE(memory.scope, 'workspace')!='session' "
+                    "ORDER BY support.edge_id, support.memory_id, support.source_kind",
+                    [*chunk, t, known_t, t, known_t],
+                ).fetchall()
+                historical_supports.extend(dict(row) for row in rows)
+            for support in historical_supports:
+                key = (
+                    str(support.get("edge_id") or ""),
+                    str(support.get("memory_id") or ""),
+                    str(support.get("source_kind") or ""),
+                )
+                if key not in live_support_keys:
+                    support_rows.append(support)
+                    live_support_keys.add(key)
         if len(support_rows) > MAX_GRAPH_ANALYSIS_SUPPORTS:
             if include_complete_rows:
                 raise GraphSceneCapacityExceeded(
@@ -7989,16 +8139,25 @@ class MemoryService:
         memory_rows: list[dict] = []
         memory_link_rows: list[dict] = []
         code_memory_link_rows: list[dict] = []
-        if include_complete_rows:
-            memory_where = [
-                "workspace_id=?",
-                "(valid_from IS NULL OR valid_from<=?)",
-                "(valid_to IS NULL OR ?<valid_to "
-                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))",
-                "(ingested_at IS NULL OR ingested_at<=?)",
-                "(expired_at IS NULL OR ?<expired_at)",
-            ]
-            memory_params: list[Any] = [wid, t, t, known_t, known_t, known_t]
+        if include_complete_rows and include_memory_nodes:
+            if include_history:
+                memory_where = [
+                    "workspace_id=?",
+                    "(valid_from IS NULL OR valid_from<=?)",
+                    "(ingested_at IS NULL OR ingested_at<=?)",
+                    "expired_at IS NULL",
+                ]
+                memory_params = [wid, t, known_t]
+            else:
+                memory_where = [
+                    "workspace_id=?",
+                    "(valid_from IS NULL OR valid_from<=?)",
+                    "(valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))",
+                    "(ingested_at IS NULL OR ingested_at<=?)",
+                    "(expired_at IS NULL OR ?<expired_at)",
+                ]
+                memory_params = [wid, t, t, known_t, known_t, known_t]
             memory_where.append("COALESCE(scope, 'workspace')!='session'")
             if repo_id:
                 memory_where.append("(repo_id=? OR repo_id IS NULL)")
@@ -8022,31 +8181,70 @@ class MemoryService:
                 + " AND ".join(memory_where) + " ORDER BY id LIMIT ?",
                 [*memory_params, MAX_GRAPH_COMPLETE_MEMORIES + 1],
             ).fetchall()]
+            if include_history:
+                for memory in memory_rows:
+                    valid_to_value = memory.get("valid_to")
+                    recorded_at = memory.get("valid_to_recorded_at")
+                    try:
+                        memory["ghost"] = bool(
+                            valid_to_value is not None
+                            and float(valid_to_value) <= t
+                            and (recorded_at is None or float(recorded_at) <= known_t)
+                        )
+                    except (TypeError, ValueError):
+                        memory["ghost"] = False
             if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
                 raise GraphSceneCapacityExceeded(
                     resource="memory nodes", count=len(memory_rows),
                     limit=MAX_GRAPH_COMPLETE_MEMORIES,
                 )
 
-            memory_link_rows = [dict(row) for row in self.store.conn.execute(
+            memory_link_sql = (
                 "WITH selected_memory AS (" + scoped_memory_sql + ") "
                 "SELECT links.a, links.b, links.relation, links.layer, links.reason, "
                 "links.created_at, links.valid_from, links.valid_to, "
                 "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
                 "FROM mem_links links "
                 "JOIN selected_memory source ON source.id=links.a "
-                "JOIN selected_memory target ON target.id=links.b "
-                "WHERE (links.valid_from IS NULL OR links.valid_from<=?) "
-                "AND (links.valid_to IS NULL OR ?<links.valid_to "
-                "OR (links.valid_to_recorded_at IS NOT NULL "
-                "AND ?<links.valid_to_recorded_at)) "
-                "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
-                "AND (links.expired_at IS NULL OR ?<links.expired_at) "
+                "JOIN selected_memory target ON target.id=links.b WHERE "
+                "(links.valid_from IS NULL OR links.valid_from<=?) "
+            )
+            memory_link_params: list[Any] = [*memory_params, t]
+            if include_history:
+                memory_link_sql += (
+                    "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                    "AND links.expired_at IS NULL "
+                )
+                memory_link_params.append(known_t)
+            else:
+                memory_link_sql += (
+                    "AND (links.valid_to IS NULL OR ?<links.valid_to "
+                    "OR (links.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<links.valid_to_recorded_at)) "
+                    "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                    "AND (links.expired_at IS NULL OR ?<links.expired_at) "
+                )
+                memory_link_params.extend((t, known_t, known_t, known_t))
+            memory_link_sql += (
                 "ORDER BY links.a, links.b, links.relation, links.layer, links.created_at "
-                "LIMIT ?",
-                [*memory_params, t, t, known_t, known_t, known_t,
-                 MAX_GRAPH_COMPLETE_MEMORY_LINKS + 1],
+                "LIMIT ?"
+            )
+            memory_link_params.append(MAX_GRAPH_COMPLETE_MEMORY_LINKS + 1)
+            memory_link_rows = [dict(row) for row in self.store.conn.execute(
+                memory_link_sql, memory_link_params,
             ).fetchall()]
+            if include_history:
+                for link in memory_link_rows:
+                    valid_to_value = link.get("valid_to")
+                    recorded_at = link.get("valid_to_recorded_at")
+                    try:
+                        link["ghost"] = bool(
+                            valid_to_value is not None
+                            and float(valid_to_value) <= t
+                            and (recorded_at is None or float(recorded_at) <= known_t)
+                        )
+                    except (TypeError, ValueError):
+                        link["ghost"] = False
             if len(memory_link_rows) > MAX_GRAPH_COMPLETE_MEMORY_LINKS:
                 raise GraphSceneCapacityExceeded(
                     resource="memory connectors", count=len(memory_link_rows),
@@ -8057,19 +8255,29 @@ class MemoryService:
                 code_sql = (
                     "WITH selected_memory AS (" + scoped_memory_sql + ") "
                     "SELECT links.id, links.repo_id, links.symbol_id, links.memory_id, "
-                    "links.relation, links.confidence FROM code_memory_links links "
+                    "links.relation, links.confidence, links.valid_from, links.valid_to, "
+                    "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
+                    "FROM code_memory_links links "
                     "JOIN selected_memory memory ON memory.id=links.memory_id "
                     "JOIN repos repo ON repo.id=links.repo_id WHERE repo.workspace_id=? "
                     "AND (links.valid_from IS NULL OR links.valid_from<=?) "
-                    "AND (links.valid_to IS NULL OR ?<links.valid_to "
-                    "OR (links.valid_to_recorded_at IS NOT NULL "
-                    "AND ?<links.valid_to_recorded_at)) "
-                    "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
-                    "AND (links.expired_at IS NULL OR ?<links.expired_at)"
                 )
-                code_params: list[Any] = [
-                    *memory_params, wid, t, t, known_t, known_t, known_t,
-                ]
+                code_params: list[Any] = [*memory_params, wid, t]
+                if include_history:
+                    code_sql += (
+                        "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                        "AND links.expired_at IS NULL"
+                    )
+                    code_params.append(known_t)
+                else:
+                    code_sql += (
+                        "AND (links.valid_to IS NULL OR ?<links.valid_to "
+                        "OR (links.valid_to_recorded_at IS NOT NULL "
+                        "AND ?<links.valid_to_recorded_at)) "
+                        "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                        "AND (links.expired_at IS NULL OR ?<links.expired_at)"
+                    )
+                    code_params.extend((t, known_t, known_t, known_t))
                 if repo_id:
                     code_sql += " AND links.repo_id=?"
                     code_params.append(repo_id)
@@ -8078,12 +8286,42 @@ class MemoryService:
                 code_memory_link_rows = [dict(row) for row in self.store.conn.execute(
                     code_sql, code_params,
                 ).fetchall()]
+                if include_history:
+                    for link in code_memory_link_rows:
+                        valid_to_value = link.get("valid_to")
+                        recorded_at = link.get("valid_to_recorded_at")
+                        try:
+                            link["ghost"] = bool(
+                                valid_to_value is not None
+                                and float(valid_to_value) <= t
+                                and (recorded_at is None or float(recorded_at) <= known_t)
+                            )
+                        except (TypeError, ValueError):
+                            link["ghost"] = False
                 if len(code_memory_link_rows) > MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS:
                     raise GraphSceneCapacityExceeded(
                         resource="code-memory connectors",
                         count=len(code_memory_link_rows),
                         limit=MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS,
                     )
+        referenced_repo_ids = sorted({
+            str(row.get("repo_id") or "")
+            for row in [*entity_rows, *memory_rows]
+            if row.get("repo_id")
+        })
+        repo_name_by_id: dict[str, str] = {}
+        for start in range(0, len(referenced_repo_ids), 500):
+            chunk = referenced_repo_ids[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            for row in self.store.conn.execute(
+                f"SELECT id, name FROM repos WHERE workspace_id=? AND id IN ({marks})",
+                [wid, *chunk],
+            ).fetchall():
+                repo_name_by_id[str(row["id"])] = str(row["name"])
+        for row in [*entity_rows, *memory_rows]:
+            repo_name = repo_name_by_id.get(str(row.get("repo_id") or ""))
+            if repo_name:
+                row["repo_name"] = repo_name
         return (
             ws, wid, entity_rows, edge_rows, enriched_supports,
             memory_rows, memory_link_rows, code_memory_link_rows,
@@ -8107,6 +8345,9 @@ class MemoryService:
                     min_support: int = 1, min_confidence: float = 0.0,
                     include_weak_cooccurrence: bool = False,
                     include_code: bool = False,
+                    connected_only: bool = False,
+                    include_history: bool = False,
+                    include_memory_nodes: bool = True,
                     node_limit: Optional[int] = None,
                     edge_limit: Optional[int] = None) -> dict:
         started = time.perf_counter()
@@ -8118,6 +8359,15 @@ class MemoryService:
             raise ValidationError(
                 "level must be one of: overview, system, neighborhood, path, complete"
             )
+        for field, value in (
+            ("connected_only", connected_only),
+            ("include_history", include_history),
+            ("include_memory_nodes", include_memory_nodes),
+        ):
+            if not isinstance(value, bool):
+                raise ValidationError(f"{field} must be a boolean")
+        if clean_level != "complete" and not include_memory_nodes:
+            raise ValidationError("include_memory_nodes is only accepted for complete scenes")
         clean_center_id = (
             _clean_text(center_id, field="center_id", max_chars=MAX_NAME_CHARS)
             if center_id is not None else None
@@ -8212,7 +8462,9 @@ class MemoryService:
             clean_time_from, clean_time_to,
             clean_depth, clean_min_support,
             clean_min_confidence, bool(include_weak_cooccurrence),
-            bool(include_code), clean_node_limit, clean_edge_limit,
+            bool(include_code), connected_only, include_history,
+            include_memory_nodes, clean_node_limit, clean_edge_limit,
+            GRAPH_SCENE_ALGORITHM_VERSION,
         )
         cached = self._graph_scene_cache.get(cache_key)
         if cached is not None and (
@@ -8239,6 +8491,8 @@ class MemoryService:
             include_weak_cooccurrence=include_weak_cooccurrence,
             include_code=include_code,
             include_complete_rows=clean_level == "complete",
+            include_history=include_history,
+            include_memory_nodes=include_memory_nodes,
         )
         selected_layers = set(clean_layers) if clean_layers is not None else None
         selected_relations = set(clean_relations) or None
@@ -8257,9 +8511,13 @@ class MemoryService:
             "min_confidence": clean_min_confidence,
             "include_weak_cooccurrence": bool(include_weak_cooccurrence),
             "include_code": bool(include_code),
+            "connected_only": connected_only,
+            "include_history": include_history,
+            "include_memory_nodes": include_memory_nodes,
         }
         filters = {key: value for key, value in filters.items()
-                   if value not in (None, [], False)}
+                   if key in {"connected_only", "include_history", "include_memory_nodes"}
+                   or value not in (None, [], False)}
         scene = build_graph_scene(
             ws, entities, edges, supports, level=clean_level,
             memory_rows=memories, memory_link_rows=memory_links,
@@ -8270,6 +8528,8 @@ class MemoryService:
             include_weak_cooccurrence=include_weak_cooccurrence,
             layers=selected_layers, relations=selected_relations,
             min_support=clean_min_support, min_confidence=clean_min_confidence,
+            connected_only=connected_only, include_history=include_history,
+            include_memory_nodes=include_memory_nodes,
             filters=filters, index_generation=int(index_info["generation"]),
         )
         scene["meta"]["index_state"] = index_info["state"]

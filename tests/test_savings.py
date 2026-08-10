@@ -169,6 +169,67 @@ def test_context_savings_aggregates_estimates_filters_releases_and_counters():
         store.context_savings(workspace_id=wid, release_version="not-a-release")
 
 
+def test_context_savings_global_covers_full_history_across_workspaces():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    first_workspace = service.store.get_or_create_workspace("history-first")
+    second_workspace = service.store.get_or_create_workspace("history-second")
+    first_repo = service.store.get_or_create_repo(first_workspace, "repo")
+    second_repo = service.store.get_or_create_repo(second_workspace, "repo")
+    first = service.store.record_receipt(
+        "recall", workspace_id=first_workspace, repo_id=first_repo,
+        metadata={"token_usage": _usage(200, 100, counter="engraphis.regex.v1")},
+    )
+    second = service.store.record_receipt(
+        "adaptive_context", workspace_id=second_workspace, repo_id=second_repo,
+        metadata={"token_usage": _usage(300, 200, counter="engraphis.regex.v1")},
+    )
+    service.store.conn.executemany(
+        "UPDATE operation_receipts SET ts=? WHERE id=?",
+        [(1.0, first["id"]), (2.0, second["id"])],
+    )
+    service.store.conn.commit()
+
+    summary = service.context_savings()
+
+    assert summary["scope"] == {"workspace": "all"}
+    assert summary["workspace_count"] == 2
+    assert summary["estimated"]["eligible_receipt_count"] == 2
+    assert summary["estimated"]["baseline_tokens"] == 500
+    assert summary["estimated"]["emitted_tokens"] == 300
+    assert summary["estimated"]["saved_tokens"] == 200
+    assert service.context_savings(workspace="history-first")["estimated"]["saved_tokens"] == 100
+
+    grouped = service.context_savings(group_by="workspace")
+    assert {row["group_key"] for row in grouped["by_group"]} == {
+        first_workspace, second_workspace,
+    }
+
+
+def test_bound_context_savings_global_scope_stays_within_authorized_workspaces():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    first_workspace = service.store.get_or_create_workspace("history-first")
+    second_workspace = service.store.get_or_create_workspace("history-second")
+    service.store.record_receipt(
+        "recall", workspace_id=first_workspace,
+        metadata={"token_usage": _usage(200, 100, counter="engraphis.regex.v1")},
+    )
+    service.store.record_receipt(
+        "recall", workspace_id=second_workspace,
+        metadata={"token_usage": _usage(300, 100, counter="engraphis.regex.v1")},
+    )
+    # Seed both workspaces before applying the server-side binding, matching a
+    # deployment that is narrowed after historical data already exists.
+    service.allowed_workspaces = frozenset({"history-first"})
+    service.store.allowed_workspaces = service.allowed_workspaces
+
+    summary = service.context_savings()
+
+    assert summary["scope"] == {"workspace": "all"}
+    assert summary["workspace_count"] == 1
+    assert summary["estimated"]["baseline_tokens"] == 200
+    assert summary["estimated"]["saved_tokens"] == 100
+
+
 def test_service_context_savings_filters_and_new_receipts_are_versioned():
     service = MemoryService.create(":memory:", graph_extractor="none")
     service.remember("Versioned context delivery.", workspace="versioned", scope="workspace")

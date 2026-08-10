@@ -98,7 +98,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Code | `engraphis_export_code_graph` | Exports graph JSON, Markdown, and HTML. |
 | Code | `engraphis_link_symbol` | Manually links a code symbol to a memory (idempotent). |
 | Audit | `engraphis_receipts` | Lists content-free hashed operation receipts. |
-| Audit | `engraphis_context_savings` | Reports receipt-backed estimated context tokens saved, eligible/excluded deliveries, basis, confidence, and token-counter identity; optional `from_ts`, `to_ts`, and `release_version` filters are supported. This is estimated prompt-context reduction, not provider billing. |
+| Audit | `engraphis_context_savings` | Reports receipt-backed estimated context tokens saved across all visible workspaces by default, or one workspace when supplied; optional `from_ts`, `to_ts`, and `release_version` filters are supported. This is estimated prompt-context reduction, not provider billing. |
 | Audit | `engraphis_verify_receipts` | Verifies the receipt chain, local tail anchor, and an optional saved head/count. |
 | Audit | `engraphis_export_receipts` | Exports a shareable receipt-only audit bundle. |
 | Governance | `engraphis_retire` | Retires a memory by closing its validity window. It does not delete history. |
@@ -111,12 +111,14 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. |
 
-All four recall tools (`engraphis_recall`, `engraphis_recall_context`,
+The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
 optional `mtype_limits` such as `{"working": 1, "semantic": 3}`, and optional
-`max_response_tokens` from `1` through `1000000`. `response_mode="full"` returns the classic
+`max_response_tokens` from `2` through `1000000`. `response_mode="full"` returns the classic
 response; `"compact"` removes packed context and citation/memory bodies from the end while
-preserving source/citation references. Responses include a stable `context_revision`. Planner
+preserving source/citation references. `engraphis_recall_context` is always compact and does
+not accept `response_mode`; it shares the same `max_response_tokens` floor. Responses include
+a stable `context_revision`. Planner
 details, per-query rankings, type-limit drops, and fallback reasons are returned only when
 `diagnostics=true`. Type limits are post-rank maxima and can intentionally return fewer than `k`;
 they do not raise a memory type's relevance. Every planned query remains inside the caller's scope,

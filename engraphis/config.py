@@ -571,7 +571,19 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
     """Resolve an explicit override or prepare the safe installed default."""
     configured = _env("ENGRAPHIS_DB_PATH", "")
     if configured:
-        return configured
+        # A relative path in the owner-private config must not follow whichever CWD
+        # happened to launch the dashboard, MCP server, or a desktop shortcut. Anchor
+        # it to the trusted config directory so every entrypoint opens the same file.
+        if configured in {":memory:", ""} or configured.startswith("file:"):
+            return configured
+        configured_path = Path(configured).expanduser()
+        if (configured_path.is_absolute()
+                or PurePosixPath(configured).is_absolute()
+                or PureWindowsPath(configured).is_absolute()):
+            # Preserve explicit absolute spelling for compatibility with callers that
+            # intentionally use a POSIX-style path on Windows or a symlinked path.
+            return configured
+        return str((_CONFIG_ENV_PATH.parent / configured_path).resolve())
     target = Path(_default_db_path(root))
     parts = {p.lower() for p in root.parts}
     if "site-packages" in parts or "dist-packages" in parts:

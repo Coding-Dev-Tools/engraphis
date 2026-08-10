@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260809-physics-guard">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260810-galaxy-gravity">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -81,22 +81,6 @@
       <div id="notice-banner" class="notice-banner" role="status" aria-live="polite" hidden></div>
       <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
 
-      <section class="persistent-savings-summary" id="context-savings-persistent" aria-labelledby="persistent-savings-title">
-        <div class="persistent-savings-copy">
-          <p class="eyebrow">Runtime savings</p>
-          <h2 id="persistent-savings-title">Estimated context saved</h2>
-          <p id="context-savings-persistent-meta">Loading receipt-backed estimate…</p>
-        </div>
-        <div class="persistent-savings-value">
-          <strong id="context-savings-persistent-value">—</strong>
-          <span>tokens avoided</span>
-        </div>
-        <div class="persistent-savings-action">
-          <span id="context-savings-persistent-rate" class="savings-inline-rate">—</span>
-          <button class="text-button" type="button" data-provenance="audit">View details</button>
-        </div>
-      </section>
-
       <section class="view active" data-view-panel="today" aria-labelledby="today-title">
         <div class="today-layout">
           <div class="view-column">
@@ -112,15 +96,6 @@
               <div class="metric"><strong>—</strong><span>Workspaces</span></div>
               <div class="metric"><strong>—</strong><span>Sessions</span></div>
             </div>
-
-            <section class="content-section savings-overview-section" id="context-savings-summary">
-              <div class="section-heading">
-                <div><p class="eyebrow">Runtime savings</p><h2>Estimated context saved</h2></div>
-                <button class="text-button" type="button" data-provenance="audit">View receipt details</button>
-              </div>
-              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
-              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
-            </section>
 
             <section class="content-section">
               <div class="section-heading">
@@ -269,7 +244,7 @@
             <div id="graph-empty" class="graph-empty" role="status" aria-live="polite">Open Graph &amp; Relationships to load the graph.</div>
             <div class="graph-hud">
               <span id="graph-count">0 entities · 0 relations</span>
-              <span id="graph-mode">Community islands</span>
+              <span id="graph-mode">Galaxy gravity</span>
             </div>
             <p id="graph-a11y-help" class="sr-only">The graph is a visual summary. Open the Analyse tab to inspect entities and relations with keyboard controls.</p>
           </div>
@@ -282,7 +257,7 @@
             </div>
 
             <section class="graph-control-panel" id="graph-explore" role="tabpanel" aria-labelledby="graph-explore-tab" data-graph-tab-panel="explore">
-              <input id="graph-preset" type="hidden" value="communities">
+              <input id="graph-preset" type="hidden" value="galaxy">
               <input id="graph-style" type="hidden" value="cyber">
               <input id="graph-color" type="hidden" value="community">
               <input id="graph-palette" type="hidden" value="theme">
@@ -297,7 +272,7 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="false" title="Show entities that have no relations in this graph view">Show unlinked nodes</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
@@ -322,8 +297,9 @@
               <section class="graph-drawer-section" aria-labelledby="graph-layout-title">
                 <h2 id="graph-layout-title">Layout</h2>
                 <div class="graph-choice-grid graph-layout-grid" role="group" aria-label="Graph layout">
+                  <button class="graph-choice graph-layout-choice active" type="button" data-graph-preset-choice="galaxy" aria-pressed="true"><span class="layout-preview galaxy"><i></i><i></i><i></i><i></i></span><span>Galaxy gravity</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="compact" aria-pressed="false"><span class="layout-preview compact"><i></i><i></i><i></i><i></i></span><span>Compact</span></button>
-                  <button class="graph-choice graph-layout-choice active" type="button" data-graph-preset-choice="communities" aria-pressed="true"><span class="layout-preview islands"><i></i><i></i><i></i><i></i></span><span>Islands</span></button>
+                  <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="communities" aria-pressed="false"><span class="layout-preview islands"><i></i><i></i><i></i><i></i></span><span>Islands</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="original" aria-pressed="false"><span class="layout-preview spacious"><i></i><i></i><i></i><i></i></span><span>Spacious</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="radial" aria-pressed="false"><span class="layout-preview radial"><i></i><i></i><i></i><i></i></span><span>Radial</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="constellation" aria-pressed="false"><span class="layout-preview constellation"><i></i><i></i><i></i><i></i></span><span>Constellation</span></button>
@@ -370,9 +346,9 @@
               <details class="graph-drawer-section graph-tuning" open>
                 <summary>Tune the simulation — forces, size, scope</summary>
                 <div class="graph-tuning-grid">
-                  <label for="graph-repel"><span>Repel force</span><input id="graph-repel" type="range" min="0" max="120" value="48"><output id="graph-repel-output">48</output></label>
-                  <label for="graph-link"><span>Link distance</span><input id="graph-link" type="range" min="4" max="80" value="16"><output id="graph-link-output">16</output></label>
-                  <label for="graph-gravity"><span>Centre gravity</span><input id="graph-gravity" type="range" min="0" max="100" value="48"><output id="graph-gravity-output">48</output></label>
+                  <label for="graph-repel"><span id="graph-repel-label">Orbital separation</span><input id="graph-repel" type="range" min="0" max="120" value="48"><output id="graph-repel-output">48</output></label>
+                  <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8"><output id="graph-link-output">8</output></label>
+                  <label for="graph-gravity"><span id="graph-gravity-label">Gravity strength · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="100" value="48"><output id="graph-gravity-output">48</output></label>
                   <label for="graph-node-size"><span>Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3"><output id="graph-node-size-output">3</output></label>
                   <label for="graph-text-size"><span>Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12"><output id="graph-text-size-output">12</output></label>
                   <label for="graph-line-width"><span>Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72"><output id="graph-line-width-output">0.72</output></label>
@@ -395,7 +371,7 @@
               <section class="control-group">
                 <h2>Scope</h2>
                 <label>Minimum links<input id="graph-min-degree" type="range" min="0" max="12" value="1"><output id="graph-min-degree-output">1</output></label>
-                <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option></select></label>
+                <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option><option value="evidence_mass">Evidence mass</option></select></label>
                 <label class="check-row"><input id="graph-bridges" type="checkbox"> Highlight bridges</label>
                 <label class="check-row"><input id="graph-collapse" type="checkbox" checked> Auto-collapse clusters</label>
               </section>
@@ -478,6 +454,22 @@
             <h1 id="manage-title">Operate the engine deliberately</h1>
             <p>Workspace, consolidation, hosted services and interface preferences in one place.</p>
           </header>
+
+          <section class="persistent-savings-summary manage-savings-summary" id="context-savings-persistent" aria-labelledby="persistent-savings-title">
+            <div class="persistent-savings-copy">
+              <p class="eyebrow">Runtime savings</p>
+              <h2 id="persistent-savings-title">Estimated context saved</h2>
+              <p id="context-savings-persistent-meta">Loading receipt-backed estimate…</p>
+            </div>
+            <div class="persistent-savings-value">
+              <strong id="context-savings-persistent-value">—</strong>
+              <span>tokens avoided</span>
+            </div>
+            <div class="persistent-savings-action">
+              <span id="context-savings-persistent-rate" class="savings-inline-rate">—</span>
+              <button class="text-button" type="button" data-provenance="audit">View details</button>
+            </div>
+          </section>
 
           <div class="tab-list manage-tabs" role="tablist" aria-label="Manage views">
             <button id="manage-workspaces-tab" class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true" aria-controls="manage-workspaces-panel">Workspaces</button>
@@ -700,6 +692,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260809-physics-guard"></script>
+    <script src="/v2-assets/ledger.js?v=20260810-galaxy-explicit-reheat"></script>
 </body>
 </html>

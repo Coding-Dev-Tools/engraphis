@@ -2532,13 +2532,16 @@ class MemoryEngine:
         but do not leave the local SQLite copy intact if that backend is unavailable; the
         returned status explicitly reports that incomplete external cleanup.
         """
+        target_ids = self.store.secure_erase_target_ids(memory_id)
         index_cleanup = "not_configured"
         try:
-            self.index.delete([memory_id])
+            self.index.delete(target_ids)
             index_cleanup = "deleted"
         except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
             index_cleanup = "failed"
-        result = self.store.secure_erase_memory(memory_id, actor=actor)
+        result = self.store.secure_erase_memory(
+            memory_id, actor=actor, _target_ids=target_ids,
+        )
         result["vector_index_cleanup"] = index_cleanup
         if index_cleanup == "failed":
             result["external_index_limitation"] = (
