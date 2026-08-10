@@ -933,7 +933,6 @@
     const api = {};
 
     let activeDragNode = null, activeDragLinks = [], dragFollowForce = null;
-    let dragIsolated = false, dragCenterForce = null;
 
     function setActiveDragNode(node) {
       activeDragNode = node || null;
@@ -946,29 +945,14 @@
         const source = linkEndpoint(link, 'source'), target = linkEndpoint(link, 'target');
         return source === activeId || target === activeId;
       });
-      isolateDragPhysics();
     }
 
-    /* A pinned node is a local interaction. Keeping charge, centering, radial, and collision
-       forces active while that pin jumps makes every unrelated node respond to the pointer.
-       Leave only link attraction, the bounded one-hop follow force, and the final velocity
-       guard active until pointer-up. Settings renders can reinstall the normal forces; the
-       final isolation pass in applyForces() removes them again while the gesture is live. */
-    function isolateDragPhysics() {
-      if (!dragIsolated) {
-        dragIsolated = true;
-        dragCenterForce = fg.d3Force('center');
-      }
-      ['charge', 'x', 'y', 'radial', 'collide', 'center'].forEach(name => fg.d3Force(name, null));
-    }
-
-    function restoreDragPhysics() {
-      if (!dragIsolated) return;
-      dragIsolated = false;
-      if (dragCenterForce) fg.d3Force('center', dragCenterForce);
-      dragCenterForce = null;
-      applyForces();
-    }
+    /* A pinned node is a local interaction: the fx/fy pin alone holds the dragged node.
+       Removing the global forces (charge, centering, collision) during drag would freeze
+       every other node and cause a violent snap-back when they are restored on release.
+       Instead all forces stay live so neighbors respond organically through link attraction
+       and charge repulsion; the dragFollow force provides bounded one-hop pull and the
+       velocity guard caps runaway speeds. Release settles via a soft alpha target. */
 
     function makeDragFollowForce() {
       const force = alpha => {
@@ -1333,7 +1317,6 @@
          per node on every tick, and a large store pays that on the initial layout and on every
          reheat, which is exactly where it is least affordable. */
       if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
-      if (dragIsolated) isolateDragPhysics();
     }
 
     function clearPinnedPositions(data) {
@@ -1828,11 +1811,23 @@
         node.fy = undefined;
       }
       setActiveDragNode(null);
-      restoreDragPhysics();
       setDragSimulationBudget(false);
       node.vx = 0;
       node.vy = 0;
-      if (!retainAnchor) reheatLiveLayout(false);
+      /* Gentle settle: the simulation is already warm from drag, so a soft alpha
+         target is enough. A full reheat would re-energize every node and cause
+         the released node to snap back toward the centering origin. */
+      if (!retainAnchor && supportsSoftAlpha()) {
+        fg.d3AlphaTarget(0.02);
+        fg.resetCountdown();
+        clearTimeout(softAlphaTimer);
+        softAlphaTimer = setTimeout(() => {
+          softAlphaTimer = 0;
+          if (!destroyed && !activeDragNode) releaseSoftAlpha();
+        }, 800);
+      } else if (!retainAnchor) {
+        reheatLiveLayout(false);
+      }
     }
 
     /* A drag uses fx/fy only while the pointer is down. Pointer-up releases the anchor and gives
