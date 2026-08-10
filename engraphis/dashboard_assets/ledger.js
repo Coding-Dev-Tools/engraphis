@@ -425,7 +425,7 @@
     graphAssetsPromise = null;
     const controller = graphAssetsController;
     graphAssetsController = null;
-    graphAssetsRetry += 1;
+    graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10);
     if (controller) controller.abort();
     all('script[data-engraphis-graph-asset="true"]').forEach(script => script.remove());
   }
