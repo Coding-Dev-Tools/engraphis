@@ -35,6 +35,8 @@ REQUIRED_COMMON = frozenset({
 })
 REQUIRED_SDIST = REQUIRED_COMMON | frozenset({
     "BENCHMARKS.md",
+    "docs/DOCUMENT_IMPORT.md",
+    "docs/OBSIDIAN_IMPORT.md",
     "docker-compose.lan.yml",
     "deploy/force-graph-1.51.4.licenses.json",
     "deploy/force-graph-1.51.4.yarn.lock",

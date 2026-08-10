@@ -664,6 +664,40 @@ def test_recall_edge_filter_rejects_untrusted_source_less_edges():
     }
 
 
+def test_prompt_edge_support_must_match_active_scope_and_validity():
+    from engraphis.core.interfaces import Edge
+
+    store, emb, eng = _engine()
+    allowed = store.get_or_create_workspace("allowed")
+    foreign = store.get_or_create_workspace("foreign")
+    foreign_memory = _add(store, emb, foreign, None, "Foreign approved support.")
+    expired_memory = _add(
+        store, emb, allowed, None, "Expired approved support.",
+        valid_from=0.0, valid_to=10.0,
+    )
+    edges = [
+        Edge(
+            id="foreign-support", src="a", dst="b", relation="supports",
+            workspace_id=allowed,
+            provenance={
+                "trusted": True, "review_state": "approved",
+                "memory_id": foreign_memory,
+            },
+        ),
+        Edge(
+            id="expired-support", src="a", dst="c", relation="supports",
+            workspace_id=allowed,
+            provenance={
+                "trusted": True, "review_state": "approved",
+                "memory_id": expired_memory,
+            },
+        ),
+    ]
+
+    flt = SearchFilter(workspace_id=allowed, valid_at=20.0)
+    assert eng._prompt_eligible_edges(edges, flt) == []
+
+
 def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
     from engraphis.core.interfaces import Edge, Node
 

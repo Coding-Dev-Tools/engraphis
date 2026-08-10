@@ -17,15 +17,16 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import json
 import hashlib
 import contextvars
 import logging
 import math
 import copy
-import sys
 import time
 import threading
+import unicodedata
 import numpy as np
 from collections import Counter, OrderedDict
 from dataclasses import asdict
@@ -50,6 +51,7 @@ from engraphis.core.interfaces import (
     Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
+    vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -885,15 +887,9 @@ def _title_from_content(content: str, fallback: str) -> str:
 
 
 def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
-    """Best-effort diagnostic when the configured database holds zero memories.
-
-    Probes well-known sibling locations (the installed-default paths and the
-    owner-private ``~/.engraphis/engraphis.db``). When a sibling holds memories
-    and the configured path does not, emit a one-time stderr notice naming both
-    paths so the operator can reconcile. This is a diagnostic only — it never
-    raises, never blocks startup, and never reads memory content.
-    """
+    """Warn, without blocking startup, when a sibling database holds the data."""
     import sqlite3
+
     configured = Path(db_path)
     if not configured.is_file():
         return
@@ -903,31 +899,26 @@ def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
             row = probe.execute("SELECT COUNT(*) FROM memories").fetchone()
             configured_count = int(row[0]) if row else 0
         except sqlite3.Error:
-            return  # no memories table yet, or unreadable — nothing to warn about
+            return
         finally:
             probe.close()
     except sqlite3.Error:
         return
     if configured_count > 0:
-        return  # configured DB has data — no diagnostic needed
-    # Build the set of well-known sibling paths (excluding the configured one).
+        return
+
     home = Path.home()
-    candidates: list[Path] = []
-    # Owner-private home location (most common for real data).
-    candidates.append(home / ".engraphis" / "engraphis.db")
-    # Platform-specific installed defaults.
+    candidates: list[Path] = [home / ".engraphis" / "engraphis.db"]
     if os.name == "nt":
         local_appdata = os.environ.get("LOCALAPPDATA")
         if local_appdata:
             candidates.append(Path(local_appdata) / "engraphis" / "engraphis.db")
     elif sys.platform == "darwin":
-        candidates.append(
-            home / "Library" / "Application Support" / "engraphis" / "engraphis.db"
-        )
+        candidates.append(home / "Library" / "Application Support" / "engraphis" / "engraphis.db")
     else:
         xdg = os.environ.get("XDG_DATA_HOME", str(home / ".local" / "share"))
         candidates.append(Path(xdg) / "engraphis" / "engraphis.db")
-    # Deduplicate and exclude the configured path.
+
     configured_resolved = configured.resolve()
     seen: set[str] = set()
     for candidate in candidates:
@@ -957,7 +948,8 @@ def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
                 "populated database." % (configured, candidate, count),
                 file=sys.stderr,
             )
-            return  # one notice is enough
+            return
+
 
 def _auto_migrate_v1_if_needed(db_path: str) -> None:
     """If *db_path* is an existing v1-shaped SQLite file, migrate it to the v2 schema
@@ -990,13 +982,10 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
     original file exactly as it was; ``Store`` then raises its normal (now unmasked)
     error instead of silently losing data."""
     p = Path(db_path)
-    # Recover from a crash during a previous two-step swap (legacy code).
+    # Recover a crash from the legacy two-step Windows swap before inspecting the
+    # database. A completed migration output is preferred to the stale v1 backup.
     staging = p.with_suffix(".v2_swap")
     if not p.exists() and staging.exists():
-        # If a completed-but-not-swapped migration output also exists
-        # (.v2-migrating-*), prefer it over the stale v1 original in
-        # .v2_swap — the migration had finished writing the new file but
-        # crashed before the final os.replace into db_path.
         migrating = sorted(
             p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
             key=lambda f: f.stat().st_mtime,
@@ -1016,8 +1005,6 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
         else:
             os.replace(str(staging), str(p))
     elif not p.exists():
-        # No .v2_swap either, but a stray .v2-migrating-* might remain
-        # from a crash where the original was already removed.
         migrating = sorted(
             p.parent.glob(p.stem + ".v2-migrating-*" + p.suffix),
             key=lambda f: f.stat().st_mtime,
@@ -1056,11 +1043,23 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
         shutil.copy2(str(p), str(backup))          # preserve the untouched original first
         from scripts.migrate_to_v2 import migrate
         counts = migrate(str(p), str(tmp_new))      # reads p (untouched), writes tmp_new
-        # Both paths are in the same directory, so os.replace gives the only
-        # single-name swap available on Windows: a failed replacement leaves the
-        # original at p, while a successful replacement makes the complete migrated
-        # file visible without an intermediate missing-path window.
-        os.replace(str(tmp_new), str(p))
+        # On Windows os.replace is not atomic; use a two-step rename with a staging
+        # file so a crash mid-swap leaves either the original or the migrated DB intact.
+        staging = p.with_suffix(".v2_swap")
+        try:
+            if staging.exists():
+                staging.unlink()
+            os.rename(str(p), str(staging))
+            os.rename(str(tmp_new), str(p))
+            try:
+                staging.unlink()
+            except OSError:
+                pass  # best-effort cleanup; backup still exists
+        except Exception:
+            # Rollback: restore the original if the swap failed partway through.
+            if staging.exists() and not p.exists():
+                os.rename(str(staging), str(p))
+            raise
         print("[engraphis] v1->v2 auto-migration complete: %s" % counts, file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — must never brick startup worse than before
         print("[engraphis] v1->v2 auto-migration failed (%s) — leaving %s untouched; "
@@ -1103,6 +1102,7 @@ class MemoryService:
         self._graph_scene_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
         self._graph_job_lock = threading.RLock()
         self._graph_job_threads: dict[str, threading.Thread] = {}
+        self._obsidian_job_threads: dict[str, threading.Thread] = {}
         self._graph_runner_id = make_id("device")
         self._service_close_lock = threading.Lock()
         self._closing = False
@@ -1131,11 +1131,24 @@ class MemoryService:
             with self._graph_job_lock:
                 workers = list(self._graph_job_threads.items())
 
+            with self._graph_job_lock:
+                import_workers = list(self._obsidian_job_threads.items())
+            for job_id, _thread in import_workers:
+                self.store.conn.execute(
+                    "UPDATE jobs SET cancel_requested=1 WHERE id=? AND state='running'",
+                    (job_id,),
+                )
+            if import_workers:
+                self.store.conn.commit()
+
             deadline = time.monotonic() + timeout_value
-            for _job_id, thread in workers:
+            for _job_id, thread in [*workers, *import_workers]:
                 remaining = max(0.0, deadline - time.monotonic())
                 thread.join(remaining)
-            alive = [job_id for job_id, thread in workers if thread.is_alive()]
+            alive = [
+                job_id for job_id, thread in [*workers, *import_workers]
+                if thread.is_alive()
+            ]
             if alive:
                 raise RuntimeError(
                     f"{len(alive)} graph index worker(s) did not stop before shutdown"
@@ -1221,15 +1234,10 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
         )
-        # Startup diagnostic: warn when the configured database exists but is empty,
-        # while a sibling database at a well-known location has memories. Catches the
-        # exact misconfiguration that caused silent memory loss (config.env pointing to
-        # an empty DB while the real data lived elsewhere). Non-fatal — the service
-        # still starts against the configured path so fresh installs are unaffected.
         if db_path != ":memory:" and not read_only:
             try:
                 _warn_if_db_empty_with_populated_sibling(db_path)
-            except Exception:  # noqa: BLE001 — diagnostic must never block startup
+            except Exception:  # noqa: BLE001 — diagnostics never block startup
                 pass
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -1661,9 +1669,7 @@ class MemoryService:
                     source=mem.get("source", "agent"),
                     trusted=mem.get("trusted", False),
                     kind=mem.get("kind"),
-                    resolve_conflicts=mem.get(
-                        "resolve_conflicts", mem.get("dedupe", True)
-                    ),
+                    resolve_conflicts=mem.get("resolve_conflicts", mem.get("dedupe", True)),
                     retention_class=mem.get("retention_class"),
                     retention_reason=mem.get("retention_reason", ""),
                     valid_from=mem.get("valid_from"),
@@ -2151,6 +2157,928 @@ class MemoryService:
         return {"workspace": ws, "scanned": len(files), "imported": imported,
                 "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
                 "details": details[:50], "warnings": warnings[:50]}
+
+    # ── Universal local document import (v2 source manifest) ────────────────
+    def _document_registered_target(
+        self, source_id: Optional[str], *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> Optional[str]:
+        """Validate a selected source collection before creating scope rows."""
+        if source_id is None:
+            return None
+        clean_id = _clean_text(
+            source_id, field="source_id", max_chars=MAX_NAME_CHARS,
+        )
+        if not clean_id.startswith("vlt_"):
+            raise ValidationError("registered document source was not found")
+        _ws, wid, rid, sid, selected_scope, selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None or (repo is not None and rid is None):
+            raise ValidationError("registered document source was not found")
+        source = self.store.get_source_vault(clean_id)
+        if (
+            source is None
+            or source.get("kind") != "documents"
+            or source.get("workspace_id") != wid
+            or source.get("repo_id") != rid
+            or source.get("session_id") != sid
+        ):
+            raise ValidationError("registered document source does not belong to that target")
+        if (
+            source.get("scope") != selected_scope.value
+            or source.get("memory_type") != selected_type.value
+        ):
+            raise ValidationError("registered document source has different import defaults")
+        return clean_id
+
+    def _document_label(self, value: str, *, source_id: Optional[str] = None) -> str:
+        label = unicodedata.normalize("NFC", _clean_text(
+            value, field="source_label", max_chars=MAX_NAME_CHARS, required=False,
+        ))
+        if not label and source_id:
+            source = self.store.get_source_vault(source_id)
+            label = str(source.get("display_name") or "") if source else ""
+        if not label:
+            raise ValidationError("source_label is required for a new browser source")
+        _reject_secret_capture((("source_label", label),))
+        return label
+
+    def _require_new_browser_source_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+        source_kind: str, source_noun: str,
+    ) -> None:
+        """Keep independently selected browser uploads from sharing a label lineage.
+
+        Browser uploads intentionally have no stable filesystem root.  A new upload
+        therefore cannot safely infer that an existing same-label collection is the
+        same source.  Require the owner to select that registered ``vlt_`` identity
+        explicitly; disk imports retain their root-digest auto-selection path.
+        """
+        _ws, wid, rid, sid, _selected_scope, _selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None:
+            return
+        # Browser source roots are deliberately derived only from the normalized
+        # owner label: source bytes change on every edit. Query that exact,
+        # indexed identity rather than a capped presentation list; otherwise a
+        # 101st registered source could silently reuse a live lineage.
+        root_digest = hashlib.sha256(
+            f"{source_kind}-browser\0{label.casefold()}".encode("utf-8", "surrogatepass"),
+        ).hexdigest()
+        source = self.store.get_source_vault_by_root_digest(
+            kind=source_kind, root_digest=root_digest, workspace_id=wid,
+            repo_id=rid, session_id=sid,
+        )
+        if source is not None:
+            raise ValidationError(
+                f"a {source_noun} with this label already exists; select its source_id to resume"
+            )
+
+    def _require_new_document_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> None:
+        self._require_new_browser_source_label(
+            label, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, source_kind="documents",
+            source_noun="source",
+        )
+
+    def _require_new_obsidian_label(
+        self, label: str, *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> None:
+        self._require_new_browser_source_label(
+            label, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, source_kind="obsidian",
+            source_noun="vault",
+        )
+
+    @staticmethod
+    def _document_report(report: dict) -> dict:
+        """Expose the selected adapter explicitly on every generic response."""
+        report.setdefault("adapter", "documents")
+        report.setdefault("source_adapter", "documents")
+        return report
+
+    @staticmethod
+    def _document_upload_inputs(
+        files: list[tuple[str, bytes]], attachment_manifest: Optional[list[dict]],
+    ) -> tuple[list[tuple[str, bytes]], list[dict]]:
+        """Validate mixed document bytes and content-free attachment metadata."""
+        if not isinstance(files, list) or not files or len(files) > MAX_IMPORT_FILES:
+            raise ValidationError(f"files must contain 1 to {MAX_IMPORT_FILES} uploads")
+        from engraphis.core.documents import normalize_document_path
+
+        uploads: list[tuple[str, bytes]] = []
+        upload_paths: set[str] = set()
+        total_bytes = 0
+        for entry in files:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValidationError("each upload must contain a path and bytes")
+            relative_path, raw = entry
+            if not isinstance(relative_path, str) or not isinstance(raw, bytes):
+                raise ValidationError("each upload must contain a path and bytes")
+            try:
+                path = normalize_document_path(relative_path)
+            except ValueError:
+                raise ValidationError("upload contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in upload_paths:
+                raise ValidationError("upload contains a duplicate path")
+            upload_paths.add(path_key)
+            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+                raise ValidationError("upload contains a file that is too large")
+            total_bytes += len(raw)
+            if total_bytes > MAX_IMPORT_TOTAL_BYTES:
+                raise ValidationError("uploads exceed the total size limit")
+            uploads.append((path, raw))
+
+        manifest = [] if attachment_manifest is None else attachment_manifest
+        if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
+            raise ValidationError("attachment_manifest is invalid")
+        attachments: list[dict] = []
+        attachment_paths: set[str] = set()
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise ValidationError("attachment_manifest is invalid")
+            raw_path = entry.get("path")
+            if not isinstance(raw_path, str):
+                raise ValidationError("attachment_manifest contains an invalid path")
+            try:
+                path = normalize_document_path(raw_path)
+            except ValueError:
+                raise ValidationError("attachment_manifest contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in attachment_paths:
+                raise ValidationError("attachment_manifest contains a duplicate path")
+            attachment_paths.add(path_key)
+            size = entry.get("size")
+            if (
+                isinstance(size, bool) or not isinstance(size, int)
+                or not 0 <= size <= MAX_IMPORT_RESOURCE_BYTES
+            ):
+                raise ValidationError("attachment_manifest contains an invalid size")
+            attachments.append({"path": path, "size": size})
+        if upload_paths.intersection(attachment_paths):
+            raise ValidationError("upload and attachment paths overlap")
+        return uploads, attachments
+
+    def preview_document_tree(
+        self, path: str, *, workspace: str, repo: Optional[str] = None,
+        session_id: Optional[str] = None, scope: Optional[str] = None,
+        memory_type: str = "semantic", source_id: Optional[str] = None,
+        source_label: str = "", on_conflict: str = "error",
+    ) -> dict:
+        """Scan and plan a mixed local document collection without Store writes."""
+        from engraphis.core.documents import scan_document_tree
+        from engraphis.document_import import DocumentImporter, local_document_adapter
+
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        scan = scan_document_tree(path, adapter=local_document_adapter)
+        label = self._document_label(source_label or Path(path).name)
+        report = DocumentImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def import_document_tree(
+        self, path: str, *, workspace: str, repo: Optional[str] = None,
+        session_id: Optional[str] = None, scope: Optional[str] = None,
+        memory_type: str = "semantic", source_id: Optional[str] = None,
+        source_label: str = "", on_conflict: str = "error",
+        confirmed: bool = False, actor: str = "local_cli_operator",
+        cancel_check=None, progress=None, _scan=None,
+    ) -> dict:
+        """Import mixed local documents synchronously and atomically per source file."""
+        from engraphis.core.documents import scan_document_tree
+        from engraphis.document_import import DocumentImporter, local_document_adapter
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        # The local CLI passes its already-previewed immutable scan so confirmation
+        # applies to exactly those bytes. Other callers receive the same secure scan
+        # here, immediately before target creation.
+        scan = _scan or scan_document_tree(path, adapter=local_document_adapter)
+        label = self._document_label(source_label or Path(path).name)
+        clean_actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS)
+        _reject_secret_capture((("actor", clean_actor),))
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        report = DocumentImporter(self).import_scan(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, confirmed=True,
+            actor=clean_actor, strict_root=True,
+            cancel_check=cancel_check, progress=progress,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def preview_document_upload(
+        self, *, files: list[tuple[str, bytes]],
+        attachment_manifest: Optional[list[dict]], workspace: str,
+        repo: Optional[str] = None, session_id: Optional[str] = None,
+        scope: Optional[str] = None, memory_type: str = "semantic",
+        source_id: Optional[str] = None, source_label: str = "",
+        on_conflict: str = "error", confirmed: bool = False,
+    ) -> dict:
+        """Preview browser-selected mixed document bytes without persisting a copy."""
+        del confirmed
+        from engraphis.document_import import DocumentImporter, scan_document_upload
+
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
+        label = self._document_label(source_label, source_id=source_id)
+        if source_id is None:
+            self._require_new_document_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
+        scan = scan_document_upload(uploads, source_label=label)
+        report = DocumentImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, strict_root=False,
+            attachment_manifest=attachments,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return self._document_report(report)
+
+    def import_document_upload(
+        self, *, files: list[tuple[str, bytes]],
+        attachment_manifest: Optional[list[dict]], workspace: str,
+        repo: Optional[str] = None, session_id: Optional[str] = None,
+        scope: Optional[str] = None, memory_type: str = "semantic",
+        source_id: Optional[str] = None, source_label: str = "",
+        on_conflict: str = "error", confirmed: bool = False,
+    ) -> dict:
+        """Start an owner-confirmed mixed-document import without upload persistence."""
+        from engraphis.document_import import DocumentImporter, scan_document_upload
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        source_id = self._document_registered_target(
+            source_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        uploads, attachments = self._document_upload_inputs(files, attachment_manifest)
+        label = self._document_label(source_label, source_id=source_id)
+        if source_id is None:
+            self._require_new_document_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
+        scan = scan_document_upload(uploads, source_label=label)
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        importer = DocumentImporter(self)
+        prepared = importer.prepare_import(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, source_id=source_id,
+            source_label=label, on_conflict=policy, confirmed=True,
+            strict_root=False,
+        )
+        job_id = str(prepared["job_id"])
+
+        def run() -> None:
+            try:
+                importer.import_scan(
+                    scan, workspace_id=wid, repo_id=rid, session_id=sid,
+                    scope=sc, memory_type=mt, source_id=source_id,
+                    source_label=label, on_conflict=policy, confirmed=True,
+                    actor="dashboard_browser_session", strict_root=False,
+                    attachment_manifest=attachments, prepared=prepared,
+                )
+            except BaseException:
+                logger.exception("Document import worker failed before final reporting")
+                try:
+                    self.store.conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? WHERE id=?",
+                        (time.time(), time.time(), job_id),
+                    )
+                    self.store.conn.commit()
+                except Exception:
+                    logger.exception("Document import worker finalization failed")
+            finally:
+                with self._graph_job_lock:
+                    self._obsidian_job_threads.pop(job_id, None)
+
+        worker = threading.Thread(
+            target=run, name=f"engraphis-document-import-{job_id[-8:]}", daemon=True,
+        )
+        with self._graph_job_lock:
+            self._obsidian_job_threads[job_id] = worker
+        try:
+            worker.start()
+        except BaseException:
+            with self._graph_job_lock:
+                self._obsidian_job_threads.pop(job_id, None)
+            failed_at = time.time()
+            self.store.conn.execute(
+                "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? "
+                "WHERE id=?",
+                (failed_at, failed_at, job_id),
+            )
+            self.store.conn.commit()
+            raise
+        return {
+            "job_id": job_id, "id": job_id, "state": "running", "status": "running",
+            "source_id": prepared.get("source_id", prepared["vault_id"]),
+            "adapter": "documents", "source_adapter": "documents",
+            "workspace": ws, "repo": repo,
+            "total_items": len(scan.documents) + len(scan.rejected) + len(scan.skipped),
+        }
+
+    def list_document_sources(self, workspace: str) -> list[dict]:
+        """List universal and legacy Markdown source identities for one workspace."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            return []
+        result = []
+        for row in self.store.list_source_vaults(workspace_id=wid):
+            if row.get("kind") not in {"documents", "obsidian"}:
+                continue
+            repo_name = None
+            if row.get("repo_id"):
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (row["repo_id"],),
+                ).fetchone()
+                repo_name = str(repo_row["name"]) if repo_row else None
+            result.append({
+                "id": row["id"],
+                "label": row.get("display_name") or "Local documents",
+                "kind": row.get("kind"),
+                "adapter": "obsidian" if row.get("kind") == "obsidian" else "documents",
+                "formats": row.get("formats") or {},
+                "workspace": ws, "repo": repo_name,
+                "session_id": row.get("session_id"), "scope": row.get("scope"),
+                "memory_type": row.get("memory_type"),
+                "importer_version": row.get("importer_version"),
+            })
+        return result
+
+    def get_document_import_job(self, job_id: str, *, workspace: str) -> dict:
+        """Return a content-free universal or compatibility import report."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? "
+            "AND kind IN ('document_import','obsidian_import')",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise KeyError(clean_id)
+        items = self.store.list_source_import_job_items(job_id=clean_id)
+        files = [{
+            "relative_path": item["relative_path"],
+            "status": item["result_state"], "action": item["planned_action"],
+            "reason": item.get("error_code") or "",
+            "warning_count": int(item.get("warning_count") or 0),
+            "format": item.get("source_format") or "",
+        } for item in items]
+        counts = _loads(row["counts"], {})
+        return {
+            "id": clean_id, "job_id": clean_id, "workspace": ws,
+            "kind": row["kind"], "state": row["state"], "status": row["state"],
+            "total_items": int(row["total_items"]),
+            "processed_items": int(row["processed_items"]),
+            "counts": counts, "files": files,
+            "report": {"state": row["state"], "counts": counts, "files": files},
+        }
+
+    def cancel_document_import_job(self, job_id: str, *, workspace: str) -> dict:
+        """Request cancellation at the next per-document atomic boundary."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        changed = self.store.conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=? AND workspace_id=? "
+            "AND kind IN ('document_import','obsidian_import') "
+            "AND state IN ('queued','running')",
+            (clean_id, wid),
+        ).rowcount
+        self.store.conn.commit()
+        if not changed:
+            row = self.store.conn.execute(
+                "SELECT state FROM jobs WHERE id=? AND workspace_id=? "
+                "AND kind IN ('document_import','obsidian_import')", (clean_id, wid),
+            ).fetchone()
+            if row is None:
+                raise KeyError(clean_id)
+            return {"id": clean_id, "state": row["state"], "cancel_requested": False}
+        return {"id": clean_id, "state": "running", "cancel_requested": True}
+
+    # ── Obsidian compatibility import ────────────────────────────────────────
+    def _obsidian_target(self, *, workspace: str, repo: Optional[str],
+                         session_id: Optional[str], scope: Optional[str],
+                         memory_type: str, create: bool) -> tuple[
+                             str, Optional[str], Optional[str], Optional[str], Scope, MemoryType
+                         ]:
+        """Resolve an import target through the ordinary v2 hierarchy rules."""
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        mt = _enum(memory_type, MemoryType, "memory_type")
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
+        if sc == Scope.USER:
+            raise ValidationError("user scope is read-only")
+        if sc == Scope.WORKSPACE and (rp or session_id):
+            raise ValidationError(
+                "workspace scope requires repo and session_id to be omitted"
+            )
+        wid = self._get_or_create_workspace(ws) if create else self._lookup_workspace(ws)
+        if wid is None:
+            if session_id:
+                raise ValidationError("session scope requires an existing workspace")
+            return ws, None, None, None, sc, mt
+        rid = (
+            self.store.get_or_create_repo(wid, rp) if create and rp
+            else self._lookup_repo(wid, rp) if rp else None
+        )
+        if rp and rid is None:
+            return ws, wid, None, None, sc, mt
+        if session_id:
+            session = self._session_for_write(session_id, wid, rid)
+            if session is None:
+                raise ValidationError("session_id is required")
+            session_id = str(session["id"])
+            if rid is None:
+                rid = session.get("repo_id")
+            if sc == Scope.REPO and rid is None:
+                raise ValidationError("repo scope requires a repo-backed session_id")
+            if sc == Scope.REPO:
+                # The session is used only to infer and validate its parent repo;
+                # repo-scoped source manifests must not retain a session target.
+                session_id = None
+        if sc == Scope.REPO and rid is None:
+            raise ValidationError("repo scope requires repo")
+        return ws, wid, rid, session_id, sc, mt
+
+    def _obsidian_registered_target(
+        self, vault_id: Optional[str], *, workspace: str, repo: Optional[str],
+        session_id: Optional[str], scope: Optional[str], memory_type: str,
+    ) -> Optional[str]:
+        """Validate a selected vault before an import may create hierarchy rows.
+
+        A new import is allowed to create its workspace/repository. Re-importing a
+        registered vault is different: its target already exists, and a misspelled or
+        cross-workspace request must fail without first creating attacker-controlled
+        hierarchy state. The importer performs the authoritative vault-row comparison;
+        this preflight makes that comparison mutation-free.
+        """
+        if vault_id is None:
+            return None
+        clean_id = _clean_text(
+            vault_id, field="vault_id", max_chars=MAX_NAME_CHARS,
+        )
+        if not clean_id.startswith("vlt_"):
+            raise ValidationError("registered vault was not found")
+        _ws, wid, rid, sid, selected_scope, selected_type = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        if wid is None or (repo is not None and rid is None):
+            raise ValidationError("registered vault was not found")
+        vault = self.store.get_source_vault(clean_id)
+        if (
+            vault is None
+            or vault.get("kind") != "obsidian"
+            or vault.get("workspace_id") != wid
+            or vault.get("repo_id") != rid
+            or vault.get("session_id") != sid
+        ):
+            raise ValidationError("registered vault does not belong to that target")
+        if (
+            vault.get("scope") != selected_scope.value
+            or vault.get("memory_type") != selected_type.value
+        ):
+            raise ValidationError("registered vault has different import defaults")
+        return clean_id
+
+    def _obsidian_label(self, value: str, *, vault_id: Optional[str] = None) -> str:
+        label = unicodedata.normalize("NFC", _clean_text(
+            value, field="vault_label", max_chars=MAX_NAME_CHARS, required=False,
+        ))
+        if not label and vault_id:
+            vault = self.store.get_source_vault(vault_id)
+            label = str(vault.get("display_name") or "") if vault else ""
+        if not label:
+            raise ValidationError("vault_label is required for a new browser source")
+        _reject_secret_capture((("vault_label", label),))
+        return label
+
+    @staticmethod
+    def _obsidian_conflict_policy(value: str) -> str:
+        policy = _clean_text(
+            value, field="on_conflict", max_chars=MAX_NAME_CHARS,
+        ).casefold()
+        policy = {"report": "error", "supersede": "replace"}.get(policy, policy)
+        if policy not in {"error", "replace", "new"}:
+            raise ValidationError("on_conflict must be error, replace, or new")
+        return policy
+
+    @staticmethod
+    def _obsidian_upload_inputs(
+        files: list[tuple[str, bytes]], attachment_manifest: Optional[list[dict]],
+    ) -> tuple[list[tuple[str, bytes]], list[dict]]:
+        """Apply transport-independent upload bounds and manifest validation."""
+        if not isinstance(files, list) or not files or len(files) > MAX_IMPORT_FILES:
+            raise ValidationError(f"files must contain 1 to {MAX_IMPORT_FILES} uploads")
+        from engraphis.core.obsidian import (
+            MAX_NOTE_BYTES,
+            MAX_VAULT_BYTES,
+            normalize_obsidian_path,
+        )
+
+        uploads: list[tuple[str, bytes]] = []
+        upload_paths: set[str] = set()
+        total_bytes = 0
+        for entry in files:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValidationError("each upload must contain a path and bytes")
+            relative_path, raw = entry
+            if not isinstance(relative_path, str) or not isinstance(raw, bytes):
+                raise ValidationError("each upload must contain a path and bytes")
+            if len(raw) > MAX_NOTE_BYTES:
+                raise ValidationError("upload contains a file that is too large")
+            total_bytes += len(raw)
+            if total_bytes > MAX_VAULT_BYTES:
+                raise ValidationError("uploads exceed the total size limit")
+            # Retain an unsafe path for the scanner to put in the content-free
+            # per-file preview report; only valid paths participate in the
+            # transport-level duplicate/overlap check.
+            try:
+                path = normalize_obsidian_path(relative_path)
+            except ValueError:
+                uploads.append((relative_path, raw))
+                continue
+            path_key = path.casefold()
+            if path_key in upload_paths:
+                raise ValidationError("upload contains a duplicate path")
+            upload_paths.add(path_key)
+            uploads.append((path, raw))
+
+        manifest = [] if attachment_manifest is None else attachment_manifest
+        if not isinstance(manifest, list) or len(manifest) > MAX_IMPORT_FILES * 20:
+            raise ValidationError("attachment_manifest is invalid")
+
+        attachments: list[dict] = []
+        attachment_paths: set[str] = set()
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise ValidationError("attachment_manifest is invalid")
+            raw_path = entry.get("path")
+            if not isinstance(raw_path, str):
+                raise ValidationError("attachment_manifest contains an invalid path")
+            try:
+                path = normalize_obsidian_path(raw_path)
+            except ValueError:
+                raise ValidationError("attachment_manifest contains an invalid path") from None
+            path_key = path.casefold()
+            if path_key in attachment_paths:
+                raise ValidationError("attachment_manifest contains a duplicate path")
+            attachment_paths.add(path_key)
+            size = entry.get("size")
+            if (
+                isinstance(size, bool) or not isinstance(size, int)
+                or not 0 <= size <= MAX_IMPORT_RESOURCE_BYTES
+            ):
+                raise ValidationError("attachment_manifest contains an invalid size")
+            attachments.append({"path": path, "size": size})
+        if upload_paths.intersection(attachment_paths):
+            raise ValidationError("upload and attachment paths overlap")
+        return uploads, attachments
+
+    def preview_obsidian_vault(self, path: str, *, workspace: str,
+                               repo: Optional[str] = None,
+                               session_id: Optional[str] = None,
+                               scope: Optional[str] = None,
+                               memory_type: str = "semantic",
+                               vault_id: Optional[str] = None,
+                               vault_label: str = "",
+                               on_conflict: str = "error") -> dict:
+        """Read and plan one local vault without mutating the Store."""
+        from engraphis.core.obsidian import scan_obsidian_vault
+        from engraphis.obsidian_import import ObsidianImporter
+
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        policy = self._obsidian_conflict_policy(on_conflict)
+        scan = scan_obsidian_vault(path)
+        label = self._obsidian_label(vault_label or Path(path).name)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        report = ObsidianImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def import_obsidian_vault(self, path: str, *, workspace: str,
+                              repo: Optional[str] = None,
+                              session_id: Optional[str] = None,
+                              scope: Optional[str] = None,
+                              memory_type: str = "semantic",
+                              vault_id: Optional[str] = None,
+                              vault_label: str = "",
+                              on_conflict: str = "error",
+                              confirmed: bool = False,
+                              actor: str = "local_cli_operator",
+                              cancel_check=None, progress=None,
+                              _scan=None) -> dict:
+        """Import one filesystem vault synchronously and atomically per note."""
+        from engraphis.core.obsidian import scan_obsidian_vault
+        from engraphis.obsidian_import import ObsidianImporter
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        # The local CLI passes its already-previewed immutable scan so operator
+        # confirmation applies to exactly those bytes. Other callers are scanned
+        # here immediately before target creation.
+        scan = _scan or scan_obsidian_vault(path)
+        label = self._obsidian_label(vault_label or Path(path).name)
+        clean_actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS)
+        _reject_secret_capture((("actor", clean_actor),))
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        report = ObsidianImporter(self).import_scan(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            confirmed=True, actor=clean_actor, strict_root=True,
+            cancel_check=cancel_check, progress=progress,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def preview_obsidian_upload(self, *, files: list[tuple[str, bytes]],
+                                attachment_manifest: Optional[list[dict]],
+                                workspace: str, repo: Optional[str] = None,
+                                session_id: Optional[str] = None,
+                                scope: Optional[str] = None,
+                                memory_type: str = "semantic",
+                                vault_id: Optional[str] = None,
+                                vault_label: str = "",
+                                on_conflict: str = "error",
+                                confirmed: bool = False) -> dict:
+        """Preview browser-selected bytes; ``confirmed`` is intentionally ignored."""
+        del confirmed
+        from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
+
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=False,
+        )
+        uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
+        label = self._obsidian_label(vault_label, vault_id=vault_id)
+        if vault_id is None:
+            self._require_new_obsidian_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
+        scan = scan_obsidian_upload(uploads, vault_label=label)
+        report = ObsidianImporter(self).preview(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            strict_root=False, attachment_manifest=attachments,
+            manifest={"vaults": [], "items": []} if wid is None else None,
+        )
+        report["target"].update({"workspace": ws, "repo": repo})
+        return report
+
+    def import_obsidian_upload(self, *, files: list[tuple[str, bytes]],
+                               attachment_manifest: Optional[list[dict]],
+                               workspace: str, repo: Optional[str] = None,
+                               session_id: Optional[str] = None,
+                               scope: Optional[str] = None,
+                               memory_type: str = "semantic",
+                               vault_id: Optional[str] = None,
+                               vault_label: str = "",
+                               on_conflict: str = "error",
+                               confirmed: bool = False) -> dict:
+        """Import owner-confirmed browser bytes without creating an upload copy."""
+        from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
+
+        if confirmed is not True:
+            raise ValidationError("trusted-local confirmation is required")
+        policy = self._obsidian_conflict_policy(on_conflict)
+        vault_id = self._obsidian_registered_target(
+            vault_id, workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type,
+        )
+        uploads, attachments = self._obsidian_upload_inputs(files, attachment_manifest)
+        label = self._obsidian_label(vault_label, vault_id=vault_id)
+        if vault_id is None:
+            self._require_new_obsidian_label(
+                label, workspace=workspace, repo=repo, session_id=session_id,
+                scope=scope, memory_type=memory_type,
+            )
+        scan = scan_obsidian_upload(uploads, vault_label=label)
+        ws, wid, rid, sid, sc, mt = self._obsidian_target(
+            workspace=workspace, repo=repo, session_id=session_id,
+            scope=scope, memory_type=memory_type, create=True,
+        )
+        if wid is None:
+            raise RuntimeError("workspace creation failed")
+        importer = ObsidianImporter(self)
+        prepared = importer.prepare_import(
+            scan, workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=sc, memory_type=mt, vault_id=vault_id,
+            vault_label=label, on_conflict=policy,
+            confirmed=True, strict_root=False,
+        )
+        job_id = str(prepared["job_id"])
+
+        def run() -> None:
+            try:
+                importer.import_scan(
+                    scan, workspace_id=wid, repo_id=rid, session_id=sid,
+                    scope=sc, memory_type=mt, vault_id=vault_id,
+                    vault_label=label, on_conflict=policy,
+                    confirmed=True, actor="dashboard_browser_session",
+                    strict_root=False, attachment_manifest=attachments,
+                    prepared=prepared,
+                )
+            except BaseException:
+                logger.exception("Obsidian import worker failed before final reporting")
+                try:
+                    self.store.conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? WHERE id=?",
+                        (time.time(), time.time(), job_id),
+                    )
+                    self.store.conn.commit()
+                except Exception:
+                    logger.exception("Obsidian import worker finalization failed")
+            finally:
+                with self._graph_job_lock:
+                    self._obsidian_job_threads.pop(job_id, None)
+
+        worker = threading.Thread(
+            target=run, name=f"engraphis-obsidian-import-{job_id[-8:]}", daemon=True,
+        )
+        with self._graph_job_lock:
+            self._obsidian_job_threads[job_id] = worker
+        try:
+            worker.start()
+        except BaseException:
+            with self._graph_job_lock:
+                self._obsidian_job_threads.pop(job_id, None)
+            failed_at = time.time()
+            self.store.conn.execute(
+                "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? "
+                "WHERE id=?",
+                (failed_at, failed_at, job_id),
+            )
+            self.store.conn.commit()
+            raise
+        return {
+            "job_id": job_id, "id": job_id, "state": "running", "status": "running",
+            "vault_id": prepared["vault_id"], "workspace": ws, "repo": repo,
+            "total_items": len(scan.notes) + len(scan.rejected) + len(scan.skipped),
+        }
+
+    def list_obsidian_vaults(self, workspace: str) -> list[dict]:
+        """Return registered identities/defaults without exposing local root digests."""
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            return []
+        result = []
+        for row in self.store.list_source_vaults(workspace_id=wid, kind="obsidian"):
+            repo_name = None
+            if row.get("repo_id"):
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (row["repo_id"],),
+                ).fetchone()
+                repo_name = str(repo_row["name"]) if repo_row else None
+            result.append({
+                "id": row["id"], "label": row.get("display_name") or "Obsidian vault",
+                "workspace": ws, "repo": repo_name, "session_id": row.get("session_id"),
+                "scope": row.get("scope"), "memory_type": row.get("memory_type"),
+                "importer_version": row.get("importer_version"),
+            })
+        return result
+
+    def get_obsidian_import_job(self, job_id: str, *, workspace: str) -> dict:
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='obsidian_import'",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise KeyError(clean_id)
+        items = self.store.list_source_import_job_items(job_id=clean_id)
+        files = [{
+            "relative_path": item["relative_path"],
+            "status": item["result_state"],
+            "action": item["planned_action"],
+            "reason": item.get("error_code") or "",
+            "warning_count": int(item.get("warning_count") or 0),
+            "format": item.get("source_format") or "",
+        } for item in items]
+        return {
+            "id": clean_id, "job_id": clean_id, "workspace": ws,
+            "state": row["state"], "status": row["state"],
+            "total_items": int(row["total_items"]),
+            "processed_items": int(row["processed_items"]),
+            "counts": _loads(row["counts"], {}), "files": files,
+            "report": {"state": row["state"], "counts": _loads(row["counts"], {}),
+                       "files": files},
+        }
+
+    def cancel_obsidian_import_job(self, job_id: str, *, workspace: str) -> dict:
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        if wid is None:
+            raise KeyError(clean_id)
+        changed = self.store.conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=? AND workspace_id=? "
+            "AND kind='obsidian_import' AND state IN ('queued','running')",
+            (clean_id, wid),
+        ).rowcount
+        self.store.conn.commit()
+        if not changed:
+            row = self.store.conn.execute(
+                "SELECT state FROM jobs WHERE id=? AND workspace_id=? "
+                "AND kind='obsidian_import'", (clean_id, wid),
+            ).fetchone()
+            if row is None:
+                raise KeyError(clean_id)
+            return {"id": clean_id, "state": row["state"], "cancel_requested": False}
+        return {"id": clean_id, "state": "running", "cancel_requested": True}
 
     def import_postgres_schema(self, dsn: str, *, workspace: str,
                                repo: Optional[str] = None,
@@ -3627,9 +4555,7 @@ class MemoryService:
         symbol_id = _clean_text(symbol_id, field="symbol_id", max_chars=500)
         memory_id = _clean_text(memory_id, field="memory_id", max_chars=500)
         relation = _clean_name(relation, field="relation") or "mentions"
-        reason = _clean_text(
-            reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
-        )
+        reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
         _reject_secret_capture((("link_symbol reason", reason),))
         try:
             confidence = max(0.0, min(1.0, float(confidence)))
@@ -3656,9 +4582,11 @@ class MemoryService:
         receipt = self.store.record_receipt(
             "link", workspace_id=wid, repo_id=rid, actor=actor,
             target_count=1, status="ok",
-            metadata={"relation": relation, "result_count": 1,
-                      "reason": reason[:200] if reason else "",
-                      "symbol_id": symbol["id"], "memory_id": memory_id},
+            metadata={
+                "relation": relation, "result_count": 1,
+                "reason": reason[:200] if reason else "",
+                "symbol_id": symbol["id"], "memory_id": memory_id,
+            },
         )
         self.store.audit(
             actor, "link_symbol", link_id,
@@ -3667,8 +4595,8 @@ class MemoryService:
         )
         return {"link_id": link_id, "symbol_id": symbol["id"],
                 "memory_id": memory_id, "relation": relation,
-                "reason": reason,
-                "workspace": workspace, "repo": repo, "receipt": receipt}
+                "reason": reason, "workspace": workspace, "repo": repo,
+                "receipt": receipt}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
@@ -3930,6 +4858,12 @@ class MemoryService:
             pass  # sqlite-vec vector table only present when that backend is active
         c.execute(f"DELETE FROM mem_links WHERE a IN {msub} OR b IN {msub}", (wid, wid))
         c.execute("DELETE FROM memories WHERE workspace_id=?", (wid,))
+        # These content-free sync/governance rows are not foreign-key cascades. A
+        # hard workspace deletion must remove them too, otherwise stale markers can
+        # later authorize a tombstone or block a newly created workspace's sync.
+        c.execute("DELETE FROM memory_sync_exports WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM memory_tombstones WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM maintenance_cursors WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM entities WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM edges WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM sessions WHERE workspace_id=?", (wid,))
@@ -4289,6 +5223,27 @@ class MemoryService:
                     f"UPDATE {table} SET workspace_id=?, repo_id=? "
                     f"WHERE workspace_id=? AND repo_id IS ?",
                     (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
+
+        # Export proofs and remote-erasure markers survive memory re-homing so the
+        # next sync can still converge. Their repository owner follows the same
+        # collision map as the memories themselves.
+        for row in [dict(x) for x in c.execute(
+                "SELECT memory_id, repo_id FROM memory_sync_exports "
+                "WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "UPDATE memory_sync_exports SET workspace_id=?, repo_id=? "
+                "WHERE memory_id=?",
+                (wid_dst, _new_repo(row["repo_id"]), row["memory_id"]),
+            )
+        for row in [dict(x) for x in c.execute(
+                "SELECT memory_id, repo_id FROM memory_tombstones "
+                "WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "UPDATE memory_tombstones SET workspace_id=?, repo_id=? "
+                "WHERE memory_id=?",
+                (wid_dst, _new_repo(row["repo_id"]), row["memory_id"]),
+            )
+        c.execute("DELETE FROM maintenance_cursors WHERE workspace_id=?", (wid_src,))
 
         # 5) Receipt payload hashes bind their original workspace scope digest and chain
         # predecessor. Re-homing them would either forge that evidence or fork the target
@@ -4745,7 +5700,7 @@ class MemoryService:
             and (importance is None or importance == existing.importance)
         ):
             return {"id": mid, "updated": []}
-        return self._update_memory_transactional(
+        result, external_index_action = self._update_memory_transactional(
             mid,
             workspace=workspace,
             repo=repo,
@@ -4754,14 +5709,55 @@ class MemoryService:
             importance=importance,
             actor=actor,
         )
+        if external_index_action is not None:
+            self._publish_memory_index_action(external_index_action)
+        return result
 
+    def _publish_memory_index_action(
+        self, action: tuple[str, str, Optional[np.ndarray], str],
+    ) -> None:
+        """Publish one committed title edit to a separately-backed vector index.
+
+        The Store row/vector/FTS state is canonical and has already committed when this
+        runs.  A provider failure therefore becomes explicit repair debt; it must never
+        be raised as though the canonical edit had rolled back.
+        """
+        operation, memory_id, vector, model = action
+        try:
+            if operation == "delete":
+                self.engine.index.delete([memory_id])
+            elif operation == "upsert" and vector is not None:
+                self.engine.index.upsert(
+                    [memory_id], vector.reshape(1, -1), [{"model": model}],
+                )
+            else:  # pragma: no cover - action is constructed locally
+                raise RuntimeError("invalid deferred vector-index action")
+        except Exception as exc:  # noqa: BLE001 - canonical Store state is committed
+            failure_type = type(exc).__name__
+            logger.warning(
+                "vector-index %s failed for title update %s (%s)",
+                operation, memory_id, failure_type,
+            )
+            try:
+                self.store.audit(
+                    "engine", f"index_{operation}_failed", memory_id,
+                    f"failure_type={failure_type}",
+                    commit=not self.store.conn.transaction_owned_by_current_thread(),
+                )
+            except Exception as audit_exc:  # noqa: BLE001 - retain original repair debt
+                logger.warning(
+                    "could not audit title-update vector-index failure (%s)",
+                    type(audit_exc).__name__,
+                )
 
     @_rollback_service_transaction
     def _update_memory_transactional(
             self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
-                      actor: str = "user") -> dict:
+                      actor: str = "user") -> tuple[
+                          dict, Optional[tuple[str, str, Optional[np.ndarray], str]]
+                      ]:
         """In-place edit of a memory's metadata fields. Content edits go through
         ``correct`` so bi-temporal history is preserved."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -4772,6 +5768,7 @@ class MemoryService:
         old_title = existing.title if existing is not None else ""
         sets, params, changes = [], [], []
         title_changed = False
+        external_index_action = None
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
             _reject_secret_capture((("title", title),))
@@ -4799,11 +5796,8 @@ class MemoryService:
                 params.append(importance)
                 changes.append("importance")
         if not sets and title is None:
-            return {"id": mid, "updated": []}
+            return {"id": mid, "updated": []}, None
         if sets:
-            # Descriptive fields participate in sync conflict ordering. Advance the
-            # hybrid logical clock in the same transaction as the direct SQL update so
-            # a peer cannot observe a changed title/type/importance at the old clock.
             self.store.advance_memory_modified_hlc(mid, commit=False)
             params.append(mid)
             self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
@@ -4826,7 +5820,12 @@ class MemoryService:
                 ):
                     self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
                     if vector_index_requires_sync(self.engine.index, self.store):
-                        self.engine.index.delete([mid], commit=False)
+                        if vector_index_shares_store_transaction(
+                            self.engine.index, self.store,
+                        ):
+                            self.engine.index.delete([mid], commit=False)
+                        else:
+                            external_index_action = ("delete", mid, None, "")
                 else:
                     # Existing rows may predate the write-path secret guard.  Do not send
                     # such content to a remote embedder while changing unrelated metadata.
@@ -4860,23 +5859,19 @@ class MemoryService:
                     ):
                         raise ValidationError("embedder returned an invalid vector")
                     if vector_index_requires_sync(self.engine.index, self.store):
-                        try:
+                        if vector_index_shares_store_transaction(
+                            self.engine.index, self.store,
+                        ):
                             self.engine.index.upsert(
                                 [mid], vectors, [{"model": model}], commit=False
                             )
-                        except Exception as exc:  # noqa: BLE001 — preserve mirror atomicity
-                            logger.warning("vector-index upsert failed for title update %s (%s)",
-                                           mid, type(exc).__name__)
-                            try:
-                                self.store.audit(
-                                    "engine", "index_upsert_failed", mid,
-                                    "failure_type=%s" % type(exc).__name__, commit=False,
-                                )
-                            except Exception:
-                                pass
-                            raise
+                        else:
+                            external_index_action = (
+                                "upsert", mid, vectors[0].copy(), model,
+                            )
                     # Store owns the portable mirror for every backend. A separate
-                    # index was synchronized above; NumPy searches this row directly.
+                    # index is published only after this transaction commits; NumPy
+                    # searches this canonical row directly.
                     self.store.put_vector(mid, vectors[0], model=model)
             self.store._fts_upsert(
                 mid, row["title"] or "", row["content"] or "", kw,
@@ -4884,7 +5879,7 @@ class MemoryService:
 
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
-        return {"id": mid, "updated": changes}
+        return {"id": mid, "updated": changes}, external_index_action
     @_rollback_service_transaction
     def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
                          actor: str = "user") -> dict:
@@ -5210,20 +6205,29 @@ class MemoryService:
             )
             base["group_by"] = gb
             base["by_group"] = rows
-            if fmt == "csv":
-                import csv as _csv
-                import io as _io
-                buf = _io.StringIO()
+        if fmt == "csv":
+            import csv as _csv
+            import io as _io
+            buf = _io.StringIO()
+            if gb:
                 fields = [
                     "group_key", "token_counter", "receipt_count", "source_tokens",
                     "context_tokens", "saved_tokens", "budget_tokens",
                     "packed_count", "omitted_count", "savings_ratio",
                 ]
-                writer = _csv.DictWriter(buf, fieldnames=fields)
-                writer.writeheader()
-                for row in rows:
-                    writer.writerow({k: row.get(k, "") for k in fields})
-                base["csv"] = buf.getvalue()
+                rows = base.get("by_group", [])
+            else:
+                fields = [
+                    "token_counter", "receipt_count", "source_tokens", "context_tokens",
+                    "saved_tokens", "budget_tokens", "packed_count", "omitted_count",
+                    "savings_ratio",
+                ]
+                rows = base.get("by_token_counter", [])
+            writer = _csv.DictWriter(buf, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fields})
+            base["csv"] = buf.getvalue()
         return base
 
     def verify_receipts(self, *, workspace: str, expected_head: str = "",
@@ -6058,6 +7062,7 @@ class MemoryService:
         with self._graph_job_lock:
             if self._closing or self._closed:
                 raise ValidationError("memory service is shutting down")
+            self._recover_stale_graph_jobs()
             self._graph_job_threads = {
                 key: value for key, value in self._graph_job_threads.items()
                 if value.is_alive()
@@ -6066,7 +7071,6 @@ class MemoryService:
             if owns_graph_txn:
                 self.store.conn.execute("BEGIN IMMEDIATE")
             try:
-                self._recover_stale_graph_jobs()
                 current_scope = self.store.conn.execute(
                     "SELECT 1 FROM workspaces WHERE id=?", (wid,)
                 ).fetchone()
@@ -8717,36 +9721,66 @@ class MemoryService:
         # ── Decay distribution (retention buckets) ──────────────────────────────
         # R(t) = exp(-Δt_days / S). Bucket into 5 bands: critical (<0.2), low
         # (0.2–0.4), medium (0.4–0.6), high (0.6–0.8), strong (>0.8).
-        # SQLite's optional math extension is not available in every supported
-        # build. Fetch the indexed candidate columns and keep the calculation
-        # deterministic in Python instead of requiring SQLite's EXP().
-        decay_rows = conn.execute(
-            f"SELECT last_access, ingested_at, stability FROM memories{live_where}",
-            live_params,
-        ).fetchall()
-        decay_counts = [0, 0, 0, 0, 0]
-        for row in decay_rows:
-            anchor = row["last_access"] or row["ingested_at"] or now
-            stability = max(float(row["stability"] or 0.0), 0.01)
-            elapsed_days = max(0.0, (now - float(anchor)) / 86400.0)
-            retention = math.exp(-elapsed_days / stability)
-            if retention < 0.2:
-                decay_counts[0] += 1
-            elif retention < 0.4:
-                decay_counts[1] += 1
-            elif retention < 0.6:
-                decay_counts[2] += 1
-            elif retention < 0.8:
-                decay_counts[3] += 1
-            else:
-                decay_counts[4] += 1
-        decay_distribution = [
-            {"bucket": "critical", "label": "< 20%", "count": decay_counts[0]},
-            {"bucket": "low",      "label": "20–40%", "count": decay_counts[1]},
-            {"bucket": "medium",   "label": "40–60%", "count": decay_counts[2]},
-            {"bucket": "high",     "label": "60–80%", "count": decay_counts[3]},
-            {"bucket": "strong",   "label": "> 80%",  "count": decay_counts[4]},
-        ]
+        # Computed in SQL via CASE on the retention formula so this is one indexed
+        # scan, not a Python loop over every memory.
+        decay_sql = f"""
+            SELECT
+                SUM(CASE WHEN ret < 0.2 THEN 1 ELSE 0 END) AS critical,
+                SUM(CASE WHEN ret >= 0.2 AND ret < 0.4 THEN 1 ELSE 0 END) AS low,
+                SUM(CASE WHEN ret >= 0.4 AND ret < 0.6 THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN ret >= 0.6 AND ret < 0.8 THEN 1 ELSE 0 END) AS high,
+                SUM(CASE WHEN ret >= 0.8 THEN 1 ELSE 0 END) AS strong
+            FROM (
+                SELECT EXP(
+                    -MAX(0, (? - COALESCE(last_access, ingested_at, ?)) / 86400.0)
+                    / MAX(stability, 0.01)
+                ) AS ret
+                FROM memories{live_where}
+            )
+        """
+        try:
+            decay_row = conn.execute(decay_sql, [now, now, *live_params]).fetchone()
+        except Exception:  # noqa: BLE001 — SQLite may lack SQLITE_ENABLE_MATH_FUNCTIONS
+            # EXP() is an optional SQLite math function. On builds compiled without
+            # it (or on SQLCipher), fall back to a portable Python computation so
+            # memory_health() keeps working everywhere.
+            decay_ret_sql = f"""
+                SELECT
+                    MAX(0, (? - COALESCE(last_access, ingested_at, ?)) / 86400.0)
+                        / MAX(stability, 0.01) AS days_ratio
+                FROM memories{live_where}
+            """
+            ratios = [float(r["days_ratio"]) for r in conn.execute(
+                decay_ret_sql, [now, now, *live_params]
+            ).fetchall()]
+            buckets = {"critical": 0, "low": 0, "medium": 0, "high": 0, "strong": 0}
+            for ratio in ratios:
+                retention = math.exp(-ratio)
+                if retention < 0.2:
+                    buckets["critical"] += 1
+                elif retention < 0.4:
+                    buckets["low"] += 1
+                elif retention < 0.6:
+                    buckets["medium"] += 1
+                elif retention < 0.8:
+                    buckets["high"] += 1
+                else:
+                    buckets["strong"] += 1
+            decay_distribution = [
+                {"bucket": "critical", "label": "< 20%", "count": buckets["critical"]},
+                {"bucket": "low",      "label": "20–40%", "count": buckets["low"]},
+                {"bucket": "medium",   "label": "40–60%", "count": buckets["medium"]},
+                {"bucket": "high",     "label": "60–80%", "count": buckets["high"]},
+                {"bucket": "strong",   "label": "> 80%",  "count": buckets["strong"]},
+            ]
+        else:
+            decay_distribution = [
+                {"bucket": "critical", "label": "< 20%", "count": int(decay_row["critical"] or 0)},
+                {"bucket": "low",      "label": "20–40%", "count": int(decay_row["low"] or 0)},
+                {"bucket": "medium",   "label": "40–60%", "count": int(decay_row["medium"] or 0)},
+                {"bucket": "high",     "label": "60–80%", "count": int(decay_row["high"] or 0)},
+                {"bucket": "strong",   "label": "> 80%",  "count": int(decay_row["strong"] or 0)},
+            ]
         # ── Orphan count (memories with no entity links) ────────────────────────
         # A memory is an orphan when it has zero live rows in memory_entities.
         # The NOT EXISTS subquery uses the existing idx_memory_entity_memory

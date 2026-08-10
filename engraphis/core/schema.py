@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id               TEXT PRIMARY KEY,
     workspace_id     TEXT NOT NULL,
     repo_id          TEXT,
+    session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     kind             TEXT NOT NULL,
     state            TEXT NOT NULL DEFAULT 'queued',
     dry_run          INTEGER NOT NULL DEFAULT 1,
@@ -242,6 +243,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_scope_state
     ON jobs(workspace_id, kind, state, created_at);
+
+-- A job may be session-targeted, but generic jobs remain backward-compatible
+-- with a NULL session.  SQLite FKs alone cannot assert that its optional repo
+-- belongs to the same session, so retain the v2 scope relation at the boundary.
+CREATE TRIGGER IF NOT EXISTS trg_job_session_scope_insert
+BEFORE INSERT ON jobs WHEN NEW.session_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM sessions s WHERE s.id=NEW.session_id
+          AND s.workspace_id=NEW.workspace_id AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'job session scope mismatch') END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_job_session_scope_update
+BEFORE UPDATE OF workspace_id, repo_id, session_id ON jobs
+WHEN NEW.session_id IS NOT NULL BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM sessions s WHERE s.id=NEW.session_id
+          AND s.workspace_id=NEW.workspace_id AND s.repo_id IS NEW.repo_id
+    ) THEN RAISE(ABORT, 'job session scope mismatch') END;
+END;
 
 CREATE TABLE IF NOT EXISTS graph_index_state (
     workspace_id  TEXT PRIMARY KEY,
@@ -740,7 +760,10 @@ BEFORE INSERT ON source_imports WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+          AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
 END;
 CREATE TRIGGER IF NOT EXISTS trg_source_import_seen_job_update
@@ -750,7 +773,10 @@ WHEN NEW.last_seen_job_id IS NOT NULL BEGIN
         SELECT 1 FROM jobs j JOIN source_vaults v ON v.id=NEW.vault_id
         WHERE j.id=NEW.last_seen_job_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+          AND j.session_id IS v.session_id
     ) THEN RAISE(ABORT, 'source import seen-job scope mismatch') END;
 END;
 
@@ -766,7 +792,10 @@ BEFORE INSERT ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+          AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL
     THEN RAISE(ABORT, 'source import job scope mismatch') END;
 END;
@@ -782,7 +811,10 @@ BEFORE UPDATE OF job_id, source_id ON source_import_items BEGIN
         JOIN jobs j ON j.id=NEW.job_id
         WHERE i.id=NEW.source_id
           AND j.kind IN ('document_import','obsidian_import')
+          AND ((v.kind='documents' AND j.kind='document_import')
+               OR (v.kind='obsidian' AND j.kind='obsidian_import'))
           AND j.workspace_id=v.workspace_id AND j.repo_id IS v.repo_id
+          AND j.session_id IS v.session_id
     ) AND NEW.source_id IS NOT NULL
     THEN RAISE(ABORT, 'source import job scope mismatch') END;
 END;

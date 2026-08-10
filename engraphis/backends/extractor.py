@@ -765,7 +765,7 @@ def _load_chunk_token_counter(
     require_immutable_models: Optional[bool] = None,
 ) -> tuple[Callable[[str], int], str]:
     """Load an explicitly configured Hugging Face tokenizer at the backend edge."""
-    from engraphis.backends.model_source import validate_model_source
+    from engraphis.backends.model_source import is_local_model_source, validate_model_source
 
     validate_model_source(
         model,
@@ -779,15 +779,23 @@ def _load_chunk_token_counter(
         raise RuntimeError(
             "ENGRAPHIS_CHUNK_TOKENIZER_MODEL requires the optional transformers package"
         ) from exc
+    raw_model = str(model or "").strip()
+    has_local_prefix = raw_model.startswith("local:")
+    local_files_only = is_local_model_source(raw_model)
+    resolved_model = raw_model[len("local:"):].strip() if has_local_prefix else raw_model
+    if not resolved_model:
+        raise ValueError("local chunk tokenizer selector requires a path or cached model name")
     kwargs: dict[str, Any] = {"trust_remote_code": False}
     if revision:
         kwargs["revision"] = revision
-    tokenizer = AutoTokenizer.from_pretrained(model, **kwargs)
+    if local_files_only:
+        kwargs["local_files_only"] = True
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model, **kwargs)
 
     def count(text: str) -> int:
         return len(tokenizer.encode(text or "", add_special_tokens=False))
 
-    identity = f"hf:{model}@{revision or 'unversioned'}"
+    identity = f"hf:{resolved_model}@{revision or 'unversioned'}"
     count.identity = identity  # type: ignore[attr-defined]
     return count, identity
 

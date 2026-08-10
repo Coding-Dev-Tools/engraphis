@@ -131,6 +131,43 @@ def test_migration_writes_scoped_v2(tmp_path):
     store.close()
 
 
+def test_migration_preserves_legacy_event_payload_entity_and_timestamp(tmp_path):
+    old = tmp_path / "engraphis_v1.db"
+    new = tmp_path / "engraphis_v2.db"
+    _build_v1_db(str(old))
+    with sqlite3.connect(old) as connection:
+        connection.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, "
+            "entity_name TEXT NOT NULL, event_type TEXT NOT NULL, description TEXT, "
+            "payload TEXT NOT NULL, timestamp REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO events(namespace, entity_name, event_type, description, payload, timestamp) "
+            "VALUES (?,?,?,?,?,?)",
+            ("infra", "PostgreSQL", "deploy", "release observed", '{"version":16}', 1234.5),
+        )
+
+    migrate(str(old), str(new))
+    store = Store(str(new))
+    event = store.conn.execute(
+        "SELECT content, refs, ts FROM events WHERE kind='deploy'"
+    ).fetchone()
+    assert event is not None
+    refs = json.loads(event["refs"])
+    assert event["content"] == "release observed"
+    assert event["ts"] == 1234.5
+    assert {item["kind"] for item in refs} == {
+        "v1_event_id", "v1_entity", "v1_payload"
+    }
+    assert {item["name"] for item in refs if item["kind"] == "v1_entity"} == {
+        "PostgreSQL"
+    }
+    assert [item["value"] for item in refs if item["kind"] == "v1_payload"] == [
+        {"version": 16}
+    ]
+    store.close()
+
+
 def test_migration_preserves_same_name_entities_with_distinct_types(tmp_path):
     old = tmp_path / "engraphis_v1.db"
     new = tmp_path / "engraphis_v2.db"
