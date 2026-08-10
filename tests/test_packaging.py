@@ -432,7 +432,7 @@ def test_release_version_surfaces_are_synchronized():
     )
     # The Ledger sources release_version from the bootstrap payload at runtime
     # (state.releaseVersion), so no hardcoded literal must drift from pyproject.
-    assert "return `release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
+    assert "return `?release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
     assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == []
 
     static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
