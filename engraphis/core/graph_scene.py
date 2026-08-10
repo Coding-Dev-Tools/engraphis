@@ -2127,6 +2127,12 @@ def build_graph_scene(
             [], [], min_support=0,
         )
         for node_id, node in historical_graph["nodes"].items():
+            live = graph["nodes"].get(node_id)
+            if live is not None:
+                # The canonical ID already holds a live evidence node.
+                # Record the historical-only alias under a distinct key so
+                # the live node keeps its mass, community, and relations.
+                node_id = f"{node_id}:ghost"
             node["ghost"] = True
             node["mass_score"] = 0.0
             node["gravity_mass"] = 0.0
@@ -2158,9 +2164,26 @@ def build_graph_scene(
                 if values:
                     node[field] = max(values) if field in {"valid_to", "expired_at"} else min(values)
             graph["nodes"][node_id] = node
-        graph["member_to_canonical"].update(historical_graph["member_to_canonical"])
-        graph["community_members"].update(historical_graph["community_members"])
-        graph["community_anchors"].update(historical_graph["community_anchors"])
+        for member, canonical in historical_graph["member_to_canonical"].items():
+            if canonical in graph["nodes"]:
+                # Route the member to the ghost alias when the live slot
+                # is already occupied so member_to_canonical stays a bijection.
+                if graph["nodes"][canonical].get("ghost") is not True:
+                    canonical = f"{canonical}:ghost"
+            graph["member_to_canonical"][member] = canonical
+        for community_id, members in historical_graph["community_members"].items():
+            existing = graph["community_members"].get(community_id)
+            if existing is None:
+                graph["community_members"][community_id] = list(members)
+            else:
+                seen = set(existing)
+                for member_id in members:
+                    if member_id not in seen:
+                        existing.append(member_id)
+                        seen.add(member_id)
+        for community_id, anchor in historical_graph["community_anchors"].items():
+            if community_id not in graph["community_anchors"]:
+                graph["community_anchors"][community_id] = anchor
 
     if connected_only:
         connected_canonical_ids = {

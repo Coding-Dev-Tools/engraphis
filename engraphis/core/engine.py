@@ -2539,6 +2539,19 @@ class MemoryEngine:
             index_cleanup = "deleted"
         except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
             index_cleanup = "failed"
+        # Re-check successors after the (potentially long) index.delete: a
+        # concurrent write or sync may have produced a new replacement while
+        # the vector backend was busy. secure_erase_memory re-computes its own
+        # target set, but we want the vector side to observe any new IDs too.
+        if index_cleanup == "deleted":
+            refreshed = self.store.secure_erase_target_ids(memory_id)
+            new_ids = set(refreshed) - set(target_ids)
+            if new_ids:
+                try:
+                    self.index.delete(list(new_ids))
+                except Exception:  # noqa: BLE001
+                    index_cleanup = "partial"
+            target_ids = refreshed
         result = self.store.secure_erase_memory(
             memory_id, actor=actor, _target_ids=target_ids,
         )
