@@ -2126,13 +2126,17 @@ def build_graph_scene(
              if str(row.get("id") or "") in historical_only_members],
             [], [], min_support=0,
         )
+        historical_id_map: dict[str, str] = {}
         for node_id, node in historical_graph["nodes"].items():
+            historical_id = node_id
             live = graph["nodes"].get(node_id)
             if live is not None:
                 # The canonical ID already holds a live evidence node.
                 # Record the historical-only alias under a distinct key so
                 # the live node keeps its mass, community, and relations.
                 node_id = f"{node_id}:ghost"
+            historical_id_map[historical_id] = node_id
+            node["id"] = node_id
             node["ghost"] = True
             node["mass_score"] = 0.0
             node["gravity_mass"] = 0.0
@@ -2165,6 +2169,7 @@ def build_graph_scene(
                     node[field] = max(values) if field in {"valid_to", "expired_at"} else min(values)
             graph["nodes"][node_id] = node
         for member, canonical in historical_graph["member_to_canonical"].items():
+            canonical = historical_id_map.get(canonical, canonical)
             if canonical in graph["nodes"]:
                 # Route the member to the ghost alias when the live slot
                 # is already occupied so member_to_canonical stays a bijection.
@@ -2172,6 +2177,7 @@ def build_graph_scene(
                     canonical = f"{canonical}:ghost"
             graph["member_to_canonical"][member] = canonical
         for community_id, members in historical_graph["community_members"].items():
+            members = [historical_id_map.get(member, member) for member in members]
             existing = graph["community_members"].get(community_id)
             if existing is None:
                 graph["community_members"][community_id] = list(members)
@@ -2182,6 +2188,7 @@ def build_graph_scene(
                         existing.append(member_id)
                         seen.add(member_id)
         for community_id, anchor in historical_graph["community_anchors"].items():
+            anchor = historical_id_map.get(anchor, anchor)
             if community_id not in graph["community_anchors"]:
                 graph["community_anchors"][community_id] = anchor
 
