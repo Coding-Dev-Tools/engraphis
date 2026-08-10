@@ -1671,10 +1671,10 @@ class Store:
         serialize = getattr(conn, "serialize", None)
         if callable(serialize):
             payload = bytearray(cast(Callable[[], bytes], serialize)())
-            # SQLite may advance the change-counter and version-valid-for header
-            # fields while materializing an online backup. They describe the file
-            # image's write history, not its logical contents.
-            for offset in (24, 92):
+            # SQLite may advance the change-counter, schema-cookie, and
+            # version-valid-for header fields while materializing an online backup.
+            # They describe the file image's write history, not its logical contents.
+            for offset in (24, 40, 92):
                 if len(payload) >= offset + 4:
                     payload[offset:offset + 4] = b"\x00" * 4
             digest = hashlib.sha256()

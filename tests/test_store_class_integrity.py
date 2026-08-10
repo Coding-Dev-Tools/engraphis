@@ -98,12 +98,18 @@ def test_logical_digest_prefers_serialized_database() -> None:
 
     class SerializedConnection:
         def serialize(self) -> bytes:
-            return b"serialized-main-database"
+            payload = bytearray(b"serialized-main-database".ljust(96, b"\x01"))
+            for offset, value in ((24, 1), (40, 2), (92, 3)):
+                payload[offset:offset + 4] = value.to_bytes(4, "big")
+            return bytes(payload)
 
         def iterdump(self):
             raise AssertionError("virtual-table-safe path must not use iterdump")
 
-    expected = hashlib.sha256(b"serialized-main-database").hexdigest()
+    payload = bytearray(b"serialized-main-database".ljust(96, b"\x01"))
+    for offset in (24, 40, 92):
+        payload[offset:offset + 4] = b"\x00" * 4
+    expected = hashlib.sha256(payload).hexdigest()
     assert Store._logical_digest(SerializedConnection()) == expected
 
 

@@ -2340,13 +2340,40 @@ def build_graph_scene(
             layers=layers, relations=relations, min_support=min_support,
             min_confidence=min_confidence,
         )
-        scene_edges.extend(
+        ghost_relations = [
             edge for edge in ghost_relations
             if edge["source"] in selected and edge["target"] in selected
+        ]
+        historical_node_ids = {
+            node_id for node_id in selected if nodes[node_id].get("ghost")
+        }
+        reserved_history_edges: list[dict] = []
+        if edge_cap and historical_node_ids:
+            uncovered = set(historical_node_ids)
+            for edge in sorted(ghost_relations, key=lambda item: (
+                -float(item.get("strength") or 0.0), item["id"]
+            )):
+                touched = {
+                    endpoint for endpoint in (edge["source"], edge["target"])
+                    if endpoint in historical_node_ids
+                }
+                if not touched or not touched.intersection(uncovered):
+                    continue
+                reserved_history_edges.append(edge)
+                uncovered.difference_update(touched)
+                if len(reserved_history_edges) >= edge_cap or not uncovered:
+                    break
+        remaining_capacity = max(0, edge_cap - len(reserved_history_edges))
+        scene_edges = _selected_edges(
+            graph, selected, level, remaining_capacity,
         )
-        scene_edges = sorted(scene_edges, key=lambda edge: (
-            bool(edge.get("ghost")), -float(edge.get("strength") or 0.0), edge["id"]
-        ))[:edge_cap]
+        scene_edges.extend(reserved_history_edges)
+        scene_edges.extend(
+            edge for edge in sorted(ghost_relations, key=lambda item: (
+                -float(item.get("strength") or 0.0), item["id"]
+            )) if edge not in reserved_history_edges
+        )
+        scene_edges = scene_edges[:edge_cap]
     communities = _community_summaries(graph, chosen_communities, selected)
     bridges = _bridges(graph, chosen_communities, 80)
 
