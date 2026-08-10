@@ -7797,7 +7797,7 @@ class MemoryService:
         prune_entities = bool(
             clean_memory_types or lower_time is not None or upper_time is not None
         )
-        evidence_filter = not include_history and not prune_entities
+        evidence_filter = not include_history
         allow_supportless = not (
             clean_memory_types or lower_time is not None or upper_time is not None
         )
