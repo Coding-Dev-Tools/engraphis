@@ -1332,13 +1332,13 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   });
   await page.goto('/');
 
-  await expect(page.locator('#plan-badge')).toHaveCount(0);
+  await expect(page.locator('#plan-badge')).toHaveCount(1);
   await expect(page.locator('#sidebar-pro-cta')).toHaveText('Open Engraphis Cloud');
   await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=sidebar',
   );
-  await expect(page.locator('#plan-badge')).toHaveCount(0);
+  await expect(page.locator('#plan-badge')).toHaveText('PRO');
 
   await page.getByRole('button', { name: 'Manage' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
@@ -1383,7 +1383,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
 test('billing cadence selects the exact Pro and Team checkout target', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
-  await expect(page.locator('#plan-badge')).toHaveCount(0);
+  await expect(page.locator('#plan-badge')).toHaveCount(1);
   await expect(page.locator('#sidebar-pro-cta')).toHaveText('Start 3-day Pro trial');
   await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
     'href',

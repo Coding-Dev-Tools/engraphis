@@ -138,7 +138,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260809-pin-only-physics" in eager
+    assert "/static/dashboard.js?v=20260809-physics-guard" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -160,7 +160,7 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "script.src='/static/vendor/force-graph.min.js?v=20260809-csp'" in source
     assert (
-        "script.src='/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'"
+        "script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard'"
         in source
     )
     render = source[source.index("function graphRender("):]
@@ -281,7 +281,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
+        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -296,7 +296,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics"
+        "/v2-assets/engraphis-graph.js?v=20260809-physics-guard"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1470,7 +1470,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'")
     assert d3 < force_graph < renderer
     assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
