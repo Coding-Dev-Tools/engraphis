@@ -2793,6 +2793,7 @@
           timeoutPromise,
         ]);
         if (!isCurrentGraphLoad(request)) return;
+        if (payload && payload.error) throw new Error(String(payload.error));
         const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : payload;
         const data = {
           nodes: graphNodes(scene),
