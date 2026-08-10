@@ -742,12 +742,11 @@
   }
 
   function savingsQuery(preset = 'all') {
-    const base = '';
     if (preset === 'current' && state.releaseVersion) {
-      return `release_version=${encodeURIComponent(state.releaseVersion)}`;
+      return `?release_version=${encodeURIComponent(state.releaseVersion)}`;
     }
-    if (preset === '7d') return `from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
-    return base;
+    if (preset === '7d') return `?from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
+    return '';
   }
 
   function savingsScopeLabel(payload) {
@@ -969,7 +968,7 @@
 
   async function loadSavings(epoch) {
     try {
-      const payload = await api(`/context-savings?${savingsQuery()}`);
+      const payload = await api(`/context-savings${savingsQuery()}`);
       if (epoch !== state.refreshEpoch) return;
       renderSavingsOverview(payload);
     } catch (error) {
@@ -3019,7 +3018,7 @@
     const [auditResult, receiptsResult, savingsResult] = await Promise.allSettled([
       api(`/audit?${query(request.workspace)}&limit=100`),
       api(`/receipts?${query(request.workspace)}&limit=100`),
-      api(`/context-savings?${savingsQuery(state.savingsPreset)}`),
+      api(`/context-savings${savingsQuery(state.savingsPreset)}`),
     ]);
     if (!isCurrentScopedRequest(request)) return;
     if (savingsResult.status === 'fulfilled') {
