@@ -228,7 +228,7 @@ def test_launcher_reports_a_non_engraphis_port_conflict(monkeypatch, capsys):
 
     assert exc.value.code == 1
     error = capsys.readouterr().err
-    assert "http://127.0.0.1:8719 is already in use" in error
+    assert "port is occupied by a non-Engraphis service" in error
     assert "--port" in error
 
 

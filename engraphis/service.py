@@ -271,11 +271,12 @@ def _graph_edge_history_visibility_sql(
         "AND history_support.expired_at IS NULL "
         "AND (history_memory.valid_from IS NULL "
         f"OR history_memory.valid_from<={anchor}) "
-        "AND (history_memory.ingested_at IS NULL "
-        f"OR history_memory.ingested_at<={known_anchor}) "
-        "AND history_memory.expired_at IS NULL "
-        "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
-    )
+         "AND (history_memory.ingested_at IS NULL "
+         f"OR history_memory.ingested_at<={known_anchor}) "
+         "AND history_memory.expired_at IS NULL "
+         f"AND history_memory.workspace_id={edge_alias}.workspace_id "
+         "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
+     )
 
 
 def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = None) -> str:
@@ -7931,19 +7932,42 @@ class MemoryService:
             ).fetchall()
             for repo_row in repo_rows:
                 remaining_entities = MAX_GRAPH_ANALYSIS_ENTITIES - len(entity_rows)
-                symbol_rows = [dict(row) for row in self.store.conn.execute(
-                    "SELECT id, kind, name, fqname, file FROM symbols "
+                symbol_sql = (
+                    "SELECT id, kind, name, fqname, file, valid_from, valid_to, "
+                    "valid_to_recorded_at, ingested_at, expired_at FROM symbols "
                     "WHERE repo_id=? AND (valid_from IS NULL OR valid_from<=?) "
-                    "AND (valid_to IS NULL OR ?<valid_to "
-                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-                    "AND (ingested_at IS NULL OR ingested_at<=?) "
-                    "AND (expired_at IS NULL OR ?<expired_at) "
-                    "ORDER BY id LIMIT ?",
-                    (
-                        repo_row["id"], t, t, known_t, known_t, known_t,
-                        remaining_entities + 1,
-                    ),
+                )
+                symbol_params: list[Any] = [repo_row["id"], t]
+                if include_history:
+                    symbol_sql += (
+                        "AND (ingested_at IS NULL OR ingested_at<=?) "
+                        "AND expired_at IS NULL "
+                    )
+                    symbol_params.append(known_t)
+                else:
+                    symbol_sql += (
+                        "AND (valid_to IS NULL OR ?<valid_to "
+                        "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                        "AND (ingested_at IS NULL OR ingested_at<=?) "
+                        "AND (expired_at IS NULL OR ?<expired_at) "
+                    )
+                    symbol_params.extend((t, known_t, known_t, known_t))
+                symbol_params.append(remaining_entities + 1)
+                symbol_rows = [dict(row) for row in self.store.conn.execute(
+                    symbol_sql + "ORDER BY id LIMIT ?", symbol_params,
                 ).fetchall()]
+                if include_history:
+                    for symbol in symbol_rows:
+                        valid_to_value = symbol.get("valid_to")
+                        recorded_at = symbol.get("valid_to_recorded_at")
+                        try:
+                            symbol["ghost"] = bool(
+                                valid_to_value is not None
+                                and float(valid_to_value) <= t
+                                and (recorded_at is None or float(recorded_at) <= known_t)
+                            )
+                        except (TypeError, ValueError):
+                            symbol["ghost"] = False
                 if len(symbol_rows) > remaining_entities:
                     if include_complete_rows:
                         raise GraphSceneCapacityExceeded(
@@ -7966,24 +7990,49 @@ class MemoryService:
                         "canonical_id": node_id,
                         "normalized_name": normalize_entity_name(label),
                         "canonical_method": "code_identity", "canonical_confidence": 1.0,
+                        "ghost": bool(symbol.get("ghost")),
                     })
                     for key in (symbol.get("id"), symbol.get("fqname"), symbol.get("name")):
                         if key:
                             endpoint.setdefault(str(key), node_id)
                 remaining_edges = MAX_GRAPH_ANALYSIS_EDGES - len(edge_rows)
-                code_edges = self.store.conn.execute(
-                    "SELECT id, src, dst, relation, layer FROM code_edges "
+                code_edge_sql = (
+                    "SELECT id, src, dst, relation, layer, valid_from, valid_to, "
+                    "valid_to_recorded_at, ingested_at, expired_at FROM code_edges "
                     "WHERE repo_id=? AND (valid_from IS NULL OR valid_from<=?) "
-                    "AND (valid_to IS NULL OR ?<valid_to "
-                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-                    "AND (ingested_at IS NULL OR ingested_at<=?) "
-                    "AND (expired_at IS NULL OR ?<expired_at) "
-                    "ORDER BY id LIMIT ?",
-                    (
-                        repo_row["id"], t, t, known_t, known_t, known_t,
-                        remaining_edges + 1,
-                    ),
+                )
+                code_edge_params: list[Any] = [repo_row["id"], t]
+                if include_history:
+                    code_edge_sql += (
+                        "AND (ingested_at IS NULL OR ingested_at<=?) "
+                        "AND expired_at IS NULL "
+                    )
+                    code_edge_params.append(known_t)
+                else:
+                    code_edge_sql += (
+                        "AND (valid_to IS NULL OR ?<valid_to "
+                        "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                        "AND (ingested_at IS NULL OR ingested_at<=?) "
+                        "AND (expired_at IS NULL OR ?<expired_at) "
+                    )
+                    code_edge_params.extend((t, known_t, known_t, known_t))
+                code_edge_params.append(remaining_edges + 1)
+                code_edges = self.store.conn.execute(
+                    code_edge_sql + "ORDER BY id LIMIT ?", code_edge_params,
                 ).fetchall()
+                if include_history:
+                    code_edges = [dict(row) for row in code_edges]
+                    for code_edge in code_edges:
+                        valid_to_value = code_edge.get("valid_to")
+                        recorded_at = code_edge.get("valid_to_recorded_at")
+                        try:
+                            code_edge["ghost"] = bool(
+                                valid_to_value is not None
+                                and float(valid_to_value) <= t
+                                and (recorded_at is None or float(recorded_at) <= known_t)
+                            )
+                        except (TypeError, ValueError):
+                            code_edge["ghost"] = False
                 if len(code_edges) > remaining_edges:
                     if include_complete_rows:
                         raise GraphSceneCapacityExceeded(
@@ -8004,8 +8053,12 @@ class MemoryService:
                             "repo_id": repo_row["id"], "src": source, "dst": target,
                             "relation": code_edge["relation"] or "references",
                             "layer": code_edge["layer"] or "entity", "weight": 1.0,
-                            "valid_from": None, "valid_to": None, "ingested_at": None,
-                            "expired_at": None,
+                            "valid_from": code_edge.get("valid_from"),
+                            "valid_to": code_edge.get("valid_to"),
+                            "valid_to_recorded_at": code_edge.get("valid_to_recorded_at"),
+                            "ingested_at": code_edge.get("ingested_at"),
+                            "expired_at": code_edge.get("expired_at"),
+                            "ghost": bool(code_edge.get("ghost")),
                             "provenance": json.dumps({"source": "code_index"}),
                         })
         if prune_entities:
