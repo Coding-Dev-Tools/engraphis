@@ -54,7 +54,8 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         page = client.get("/")
         assert page.status_code == 200
         assert "<title>Engraphis Ledger</title>" in page.text
-        assert "Visible memories" in page.text
+        assert "Live memories" in page.text
+        assert "All versions, including history" in page.text
         assert "Live rows" not in page.text
         assert 'class="sidebar"' in page.text
         for area in ("Today", "Ask", "Library", "Graph &amp; Relationships", "Provenance", "Manage"):
@@ -104,6 +105,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert filtered.status_code == 200
         assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
         assert "Estimated context saved" in page.text
+        assert 'class="content-section savings-overview-section" id="context-savings-summary"' in page.text
 
 
 def test_dashboard_memory_reads_use_the_active_store_for_memory_databases(monkeypatch):

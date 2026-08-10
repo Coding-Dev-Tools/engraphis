@@ -304,6 +304,8 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   expect(response.headers()['content-security-policy']).not.toContain("'unsafe-inline'");
   await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  await expect(page.locator('#context-savings-summary')).toHaveClass(/savings-overview-section/);
+  expect(await page.locator('#context-savings-summary').evaluate(element => Boolean(element.closest('.view-column')))).toBe(true);
   await expect(page.locator('#context-savings-summary-body .savings-number')).toHaveText('2,048');
   await expect(page.locator('#context-savings-summary-body .savings-unit')).toHaveText('tokens avoided');
   await expect(page.locator('#context-savings-summary-body .savings-rate-value')).toHaveText('50.0%');
@@ -338,6 +340,7 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(page.getByRole('button', { name: 'Manage' })).toBeVisible();
+  await expect(page.locator('#workspace-select')).toBeVisible();
   await expect(page.locator('#sidebar-pro-cta')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
@@ -527,6 +530,14 @@ test('provenance merges audit seconds and receipt milliseconds chronologically',
 test('memory listings open the editable Library detail from every dashboard view', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
+
+  await page.getByRole('button', { name: 'Library memories and imports' }).click();
+  const libraryOptions = page.locator('#library-list [role="option"]');
+  await expect(libraryOptions.first()).toHaveAttribute('tabindex', '0');
+  await expect(libraryOptions.nth(1)).toHaveAttribute('tabindex', '-1');
+  await libraryOptions.first().press('ArrowDown');
+  await expect(libraryOptions.nth(1)).toHaveAttribute('tabindex', '0');
+  await page.getByRole('button', { name: 'Today changes and decisions' }).click();
 
   await page.locator('#proactive-list [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');

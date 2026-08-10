@@ -381,7 +381,13 @@
   }
 
   function showNotice(message) {
-    byId('notice-text').textContent = message;
+    const text = String(message || '');
+    byId('notice-text').textContent = text;
+    const banner = byId('notice-banner');
+    if (!banner) return;
+    banner.textContent = text;
+    banner.hidden = !text;
+    banner.dataset.tone = /\b(could not|unavailable|failed|broken|error)\b/i.test(text) ? 'error' : 'info';
   }
 
   function updateReleaseUrl(value) {
@@ -734,23 +740,41 @@
 
   function renderSavingsOverview(payload) {
     const target = byId('context-savings-summary-body');
-    if (!target) return;
     const { estimate, eligible, excluded } = savingsCounts(payload);
+    const persistentValue = byId('context-savings-persistent-value');
+    const persistentMeta = byId('context-savings-persistent-meta');
+    const persistentRate = byId('context-savings-persistent-rate');
+    const setPersistent = (value, meta, rate = '—') => {
+      if (persistentValue) persistentValue.textContent = value;
+      if (persistentMeta) persistentMeta.textContent = meta;
+      if (persistentRate) persistentRate.textContent = rate;
+    };
+    if (!target) {
+      setPersistent('—', 'Savings estimate unavailable.');
+      return;
+    }
     target.replaceChildren();
     if (!eligible) {
+      setPersistent('—', excluded ? `${excluded} excluded or unclassified deliveries so far.` : 'Tracking starts with the first eligible delivery.');
       target.append(
         empty('No receipt-backed context savings yet.'),
-        node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'} so far.`),
+        node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'} so far.`),
       );
       return;
     }
     const metric = savingsMetric(estimate);
+    const ratio = savingsRatio(estimate.savings_ratio);
+    setPersistent(
+      formatSavingsTokens(estimate.saved_tokens),
+      `Across ${eligible.toLocaleString()} eligible context deliveries · ${estimate.confidence || 'unknown'} confidence`,
+      `${(ratio * 100).toFixed(1)}% estimated reduction`,
+    );
     target.append(
       metric.hero,
       metric.progress,
       node('p', 'savings-summary', `Across ${eligible} eligible context deliveries`),
       node('p', 'field-note', `Baseline ${formatSavingsTokens(estimate.baseline_tokens)} → emitted ${formatSavingsTokens(estimate.emitted_tokens)} · confidence: ${text(estimate.confidence || 'unknown')}`),
-      node('p', 'field-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}.`),
+      node('p', 'field-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}.`),
     );
   }
 
@@ -778,6 +802,7 @@
         loadAudit();
       });
       control.classList.toggle('active', state.savingsPreset === value);
+      control.setAttribute('aria-pressed', String(state.savingsPreset === value));
       presets.append(control);
     });
     header.append(presets);
@@ -803,14 +828,14 @@
           const item = node('div', 'savings-breakdown-row');
           item.append(
             node('span', '', text(row.token_counter || 'unknown')),
-            node('span', '', `${formatSavingsTokens(row.saved_tokens)} saved · ${row.receipt_count || 0} eligible delivery`),
+            node('span', '', `${formatSavingsTokens(row.saved_tokens)} saved · ${row.receipt_count || 0} eligible deliver${number(row.receipt_count) === 1 ? 'y' : 'ies'}`),
           );
           counterRows.append(item);
         });
         target.append(counterRows);
       }
     }
-    target.append(node('p', 'savings-note', `${excluded} excluded or unclassified delivery${excluded === 1 ? '' : 's'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
+    target.append(node('p', 'savings-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
   }
 
   function renderDecisions(memories) {
@@ -892,11 +917,11 @@
     });
   }
 
-  function renderProactive(memories) {
+  function renderProactive(memories, unavailableMessage = '') {
     const target = byId('proactive-list');
     target.replaceChildren();
     if (!memories.length) {
-      target.append(empty('No proactive context is available.'));
+      target.append(empty(unavailableMessage || 'No proactive context is available.'));
       return;
     }
     memories.slice(0, 5).forEach(memory => {
@@ -927,7 +952,15 @@
       renderSavingsOverview(payload);
     } catch (error) {
       if (epoch !== state.refreshEpoch) return;
-      byId('context-savings-summary-body').replaceChildren(empty(`Could not load savings: ${error.message}`));
+      const message = `Could not load savings: ${error.message}`;
+      const target = byId('context-savings-summary-body');
+      if (target) target.replaceChildren(empty(message));
+      const persistentValue = byId('context-savings-persistent-value');
+      const persistentMeta = byId('context-savings-persistent-meta');
+      const persistentRate = byId('context-savings-persistent-rate');
+      if (persistentValue) persistentValue.textContent = 'Unavailable';
+      if (persistentMeta) persistentMeta.textContent = 'Receipt-backed estimate could not be loaded.';
+      if (persistentRate) persistentRate.textContent = '—';
     }
   }
 
@@ -946,10 +979,15 @@
     if (epoch !== state.refreshEpoch) return;
     const proactive = proactiveResult.status === 'fulfilled'
       ? (proactiveResult.value.memories || proactiveResult.value.results || [])
-      : state.memories.slice(0, 5);
-    renderProactive(proactive);
-    renderDecisions(proactive.length ? proactive : state.memories);
+      : [];
+    renderProactive(proactive, proactiveResult.status === 'rejected'
+      ? 'Strongest memories are unavailable. Try refreshing this workspace.' : '');
+    renderDecisions(proactive);
     renderActivity(auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : []);
+    if (auditResult.status === 'rejected') {
+      const cell = byId('activity-body').querySelector('td');
+      if (cell) cell.textContent = 'Activity is unavailable. Try refreshing this workspace.';
+    }
   }
 
   function renderWorkspaceNames() {
@@ -969,6 +1007,7 @@
       'timeline-result': 'Search a topic to inspect its temporal history.',
       'supersession-list': 'Search a topic to compare closed and current records.',
       'audit-list': 'Open Audit to load this workspace’s records and receipts.',
+      'savings-detail': 'Open Audit to load this workspace’s receipt-backed estimate.',
       'analytics-result': 'Open this tab to check availability.',
       'automation-result': 'Open this tab to check availability.',
       'team-result': 'Open this tab to check connection state.',
@@ -1012,13 +1051,15 @@
     } catch (_) {}
     showNotice('');
     try {
-      await Promise.all([
+      const results = await Promise.allSettled([
         loadStats(name, epoch),
         loadSavings(name, epoch),
         loadMemories(name, epoch),
         loadToday(name, epoch),
       ]);
       if (epoch !== state.refreshEpoch) return;
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) showNotice(`Some workspace panels could not refresh: ${failed.reason.message}`);
       renderWorkspaceList();
       if (state.view === 'relations') await loadGraph();
       if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
@@ -1056,6 +1097,23 @@
 
   function renderLibrary() {
     const target = byId('library-list');
+    if (!target.dataset.keyboardBound) {
+      target.dataset.keyboardBound = 'true';
+      target.addEventListener('keydown', event => {
+        const cards = [...target.querySelectorAll('[role="option"]')];
+        const current = event.target.closest('[role="option"]');
+        if (!current || !cards.length) return;
+        let index = cards.indexOf(current);
+        if (event.key === 'Home') index = 0;
+        else if (event.key === 'End') index = cards.length - 1;
+        else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') index = Math.min(cards.length - 1, index + 1);
+        else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') index = Math.max(0, index - 1);
+        else return;
+        event.preventDefault();
+        cards.forEach((card, cardIndex) => { card.tabIndex = cardIndex === index ? 0 : -1; });
+        cards[index].focus();
+      });
+    }
     target.replaceChildren();
     const memories = filteredMemories();
     byId('library-count').textContent = `${memories.length.toLocaleString()} ${memories.length === 1 ? 'memory' : 'memories'}`;
@@ -1064,6 +1122,9 @@
       return;
     }
     memories.forEach(memory => target.append(memoryCard(memory)));
+    const cards = [...target.querySelectorAll('[role="option"]')];
+    const selectedIndex = cards.findIndex(card => card.getAttribute('aria-selected') === 'true');
+    cards.forEach((card, index) => { card.tabIndex = index === (selectedIndex >= 0 ? selectedIndex : 0) ? 0 : -1; });
   }
 
   function definitionList(entries) {
@@ -2449,6 +2510,7 @@
       const active = control.dataset.graphTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-graph-tab-panel]').forEach(panel => {
       panel.hidden = panel.dataset.graphTabPanel !== tab;
@@ -2696,6 +2758,7 @@
       const active = control.dataset.provenanceTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-provenance-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.provenancePanel === tab));
     if (tab === 'audit') loadAudit();
@@ -2784,19 +2847,28 @@
     const request = beginScopedRequest('audit');
     const target = byId('audit-list');
     target.replaceChildren(empty('Loading audit records and receipts…'));
-    try {
-      const [audit, receipts, savings] = await Promise.all([
-        api(`/audit?${query(request.workspace)}&limit=100`),
-        api(`/receipts?${query(request.workspace)}&limit=100`),
-        api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
-      ]);
+    byId('savings-detail').replaceChildren(empty('Loading receipt-backed estimate…'));
+    const [auditResult, receiptsResult, savingsResult] = await Promise.allSettled([
+      api(`/audit?${query(request.workspace)}&limit=100`),
+      api(`/receipts?${query(request.workspace)}&limit=100`),
+      api(`/context-savings?${savingsQuery(request.workspace, state.savingsPreset)}`),
+    ]);
       if (!isCurrentScopedRequest(request)) return;
-      renderSavingsDetail(savings);
-      renderAuditCards(auditItems(audit), receiptItems(receipts));
-    } catch (error) {
-      if (!isCurrentScopedRequest(request)) return;
-      target.replaceChildren(empty(`Could not load provenance records: ${error.message}`));
-    }
+      if (savingsResult.status === 'fulfilled') {
+        renderSavingsDetail(savingsResult.value);
+      } else {
+        byId('savings-detail').replaceChildren(empty(`Could not load context savings: ${savingsResult.reason.message}`));
+      }
+      const audit = auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : [];
+      const receipts = receiptsResult.status === 'fulfilled' ? receiptItems(receiptsResult.value) : [];
+      if (auditResult.status === 'rejected' && receiptsResult.status === 'rejected') {
+        target.replaceChildren(empty('Could not load audit records or receipts. Try again.'));
+      } else {
+        renderAuditCards(audit, receipts);
+      }
+      if (auditResult.status === 'rejected' || receiptsResult.status === 'rejected') {
+        showNotice('Some provenance data could not be loaded; available records remain visible.');
+      }
   }
 
   async function verifyReceipts() {
@@ -2833,6 +2905,7 @@
       const active = control.dataset.manageTab === tab;
       control.classList.toggle('active', active);
       control.setAttribute('aria-selected', String(active));
+      control.tabIndex = active ? 0 : -1;
     });
     all('[data-manage-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.managePanel === tab));
     loadManageTab(tab);
@@ -3503,7 +3576,14 @@
     }
   }
 
-  function switchView(view) {
+  function switchView(view, { pushHistory = true } = {}) {
+    const validViews = ['today', 'ask', 'library', 'relations', 'provenance', 'manage'];
+    if (!validViews.includes(view)) view = 'today';
+    if (pushHistory && state.view !== view) {
+      const url = new URL(location.href);
+      url.searchParams.set('view', view);
+      window.history.pushState({ view }, '', url);
+    }
     state.view = view;
     all('[data-view-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.viewPanel === view));
     all('[data-view]').forEach(control => {
@@ -3519,6 +3599,11 @@
     if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
     if (view === 'manage') loadManageTab(state.manageTab);
     window.scrollTo({ top: 0, behavior: 'instant' });
+    const heading = byId(`${view}-title`);
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus({ preventScroll: true });
+    }
   }
 
   function applyTheme(theme) {
@@ -3554,6 +3639,18 @@
       state.workspace = '';
       renderWorkspaceNames();
       renderWorkspaceList();
+      renderMetricValues({ memories: 0, total_rows: 0, workspaces: 0, sessions: 0 });
+      byId('decision-list').replaceChildren(empty('Create a workspace in Manage to start reviewing memory.'));
+      const emptyActivity = node('tr');
+      const emptyActivityCell = node('td', '', 'No workspace selected yet.');
+      emptyActivityCell.colSpan = 5;
+      emptyActivity.append(emptyActivityCell);
+      byId('activity-body').replaceChildren(emptyActivity);
+      byId('proactive-list').replaceChildren(empty('Create a workspace to see proactive context.'));
+      byId('context-savings-summary-body').replaceChildren(empty('Create a workspace to start tracking context savings.'));
+      byId('context-savings-persistent-value').textContent = '—';
+      byId('context-savings-persistent-meta').textContent = 'Create a workspace to start tracking context savings.';
+      byId('context-savings-persistent-rate').textContent = '—';
       return;
     }
     select.disabled = false;
@@ -3583,7 +3680,8 @@
         const saved = localStorage.getItem('engraphis-ledger-view');
         if (['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
       } catch (_) {}
-      switchView(view);
+      const urlView = new URL(location.href).searchParams.get('view');
+      switchView(['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
     } catch (error) {
       if (error.status === 401 && await authenticateBrowser()) {
         location.reload();
@@ -3615,6 +3713,34 @@
   }));
   all('[data-provenance-tab]').forEach(control => control.addEventListener('click', () => switchProvenanceTab(control.dataset.provenanceTab)));
   all('[data-manage-tab]').forEach(control => control.addEventListener('click', () => switchManageTab(control.dataset.manageTab)));
+  function wireTabKeyboard(selector, dataKey, activate) {
+    const controls = all(selector);
+    controls.forEach((control, index) => {
+      control.tabIndex = control.getAttribute('aria-selected') === 'true' ? 0 : (index ? -1 : 0);
+      control.addEventListener('keydown', event => {
+        const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1
+          : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
+        let nextIndex = index;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = controls.length - 1;
+        else if (direction) nextIndex = (index + direction + controls.length) % controls.length;
+        else return;
+        event.preventDefault();
+        const next = controls[nextIndex];
+        next.focus();
+        activate(next.dataset[dataKey]);
+      });
+    });
+  }
+  wireTabKeyboard('[data-graph-tab]', 'graphTab', setGraphTab);
+  wireTabKeyboard('[data-provenance-tab]', 'provenanceTab', switchProvenanceTab);
+  wireTabKeyboard('[data-manage-tab]', 'manageTab', switchManageTab);
+  window.addEventListener('popstate', event => {
+    const view = event.state && event.state.view
+      ? event.state.view
+      : new URL(location.href).searchParams.get('view') || 'today';
+    switchView(view, { pushHistory: false });
+  });
 
   byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
   byId('ask-form').addEventListener('submit', askMemory);

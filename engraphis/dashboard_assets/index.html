@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260728-connected-memories">
 </head>
 <body data-theme="slate">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Ledger navigation">
       <div class="brand-row">
@@ -74,9 +75,26 @@
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="main-content" tabindex="-1">
       <p id="notice-text" class="sr-only" role="status" aria-live="polite"></p>
+      <div id="notice-banner" class="notice-banner" role="status" aria-live="polite" hidden></div>
       <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
+
+      <section class="persistent-savings-summary" id="context-savings-persistent" aria-labelledby="persistent-savings-title">
+        <div class="persistent-savings-copy">
+          <p class="eyebrow">Runtime savings</p>
+          <h2 id="persistent-savings-title">Estimated context saved</h2>
+          <p id="context-savings-persistent-meta">Loading receipt-backed estimate…</p>
+        </div>
+        <div class="persistent-savings-value">
+          <strong id="context-savings-persistent-value">—</strong>
+          <span>tokens avoided</span>
+        </div>
+        <div class="persistent-savings-action">
+          <span id="context-savings-persistent-rate" class="savings-inline-rate">—</span>
+          <button class="text-button" type="button" data-provenance="audit">View details</button>
+        </div>
+      </section>
 
       <section class="view active" data-view-panel="today" aria-labelledby="today-title">
         <div class="today-layout">
@@ -88,11 +106,20 @@
             </header>
 
             <div class="metrics" id="metrics" aria-live="polite">
-              <div class="metric"><strong>—</strong><span>Memories</span></div>
-              <div class="metric"><strong>—</strong><span>Visible memories</span></div>
+              <div class="metric"><strong>—</strong><span>Live memories</span></div>
+              <div class="metric"><strong>—</strong><span>All versions, including history</span></div>
               <div class="metric"><strong>—</strong><span>Workspaces</span></div>
               <div class="metric"><strong>—</strong><span>Sessions</span></div>
             </div>
+
+            <section class="content-section savings-overview-section" id="context-savings-summary">
+              <div class="section-heading">
+                <div><p class="eyebrow">Runtime savings</p><h2>Estimated context saved</h2></div>
+                <button class="text-button" type="button" data-provenance="audit">View receipt details</button>
+              </div>
+              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
+              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
+            </section>
 
             <section class="content-section">
               <div class="section-heading">
@@ -127,12 +154,6 @@
             <section class="rail-section">
               <p class="eyebrow">Memory composition</p>
               <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
-            </section>
-            <section class="rail-section" id="context-savings-summary">
-              <p class="eyebrow">Runtime savings</p>
-              <h2>Estimated context saved</h2>
-              <div id="context-savings-summary-body"><p class="empty-state">Loading receipt-backed estimate…</p></div>
-              <p class="savings-note">Measures estimated prompt-context reduction; it does not measure provider billing.</p>
             </section>
             <section class="rail-section rail-action">
               <p class="eyebrow">Local-first</p>
@@ -562,6 +583,14 @@
           </section>
 
           <section id="manage-settings-panel" class="tab-panel" data-manage-panel="settings" role="tabpanel" aria-labelledby="manage-settings-tab">
+            <div class="settings-intro">
+              <div>
+                <p class="eyebrow">Settings · local preferences</p>
+                <h2>Make the workspace yours</h2>
+                <p>Choose how Engraphis looks and connects while keeping memory, recall, and storage local by default.</p>
+              </div>
+              <div class="settings-intro-status"><span class="status-dot" aria-hidden="true"></span><span>Local-first runtime</span></div>
+            </div>
             <div class="settings-grid">
               <section class="setting-card">
                 <p class="eyebrow">Interface</p>
