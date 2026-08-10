@@ -184,6 +184,37 @@ def test_graph_scene_does_not_merge_session_private_alias_into_public_canonical_
     }
 
 
+def test_graph_scene_filters_session_only_edge_when_endpoints_are_public():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    for entity_id, name in (("source", "Source"), ("target", "Target")):
+        svc.store.conn.execute(
+            "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+            "VALUES (?,?,?,?,0)", (entity_id, wid, name, "concept"),
+        )
+    for edge_id, relation in (("public-edge", "publicly_related"),
+                              ("private-edge", "session_only_relation")):
+        svc.store.conn.execute(
+            "INSERT INTO edges(id, workspace_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?)",
+            (edge_id, wid, "source", "target", relation, "semantic"),
+        )
+    public_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="public evidence", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("public-edge", {"memory_id": public_memory})
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme")
+
+    assert {edge["id"] for edge in scene["edges"]} == {"public-edge"}
+    assert "session_only_relation" not in repr(scene)
+
+
 def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     wid = svc.store.get_or_create_workspace("acme")

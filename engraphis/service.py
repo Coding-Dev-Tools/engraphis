@@ -7823,6 +7823,53 @@ class MemoryService:
         allow_supportless = not (
             clean_memory_types or lower_time is not None or upper_time is not None
         )
+        if not include_history:
+            # Keep session-only relations out of the live candidate set. Filtering
+            # their supports later is insufficient: build_canonical_graph can recover
+            # provenance from an otherwise support-less edge when its endpoints are
+            # also connected by public relations.
+            evidence_filter = True
+            edge_sql += " AND ("
+            if allow_supportless:
+                edge_sql += (
+                    "NOT EXISTS (SELECT 1 FROM edge_supports any_graph_support "
+                    "WHERE any_graph_support.edge_id=edges.id) OR "
+                )
+            edge_sql += (
+                "EXISTS (SELECT 1 FROM edge_supports graph_support "
+                "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
+                "WHERE graph_support.edge_id=edges.id "
+                "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
+                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to "
+                "OR (graph_support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<graph_support.valid_to_recorded_at)) "
+                "AND (graph_support.ingested_at IS NULL OR graph_support.ingested_at<=?) "
+                "AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
+                "AND graph_memory.workspace_id=? "
+                "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
+                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to "
+                "OR (graph_memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<graph_memory.valid_to_recorded_at)) "
+                "AND (graph_memory.ingested_at IS NULL OR graph_memory.ingested_at<=?) "
+                "AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
+            )
+            edge_params.extend((
+                t, t, t, known_t, known_t,
+                wid, t, t, t, known_t, known_t,
+            ))
+            if restrict_sessions:
+                edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
+            if clean_memory_types:
+                marks = ",".join("?" for _ in clean_memory_types)
+                edge_sql += f" AND graph_memory.mtype IN ({marks})"
+                edge_params.extend(clean_memory_types)
+            if lower_time is not None:
+                edge_sql += " AND COALESCE(graph_memory.valid_from, graph_memory.ingested_at, 0)>=?"
+                edge_params.append(lower_time)
+            if upper_time is not None:
+                edge_sql += " AND COALESCE(graph_memory.valid_from, graph_memory.ingested_at, 0)<=?"
+                edge_params.append(upper_time)
+            edge_sql += "))"
         if prune_entities and include_history:
             evidence_filter = True
             edge_sql += " AND ("
