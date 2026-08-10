@@ -70,7 +70,7 @@ stronger release and evaluation evidence.
   response, and explicit relations only strengthen it. A bounded once-per-physics-slice projection
   makes nearby unlinked bodies visibly follow without teleporting, freezing the rest of the graph,
   or depending on pointer-event frequency. Pointer events update only the source position and
-  field membership—the gravitational response is sampled by the 30 Hz physics clock. The selected
+  field membership--the gravitational response is sampled by the 30 Hz physics clock. The selected
   Link orbit supplies a safe periapsis,
   tangential momentum is retained, and release adds no wake or impulse. Freeze remains the sole
   explicit motion gate. The explicit **Reheat layout** action now gives Galaxy a finite custom-
