@@ -335,3 +335,18 @@ def test_read_only_api_rejects_declared_oversized_body_with_fixed_detail():
 
     assert response.status_code == 413
     assert response.json() == {"detail": "request body too large"}
+
+
+def test_read_only_api_rejects_streamed_oversized_body_with_413():
+    # Chunked/streamed requests carry no Content-Length, so the middleware must
+    # translate the over-limit receive itself instead of relying on the declared
+    # length check or a ValueError that FastAPI's parser swallows as a 400.
+    app = create_read_only_app(object())
+    response = TestClient(app).post(
+        "/intent/recall",
+        content=b"x" * (MAX_READ_ONLY_BODY_BYTES + 1),
+        headers={"transfer-encoding": "chunked"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "request body too large"}

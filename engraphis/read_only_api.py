@@ -29,6 +29,15 @@ MAX_READ_ONLY_TEXT_CHARS = 100_000
 MAX_READ_ONLY_LIST_ITEMS = 2_000
 
 
+class BodyTooLarge(Exception):
+    """Internal marker: a streamed request exceeded the body limit.
+
+    Raised inside the receive hook where FastAPI's request-body parser would
+    otherwise swallow it as a generic parse error; the middleware translates
+    it to the same 413 the declared-length path returns.
+    """
+
+
 class IntentRecallRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=MAX_READ_ONLY_TEXT_CHARS)
     intent: str = Field("recall", max_length=64)
@@ -162,12 +171,17 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             if message.get("type") == "http.request":
                 received += len(message.get("body") or b"")
                 if received > MAX_READ_ONLY_BODY_BYTES:
-                    raise ValueError("request body too large")
+                    # Raising here is consumed by FastAPI's request-body parser for
+                    # chunked/streamed bodies, which reports a generic 400 before our
+                    # middleware can translate it. Emit the 413 response directly.
+                    raise BodyTooLarge
             return message
 
         request._receive = limited_receive
         try:
             return await call_next(request)
+        except BodyTooLarge:
+            return JSONResponse({"detail": "request body too large"}, status_code=413)
         except ValueError as exc:
             if str(exc) == "request body too large":
                 return JSONResponse(

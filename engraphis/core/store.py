@@ -1895,6 +1895,13 @@ class Store:
             "_source_vaults_v15", "_source_imports_v15", "_source_import_items_v15",
         }
         if not required_staged_tables.issubset(staged_tables):
+            # v15 (and later) databases carry the live source manifest rather than
+            # staged temp tables, but their jobs still predate ``jobs.session_id``.
+            # Backfill from the live v15 tables so the exact-session triggers added
+            # below never reject persisted lineage for legacy jobs.
+            self._backfill_job_session_scope_from_tables(
+                "source_vaults", "source_imports", "source_import_items",
+            )
             return
 
         # A legacy import job can be referenced by either the source manifest's
@@ -1915,6 +1922,52 @@ class Store:
             "WHERE item.job_id IS NOT NULL AND v.session_id IS NOT NULL"
             ") ORDER BY job_id, session_id"
         ).fetchall()
+        self._apply_job_session_backfill(candidates)
+
+    def _backfill_job_session_scope_from_tables(
+        self, vaults_table: str, imports_table: str, items_table: str,
+    ) -> None:
+        """Backfill ``jobs.session_id`` from a (temp or live) source manifest.
+
+        Shared by the staged v14 path and the live v15 path so legacy jobs that
+        predate ``jobs.session_id`` keep their authoritative vault session scope
+        before the v16 exact-session triggers compile.
+        """
+        try:
+            vault_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (vaults_table,),
+            ).fetchone() is not None
+            imports_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (imports_table,),
+            ).fetchone() is not None
+            items_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (items_table,),
+            ).fetchone() is not None
+        except Exception:  # noqa: BLE001 — a temp table may not be readable here
+            return
+        if not (vault_exists and imports_exists and items_exists):
+            return
+        candidates = self.conn.execute(
+            "SELECT job_id, session_id FROM ("
+            "SELECT i.last_seen_job_id AS job_id, v.session_id "
+            f"FROM {imports_table} i "
+            f"JOIN {vaults_table} v ON v.id=i.vault_id "
+            "WHERE i.last_seen_job_id IS NOT NULL AND v.session_id IS NOT NULL "
+            "UNION "
+            "SELECT item.job_id, v.session_id "
+            f"FROM {items_table} item "
+            f"JOIN {imports_table} i ON i.id=item.source_id "
+            f"JOIN {vaults_table} v ON v.id=i.vault_id "
+            "WHERE item.job_id IS NOT NULL AND v.session_id IS NOT NULL"
+            ") ORDER BY job_id, session_id"
+        ).fetchall()
+        self._apply_job_session_backfill(candidates)
+
+    def _apply_job_session_backfill(self, candidates) -> None:
+        """Apply a job→session backfill with the same conflict rules as the staged path."""
         by_job: dict[str, str] = {}
         for row in candidates:
             job_id = str(row["job_id"])

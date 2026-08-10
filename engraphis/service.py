@@ -9738,14 +9738,49 @@ class MemoryService:
                 FROM memories{live_where}
             )
         """
-        decay_row = conn.execute(decay_sql, [now, now, *live_params]).fetchone()
-        decay_distribution = [
-            {"bucket": "critical", "label": "< 20%", "count": int(decay_row["critical"] or 0)},
-            {"bucket": "low",      "label": "20–40%", "count": int(decay_row["low"] or 0)},
-            {"bucket": "medium",   "label": "40–60%", "count": int(decay_row["medium"] or 0)},
-            {"bucket": "high",     "label": "60–80%", "count": int(decay_row["high"] or 0)},
-            {"bucket": "strong",   "label": "> 80%",  "count": int(decay_row["strong"] or 0)},
-        ]
+        try:
+            decay_row = conn.execute(decay_sql, [now, now, *live_params]).fetchone()
+        except Exception:  # noqa: BLE001 — SQLite may lack SQLITE_ENABLE_MATH_FUNCTIONS
+            # EXP() is an optional SQLite math function. On builds compiled without
+            # it (or on SQLCipher), fall back to a portable Python computation so
+            # memory_health() keeps working everywhere.
+            decay_ret_sql = f"""
+                SELECT
+                    MAX(0, (? - COALESCE(last_access, ingested_at, ?)) / 86400.0)
+                        / MAX(stability, 0.01) AS days_ratio
+                FROM memories{live_where}
+            """
+            ratios = [float(r["days_ratio"]) for r in conn.execute(
+                decay_ret_sql, [now, now, *live_params]
+            ).fetchall()]
+            buckets = {"critical": 0, "low": 0, "medium": 0, "high": 0, "strong": 0}
+            for ratio in ratios:
+                retention = math.exp(-ratio)
+                if retention < 0.2:
+                    buckets["critical"] += 1
+                elif retention < 0.4:
+                    buckets["low"] += 1
+                elif retention < 0.6:
+                    buckets["medium"] += 1
+                elif retention < 0.8:
+                    buckets["high"] += 1
+                else:
+                    buckets["strong"] += 1
+            decay_distribution = [
+                {"bucket": "critical", "label": "< 20%", "count": buckets["critical"]},
+                {"bucket": "low",      "label": "20–40%", "count": buckets["low"]},
+                {"bucket": "medium",   "label": "40–60%", "count": buckets["medium"]},
+                {"bucket": "high",     "label": "60–80%", "count": buckets["high"]},
+                {"bucket": "strong",   "label": "> 80%",  "count": buckets["strong"]},
+            ]
+        else:
+            decay_distribution = [
+                {"bucket": "critical", "label": "< 20%", "count": int(decay_row["critical"] or 0)},
+                {"bucket": "low",      "label": "20–40%", "count": int(decay_row["low"] or 0)},
+                {"bucket": "medium",   "label": "40–60%", "count": int(decay_row["medium"] or 0)},
+                {"bucket": "high",     "label": "60–80%", "count": int(decay_row["high"] or 0)},
+                {"bucket": "strong",   "label": "> 80%",  "count": int(decay_row["strong"] or 0)},
+            ]
         # ── Orphan count (memories with no entity links) ────────────────────────
         # A memory is an orphan when it has zero live rows in memory_entities.
         # The NOT EXISTS subquery uses the existing idx_memory_entity_memory
