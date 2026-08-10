@@ -21,7 +21,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 15`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 16`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -198,19 +198,25 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 15`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 16`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
   system-time `ingested_at/expired_at`. Reads hide facts outside their validity window
   unless `include_invalid=True` or an `as_of` anchor is given.
 - **IDs:** ULID, time-sortable, **typed prefixes** (`ws_`, `repo_`, `ses_`, `mem_`, `ent_`,
-  `edg_`, `sym_`, `evt_`, `job_`, `aud_`, `dev_`, `rcpt_`) — `core/ids.py`.
+  `edg_`, `sym_`, `evt_`, `job_`, `aud_`, `dev_`, `rcpt_`, `vlt_`, `src_`) — `core/ids.py`.
   Lexicographic sort == chronological.
 - **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`, `embedding_state`,
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
-  `operation_receipts`, `events`, `audit`, `memory_tombstones`, `schema_migrations`.
+  `operation_receipts`, `events`, `audit`, `memory_tombstones`, `source_vaults`,
+  `source_imports`, `source_import_items`, `schema_migrations`.
+- **Local document sources:** source collections are scope-bound, resumable manifests. Their
+  paths, digests, and import state are provenance; source folders never create implicit memory
+  scopes. `kind="documents"` is the source-neutral adapter, while `kind="obsidian"` retains
+  the rich Markdown adapter and its existing lineage. Import jobs persist the optional session
+  target, and schema checks keep source-job lineage and per-job items in that exact session.
 - **Erasure markers contain no memory content.** `memory_tombstones.export_class` is strictly
   `never_export|remote_erasure`; only `remote_erasure` may cross a sync boundary.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
@@ -250,6 +256,12 @@ These are pure, unit-tested functions — change them only with a corresponding 
   with `engraphis/mcp_server.py`.
 - **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, and the
   untrusted-bundle security model.
+- **`docs/DOCUMENT_IMPORT.md`** — universal local-document import, source safety, re-import,
+  conflicts, format adapters, and dashboard/CLI flows. Keep it synchronized with the parser,
+  importer, dashboard, and import-report schema.
+- **`docs/OBSIDIAN_IMPORT.md`** — the rich Obsidian Markdown adapter (frontmatter, wikilinks,
+  aliases, attachments) and its compatibility command. It supplements, rather than replaces,
+  the universal document-import guide.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
   MCP-capable agent the *memory discipline* (when to remember/recall, scoping, tool selection).

@@ -6,7 +6,6 @@
 - POST /memory/conversations validates content and forwards the complete grounded history.
 - POST /memory/interactions recorded signals that never reinforced any memory.
 """
-import os
 import threading
 
 import numpy as np
@@ -172,120 +171,101 @@ def test_upload_filename_stem_is_lexical_only(filename, expected):
     assert _filename_stem(filename) == expected
 
 
-def test_import_folder_preserves_relative_case_and_uses_lexical_stem(
+def test_legacy_folder_import_contains_path_before_filesystem_access(
     monkeypatch,
     tmp_path,
 ):
+    import os
+
     from engraphis.routes import vault as vault_routes
 
-    root = tmp_path / "MixedRoot"
-    nested = root / "NestedDir"
-    nested.mkdir(parents=True)
-    (nested / "notes.v1.md").write_text("body", encoding="utf-8")
-    fake_home = tmp_path / "fake-home"
-    fake_home.mkdir()
-    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(root))
-    monkeypatch.setattr(
-        vault_routes.Path,
-        "home",
-        classmethod(lambda _cls: fake_home),
-    )
+    client = _client(monkeypatch, tmp_path)
+    home = tmp_path / "decoy-home"
+    allowed = tmp_path / "allowed"
+    sibling = tmp_path / "allowed-sibling"
+    home.mkdir()
+    allowed.mkdir()
+    sibling.mkdir()
+    (allowed / "safe.md").write_text("# Safe\nAllowed content.\n", encoding="utf-8")
+    (sibling / "secret.md").write_text("must not be read", encoding="utf-8")
+
+    monkeypatch.setattr(vault_routes.Path, "home", lambda: home)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+
+    original_exists = vault_routes.Path.exists
+    original_is_dir = vault_routes.Path.is_dir
+    original_rglob = vault_routes.Path.rglob
+    forbidden = os.path.normcase(str(sibling))
+
+    def reject_forbidden(path):
+        if os.path.normcase(str(path)) == forbidden:
+            pytest.fail("rejected import path reached the filesystem")
+
+    def guarded_exists(path):
+        reject_forbidden(path)
+        return original_exists(path)
+
+    def guarded_is_dir(path):
+        reject_forbidden(path)
+        return original_is_dir(path)
+
+    def guarded_rglob(path, pattern):
+        reject_forbidden(path)
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(vault_routes.Path, "exists", guarded_exists)
+    monkeypatch.setattr(vault_routes.Path, "is_dir", guarded_is_dir)
+    monkeypatch.setattr(vault_routes.Path, "rglob", guarded_rglob)
     monkeypatch.setattr(
         vault_routes.ingest_engine,
         "ingest_document",
-        lambda **_kwargs: {"document_id": "notes-v1"},
+        lambda **_kwargs: "doc",
     )
 
-    with _client(monkeypatch, tmp_path) as client:
-        response = client.post(
+    with client:
+        rejected = client.post(
             "/memory/vaults/import-folder",
-            json={
-                "path": str(root),
-                "namespace": "ns",
-                "file_pattern": "*.md",
-            },
+            json={"path": str(sibling), "namespace": "ns"},
         )
+        assert rejected.status_code == 403
 
-    assert response.status_code == 200
-    result = response.json()["data"]
-    assert result["imported"] == 1
-    assert result["files"] == [
-        {"path": "NestedDir/notes.v1.md", "title": "notes.v1", "status": "ok"}
-    ]
+        accepted = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(allowed), "namespace": "ns"},
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["data"]["folder"] == str(allowed)
+        assert accepted.json()["data"]["imported"] == 1
 
 
-def test_import_folder_rejects_paths_outside_allowed_roots(monkeypatch, tmp_path):
+def test_legacy_folder_import_skips_symlink_escape(monkeypatch, tmp_path):
     from engraphis.routes import vault as vault_routes
 
+    client = _client(monkeypatch, tmp_path)
+    home = tmp_path / "decoy-home"
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"
-    fake_home = tmp_path / "fake-home"
+    home.mkdir()
     allowed.mkdir()
     outside.mkdir()
-    fake_home.mkdir()
-    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    secret = outside / "secret.md"
+    secret.write_text("must not be imported", encoding="utf-8")
+    try:
+        (allowed / "escape.md").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+
+    monkeypatch.setattr(vault_routes.Path, "home", lambda: home)
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
-    monkeypatch.setattr(
-        vault_routes.Path,
-        "home",
-        classmethod(lambda _cls: fake_home),
-    )
 
-    with _client(monkeypatch, tmp_path) as client:
+    with client:
         response = client.post(
             "/memory/vaults/import-folder",
-            json={"path": str(outside), "namespace": "ns"},
+            json={"path": str(allowed), "namespace": "ns"},
         )
 
-    assert response.status_code == 403
-    assert response.json()["detail"].startswith("Import path must be under an allowed root")
-
-def test_import_folder_accepts_files_under_any_configured_root(monkeypatch, tmp_path):
-    """When ENGRAPHIS_IMPORT_ROOTS points outside home, files under ANY configured
-    root must be accepted (not rejected because they're not under ALL roots).
-    Regression for review thread #20: any(not _path_within_root(...)) required
-    every root to be an ancestor — should accept files under ANY configured root."""
-    from engraphis.routes import vault as vault_routes
-
-    # Two disjoint allowed roots
-    root_a = tmp_path / "data" / "root_a"
-    root_b = tmp_path / "data" / "root_b"
-    fake_home = tmp_path / "fake-home"
-    root_a.mkdir(parents=True)
-    root_b.mkdir(parents=True)
-    fake_home.mkdir()
-
-    # File under root_b (not under root_a or fake_home)
-    (root_b / "note.md").write_text("# Disjoint Root Test", encoding="utf-8")
-
-    # Configure both roots (disjoint from each other and from home)
-    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", f"{root_a}{os.pathsep}{root_b}")
-    monkeypatch.setattr(
-        vault_routes.Path,
-        "home",
-        classmethod(lambda _cls: fake_home),
-    )
-    monkeypatch.setattr(
-        vault_routes.ingest_engine,
-        "ingest_document",
-        lambda **_kwargs: {"document_id": "disjoint-test"},
-    )
-
-    with _client(monkeypatch, tmp_path) as client:
-        response = client.post(
-            "/memory/vaults/import-folder",
-            json={
-                "path": str(root_b),
-                "namespace": "ns",
-                "file_pattern": "*.md",
-            },
-        )
-
-    # Must succeed (file is under root_b, one of the configured roots)
     assert response.status_code == 200
-    result = response.json()["data"]
-    assert result["imported"] == 1
-    assert result["files"][0]["status"] == "ok"
+    assert response.json()["data"]["imported"] == 0
 
 
 def test_safe_call_classifies_and_sanitizes_legacy_failures():

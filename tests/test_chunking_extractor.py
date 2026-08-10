@@ -6,6 +6,8 @@ properties a security review depends on: determinism, the per-document chunk cap
 control-character defanging.
 """
 import pytest
+import sys
+import types
 
 import engraphis.backends.extractor as extractor_module
 from engraphis.backends.extractor import (
@@ -56,6 +58,32 @@ def test_chunk_tokenizer_strict_mode_rejects_mutable_remote_revision_before_load
         _load_chunk_token_counter(
             "reader/model", "main", require_immutable_models=True,
         )
+
+
+def test_chunk_tokenizer_local_selector_forces_local_files_only(monkeypatch):
+    calls = []
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return list(text)
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model, **kwargs):
+            calls.append((model, kwargs))
+            return FakeTokenizer()
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+    )
+
+    counter, identity = _load_chunk_token_counter("local:C:/models/reader")
+
+    assert calls == [("C:/models/reader", {
+        "trust_remote_code": False, "local_files_only": True,
+    })]
+    assert identity == "hf:C:/models/reader@unversioned"
+    assert counter("abc") == 3
 
 
 def test_empty_or_whitespace_returns_nothing():

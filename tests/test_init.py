@@ -163,7 +163,6 @@ def test_generated_encryption_key_is_private(tmp_path, monkeypatch):
 def test_installed_config_loads_the_trusted_env_from_an_unrelated_cwd(
         tmp_path, monkeypatch):
     """The wheel must consume the exact trusted file ``engraphis-init`` writes."""
-    pytest.importorskip("dotenv")
     monkeypatch.chdir(tmp_path)
     target = tmp_path / "preserved.db"
     main(["--db", str(target)])

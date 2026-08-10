@@ -116,6 +116,16 @@ def test_public_narrative_has_no_named_competitor_positioning():
         *(ROOT / "eval").rglob("*.md"),
     })
     named_competitors = ("obsidian", "mem0", "zep", "letta")
+    # A product-specific source adapter must name the format it parses. Keep that
+    # exception constrained to the importer guide and its four discovery/changelog
+    # surfaces; comparison/positioning language remains forbidden everywhere.
+    obsidian_integration_docs = {
+        ROOT / "AGENTS.md",
+        ROOT / "README.md",
+        ROOT / "CHANGELOG.md",
+        ROOT / "docs" / "DOCUMENT_IMPORT.md",
+        ROOT / "docs" / "OBSIDIAN_IMPORT.md",
+    }
     private_research_phrases = (
         "commercial audit",
         "competitive analysis",
@@ -127,5 +137,9 @@ def test_public_narrative_has_no_named_competitor_positioning():
     )
     for path in public_markdown:
         content = path.read_text(encoding="utf-8").casefold()
-        assert all(name not in content for name in named_competitors), path
+        forbidden_names = (
+            named_competitors[1:]
+            if path in obsidian_integration_docs else named_competitors
+        )
+        assert all(name not in content for name in forbidden_names), path
         assert all(phrase not in content for phrase in private_research_phrases), path

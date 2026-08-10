@@ -552,6 +552,26 @@ def _migrate_rows(
             source_id = _source_id(row, vcols)
             if source_id is not None:
                 refs.append({"kind": "v1_event_id", "id": source_id})
+            entity_name = str(
+                (row["entity_name"] if "entity_name" in vcols else "") or ""
+            ).strip()
+            if entity_name:
+                refs.append({"kind": "v1_entity", "name": entity_name})
+            if "payload" in vcols:
+                raw_payload = row["payload"]
+                try:
+                    payload = json.loads(raw_payload or "{}")
+                except (TypeError, ValueError, RecursionError):
+                    payload = str(raw_payload or "")
+                refs.append({"kind": "v1_payload", "value": payload})
+            event_repairs = []
+            event_ts = _legacy_float(
+                row["timestamp"] if "timestamp" in vcols else migration_time,
+                default=migration_time,
+                field="timestamp",
+                repairs=event_repairs,
+            )
+            counts["repaired_fields"] += len(event_repairs)
             reject_secrets((("event content", content), ("event refs", refs)))
             if store is not None:
                 store.append_event(
@@ -560,6 +580,7 @@ def _migrate_rows(
                     workspace_id=wid,
                     repo_id=rid,
                     refs=refs,
+                    ts=event_ts,
                 )
 
     if _has_table(src, "thoughts"):

@@ -84,7 +84,13 @@ def _safe_upsert(index, ids, vecs, meta=None, *, commit=True):
     try:
         index.upsert(ids, vecs, meta, commit=commit)
     except TypeError:
-        index.upsert(ids, vecs, commit=commit)
+        try:
+            index.upsert(ids, vecs, meta)
+        except TypeError:
+            try:
+                index.upsert(ids, vecs, commit=commit)
+            except TypeError:
+                index.upsert(ids, vecs)
 
 logger = logging.getLogger("engraphis.core.engine")
 
@@ -1040,8 +1046,10 @@ class MemoryEngine:
         if not vector_index_requires_sync(self.index, self.store):
             return
         try:
-            self.index.upsert(
-                [memory_id], vec.reshape(1, -1),
+            _safe_upsert(
+                self.index,
+                [memory_id],
+                vec.reshape(1, -1),
                 [{"model": self.embedding_space}],
             )
         except Exception as exc:  # noqa: BLE001 — a failed index write must not lose the memory
@@ -1366,14 +1374,16 @@ class MemoryEngine:
             # SearchFilter as lexical/graph retrieval, so it is hidden from current recall
             # but remains available for historical ``as_of`` queries. Deleting it made
             # time travel silently lose the semantic arm.
-            linked = self._evolve(mid, neighbors, exclude={decision.target_id}) if trusted_write else []
+            linked = self._evolve(
+                mid, neighbors, exclude={decision.target_id}, valid_from=rec.valid_from,
+            ) if trusted_write else []
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
                    "reason": decision.reason}
             if linked:
                 out["linked"] = linked
             return out
 
-        linked = self._evolve(mid, neighbors) if trusted_write else []
+        linked = self._evolve(mid, neighbors, valid_from=rec.valid_from) if trusted_write else []
         if conflicted_with:
             # Deterministic conflict repair: persist the ``conflicts_with`` relation
             # (with the real new-memory id), the audit row, and a bounded confidence
@@ -1408,7 +1418,10 @@ class MemoryEngine:
         if decision is not None and decision.op == ResolutionOp.RELATE:
             related_to = decision.target_id
             if related_to and not self.store.has_link(mid, related_to):
-                self.store.add_link(mid, related_to, "related", reason=decision.reason)
+                self.store.add_link(
+                    mid, related_to, "related", reason=decision.reason,
+                    valid_from=rec.valid_from,
+                )
             out = {
                 "id": mid, "op": "relate", "related_to": related_to,
                 "reason": decision.reason,
@@ -1529,7 +1542,13 @@ class MemoryEngine:
                         memory_id=memory_id, entity_id=entity.id,
                         workspace_id=workspace_id, repo_id=repo_id,
                         source_kind="text_mention", confidence=0.8,
-                        valid_from=valid_from, commit=False,
+                        valid_from=valid_from,
+                        provenance={
+                            "memory_id": memory_id,
+                            "source": "text_mention",
+                            "source_kind": "text_mention",
+                        },
+                        commit=False,
                     )
             if owns_transaction:
                 self.store.conn.commit()
@@ -1542,7 +1561,10 @@ class MemoryEngine:
                 self.store.conn.rollback()
             self._warn_redacted_failure("memory-entity linking", exc)
 
-    def _evolve(self, new_id: str, neighbors: list, *, exclude: Optional[set] = None) -> list[str]:
+    def _evolve(
+        self, new_id: str, neighbors: list, *, exclude: Optional[set] = None,
+        valid_from: Optional[float] = None,
+    ) -> list[str]:
         """A-MEM-style memory evolution on write: a new memory
         auto-links to its closest still-live neighbors and gives them a small
         reinforcement touch, so old notes gain connectivity (and resist decay a little
@@ -1568,7 +1590,15 @@ class MemoryEngine:
                     continue
                 if self.store.has_link(new_id, nrec.id):
                     continue
-                self.store.add_link(new_id, nrec.id, "related")
+                link_valid_from = valid_from
+                if nrec.valid_from is not None:
+                    link_valid_from = max(
+                        nrec.valid_from,
+                        link_valid_from if link_valid_from is not None else nrec.valid_from,
+                    )
+                self.store.add_link(
+                    new_id, nrec.id, "related", valid_from=link_valid_from,
+                )
                 self.store.reinforce(nrec.id, boost=scoring.INTERACTION_BOOST["view"])
                 linked.append(nrec.id)
             if linked:
@@ -1699,16 +1729,43 @@ class MemoryEngine:
             )
             current_fallback = True
         neighbors = []
-        for nid, sim in hits:
-            nrec = self.store.get_memory(nid)
-            if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
-                    and nrec.scope == scope and nrec.mtype == mtype
-                    and nrec.session_id == session_id
-                    and prompt_eligible(nrec.provenance, nrec.metadata)
-                    and (memory_matches_filter(nrec, flt)
-                         or (current_fallback and nrec.expired_at is None
-                             and nrec.valid_to is None))):
-                neighbors.append((sim, nrec))
+
+        def append_visible_neighbors(
+            candidates: list[tuple[str, float]],
+            *,
+            fallback: bool,
+        ) -> None:
+            for nid, sim in candidates:
+                nrec = self.store.get_memory(nid)
+                if (nrec and nrec.workspace_id == workspace_id
+                        and nrec.repo_id == repo_id and nrec.scope == scope
+                        and nrec.mtype == mtype
+                        and (scope != Scope.SESSION or nrec.session_id == session_id)
+                        and prompt_eligible(nrec.provenance, nrec.metadata)
+                        and (memory_matches_filter(nrec, flt)
+                             or (fallback and nrec.expired_at is None
+                                 and nrec.valid_to is None))):
+                    neighbors.append((sim, nrec))
+
+        append_visible_neighbors(hits, fallback=current_fallback)
+        if not neighbors and valid_at is not None and not current_fallback:
+            # A stale or overly broad injected index can return candidates that are
+            # all outside the requested historical view. Retry against the current
+            # index/store mirror instead of silently turning a duplicate/correction
+            # into a new ADD.
+            current_filter = SearchFilter(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scopes=[scope], mtypes=[mtype],
+            )
+            hits, canonical_fallback = self._search_resolution_vectors(
+                vec,
+                candidate_k,
+                current_filter,
+                canonical_only=canonical_fallback,
+            )
+            current_fallback = True
+            append_visible_neighbors(hits, fallback=current_fallback)
         if subject_key:
             # A claim identity is authoritative, while vector retrieval is only a
             # bounded candidate-discovery aid.  Always add its visible predecessor(s): a

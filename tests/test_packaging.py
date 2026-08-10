@@ -69,17 +69,26 @@ def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
     from engraphis import mcp_http_cli
 
     calls = []
+    security_calls = []
+    transport_security = object()
     fake_mcp = types.SimpleNamespace(
         settings=types.SimpleNamespace(host=None, port=None),
         run=lambda *, transport: calls.append(transport),
     )
     monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
+    monkeypatch.setattr(
+        mcp_http_cli,
+        "_transport_security",
+        lambda host, port: security_calls.append((host, port)) or transport_security,
+    )
     monkeypatch.setitem(sys.modules, "engraphis.mcp_server", types.SimpleNamespace(mcp=fake_mcp))
 
     mcp_http_cli.main(["--host", "::1", "--port", "9876", "--transport", "sse"])
 
     assert fake_mcp.settings.host == "::1"
     assert fake_mcp.settings.port == 9876
+    assert fake_mcp.settings.transport_security is transport_security
+    assert security_calls == [("::1", 9876)]
     assert calls == ["sse"]
 
 
@@ -214,6 +223,7 @@ def test_distribution_configuration_includes_public_evidence_tools():
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
         "include docs/RECALL_RECOVERY.md",
+        "include docs/DOCUMENT_IMPORT.md docs/OBSIDIAN_IMPORT.md",
         "include docs/images/context-efficiency.svg",
         "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
@@ -385,18 +395,48 @@ def test_manual_release_dispatch_cannot_publish():
 
 
 def test_source_tree_version_matches_pyproject():
-    """The ``PackageNotFoundError`` fallback in ``engraphis/__init__.py`` must equal the
-    ``[project] version``. It only shows up in an uninstalled source tree, so a stale
-    value survives every test run on an installed checkout and then leaks into the API
-    index and ``--version`` output of anyone running from a clone."""
+    """Both source-tree versions must equal the ``[project] version``."""
     import re
 
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     init = (ROOT / "engraphis" / "__init__.py").read_text(encoding="utf-8")
     declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    source = re.search(r'^_SOURCE_VERSION = "([^"]+)"', init, re.M)
     fallback = re.search(r'^    __version__ = "([^"]+)"', init, re.M)
-    assert declared and fallback, "version declarations moved — update this test"
-    assert declared.group(1) == fallback.group(1)
+    assert declared and source and fallback, "version declarations moved — update this test"
+    assert declared.group(1) == source.group(1) == fallback.group(1)
+
+
+def test_release_version_surfaces_are_synchronized():
+    """Repo-distributed integrations and release filters track the package version."""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert declared, "project version declaration moved — update this test"
+    version = declared.group(1)
+
+    commercial = json.loads(
+        (ROOT / "engraphis" / "commercial_manifest.json").read_text(encoding="utf-8")
+    )
+    assert commercial["version"] == version
+
+    hermes = (ROOT / "integrations" / "hermes" / "engraphis" / "plugin.yaml").read_text(
+        encoding="utf-8"
+    )
+    hermes_version = re.search(r"^version:\s*(\S+)\s*$", hermes, re.M)
+    assert hermes_version, "Hermes version declaration moved — update this test"
+    expected_hermes = version if version.count(".") >= 2 else f"{version}.0"
+    assert hermes_version.group(1) == expected_hermes
+
+    ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
+        encoding="utf-8"
+    )
+    assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == [version]
+
+    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
+    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
+    assert static == classic
+    static_text = static.decode("utf-8")
+    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == [version]
 
 
 def test_release_version_has_a_dated_changelog_section():

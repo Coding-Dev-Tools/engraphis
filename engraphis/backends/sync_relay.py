@@ -153,6 +153,19 @@ def _saved_sync_token(relay_origin: str) -> str:
                 "configured relay credential is malformed; replace or unset it",
                 status=409,
             ) from None
+        configured_origin = os.environ.get("ENGRAPHIS_SYNC_TOKEN_ORIGIN", "")
+        try:
+            configured_origin = _validated_base_url(configured_origin)
+        except ValueError:
+            raise RelayError(
+                "configured relay credential has no valid relay binding",
+                status=409,
+            ) from None
+        if configured_origin != relay_origin:
+            raise RelayError(
+                "configured relay credential belongs to another relay",
+                status=409,
+            )
         return configured
     try:
         raw = read_private_text(

@@ -45,6 +45,7 @@ EXPECTED_ENTRY_POINTS = {
     "engraphis-consolidate": "scripts.consolidate:main",
     "engraphis-graph": "scripts.graph_cli:main",
     "engraphis-graph-server": "scripts.graph_server:main",
+    "engraphis-import": "scripts.importer:main",
     "engraphis-init": "scripts.init:main",
     "engraphis-update": "scripts.update:main",
 }

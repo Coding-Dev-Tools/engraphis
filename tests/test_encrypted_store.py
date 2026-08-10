@@ -7,6 +7,7 @@ encrypted connection (the re-open path exercises the exception-translating adapt
 key fails loudly, keys load from env or file, and the default (no key) path stays plaintext.
 """
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ def _require_sqlcipher():
     pytest.importorskip("sqlcipher3", reason="encryption extra not installed")
 
 from engraphis.backends import encrypted_db  # noqa: E402
+from engraphis.core.store import Store  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
 KEY = "b3" * 32  # 64 hex chars → raw-key form
@@ -82,6 +84,101 @@ def test_wrong_key_is_rejected(monkeypatch, tmp_path):
         MemoryService.create(db)
 
 
+def test_existing_encrypted_database_opens_read_only_without_sidecar_mutation(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
+    db_path = tmp_path / "read-only-encrypted.db"
+    service = MemoryService.create(str(db_path))
+    stored = service.remember(
+        "Encrypted immutable evidence.", workspace="demo", scope="workspace",
+    )
+    service.engine.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.engine.store.close()
+    tracked = [
+        db_path,
+        tmp_path / "read-only-encrypted.db-wal",
+        tmp_path / "read-only-encrypted.db-shm",
+        tmp_path / "read-only-encrypted.db-journal",
+    ]
+
+    def state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: state(path) for path in tracked}
+    read_only = Store(
+        str(db_path), connect=encrypted_db.make_connector(KEY), read_only=True,
+    )
+    try:
+        record = read_only.get_memory(stored["id"])
+        assert record is not None and record.content == "Encrypted immutable evidence."
+        assert read_only.conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            read_only.conn.execute(
+                "UPDATE memories SET content='changed' WHERE id=?", (stored["id"],)
+            )
+    finally:
+        read_only.close()
+    assert {path.name: state(path) for path in tracked} == before
+
+
+def test_encrypted_read_only_open_rejects_wrong_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
+    db_path = tmp_path / "wrong-read-only-key.db"
+    service = MemoryService.create(str(db_path))
+    service.engine.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.engine.store.close()
+    tracked = [
+        db_path,
+        tmp_path / "wrong-read-only-key.db-wal",
+        tmp_path / "wrong-read-only-key.db-shm",
+        tmp_path / "wrong-read-only-key.db-journal",
+    ]
+
+    def state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: state(path) for path in tracked}
+
+    with pytest.raises(encrypted_db.EncryptionError):
+        Store(
+            str(db_path), connect=encrypted_db.make_connector("aa" * 32),
+            read_only=True,
+        )
+    assert {path.name: state(path) for path in tracked} == before
+
+
+def test_encrypted_read_only_open_rejects_active_wal_before_connector(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
+    db_path = tmp_path / "active-encrypted-wal.db"
+    writable = Store(str(db_path), connect=encrypted_db.make_connector(KEY))
+    try:
+        writable.conn.execute("PRAGMA wal_autocheckpoint=0")
+        writable.get_or_create_workspace("active-encrypted-wal")
+        wal_path = tmp_path / "active-encrypted-wal.db-wal"
+        assert wal_path.is_file() and wal_path.stat().st_size > 0
+        before = (wal_path.stat().st_size, wal_path.stat().st_mtime_ns)
+
+        with pytest.raises(RuntimeError, match="active WAL found"):
+            Store(
+                str(db_path), connect=encrypted_db.make_connector(KEY),
+                read_only=True,
+            )
+        assert (wal_path.stat().st_size, wal_path.stat().st_mtime_ns) == before
+    finally:
+        writable.close()
+
+
 def test_key_from_file(monkeypatch, tmp_path):
     keyfile = tmp_path / "db.key"
     keyfile.write_text(KEY + "\n")
@@ -93,6 +190,44 @@ def test_key_from_file(monkeypatch, tmp_path):
     svc.engine.store.conn.close()
     with pytest.raises(sqlite3.DatabaseError):
         sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()
+
+
+def test_encrypted_manifest_snapshot_is_immutable_and_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
+    db = str(tmp_path / "manifest.db")
+    service = MemoryService.create(db)
+    workspace_id = service.store.get_or_create_workspace("encrypted-manifest")
+    vault_id = service.store.register_source_vault(
+        kind="obsidian", root_digest="a" * 64, workspace_id=workspace_id,
+        display_name="Encrypted vault",
+    )
+    source_id = service.store.upsert_source_import_item(
+        vault_id=vault_id, source_key="b" * 64, relative_path="Notes/One.md",
+        content_sha256="c" * 64, importer_version="1", seen_at=10,
+    )
+    service.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.close()
+    tracked = [
+        Path(db), Path(db + "-wal"), Path(db + "-shm"), Path(db + "-journal"),
+    ]
+
+    def state(path):
+        return (
+            path.exists(),
+            path.stat().st_size if path.exists() else None,
+            path.stat().st_mtime_ns if path.exists() else None,
+        )
+
+    before = {path.name: state(path) for path in tracked}
+
+    snapshot = Store.snapshot_source_import_manifest(
+        db, connect=encrypted_db.connector_from_env(),
+    )
+
+    assert snapshot["schema_version"] >= 15
+    assert [vault["id"] for vault in snapshot["vaults"]] == [vault_id]
+    assert [item["id"] for item in snapshot["items"]] == [source_id]
+    assert {path.name: state(path) for path in tracked} == before
 
 
 def test_passphrase_key_non_hex(monkeypatch, tmp_path):

@@ -33,6 +33,24 @@ def store():
     s.close()
 
 
+def test_append_event_does_not_commit_a_caller_owned_transaction(store):
+    workspace_id = store.get_or_create_workspace("events")
+    store.conn.execute(
+        "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
+        ("aud_pending", 1.0, "test", "pending", "target", "detail"),
+    )
+    assert store.conn.transaction_owned_by_current_thread()
+
+    event_id = store.append_event(
+        kind="test", content="event", workspace_id=workspace_id,
+    )
+
+    assert store.conn.transaction_owned_by_current_thread()
+    store.conn.rollback()
+    assert store.conn.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone() is None
+    assert store.conn.execute("SELECT 1 FROM audit WHERE id='aud_pending'").fetchone() is None
+
+
 def test_schema_version(store):
     assert store.schema_version == SCHEMA_VERSION
 

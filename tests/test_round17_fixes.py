@@ -22,6 +22,32 @@ def test_get_or_create_workspace_enforces_allowlist(tmp_path):
     s.close()
 
 
+def test_bound_store_enforces_allowlist_for_scoped_reads_and_writes(tmp_path):
+    from engraphis.core.interfaces import MemoryRecord
+    from engraphis.core.store import Store
+
+    path = tmp_path / "bound.db"
+    seed = Store(str(path))
+    allowed_id = seed.get_or_create_workspace("allowed")
+    secret_id = seed.get_or_create_workspace("secret")
+    secret_memory = seed.add_memory(MemoryRecord(
+        id="", content="private", workspace_id=secret_id,
+    ))
+    seed.close()
+
+    bound = Store(str(path), allowed_workspaces={"allowed"})
+    with pytest.raises(ValueError):
+        bound.create_repo(secret_id, "repo")
+    with pytest.raises(ValueError):
+        bound.start_session(secret_id)
+    with pytest.raises(ValueError):
+        bound.add_memory(MemoryRecord(id="", content="blocked", workspace_id=secret_id))
+    assert bound.get_memory(secret_memory) is None
+    assert bound.list_memories() == []
+    assert bound.get_or_create_workspace("allowed") == allowed_id
+    bound.close()
+
+
 def test_sync_apply_preserves_future_world_validity():
     from engraphis.core.sync import dict_to_record
     future = time.time() + 5 * 365 * 86400             # ~5 years out (a fact valid until then)

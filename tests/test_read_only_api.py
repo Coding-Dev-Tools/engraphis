@@ -5,7 +5,7 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 from fastapi.testclient import TestClient
 
 from engraphis.config import settings
-from engraphis.read_only_api import create_read_only_app
+from engraphis.read_only_api import MAX_READ_ONLY_BODY_BYTES, create_read_only_app
 from engraphis.service import MemoryService
 from engraphis.backends.graph_extractor import RegexGraphExtractor
 
@@ -323,3 +323,30 @@ def test_read_only_unhandled_error_is_json_and_redacted(caplog):
     assert secret not in response.text
     assert secret not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_read_only_api_rejects_declared_oversized_body_with_fixed_detail():
+    app = create_read_only_app(object())
+    response = TestClient(app).post(
+        "/intent/recall",
+        content=b"{}",
+        headers={"content-length": str(MAX_READ_ONLY_BODY_BYTES + 1)},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "request body too large"}
+
+
+def test_read_only_api_rejects_streamed_oversized_body_with_413():
+    # Chunked/streamed requests carry no Content-Length, so the middleware must
+    # translate the over-limit receive itself instead of relying on the declared
+    # length check or a ValueError that FastAPI's parser swallows as a 400.
+    app = create_read_only_app(object())
+    response = TestClient(app).post(
+        "/intent/recall",
+        content=b"x" * (MAX_READ_ONLY_BODY_BYTES + 1),
+        headers={"transfer-encoding": "chunked"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "request body too large"}

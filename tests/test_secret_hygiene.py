@@ -179,6 +179,33 @@ def test_secure_erase_rebuilds_shared_edge_provenance_from_remaining_support():
     ]
 
 
+def test_secure_erase_removes_sync_conflict_successors():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    engine.store.add_memory(MemoryRecord(
+        id=successor_id,
+        content="Losing secret copy.",
+        workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+        metadata={
+            "sync_conflict": {"memory_id": original_id},
+        },
+        provenance={"conflict_of": original_id, "trusted": False},
+    ))
+
+    engine.secure_erase(original_id)
+
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
+    assert {
+        row["id"]
+        for row in engine.store.list_memory_tombstones()
+    } >= {original_id, successor_id}
+
+
 def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")
