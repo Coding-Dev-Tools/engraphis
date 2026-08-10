@@ -430,13 +430,19 @@ def test_release_version_surfaces_are_synchronized():
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
         encoding="utf-8"
     )
-    assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == [version]
+    # The Ledger sources release_version from the bootstrap payload at runtime
+    # (state.releaseVersion), so no hardcoded literal must drift from pyproject.
+    assert "return `release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
+    assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == []
 
     static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
     classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
     assert static == classic
     static_text = static.decode("utf-8")
-    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == [version]
+    # Classic sources release_version from the runtime RELEASE_VERSION (bootstrap),
+    # so no hardcoded literal must drift from pyproject either.
+    assert "p.set('release_version',RELEASE_VERSION)" in static_text
+    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == []
 
 
 def test_release_version_has_a_dated_changelog_section():

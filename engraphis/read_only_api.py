@@ -306,7 +306,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
 
     @app.get("/context-savings")
     def context_savings(
-        workspace: str,
+        workspace: Optional[str] = None,
         repo: Optional[str] = None,
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
@@ -316,7 +316,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     ):
         return run(
             svc.context_savings,
-            workspace=workspace,
+            workspace=workspace.strip() if isinstance(workspace, str) else None,
             repo=repo,
             from_ts=from_ts,
             to_ts=to_ts,

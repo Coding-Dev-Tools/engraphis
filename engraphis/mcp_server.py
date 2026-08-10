@@ -1586,8 +1586,10 @@ def engraphis_receipts(
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def engraphis_context_savings(
-    workspace: Annotated[str, Field(description="Workspace whose receipt usage to summarize.",
-                                    min_length=1, max_length=200)],
+    workspace: Annotated[Optional[str], Field(
+        description="Optional workspace whose receipt usage to summarize. Omit to aggregate all visible workspaces.",
+        max_length=200,
+    )] = None,
     repo: Annotated[Optional[str], Field(description="Optional repo scope within the workspace.",
                                          max_length=200)] = None,
     from_ts: Annotated[Optional[float], Field(description="Optional inclusive Unix timestamp.")] = None,
@@ -1602,7 +1604,11 @@ def engraphis_context_savings(
     """Summarize receipt-backed context savings with optional time/release filters."""
     try:
         return _ok(service().context_savings(
-            workspace=workspace,
+            workspace=(
+                workspace.strip()
+                if isinstance(workspace, str)
+                else None
+            ),
             repo=repo,
             from_ts=from_ts,
             to_ts=to_ts,

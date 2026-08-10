@@ -34,6 +34,16 @@ def test_port_accepts_boundaries():
     assert start_dashboard._port("65535") == 65535
 
 
+def test_startup_error_explains_sqlite_contention():
+    message = start_dashboard._startup_error(
+        start_dashboard.sqlite3.OperationalError("database is locked"),
+        "C:/data/engraphis.db",
+    )
+    assert "database is busy" in message
+    assert "duplicate" in message
+    assert "verified backup" in message
+
+
 @pytest.mark.parametrize("busy_errno", [errno.EADDRINUSE, errno.EACCES, 10013, 10048])
 def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(
     monkeypatch, busy_errno,
@@ -69,7 +79,7 @@ def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(
     ]
 
 
-def test_dashboard_health_probe_accepts_a_local_health_payload_without_redirects(monkeypatch):
+def test_dashboard_ready_probe_accepts_a_local_ready_payload_without_redirects(monkeypatch):
     requests = []
     handlers = []
 
@@ -82,7 +92,7 @@ def test_dashboard_health_probe_accepts_a_local_health_payload_without_redirects
 
         def read(self, limit):
             assert limit == 16 * 1024
-            return b'{"status":"healthy"}'
+            return b'{"ready":true,"checks":{"db":true,"embedder":true}}'
 
     class Opener:
         def open(self, request, *, timeout):
@@ -97,7 +107,7 @@ def test_dashboard_health_probe_accepts_a_local_health_payload_without_redirects
 
     assert start_dashboard._is_engraphis_dashboard("http://127.0.0.1:8700/") is True
     assert len(requests) == 1
-    assert requests[0][0].full_url == "http://127.0.0.1:8700/api/health"
+    assert requests[0][0].full_url == "http://127.0.0.1:8700/api/ready"
     assert requests[0][1] == 0.75
     assert len(handlers) == 1
     assert handlers[0].redirect_request(
@@ -105,7 +115,7 @@ def test_dashboard_health_probe_accepts_a_local_health_payload_without_redirects
     ) is None
 
 
-def test_dashboard_health_probe_refuses_redirect_without_a_second_request(monkeypatch):
+def test_dashboard_ready_probe_refuses_redirect_without_a_second_request(monkeypatch):
     calls = []
 
     class Opener:
@@ -122,7 +132,7 @@ def test_dashboard_health_probe_refuses_redirect_without_a_second_request(monkey
     )
 
     assert start_dashboard._is_engraphis_dashboard("http://127.0.0.1:8700") is False
-    assert calls == [("http://127.0.0.1:8700/api/health", 0.75)]
+    assert calls == [("http://127.0.0.1:8700/api/ready", 0.75)]
 
 
 def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypatch):

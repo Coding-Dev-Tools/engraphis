@@ -54,7 +54,7 @@ class _GovernBody(BaseModel):
 
 class _PromoteBody(BaseModel):
     memory_id: str = Field(min_length=1, max_length=200)
-    target_scope: str
+    target_scope: str = Field(min_length=1, max_length=50)
     workspace: str = Field(min_length=1, max_length=200)
     repo: Optional[str] = Field(default=None, max_length=200)
     reason: str = Field(default="", max_length=1_000)
@@ -281,8 +281,24 @@ def create_app(
         return svc().receipt_log(workspace=workspace, limit=limit)
 
     @app.get("/api/context-savings")
-    def context_savings(workspace: str, repo: Optional[str] = None):
-        return svc().context_savings(workspace=workspace, repo=repo)
+    def context_savings(
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+        release_version: Optional[str] = None,
+        format: Optional[str] = None,
+        group_by: Optional[str] = None,
+    ):
+        return svc().context_savings(
+            workspace=workspace.strip() if isinstance(workspace, str) else None,
+            repo=repo,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            release_version=release_version,
+            format=format,
+            group_by=group_by,
+        )
 
     @app.get("/api/receipts/verify")
     def receipts_verify(workspace: str):
@@ -322,8 +338,10 @@ def create_app(
         # already applied its optional bearer boundary, so bypass the retired local
         # entitlement gate and let the owner recover their complete workspace.
         data = svc().export_workspace(workspace=workspace, recovery=True)
+        # Sanitize workspace name for filename to prevent header injection
+        safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in workspace)
         filename = "engraphis-export-%s-%s.json" % (
-            workspace.replace("/", "_"),
+            safe_ws,
             time.strftime("%Y%m%d"),
         )
         return JSONResponse(

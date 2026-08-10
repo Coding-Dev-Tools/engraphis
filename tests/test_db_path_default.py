@@ -66,6 +66,18 @@ def test_env_override_wins(monkeypatch):
     assert Settings().db_path == "/custom/spot.db"
 
 
+def test_relative_env_override_is_anchored_to_trusted_config(monkeypatch, tmp_path):
+    trusted = tmp_path / "home" / ".engraphis" / "config.env"
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", trusted)
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", "data/engraphis.db")
+    assert Settings().db_path == str((trusted.parent / "data/engraphis.db").resolve())
+
+
+def test_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", ":memory:")
+    assert Settings().db_path == ":memory:"
+
+
 def _sqlite(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))

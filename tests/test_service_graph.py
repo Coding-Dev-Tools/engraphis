@@ -105,6 +105,123 @@ def test_graph_aggregates_session_visibility_once_before_selecting_entities():
     assert any("WITH edge_visibility AS" in statement for statement in statements)
 
 
+def test_graph_scene_prunes_entities_without_correlated_visibility_sql():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("edge0", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    statements = []
+    svc.store.conn.set_trace_callback(statements.append)
+    try:
+        scene = svc.graph_scene(workspace="acme")
+    finally:
+        svc.store.conn.set_trace_callback(None)
+
+    assert not ({ids["Alice"], ids["Acme Corp"]} & {
+        node["id"] for node in scene["nodes"]
+    })
+    entity_selects = [
+        statement for statement in statements
+        if "FROM entities entity WHERE workspace_id=" in statement
+    ]
+    assert entity_selects
+    assert all("visibility_edge" not in statement for statement in entity_selects)
+    visibility_selects = [
+        statement for statement in statements
+        if "FROM edges visibility_edge" in statement
+    ]
+    assert len(visibility_selects) == 1
+
+
+def test_graph_scene_does_not_merge_session_private_alias_into_public_canonical_node():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    for entity_id, name, canonical_id in (
+        ("public-alias", "Public Alias", "canonical-person"),
+        ("private-alias", "Private Alias", "canonical-person"),
+        ("public-target", "Public Target", "public-target"),
+        ("private-target", "Private Target", "private-target"),
+    ):
+        svc.store.conn.execute(
+            "INSERT INTO entities(id, workspace_id, name, etype, canonical_id, created_at) "
+            "VALUES (?,?,?,?,?,0)",
+            (entity_id, wid, name, "concept", canonical_id),
+        )
+    for edge_id, source, target in (
+        ("public-edge", "public-alias", "public-target"),
+        ("private-edge", "private-alias", "private-target"),
+    ):
+        svc.store.conn.execute(
+            "INSERT INTO edges(id, workspace_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?)",
+            (edge_id, wid, source, target, "related", "semantic"),
+        )
+    public_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="public evidence", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("public-edge", {"memory_id": public_memory})
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme")
+
+    canonical = next(node for node in scene["nodes"] if node["id"] == "canonical-person")
+    assert canonical["member_ids"] == ["public-alias"]
+    assert canonical["label"] == "Public Alias"
+    assert "private-alias" not in {
+        member for node in scene["nodes"] for member in node["member_ids"]
+    }
+
+
+def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    visible_repo = svc.store.get_or_create_repo(wid, "visible")
+    private_repo = svc.store.get_or_create_repo(wid, "private")
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('workspace-private', ?, NULL, 'Workspace Private', 'concept', 0)",
+        (wid,),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('private-target', ?, ?, 'Private Target', 'concept', 0)",
+        (wid, private_repo),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('visible-isolate', ?, ?, 'Visible Isolate', 'concept', 0)",
+        (wid, visible_repo),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+        "VALUES ('private-edge', ?, ?, 'workspace-private', 'private-target', "
+        "'related', 'semantic')",
+        (wid, private_repo),
+    )
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid,
+        repo_id=private_repo, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme", repo="visible")
+
+    assert {node["label"] for node in scene["nodes"]} == {"Visible Isolate"}
+
+
 def test_graph_full_mode_reports_the_available_node_count_without_truncation():
     svc = MemoryService.create(":memory:")
     _seed_entities(

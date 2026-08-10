@@ -24,7 +24,7 @@ import unicodedata
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol, cast
 
 import numpy as np
 
@@ -81,6 +81,7 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+_SQLITE_CONNECT_TIMEOUT_SECONDS = 120.0
 _LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
 _LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
 _LLM_EXTRACTION_REPAIR_STATE_KEY = "__schema_v12_llm_extraction_trust_repair"
@@ -1151,9 +1152,14 @@ class Store:
             return self._connect(path)
         if self.read_only:
             uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
-            conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+            conn = sqlite3.connect(
+                uri, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
+                check_same_thread=False,
+            )
         else:
-            conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            conn = sqlite3.connect(
+                path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS, check_same_thread=False,
+            )
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1658,10 +1664,78 @@ class Store:
 
     @staticmethod
     def _logical_digest(conn) -> str:
+        # ``iterdump()`` asks SQLite to read every table, including optional virtual
+        # tables whose extension is not loaded on the short-lived backup connection
+        # (for example sqlite-vec's ``vec0`` table during Store startup).  A serialized
+        # main database avoids that module lookup on Python builds that expose it.
+        serialize = getattr(conn, "serialize", None)
+        if callable(serialize):
+            payload = bytearray(cast(Callable[[], bytes], serialize)())
+            # SQLite may advance the change-counter and version-valid-for header
+            # fields while materializing an online backup. They describe the file
+            # image's write history, not its logical contents.
+            for offset in (24, 92):
+                if len(payload) >= offset + 4:
+                    payload[offset:offset + 4] = b"\x00" * 4
+            digest = hashlib.sha256()
+            digest.update(payload)
+            return digest.hexdigest()
+
+        # Python 3.9/3.10 and several SQLCipher adapters do not expose serialize().
+        # Keep this fallback extension-agnostic: hash schema metadata and ordinary
+        # table rows directly, while recording (but never querying) virtual tables.
+        # ``iterdump()`` is deliberately not used here because it invokes each virtual
+        # table's module even when the verifier only needs an equality check.
         digest = hashlib.sha256()
-        for statement in conn.iterdump():
-            digest.update(statement.encode("utf-8"))
-            digest.update(b"\n")
+        schema_rows = conn.execute(
+            "SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_master "
+            "ORDER BY type, name, tbl_name"
+        ).fetchall()
+        virtual_tables: set[str] = set()
+        for row in schema_rows:
+            object_type = str(row[0] or "")
+            name = str(row[1] or "")
+            table_name = str(row[2] or "")
+            sql = str(row[3] or "")
+            digest.update(
+                (object_type + "\x00" + name + "\x00" + table_name + "\x00"
+                 + sql + "\n").encode("utf-8")
+            )
+            if object_type == "table" and re.search(
+                r"\bcreate\s+virtual\s+table\b", sql, re.IGNORECASE,
+            ):
+                virtual_tables.add(name)
+
+        def quote_identifier(value: str) -> str:
+            return '"' + value.replace('"', '""') + '"'
+
+        for row in schema_rows:
+            if str(row[0] or "") != "table":
+                continue
+            table_name = str(row[1] or "")
+            if table_name in virtual_tables:
+                continue
+            columns = conn.execute(
+                "PRAGMA table_info(" + quote_identifier(table_name) + ")"
+            ).fetchall()
+            digest.update(("TABLE\x00" + table_name + "\x00").encode("utf-8"))
+            if not columns:
+                continue
+            expressions = ", ".join(
+                "quote(" + quote_identifier(str(column[1])) + ")"
+                for column in columns
+            )
+            order_by = ", ".join(
+                quote_identifier(str(column[1])) for column in columns
+            )
+            for values in conn.execute(
+                "SELECT " + expressions + " FROM " + quote_identifier(table_name)
+                + " ORDER BY " + order_by
+            ).fetchall():
+                digest.update(
+                    ("\x00".join(str(value) for value in values) + "\n")
+                    .encode("utf-8")
+                )
         return digest.hexdigest()
 
     def _cleanup_v4_backup_temps(self, backup_path: str) -> None:
@@ -1674,12 +1748,25 @@ class Store:
             return
         changed = False
         for entry in entries:
-            if not pattern.fullmatch(entry.name):
+            stage_match = pattern.fullmatch(entry.name)
+            sidecar_match = re.fullmatch(
+                r"^%s\.tmp-[0-9]+-[0-9]+-[0-9]+-(?:journal|wal|shm)$"
+                % re.escape(stable.name),
+                entry.name,
+            )
+            if not stage_match and not sidecar_match:
                 continue
             try:
                 info = os.lstat(str(entry))
                 if not stat.S_ISREG(info.st_mode):
                     continue
+                # A sidecar without its randomized stage is residue from a failed
+                # attempt. If the stage still exists, leave both alone: another
+                # process may still be writing that private snapshot.
+                if sidecar_match:
+                    stage = entry.with_name(entry.name.rsplit("-", 1)[0])
+                    if stage.exists():
+                        continue
                 if getattr(info, "st_nlink", 1) == 1:
                     entry.unlink()
                     changed = True
@@ -1801,9 +1888,23 @@ class Store:
                     os.unlink(temp_path)
             except OSError:
                 pass
+            for suffix in ("-journal", "-wal", "-shm"):
+                try:
+                    sidecar = temp_path + suffix
+                    if os.path.exists(sidecar):
+                        os.unlink(sidecar)
+                except OSError:
+                    pass
+            lowered = str(exc).casefold()
+            if "locked" in lowered or "busy" in lowered:
+                reason = "the database is busy"
+            elif "no such module" in lowered:
+                reason = "an optional SQLite extension could not be loaded"
+            else:
+                reason = "backup verification failed"
             raise RuntimeError(
                 f"schema v{backup_version} migration aborted: could not create and verify the "
-                "pre-migration backup"
+                f"pre-migration backup ({reason})"
             ) from exc
 
     def _execute_script_transactional(self, script: str) -> None:
@@ -2020,7 +2121,15 @@ class Store:
             self.conn.execute(f"DROP TABLE temp.{name}")
 
     # ── schema ──────────────────────────────────────────────────────────────
-    def init_schema(self) -> None:
+    def _schema_migration_state(self) -> tuple[int, bool]:
+        """Read schema state and cache the shape repairs needed by ``_apply_schema``.
+
+        This is intentionally repeatable. A second process can inspect an old schema,
+        wait for the first process to finish its migration, and then acquire the writer
+        lock with stale observations. Re-reading the state under that lock lets it
+        recognize the completed migration instead of creating a second backup or
+        replaying transforms against the now-current database.
+        """
         objects = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','view','index','trigger') "
             "AND name NOT LIKE 'sqlite_%'"
@@ -2094,10 +2203,20 @@ class Store:
             or tombstones_need_export_class
             or sync_exports_need_table
         )
+        return previous_version, needs_backup
+
+    def init_schema(self) -> None:
+        # Capture the pre-lock view as well. A competing process may read the old
+        # version before it waits on BEGIN IMMEDIATE; the authoritative view is still
+        # re-read below after that wait completes.
+        self._schema_migration_state()
         try:
             # Reserve the writer before the snapshot. This is read/locking state only;
             # every schema/data transform remains inside the transaction below.
+            # Re-read after waiting: another process may have completed the whole
+            # migration while this connection was waiting on BEGIN IMMEDIATE.
             self.conn.execute("BEGIN IMMEDIATE")
+            previous_version, needs_backup = self._schema_migration_state()
             if needs_backup:
                 self._backup_before_v4_migration(previous_version=previous_version)
             self._apply_schema(previous_version)
@@ -4917,6 +5036,15 @@ class Store:
                     targets.append(child)
         return targets
 
+    def secure_erase_target_ids(self, memory_id: str) -> list[str]:
+        """Return the local memory IDs covered by a secure erase without mutating state.
+
+        ``MemoryEngine`` uses this read-only view to coordinate deletion with an injected
+        external vector index.  The destructive operation accepts the same ordered IDs so
+        both stores cannot silently diverge when a sync-conflict successor is present.
+        """
+        return self._secure_erase_targets(self.conn, memory_id)
+
     @classmethod
     def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
         """Remove a memory and all known local derivatives from one SQLite database.
@@ -5145,7 +5273,9 @@ class Store:
                     continue
         return sorted(set(found), key=lambda value: str(value))
 
-    def secure_erase_memory(self, memory_id: str, *, actor: str = "user") -> dict:
+    def secure_erase_memory(
+            self, memory_id: str, *, actor: str = "user",
+            _target_ids: Optional[Iterable[str]] = None) -> dict:
         """Irreversibly erase one memory plus local index copies and known backups.
 
         This is a breach-remediation operation, not the normal ``retire`` lifecycle.
@@ -5161,7 +5291,16 @@ class Store:
             # the destructive transaction means the deletion and terminal tombstone
             # commit (or roll back) as one unit.
             device_id = self.device_id()
-            targets = self._secure_erase_targets(self.conn, memory_id)
+            if _target_ids is None:
+                targets = self._secure_erase_targets(self.conn, memory_id)
+            else:
+                targets = [memory_id]
+                seen = {memory_id}
+                for target_id in _target_ids:
+                    normalized = str(target_id or "")
+                    if normalized and normalized not in seen:
+                        seen.add(normalized)
+                        targets.append(normalized)
             current_rows = []
             for target_id in targets:
                 marker = self.get_memory_sync_export(target_id)
@@ -6188,7 +6327,13 @@ class Store:
             "SELECT s.id, s.edge_id, s.memory_id, s.source_kind, s.confidence, "
             "s.valid_from, s.valid_to, s.valid_to_recorded_at, "
             "s.ingested_at, s.expired_at, s.provenance "
-            "FROM edge_supports s JOIN edges e ON e.id=s.edge_id "
+            # Keep requested support IDs as the outer lookup. SQLite otherwise
+            # reorders this inner join to scan every workspace edge for *each* IN
+            # clause chunk, then probes its supports. Scene construction can pass
+            # tens of thousands of selected edge IDs, making that legal plan dominate
+            # load time. CROSS JOIN fixes only loop order; its ON predicate retains
+            # the exact inner-join and scope/temporal semantics.
+            "FROM edge_supports s CROSS JOIN edges e ON e.id=s.edge_id "
             "WHERE (s.valid_from IS NULL OR s.valid_from<=?) "
             "AND (s.valid_to IS NULL OR ?<s.valid_to "
             "OR (s.valid_to_recorded_at IS NOT NULL "
@@ -7858,10 +8003,29 @@ class Store:
         ).fetchall()
         return [_public_receipt_row(dict(row)) for row in rows]
 
+    @staticmethod
+    def _receipt_workspace_scope(
+        *, workspace_id: Optional[str], workspace_ids: Optional[Iterable[str]],
+    ) -> tuple[str, list[str], Optional[list[str]]]:
+        """Build a receipt scope predicate and retain the exact verification scope."""
+        if workspace_id is not None and workspace_ids is not None:
+            raise ValueError("workspace_id and workspace_ids are mutually exclusive")
+        if workspace_id is not None:
+            ids = [str(workspace_id)]
+            return "workspace_id=?", ids, ids
+        if workspace_ids is None:
+            return "1=1", [], None
+        ids = list(dict.fromkeys(str(value) for value in workspace_ids))
+        if not ids:
+            return "1=0", [], ids
+        placeholders = ",".join("?" for _ in ids)
+        return f"workspace_id IN ({placeholders})", ids, ids
+
     def context_savings(
         self,
         *,
-        workspace_id: str,
+        workspace_id: Optional[str] = None,
+        workspace_ids: Optional[Iterable[str]] = None,
         repo_id: Optional[str] = None,
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
@@ -7872,8 +8036,10 @@ class Store:
         Token counts are kept separate by counter identity: a tokenizer change must not turn
         into a misleading cumulative total. Invalid, missing, and incomplete receipts remain
         visible only as counts; their payload is never reflected into this summary. The
-        workspace-wide receipt-chain validity is returned alongside any repo-scoped aggregate
-        so callers can distinguish useful local accounting from evidence eligible for audit.
+        receipt-chain validity is returned alongside the aggregate so callers can distinguish
+        useful local accounting from evidence eligible for audit. Pass ``workspace_ids`` when
+        the caller has an authorization-filtered set of workspaces; omit both workspace
+        arguments to aggregate the complete local history.
         """
         if from_ts is not None and not math.isfinite(float(from_ts)):
             raise ValueError("from_ts must be finite")
@@ -7886,9 +8052,11 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        verification = self.verify_receipts(workspace_id=workspace_id)
-        where = "workspace_id=?"
-        params: list[Any] = [workspace_id]
+        workspace_where, workspace_params, scoped_workspace_ids = self._receipt_workspace_scope(
+            workspace_id=workspace_id, workspace_ids=workspace_ids,
+        )
+        where = workspace_where
+        params: list[Any] = list(workspace_params)
         if repo_id is not None:
             where += " AND repo_id=?"
             params.append(repo_id)
@@ -7899,10 +8067,35 @@ class Store:
             where += " AND ts<?"
             params.append(float(to_ts))
         rows = self.conn.execute(
-            "SELECT id, repo_id, ts, payload, prev_hash, receipt_hash "
+            "SELECT id, workspace_id, repo_id, ts, payload, prev_hash, receipt_hash "
             "FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
+        has_active_filters = repo_id is not None or from_ts is not None or to_ts is not None
+        if has_active_filters and rows:
+            verification_ids = sorted({str(r["workspace_id"]) for r in rows if r["workspace_id"]})
+        elif scoped_workspace_ids is not None:
+            verification_ids = scoped_workspace_ids
+        else:
+            verification_ids = [
+                str(row["workspace_id"])
+                for row in self.conn.execute(
+                    "SELECT DISTINCT workspace_id FROM operation_receipts "
+                    "WHERE workspace_id IS NOT NULL"
+                ).fetchall()
+            ]
+        verifications = [
+            self.verify_receipts(workspace_id=scope_id)
+            for scope_id in verification_ids
+        ]
+        verification = {
+            "valid": all(item["valid"] for item in verifications),
+            "errors": [
+                {**error, "workspace_id": scope_id}
+                for scope_id, item in zip(verification_ids, verifications)
+                for error in item["errors"]
+            ],
+        }
         totals = {
             "receipt_count": 0,
             "usage_receipt_count": 0,
@@ -8084,7 +8277,10 @@ class Store:
             if (
                 receipt.get("invalid_payload")
                 or receipt.get("scope_digest")
-                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+                != _receipt_scope_digest(
+                    workspace_id if workspace_id is not None else str(raw_row["workspace_id"] or ""),
+                    raw_row["repo_id"],
+                )
             ):
                 if release_version is None:
                     totals["receipt_count"] += 1
@@ -8163,7 +8359,9 @@ class Store:
 
 
     def context_savings_grouped(
-        self, *, workspace_id: str, repo_id: Optional[str] = None,
+        self, *, workspace_id: Optional[str] = None,
+        workspace_ids: Optional[Iterable[str]] = None,
+        repo_id: Optional[str] = None,
         group_by: str = "workspace",
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
@@ -8193,8 +8391,11 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        where = "workspace_id=?"
-        params: list[Any] = [workspace_id]
+        workspace_where, workspace_params, _ = self._receipt_workspace_scope(
+            workspace_id=workspace_id, workspace_ids=workspace_ids,
+        )
+        where = workspace_where
+        params: list[Any] = list(workspace_params)
         if repo_id is not None:
             where += " AND repo_id=?"
             params.append(repo_id)
@@ -8205,10 +8406,9 @@ class Store:
             where += " AND ts<?"
             params.append(float(to_ts))
         rows = self.conn.execute(
-            "SELECT id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
+            "SELECT id, workspace_id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
-        import time as _time
         groups: dict[tuple[str, str], dict] = {}
 
         def _bucket() -> dict:
@@ -8237,7 +8437,10 @@ class Store:
             if (
                 receipt.get("invalid_payload")
                 or receipt.get("scope_digest")
-                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+                != _receipt_scope_digest(
+                    workspace_id if workspace_id is not None else str(raw_row["workspace_id"] or ""),
+                    raw_row["repo_id"],
+                )
             ):
                 continue
             metadata = receipt.get("metadata")
@@ -8270,19 +8473,18 @@ class Store:
             ):
                 continue
             if group_by == "workspace":
-                key = workspace_id
+                key = str(raw_row["workspace_id"] or "(none)")
             elif group_by == "repo":
                 key = str(raw_row["repo_id"] or "(none)")
             elif group_by == "agent":
                 key = str(raw_row["actor"] or "system")
             elif group_by == "day":
                 try:
-                    day = _time.strftime("%Y-%m-%d", _time.gmtime(float(raw_row["ts"])))
+                    day = time.strftime("%Y-%m-%d", time.gmtime(float(raw_row["ts"])))
                 except (TypeError, ValueError, OverflowError, OSError):
                     day = "unknown"
                 key = day
-            else:
-                key = workspace_id
+            # group_by is validated above; no fallback needed
             token_counter = str(usage.get("token_counter") or "unknown")
             grp = groups.setdefault((key, token_counter), _bucket())
             _add(grp, usage)

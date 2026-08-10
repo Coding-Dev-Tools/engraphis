@@ -37,11 +37,12 @@ context Engraphis actually emitted, keeps token counters and release versions se
 labels adaptive history reductions separately from packing savings. Receipts without estimator
 metadata remain historical/unclassified. This measures estimated prompt-context reduction; it
 does not measure provider billing. The `/context-savings` API and
-`engraphis_context_savings` MCP tool accept optional `from_ts`, `to_ts`, and `release_version`
-filters.
+`engraphis_context_savings` MCP tool aggregate the complete history across all visible workspaces
+by default, or accept an explicit workspace plus optional `from_ts`, `to_ts`, and
+`release_version` filters.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart showing three deterministic offline comparisons. Structure-aware chunks reduce mean retrieved content from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens while Recall at 5 remains 1.000. A compact recall JSON-shape proxy uses 10,202 rather than 23,810 tokens. Evidence artifact SHA-256: c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of local measurements and deterministic fixtures, including a local LoCoMo diagnostic marked with an asterisk. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets, and two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline. Structure-aware chunks reduce context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,202 rather than 23,810 tokens. Grounded recall makes 10 of 10 correct decisions and packed context averages 85.38 tokens under a 1,500-token cap." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -154,7 +155,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 `server,mcp`), or set it to `none` for the base package only.
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
-> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> require the former 34 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
 > in the 1.4.0 release was version 9. Existing v7-to-v8 databases already contain `confidence`
 > and `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table
 > and performs a one-time entity-canonicalization repair, then migrates automatically on first
@@ -693,7 +694,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before trusted values load. Its bounded dependency-free parser performs no interpolation. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
-| `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
+| `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default; a relative value is resolved from the trusted `~/.engraphis/config.env` directory so launch CWD cannot select a different workspace database. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
 | `ENGRAPHIS_SERVICE_MODE` | `customer` | The public package supports only `customer`; hosted vendor, relay, compute, and worker roles are not distributed here |

@@ -7,6 +7,11 @@ __pycache__/
 *.db-shm
 *.db-journal
 *.db.*.bak
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 
 # Webhook fulfillment runtime state — dedup DB + the undelivered-key fallback,
 # which can contain live license keys. Must never be committed.
@@ -28,6 +33,9 @@ build/
 /engraphis-[0-9]*/
 .pytest_cache/
 /.pytest-*-tmp/
+# Focused UI/API test runs use named repository-local base directories.
+/.pytest-tmp-ui-*/
+/.codex-pytest-tmp/
 .ruff_cache/
 .coverage
 node_modules/
