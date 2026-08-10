@@ -1388,7 +1388,7 @@ def test_drag_release_contract_keeps_physics_live() -> None:
 
 
 def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
-    """The connected-node spring is bounded and uses an explicit drag-only budget."""
+    """The connected-node spring is bounded and drag cannot restart global forces forever."""
     source = ASSET.read_text(encoding="utf-8")
     assert "function makeDragFollowForce()" in source
     assert "activeDragLinks.forEach(link =>" in source
@@ -1397,8 +1397,14 @@ def test_drag_follow_force_is_capped_and_neighbor_scoped() -> None:
     assert "const MAX_DRAG_PULL = 18;" in source
     assert "fg.d3Force('dragFollow', dragFollowForce);" in source
     assert "function setDragSimulationBudget(active)" in source
-    assert "fg.cooldownTime(Infinity)" in source
-    assert "fg.cooldownTicks(Infinity)" in source
+    assert "function isolateDragPhysics()" in source
+    assert "function restoreDragPhysics()" in source
+    assert "['charge', 'x', 'y', 'radial', 'collide', 'center']" in source
+    assert "if (dragIsolated) isolateDragPhysics();" in source
+    assert "fg.cooldownTime(5000)" in source
+    assert "fg.cooldownTicks(260)" in source
+    assert "fg.cooldownTime(Infinity)" not in source
+    assert "fg.cooldownTicks(Infinity)" not in source
     assert source.index("fg.d3Force('dragFollow', dragFollowForce);") < source.index("fg.d3Force('velocityGuard', velocityGuardForce);")
 
 
