@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "1.5"
+version = "1.6"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = "Apache-2.0"
@@ -218,6 +218,7 @@ engraphis-dashboard = "scripts.start_dashboard:main"
 engraphis-consolidate = "scripts.consolidate:main"
 engraphis-graph = "scripts.graph_cli:main"
 engraphis-graph-server = "scripts.graph_server:main"
+engraphis-import = "scripts.importer:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
 
@@ -261,6 +262,8 @@ select = ["E4", "E7", "E9", "F"]
 include = [
     "engraphis/core",
     "engraphis/backends",
+    "engraphis/factory.py",
+    "engraphis/__init__.py",
     "eval/harness.py",
     "eval/external.py",
 ]

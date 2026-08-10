@@ -1117,15 +1117,23 @@ class RecallEngine:
             prompt_only=prompt_only,
         )
 
-    def _prompt_eligible_memory_ids(self, memory_ids: set[str]) -> set[str]:
-        """Return only approved, non-quarantined memory nodes for prompt PPR."""
+    def _prompt_eligible_memory_ids(
+        self, memory_ids: set[str], flt: Optional[SearchFilter] = None,
+    ) -> set[str]:
+        """Return prompt-safe memory nodes visible to the active read filter.
+
+        Edge provenance is untrusted input.  Its support ids must obey the same
+        hierarchy and bi-temporal visibility rules as ordinary recall, otherwise a
+        foreign or expired support can authorize an otherwise in-scope edge.
+        """
         if not memory_ids:
             return set()
         records = self.store.get_memories(sorted(memory_ids))
         return {
             memory_id
             for memory_id, record in records.items()
-            if prompt_eligible(record.provenance, record.metadata)
+            if (flt is None or memory_matches_filter(record, flt))
+            and prompt_eligible(record.provenance, record.metadata)
         }
 
     @staticmethod
@@ -1137,13 +1145,15 @@ class RecallEngine:
             values.extend(many)
         return {str(value) for value in values if value}
 
-    def _prompt_eligible_edges(self, edges: list) -> list:
+    def _prompt_eligible_edges(
+        self, edges: list, flt: Optional[SearchFilter] = None,
+    ) -> list:
         """Keep trusted direct edges and memory-supported prompt-eligible edges."""
         source_ids = (
             set().union(*(self._edge_source_memory_ids(edge) for edge in edges))
             if edges else set()
         )
-        eligible_ids = self._prompt_eligible_memory_ids(source_ids)
+        eligible_ids = self._prompt_eligible_memory_ids(source_ids, flt)
         return [
             edge for edge in edges
             if edge_provenance_prompt_eligible(edge.provenance)
@@ -1220,7 +1230,7 @@ class RecallEngine:
                 limit=edge_cap - len(edges_by_id), prompt_only=prompt_only,
             )
             if prompt_only:
-                edges = self._prompt_eligible_edges(edges)
+                edges = self._prompt_eligible_edges(edges, flt)
             for edge in edges:
                 if _positive_graph_weight(edge.weight) is None:
                     continue
@@ -1284,7 +1294,7 @@ class RecallEngine:
             )
         }
         if prompt_only:
-            memory_ids = self._prompt_eligible_memory_ids(memory_ids)
+            memory_ids = self._prompt_eligible_memory_ids(memory_ids, flt)
             incidence = [
                 row for row in incidence
                 if str(row.get("memory_id") or "") in memory_ids
@@ -1360,7 +1370,7 @@ class RecallEngine:
             seed_ids, at=now, layers=flt.graph_layers, flt=flt, prompt_only=prompt_only,
         )
         if prompt_only:
-            edges = self._prompt_eligible_edges(edges)
+            edges = self._prompt_eligible_edges(edges, flt)
         for edge in edges:
             if _positive_graph_weight(edge.weight) is not None:
                 related_ids.add(edge.src)
@@ -1372,7 +1382,7 @@ class RecallEngine:
             self._prompt_eligible_memory_ids({
                 str(row.get("memory_id") or "")
                 for row in rows if row.get("memory_id")
-            })
+            }, flt)
             if prompt_only else None
         )
         out: dict[str, float] = {}

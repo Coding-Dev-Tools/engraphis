@@ -164,15 +164,19 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > **Upgrading to 1.5:** schema 10 bounds legacy retention state and schema 11 backfills explicit
 > approval only for eligible pre-review local memories. Pending and quarantined evidence remains
 > gated. Existing 1.4.x databases migrate automatically when Engraphis 1.5 opens them; see the
-> [1.5 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#150---2026-08-04).
+> [1.5 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#15---2026-08-04).
 
-> **Current source:** schema 15 adds the local source-import manifest (vaults, imports,
-> job items) for document and note-collection tracking. Schema 14 introduced the
-> initial note-collection manifest; schema 15 generalized it to support multiple source
-> kinds with content-free scope-security triggers.
-> Schema 12 classifies content-free erasure markers before sync: existing markers migrate to
-> local-only `never_export`; new secure erasures become `remote_erasure` only for non-secret
-> `workspace`/`repo` records that were already eligible for sharing.
+> **Upgrading to 1.6:** existing 1.5 databases migrate automatically through schema 12, which
+> classifies content-free erasure markers before sync: existing markers become local-only
+> `never_export`, while new secure erasures become `remote_erasure` only for non-secret
+> `workspace`/`repo` records already eligible for sharing. Schema 13 adds per-memory hybrid
+> logical clocks for deterministic descriptive-state sync and durable, content-free proof that a
+> memory crossed a sync boundary. Schema 14 adds the Obsidian collection and import manifests;
+> schema 15 generalizes them to source-neutral local documents, preserves temporal source lineage
+> across re-imports, binds adapters and target scopes, and retains only bounded, content-free
+> per-job format/result metadata. The schema 16 migration persists each import job's optional session target
+> and requires source lineage and job-item attachments to remain in that exact session. See the
+> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
 
 ---
 
@@ -638,11 +642,36 @@ oversized key files rather than following an unexpected filesystem object.
 
 ## Import files and folders
 
-Import supported documents and code through the dashboard, a local folder, or MCP. Optional
-extractors add offline chunking, structured LLM extraction, document OCR, transcription, and
-PostgreSQL schema ingestion. See the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md),
-[architecture guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md), and [security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/main/SECURITY.md) for formats,
-configuration, and local-resource safeguards.
+The dependency-free universal core scans Markdown, plain text, RST, HTML, JSON/JSONL, CSV/TSV,
+configuration/XML text, source code, RTF, DOCX/ODT, XLSX/ODS, PPTX/ODP, and EPUB into the normal
+v2 memory path. Installed local resource adapters add PDF text, image OCR, and explicitly
+local-model audio/video transcription.
+Start with a zero-write
+preview, then confirm the same source collection explicitly:
+
+```bash
+engraphis import documents /path/to/collection --workspace acme --dry-run
+engraphis import documents /path/to/collection --workspace acme --repo product --yes
+```
+
+The CLI never downloads an embedding model during import. Use a model that is already cached,
+set `ENGRAPHIS_EMBED_MODEL=local:/absolute/model/path`, or explicitly set
+`ENGRAPHIS_EMBED_MODEL` to an empty value to use dependency-free deterministic hashing in
+lexical degraded mode.
+
+The dashboard’s **Import local documents** flow offers the same preview, target scope, source
+label, conflict policy, cancellation, and resumable progress. Re-imports are idempotent,
+preserve temporal history, and report source removals without hard-deleting memories. Obsidian
+remains the rich Markdown adapter for frontmatter, aliases, wikilinks, and attachment references:
+
+```bash
+engraphis import obsidian /path/to/vault --workspace acme --dry-run
+```
+
+See the [document import guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCUMENT_IMPORT.md)
+for supported formats, source safety, resume and conflict behavior, optional adapters, and
+limitations; see the [Obsidian adapter guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/OBSIDIAN_IMPORT.md)
+for Markdown-specific behavior.
 
 ---
 
@@ -663,7 +692,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before dotenv values load. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
+| `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before trusted values load. Its bounded dependency-free parser performs no interpolation. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |

@@ -35,6 +35,38 @@ logger = logging.getLogger("engraphis.watch_repo")
 _WATCHED_EXTENSIONS = frozenset(LANG_BY_EXT)
 
 
+def _watched_files(root: Path):
+    """Yield watched files using the code indexer's directory policy."""
+    from engraphis.backends.codegraph import (
+        _DEFAULT_EXCLUDE_DIRS,
+        _ignored_by_rules,
+        _rel_posix,
+        load_ignore_patterns,
+    )
+
+    names, globs, unignore = load_ignore_patterns(str(root))
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, str(root))
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _DEFAULT_EXCLUDE_DIRS
+            and not _ignored_by_rules(
+                _rel_posix(rel_dir, name), name, names, globs, unignore
+            )
+        ]
+        for fname in filenames:
+            if os.path.splitext(fname)[1].lower() not in _WATCHED_EXTENSIONS:
+                continue
+            if _ignored_by_rules(
+                _rel_posix(rel_dir, fname), fname, names, globs, unignore
+            ):
+                continue
+            full = os.path.join(dirpath, fname)
+            if not os.path.islink(full):
+                yield full
+
+
 class _PollingWatcher:
     """Poll-based detector using content-backed file signatures.
 
@@ -48,6 +80,7 @@ class _PollingWatcher:
         self.root = root
         self.interval = max(1.0, interval)
         self._signatures: dict[str, tuple[int, int, bytes]] = {}
+        self._pending_signatures: dict[str, tuple[int, int, bytes]] | None = None
         self._initial_scan_done = False
         # Paths whose last reindex failed and are absent from the current scan.
         # Without this set, a failed deletion reindex would never retry because
@@ -68,36 +101,41 @@ class _PollingWatcher:
         self._exclude_dirs |= ignore_names
         self._exclude_dirs -= unignore
 
+    def _is_excluded(self, path: str) -> bool:
+        """Return whether *path* (or any parent) is pruned by the exclude policy.
+
+        Matches the polling walk's pruning: any path component equal to a
+        ``_DEFAULT_EXCLUDE_DIRS`` entry or a name ruled out by
+        ``.engraphisignore`` is excluded, exactly like ``_watched_files``.
+        """
+        try:
+            relative = os.path.relpath(path, str(self.root))
+        except ValueError:
+            return True
+        if relative in ("", "."):
+            return False
+        return any(part in self._exclude_dirs for part in Path(relative).parts)
+
     def _scan(self) -> dict[str, tuple[int, int, bytes]]:
         """Walk the tree and collect content-backed signatures."""
         signatures: dict[str, tuple[int, int, bytes]] = {}
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            # Prune excluded directories in-place so os.walk does not descend.
-            dirnames[:] = [
-                d for d in dirnames if d not in self._exclude_dirs
-                and not d.startswith(".")
-            ]
-            for fname in filenames:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext not in _WATCHED_EXTENSIONS:
-                    continue
-                full = os.path.join(dirpath, fname)
-                try:
-                    digest = hashlib.blake2b(digest_size=16)
-                    with open(full, "rb") as handle:
-                        info = os.fstat(handle.fileno())
-                        while True:
-                            chunk = handle.read(64 * 1024)
-                            if not chunk:
-                                break
-                            digest.update(chunk)
-                    signatures[full] = (
-                        int(getattr(info, "st_mtime_ns", info.st_mtime * 1_000_000_000)),
-                        int(info.st_size),
-                        digest.digest(),
-                    )
-                except OSError:
-                    pass
+        for full in _watched_files(self.root):
+            try:
+                digest = hashlib.blake2b(digest_size=16)
+                with open(full, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    while True:
+                        chunk = handle.read(64 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                signatures[full] = (
+                    int(getattr(info, "st_mtime_ns", info.st_mtime * 1_000_000_000)),
+                    int(info.st_size),
+                    digest.digest(),
+                )
+            except OSError:
+                pass
         return signatures
 
     def poll(self) -> list[str]:
@@ -135,7 +173,9 @@ class _PollingWatcher:
         # Clear entries that have reappeared (file recreated between polls).
         self._pending_deletions -= set(current.keys())
 
-        self._signatures = current
+        # Keep the candidate separate until the caller confirms that incremental
+        # indexing succeeded. A transient read/parse failure must be retried.
+        self._pending_signatures = current
         return changed
 
     def untrack(self, paths: list[str], *, deletions: bool = False) -> None:
@@ -152,23 +192,81 @@ class _PollingWatcher:
         absent paths are silently ignored.
         """
         for path in paths:
-            if self._signatures.pop(path, None) is not None:
-                continue
+            was_tracked = self._signatures.pop(path, None) is not None
             if deletions and path in self._last_deletions:
                 self._pending_deletions.add(path)
+                continue
+            if was_tracked:
+                continue
+
+    def acknowledge(self) -> None:
+        """Accept the most recent poll after its changes were indexed successfully."""
+        if self._pending_signatures is not None:
+            self._signatures = self._pending_signatures
+            self._pending_signatures = None
 
 
-def _try_watchdog_watcher(root: Path, callback, stop_event):
-    """Attempt watchdog-based watching.  Returns True if started, False if unavailable."""
+def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
+    """Watch while queuing events that arrive during startup reconciliation."""
     try:
         from watchdog.observers import Observer  # type: ignore[import-not-found]
         from watchdog.events import FileSystemEventHandler  # type: ignore[import-not-found]
     except ImportError:
-        return False
+        return None
+
+    import threading
+
+    startup_done = threading.Event()
+    pending_paths: list[str] = []
+    retry_paths: list[str] = []
+    pending_lock = threading.Lock()
+    retry_lock = threading.Lock()
+    callback_lock = threading.Lock()
+
+    def queue_retry(paths):
+        with retry_lock:
+            for path in paths:
+                if path not in retry_paths:
+                    retry_paths.append(path)
+
+    def dispatch(paths):
+        unique = list(dict.fromkeys(paths))
+        if unique:
+            with callback_lock:
+                if not callback(unique):
+                    queue_retry(unique)
+
+    def enqueue(paths):
+        with pending_lock:
+            if not startup_done.is_set():
+                pending_paths.extend(paths)
+                return
+        dispatch(paths)
 
     _MAX_RETRIES = 3
 
+    def _build_handler() -> "_Handler":
+        watcher = _PollingWatcher(root)
+        handler = _Handler()
+        handler._exclude_dirs = watcher._exclude_dirs
+        return handler
+
     class _Handler(FileSystemEventHandler):
+        #: Directory/name pruning shared with the polling backend (defaults +
+        #: ``.engraphisignore``). Assigned by :func:`_build_handler`; left as an
+        #: empty set so a hand-constructed handler never blocks on it.
+        _exclude_dirs: set[str] = set()
+
+        def _excluded(self, path: str) -> bool:
+            """Return whether *path* (or any parent) is pruned by the exclude policy."""
+            try:
+                relative = os.path.relpath(path, str(root))
+            except ValueError:
+                return True
+            if relative in ("", "."):
+                return False
+            return any(part in self._exclude_dirs for part in Path(relative).parts)
+
         def _dispatch(self, paths: list[str]) -> None:
             for attempt in range(1, _MAX_RETRIES + 1):
                 if callback(paths):
@@ -183,11 +281,25 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
                 _MAX_RETRIES, paths,
             )
 
+        def on_any_event(self, event):
+            # Belt-and-suspenders gate at the framework entry point: reject events
+            # whose src or dest path is under an excluded directory (defaults +
+            # .engraphisignore) before they reach the specific handlers, mirroring
+            # the polling backend's pruning.
+            src = getattr(event, "src_path", "")
+            if src and self._excluded(src):
+                return
+            dest = getattr(event, "dest_path", "")
+            if dest and self._excluded(dest):
+                return
+            super().on_any_event(event)
+
         def on_modified(self, event):
-            if not event.is_directory:
-                ext = os.path.splitext(event.src_path)[1].lower()
-                if ext in _WATCHED_EXTENSIONS:
-                    self._dispatch([event.src_path])
+            if event.is_directory or self._excluded(event.src_path):
+                return
+            ext = os.path.splitext(event.src_path)[1].lower()
+            if ext in _WATCHED_EXTENSIONS:
+                enqueue([event.src_path])
 
         def on_created(self, event):
             self.on_modified(event)
@@ -201,22 +313,35 @@ def _try_watchdog_watcher(root: Path, callback, stop_event):
             paths = [
                 path
                 for path in (event.src_path, event.dest_path)
-                if os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
+                if not self._excluded(path)
+                and os.path.splitext(path)[1].lower() in _WATCHED_EXTENSIONS
             ]
             if paths:
-                self._dispatch(paths)
+                enqueue(paths)
 
     observer = Observer()
-    observer.schedule(_Handler(), str(root), recursive=True)
+    observer.schedule(_build_handler(), str(root), recursive=True)
     observer.start()
     logger.info("watchdog observer started on %s", root)
     try:
+        if not startup_reconcile():
+            return 1
+        with pending_lock:
+            startup_done.set()
+            startup_paths = list(pending_paths)
+            pending_paths.clear()
+        dispatch(startup_paths)
         while not stop_event.is_set():
+            with retry_lock:
+                retry = list(retry_paths)
+                retry_paths.clear()
+            if retry:
+                dispatch(retry)
             stop_event.wait(timeout=1.0)
     finally:
         observer.stop()
         observer.join()
-    return True
+    return 0
 
 
 def _run(args, engine) -> int:
@@ -272,12 +397,9 @@ def _run(args, engine) -> int:
         )
         return True
 
-    # Reconcile persisted code state before establishing any in-process watcher
-    # baseline. This catches edits, renames, and deletions made while the watcher
-    # was stopped and works for both one-shot and continuous modes.
-    if not reindex([], fail_full=True):
-        return 1
     if args.no_watch:
+        if not reindex([], fail_full=True):
+            return 1
         print("Reindex complete.")
         return 0
 
@@ -291,12 +413,26 @@ def _run(args, engine) -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    if _try_watchdog_watcher(root, reindex, stop_event):
-        return 0
+    watchdog_status = _try_watchdog_watcher(
+        root, reindex, stop_event,
+        lambda: reindex([], fail_full=True),
+    )
+    if watchdog_status is not None:
+        return watchdog_status
 
     logger.info("watchdog not available; using polling (interval=%.1fs)", args.interval)
     watcher = _PollingWatcher(root, interval=args.interval)
+    # Establish the polling baseline before the full startup reconciliation so
+    # edits made during the scan are replayed after it completes.
     watcher.poll()
+    if not reindex([], fail_full=True):
+        return 1
+    changed_during_startup = watcher.poll()
+    if changed_during_startup:
+        if reindex(changed_during_startup):
+            watcher.acknowledge()
+    else:
+        watcher.acknowledge()
     print(f"Watching {root} (poll every {args.interval}s, Ctrl+C to stop)...")
 
     while not stop_event.is_set():
@@ -305,13 +441,17 @@ def _run(args, engine) -> int:
             break
         changed = watcher.poll()
         if changed:
-            if not reindex(changed):
+            if reindex(changed):
+                watcher.acknowledge()
+            else:
                 logger.warning(
                     "incremental reindex failed for %d file(s); "
                     "will retry on next poll cycle",
                     len(changed),
                 )
                 watcher.untrack(changed, deletions=True)
+        else:
+            watcher.acknowledge()
 
     print("Stopped.")
     return 0

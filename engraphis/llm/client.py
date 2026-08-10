@@ -15,7 +15,10 @@ import threading
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
+try:
+    import httpx
+except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
+    httpx = None  # type: ignore[assignment]
 
 from engraphis.config import settings
 

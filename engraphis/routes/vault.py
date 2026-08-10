@@ -50,65 +50,74 @@ _DUPLICATE_RESULT_LIMIT = 200
 _DUPLICATE_BLOCK_SIZE = 256
 
 
-def _read_import_bytes(path: Path, max_bytes: int) -> bytes:
-    """Read one imported file without following a swapped leaf or reparse point."""
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(str(path), flags)
+def _is_within(root: Path, candidate: Path) -> bool:
+    """Return whether *candidate* is a descendant of (or equal to) *root*."""
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
-            raise ValueError("import path is not a single-link regular file")
-        current = os.lstat(str(path))
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if stat.S_ISLNK(current.st_mode) or (
-            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
-        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise ValueError("import path changed while it was opened")
-        data = bytearray()
-        while len(data) <= max_bytes:
-            chunk = os.read(descriptor, min(65_536, max_bytes + 1 - len(data)))
-            if not chunk:
-                break
-            data.extend(chunk)
-        if len(data) > max_bytes:
-            raise ValueError("file grew beyond the import resource limit")
-        after = os.fstat(descriptor)
-        if (
-            after.st_size != opened.st_size
-            or after.st_mtime_ns != opened.st_mtime_ns
-        ):
-            raise ValueError("import file changed while it was read")
-        return bytes(data)
-    finally:
-        os.close(descriptor)
-
-
-def _read_import_size(path: Path) -> int:
-    """Return the size of a previously validated imported file path."""
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(str(path), flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or getattr(opened, "st_nlink", 1) != 1:
-            raise ValueError("import path is not a single-link regular file")
-        current = os.lstat(str(path))
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if stat.S_ISLNK(current.st_mode) or (
-            reparse_flag and getattr(current, "st_file_attributes", 0) & reparse_flag
-        ) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise ValueError("import path changed while it was opened")
-        return opened.st_size
-    finally:
-        os.close(descriptor)
-
-
-def _path_within_root(path: Path, root: Path) -> bool:
-    """Return True only when ``path`` is the root itself or a descendant of it."""
-    try:
-        path.relative_to(root)
+        candidate.relative_to(root)
         return True
     except ValueError:
         return False
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    """Return whether two stat results reference the same file on disk."""
+    if left.st_dev or left.st_ino or right.st_dev or right.st_ino:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+    return True
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """Return whether a stat result carries the Windows reparse-point attribute."""
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
+    """Read *path* descriptor-safely, bounding it to *limit* bytes.
+
+    Mirrors ``engraphis.core.documents._read_tree_file``: the path is re-validated
+    against *folder* at open time (lstat -> type/symlink/reparse rejection ->
+    containment -> ``O_NOFOLLOW`` open -> fstat identity -> size bound -> read ->
+    post-read identity/containment recheck) so a symlink swapped in between the
+    enumeration phase and this read cannot escape the import root.
+    """
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_reparse_point(before):
+        raise OSError("unsafe file type")
+    if not _is_within(folder, path.resolve(strict=True)):
+        raise OSError("path escapes import root")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or _is_reparse_point(opened) or not _same_identity(before, opened):
+            raise OSError("file changed during import")
+        if opened.st_size > limit:
+            raise OSError("import resource exceeds its byte limit")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(64 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise OSError("import resource exceeds its byte limit")
+        finished, after = os.fstat(fd), os.lstat(path)
+        if (
+            not _same_identity(opened, finished)
+            or opened.st_size != finished.st_size
+            or opened.st_mtime_ns != finished.st_mtime_ns
+            or stat.S_ISLNK(after.st_mode)
+            or _is_reparse_point(after)
+            or not _same_identity(finished, after)
+            or not _is_within(folder, path.resolve(strict=True))
+        ):
+            raise OSError("file changed during import")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 class _BoundedUploadRoute(APIRoute):
@@ -349,66 +358,49 @@ def import_folder(req: FolderImportReq):
     import os
     import re
 
-    home = os.path.normcase(os.path.realpath(str(Path.home().expanduser())))
+    home = os.path.realpath(str(Path.home().expanduser()))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
     if env_roots:
         allowed_roots.extend(
-            os.path.normcase(os.path.realpath(os.path.expanduser(root)))
+            os.path.realpath(os.path.expanduser(root))
             for root in env_roots.split(os.pathsep)
             if root
         )
-    requested_path = os.path.normcase(os.path.realpath(os.path.expanduser(req.path)))
-    if not any(
-        requested_path == root
-        or requested_path.startswith(root.rstrip(os.sep) + os.sep)
-        for root in allowed_roots
-    ):
+    real_path = os.path.realpath(os.path.expanduser(req.path))
+    comparable_path = os.path.normcase(real_path)
+    safe_path = None
+    for root in allowed_roots:
+        comparable_root = os.path.normcase(root)
+        if comparable_path == comparable_root:
+            safe_path = comparable_root
+            break
+        root_prefix = comparable_root.rstrip(os.sep) + os.sep
+        if comparable_path.startswith(root_prefix):
+            safe_path = comparable_path
+            break
+    if safe_path is None:
         raise HTTPException(
             403,
             "Import path must be under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
-    # Resolve the user-selected folder by walking from an allowlisted root. The
-    # filesystem APIs below receive only paths returned by that trusted walk;
-    # request text is used only for component comparisons, never as a path root.
-    folder: Optional[Path] = None
-    for root in allowed_roots:
-        relative = os.path.relpath(requested_path, root)
-        components = tuple(part for part in Path(relative).parts if part not in ("", "."))
-        if any(part == ".." for part in components):
-            continue
-        try:
-            current = Path(root).resolve(strict=True)
-            for component in components:
-                with os.scandir(current) as entries:
-                    match = next(
-                        (
-                            entry for entry in entries
-                            if os.path.normcase(entry.name) == component
-                        ),
-                        None,
-                    )
-                if match is None or match.is_symlink() or not match.is_dir(follow_symlinks=False):
-                    current = None
-                    break
-                current = Path(match.path)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if current is not None:
-            folder = current
-            break
-    if folder is None:
-        raise HTTPException(404, f"Path not found: {req.path}") from None
-    canonical_path = os.path.normcase(os.path.realpath(str(folder)))
+    # Carry only the path value produced by the successful containment branch into
+    # filesystem operations.  Keeping the validated value distinct from ``req.path``
+    # makes the trust boundary explicit to readers and static taint analysis alike.
+    folder = Path(safe_path)
+    if folder.is_symlink():
+        raise HTTPException(403, "Import path must not be a symbolic link")
+    resolved_folder = folder.resolve()
+    resolved_comparable = os.path.normcase(str(resolved_folder))
     if not any(
-        canonical_path == root
-        or canonical_path.startswith(root.rstrip(os.sep) + os.sep)
+        resolved_comparable == os.path.normcase(root)
+        or resolved_comparable.startswith(os.path.normcase(root).rstrip(os.sep) + os.sep)
         for root in allowed_roots
     ):
         raise HTTPException(
             403,
-            "Import path must be under an allowed root "
+            "Import path must resolve under an allowed root "
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
     if not folder.exists():
@@ -432,35 +424,18 @@ def import_folder(req: FolderImportReq):
 
     files: list[tuple[Path, Path]] = []
     total_bytes = 0
-    # Security: traversal begins only from the canonical trusted folder and each
-    # yielded path is re-resolved and re-contained before use.
-    # codeql[py/path-injection]
     for candidate in folder.rglob("*"):
-        # Resolve each candidate before trusting its location. This rejects
-        # symlink/reparse escapes and ensures the path used for stat/read is the
-        # same resolved path that was validated against the trusted folder.
-        if candidate.is_symlink() or not fnmatch.fnmatch(candidate.name, req.file_pattern):
+        if candidate.is_symlink():
             continue
-        try:
-            resolved_candidate = candidate.resolve(strict=True)
-        except (OSError, ValueError):
-            continue
-        if not _path_within_root(resolved_candidate, folder):
-            continue
-        if not resolved_candidate.is_file():
-            continue
-        try:
-            relative = resolved_candidate.relative_to(folder)
-            # Security: the size comes from a descriptor opened only after the
-            # candidate has been proven to stay under the trusted traversal root.
-            # codeql[py/path-injection]
-            size = _read_import_size(resolved_candidate)
-        except (OSError, ValueError):
-            continue
-        if not any(
-            _path_within_root(resolved_candidate, Path(root))
-            for root in allowed_roots
+        if not candidate.is_file() or not fnmatch.fnmatch(
+            candidate.name, req.file_pattern
         ):
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            relative = resolved.relative_to(resolved_folder)
+            size = resolved.stat().st_size
+        except (OSError, ValueError):
             continue
         if any(part in {"node_modules", ".git"} for part in relative.parts[:-1]):
             continue
@@ -469,7 +444,7 @@ def import_folder(req: FolderImportReq):
                 413,
                 f"Import resource exceeds {MAX_IMPORT_RESOURCE_BYTES} bytes",
             )
-        files.append((resolved_candidate, relative))
+        files.append((resolved, relative))
         if len(files) > MAX_IMPORT_FILES:
             raise HTTPException(
                 413,
@@ -486,10 +461,12 @@ def import_folder(req: FolderImportReq):
     for file_path, relative_path in files:
         relative = relative_path.as_posix()
         try:
-            # Security: file_path already passed the trusted-root containment
-            # checks, and the reader re-checks the opened inode.
-            # codeql[py/path-injection]
-            raw = _read_import_bytes(file_path, MAX_IMPORT_RESOURCE_BYTES)
+            # The enumerated path may have been swapped for a symlink since the
+            # enumeration pass; _read_import_file re-validates type, containment,
+            # and identity at open/read time, so the import root cannot be escaped.
+            raw = _read_import_file(resolved_folder, file_path, MAX_IMPORT_RESOURCE_BYTES)
+            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+                raise ValueError("file grew beyond the import resource limit")
             content = raw.decode("utf-8", errors="replace")
             if not content.strip():
                 results["skipped"] += 1
@@ -499,9 +476,7 @@ def import_folder(req: FolderImportReq):
             )
             title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
             title = (
-                title_match.group(1).strip()
-                if title_match
-                else _filename_stem(relative)
+                title_match.group(1).strip() if title_match else file_path.stem
             )
             ingest_engine.ingest_document(
                 namespace=namespace,
