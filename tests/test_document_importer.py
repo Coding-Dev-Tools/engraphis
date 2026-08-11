@@ -479,7 +479,8 @@ def test_every_registered_format_survives_the_generic_import_handoff():
 def test_secure_erase_removes_document_import_job_items():
     service = _service()
     try:
-        workspace_id = service.store.get_or_create_workspace("erase-import-items")
+        workspace = "erase-import-items"
+        workspace_id = service.store.get_or_create_workspace(workspace)
         report = DocumentImporter(service).import_scan(
             _scan(("private.txt", b"delete this secret\\n")),
             workspace_id=workspace_id, repo_id=None, session_id=None,
@@ -491,20 +492,25 @@ def test_secure_erase_removes_document_import_job_items():
             (report["source_id"],),
         ).fetchone()
         assert source is not None and source["memory_id"]
-        assert service.store.conn.execute(
-            "SELECT COUNT(*) FROM source_import_items WHERE source_id=?",
-            (source["id"],),
-        ).fetchone()[0] == 1
+        job_items = service.store.list_source_import_job_items(job_id=report["job_id"])
+        assert len(job_items) == 1
+        job_item_id = job_items[0]["id"]
+        assert service.get_document_import_job(
+            report["job_id"], workspace=workspace,
+        )["files"][0]["relative_path"] == "private.txt"
 
         service.store.secure_erase_memory(source["memory_id"])
 
         assert service.store.conn.execute(
-            "SELECT COUNT(*) FROM source_import_items WHERE source_id=?",
-            (source["id"],),
+            "SELECT COUNT(*) FROM source_import_items WHERE id=?",
+            (job_item_id,),
         ).fetchone()[0] == 0
         assert service.store.conn.execute(
             "SELECT COUNT(*) FROM source_imports WHERE id=?",
             (source["id"],),
         ).fetchone()[0] == 0
+        assert service.get_document_import_job(
+            report["job_id"], workspace=workspace,
+        )["files"] == []
     finally:
         service.close()

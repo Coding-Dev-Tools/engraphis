@@ -5119,18 +5119,6 @@ class Store:
             supported_edges = [str(item[0]) for item in conn.execute(
                 "SELECT DISTINCT edge_id FROM edge_supports WHERE memory_id=?", (memory_id,)
             ).fetchall()]
-        source_import_ids: list[str] = []
-        if "source_imports" in tables:
-            source_import_ids = [str(item[0]) for item in conn.execute(
-                "SELECT id FROM source_imports WHERE memory_id=?", (memory_id,)
-            ).fetchall()]
-
-        if source_import_ids and "source_import_items" in tables:
-            marks = ",".join("?" for _ in source_import_ids)
-            conn.execute(
-                f"DELETE FROM source_import_items WHERE source_id IN ({marks})",
-                source_import_ids,
-            )
 
         for table, column in (
             ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
@@ -5140,6 +5128,8 @@ class Store:
         ):
             if table in tables:
                 if table == "source_imports" and "source_import_items" in tables:
+                    # source_id uses ON DELETE SET NULL, so erase per-job paths before
+                    # deleting the manifest row that identifies them.
                     conn.execute(
                         "DELETE FROM source_import_items WHERE source_id IN "
                         "(SELECT id FROM source_imports WHERE memory_id=?)",

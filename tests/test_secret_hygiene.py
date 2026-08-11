@@ -133,9 +133,6 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     assert service.store.conn.execute(
         "SELECT COUNT(*) FROM source_imports WHERE id=?", (source_id,)
     ).fetchone()[0] == 0
-    assert service.store.conn.execute(
-        "SELECT COUNT(*) FROM source_import_items WHERE source_id=?", (source_id,)
-    ).fetchone()[0] == 0
     # Content-free export proof deliberately survives so the tombstone remains syncable.
     assert service.store.get_memory_sync_export(mid) is not None
     audit_rows = service.store.conn.execute(
