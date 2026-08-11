@@ -5286,21 +5286,28 @@ class Store:
         """
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
-            # Mint the origin before opening the erase transaction.  ``device_id`` may
-            # need to write sync metadata on a new database; keeping that write outside
-            # the destructive transaction means the deletion and terminal tombstone
-            # commit (or roll back) as one unit.
+            # Hold the write lock while the authoritative target set is read and erased.
+            # A vector-index coordinator may pass a snapshot from before its external
+            # delete, but a sync/write successor that commits before this boundary must
+            # be included in the same destructive operation.
+            if owns_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            # Mint the origin before opening the erase transaction. The device identity may
+                        # need to write sync metadata on a new database; keeping that write outside
+                        # the destructive transaction means the deletion and terminal tombstone
+                        # commit (or roll back) as one unit.
             device_id = self.device_id()
-            if _target_ids is None:
-                targets = self._secure_erase_targets(self.conn, memory_id)
-            else:
-                targets = [memory_id]
-                seen = {memory_id}
-                for target_id in _target_ids:
-                    normalized = str(target_id or "")
-                    if normalized and normalized not in seen:
-                        seen.add(normalized)
-                        targets.append(normalized)
+            # Recompute under the transaction even when the engine supplies its earlier
+            # vector-index snapshot. Keep any explicit ids as a compatibility hint for
+            # already-detached derivatives, but never let that stale list replace the
+            # authoritative successor scan.
+            targets = self._secure_erase_targets(self.conn, memory_id)
+            seen = set(targets)
+            for target_id in _target_ids or ():
+                normalized = str(target_id or '')
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    targets.append(normalized)
             current_rows = []
             for target_id in targets:
                 marker = self.get_memory_sync_export(target_id)
