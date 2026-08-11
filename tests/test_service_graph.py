@@ -253,6 +253,52 @@ def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
     assert {node["label"] for node in scene["nodes"]} == {"Visible Isolate"}
 
 
+def test_graph_scene_history_scopes_supports_to_requested_repo():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        repo_a = svc.store.get_or_create_repo(wid, "alpha")
+        svc.store.get_or_create_repo(wid, "beta")
+        svc.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?, ?, NULL, ?, 'concept', 0)",
+            [
+                ("history-source", wid, "History Source"),
+                ("history-target", wid, "History Target"),
+            ],
+        )
+        workspace_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_workspace", content="workspace evidence",
+            workspace_id=wid, scope=Scope.WORKSPACE,
+            valid_from=0.0, ingested_at=0.0,
+        ))
+        foreign_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_alpha", content="alpha evidence",
+            workspace_id=wid, repo_id=repo_a, scope=Scope.REPO,
+            valid_from=0.0, valid_to=100.0, ingested_at=0.0,
+        ))
+        edge_id = svc.store.upsert_edge(Edge(
+            id="history-repo-scope", src="history-source", dst="history-target",
+            relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
+        ))
+        svc.store.add_edge_support(edge_id, {"memory_id": workspace_memory})
+        svc.store.add_edge_support(edge_id, {"memory_id": foreign_memory})
+        svc.store.conn.execute(
+            "UPDATE edge_supports SET valid_to=100 WHERE edge_id=? AND memory_id=?",
+            (edge_id, foreign_memory),
+        )
+        svc.store.conn.commit()
+
+        scene = svc.graph_scene(
+            workspace="acme", repo="beta", as_of=150.0, include_history=True,
+        )
+        edge = next(item for item in scene["edges"] if item["id"] == edge_id)
+        assert workspace_memory in edge["support_memory_ids"]
+        assert foreign_memory not in edge["support_memory_ids"]
+    finally:
+        svc.close()
+
+
 def test_graph_full_mode_reports_the_available_node_count_without_truncation():
     svc = MemoryService.create(":memory:")
     _seed_entities(
