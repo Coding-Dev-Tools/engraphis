@@ -7997,9 +7997,9 @@ class MemoryService:
                 if include_history:
                     symbol_sql += (
                         "AND (ingested_at IS NULL OR ingested_at<=?) "
-                        "AND expired_at IS NULL "
+                        "AND (expired_at IS NULL OR ?<expired_at) "
                     )
-                    symbol_params.append(known_t)
+                    symbol_params.extend((known_t, known_t))
                 else:
                     symbol_sql += (
                         "AND (valid_to IS NULL OR ?<valid_to "
@@ -8061,9 +8061,9 @@ class MemoryService:
                 if include_history:
                     code_edge_sql += (
                         "AND (ingested_at IS NULL OR ingested_at<=?) "
-                        "AND expired_at IS NULL "
+                        "AND (expired_at IS NULL OR ?<expired_at) "
                     )
-                    code_edge_params.append(known_t)
+                    code_edge_params.extend((known_t, known_t))
                 else:
                     code_edge_sql += (
                         "AND (valid_to IS NULL OR ?<valid_to "
@@ -8418,9 +8418,9 @@ class MemoryService:
                 if include_history:
                     code_sql += (
                         "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
-                        "AND links.expired_at IS NULL"
+                        "AND (links.expired_at IS NULL OR ?<links.expired_at)"
                     )
-                    code_params.append(known_t)
+                    code_params.extend((known_t, known_t))
                 else:
                     code_sql += (
                         "AND (links.valid_to IS NULL OR ?<links.valid_to "
