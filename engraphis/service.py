@@ -1285,6 +1285,14 @@ class MemoryService:
                     f"WHERE {scope} AND {alias}.{column}>?{active}"
                 )
                 boundary_params.extend((*source_params, at, *extra_params))
+        # Entity rows use ``created_at`` as their temporal visibility boundary;
+        # a clock-skewed sync can make an otherwise isolated entity appear later
+        # without changing the graph revision.
+        boundary_sql.append(
+            "SELECT entity.created_at AS boundary FROM entities entity "
+            "WHERE entity.workspace_id=? AND entity.created_at>?"
+        )
+        boundary_params.extend((workspace_id, at))
         row = self.store.conn.execute(
             "SELECT MIN(boundary) FROM (" + " UNION ALL ".join(boundary_sql) + ")",
             boundary_params,

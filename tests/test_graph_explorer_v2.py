@@ -2656,6 +2656,12 @@ def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch
         "WHERE content='Alpha uses Beta.'",
         (now + 1.0, now + 2.0, now + 4.0),
     )
+    workspace_id = service.store.get_or_create_workspace("acme")
+    service.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("ent_future", workspace_id, "Future", "concept", now + 3.0),
+    )
     service.store.conn.commit()
     clock = {"now": now}
     monkeypatch.setattr(service_module, "time", types.SimpleNamespace(
@@ -2668,6 +2674,8 @@ def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch
     before_ingestion = service.graph_scene(workspace="acme")
     clock["now"] = now + 2.5
     after_ingestion = service.graph_scene(workspace="acme")
+    clock["now"] = now + 3.5
+    after_entity_creation = service.graph_scene(workspace="acme")
     clock["now"] = now + 4.5
     after_expiry = service.graph_scene(workspace="acme")
 
@@ -2677,6 +2685,7 @@ def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch
     assert before_ingestion["meta"]["total_edges"] == 1
     assert after_ingestion["meta"]["cache_hit"] is False
     assert after_ingestion["meta"]["total_edges"] == 2
+    assert after_entity_creation["meta"]["cache_hit"] is False
     assert after_expiry["meta"]["cache_hit"] is False
     assert after_expiry["meta"]["total_edges"] == 1
 
