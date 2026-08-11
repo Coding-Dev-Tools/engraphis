@@ -112,6 +112,7 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
         vault_id=vault_id, source_key="b" * 64, relative_path="secret.txt",
         memory_id=mid,
     )
+    service.store.mark_memories_sync_exported([mid], workspace_id=workspace_id)
 
     # Simulate a row captured before the boundary existed, including an FTS mirror.
     service.store.conn.execute("UPDATE memories SET content=? WHERE id=?", (_LEAK, mid))
@@ -132,6 +133,8 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     assert service.store.conn.execute(
         "SELECT COUNT(*) FROM source_imports WHERE id=?", (source_id,)
     ).fetchone()[0] == 0
+    # Content-free export proof deliberately survives so the tombstone remains syncable.
+    assert service.store.get_memory_sync_export(mid) is not None
     audit_rows = service.store.conn.execute(
         "SELECT action, detail FROM audit WHERE target=?", (mid,)
     ).fetchall()

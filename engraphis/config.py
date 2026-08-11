@@ -360,9 +360,37 @@ def _lock_windows_migration_file(handle, msvcrt) -> None:
             time.sleep(_WINDOWS_LOCK_RETRY_SECONDS)
 
 
+def _normalize_sqlite_lock_path(path_str: str) -> Optional[Path]:
+    """Normalize a SQLite path for filesystem locking.
+
+    Returns ``None`` for in-memory databases (no filesystem lock needed).
+    Handles ``file:`` URIs by extracting the real filesystem path, so that
+    ``Path`` is never handed a literal ``file:/...`` prefix that would
+    create a bogus directory.  Relative paths are resolved to absolute
+    before returning so the lock file is never placed relative to a
+    caller-owned working directory.
+    """
+    if not path_str or path_str == ":memory:":
+        return None
+    if path_str.startswith("file:"):
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(path_str)
+        if parsed.path:
+            return Path(unquote(parsed.path)).resolve()
+        # Malformed URI without a path component — fall back to literal.
+        return Path(path_str).resolve()
+    return Path(path_str).expanduser().resolve()
+
+
 @contextmanager
 def _migration_lock(target: Path):
     """Serialize first-run migration across processes without a third-party lock."""
+    resolved = _normalize_sqlite_lock_path(str(target))
+    if resolved is None:
+        # In-memory or empty target: nothing to serialize on disk.
+        yield
+        return
+    target = resolved
     # Only apply private permissions to a directory created for this database.
     # Existing parents belong to the caller and may intentionally be shared with
     # other databases or processes; changing them here is an unexpected mutation.
