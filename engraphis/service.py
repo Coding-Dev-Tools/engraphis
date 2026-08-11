@@ -1265,7 +1265,8 @@ class MemoryService:
         boundary_params: list[Any] = []
         for source, scope, source_params, alias in sources:
             for column in (
-                "valid_from", "valid_to", "valid_to_recorded_at", "expired_at",
+                "valid_from", "valid_to", "valid_to_recorded_at", "ingested_at",
+                "expired_at",
             ):
                 active = "" if column == "expired_at" else f" AND {alias}.expired_at IS NULL"
                 boundary_sql.append(
