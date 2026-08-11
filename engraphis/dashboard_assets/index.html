@@ -220,7 +220,7 @@
                 <label>Type<select id="editor-memory-type"><option>working</option><option>episodic</option><option selected>semantic</option><option>procedural</option></select></label>
                 <label>Content<textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…"></textarea></label>
                 <p id="editor-error" class="form-error" role="alert" hidden></p>
-                <label>Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+                <label for="editor-memory-importance">Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.05" value="0.5" aria-label="Memory importance"></label>
                 <div class="form-actions">
                   <button id="editor-cancel" class="secondary-button" type="button">Cancel</button>
                   <button class="primary-button" type="submit">Save memory</button>
@@ -328,7 +328,7 @@
                 <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>particles</small></div>
                 <div class="graph-motion-row"><button id="graph-labels" class="graph-switch" type="button" role="switch" aria-label="Entity labels" aria-checked="false"><span></span></button><span>Entity labels</span><small>names</small></div>
                 <div class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span>Freeze simulation</span><small>pause physics</small></div>
-                <label class="graph-motion-speed" for="graph-flow-speed"><span>Flow speed</span><input id="graph-flow-speed" type="range" min="0" max="100" value="45"><output id="graph-flow-speed-output" class="sr-only">45</output></label>
+                <label class="graph-motion-speed" for="graph-flow-speed"><span>Flow speed</span><input id="graph-flow-speed" type="range" min="0" max="100" value="45" aria-label="Flow speed"><output id="graph-flow-speed-output" class="sr-only">45</output></label>
               </section>
 
               <section class="graph-drawer-section graph-saved-views" aria-labelledby="graph-saved-views-title">
