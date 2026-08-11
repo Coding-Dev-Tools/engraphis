@@ -1776,6 +1776,36 @@ def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
     assert "edge_ab" not in {edge["id"] for edge in history["edges"]}
 
 
+def test_graph_scene_history_facets_keep_invalidated_supports_visible():
+    service, _alpha, _beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE content='Alpha uses Beta.'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id='edge_ab'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE edge_id='edge_ab'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True, memory_types=["semantic"],
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    edge = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert edge["ghost"] is True
+    assert edge["support_memory_ids"]
+
+
 def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")

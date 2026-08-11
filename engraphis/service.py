@@ -7883,22 +7883,15 @@ class MemoryService:
                 "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
                 "WHERE graph_support.edge_id=edges.id "
                 "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
-                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to "
-                "OR (graph_support.valid_to_recorded_at IS NOT NULL "
-                "AND ?<graph_support.valid_to_recorded_at)) "
                 "AND (graph_support.ingested_at IS NULL OR graph_support.ingested_at<=?) "
-                "AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
+                "AND graph_support.expired_at IS NULL "
                 "AND graph_memory.workspace_id=? "
                 "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
-                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to "
-                "OR (graph_memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<graph_memory.valid_to_recorded_at)) "
                 "AND (graph_memory.ingested_at IS NULL OR graph_memory.ingested_at<=?) "
-                "AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
+                "AND graph_memory.expired_at IS NULL"
             )
             edge_params.extend((
-                t, t, known_t, known_t, known_t,
-                wid, t, t, known_t, known_t, known_t,
+                t, known_t, wid, t, known_t,
             ))
             if restrict_sessions:
                 edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
@@ -8211,14 +8204,26 @@ class MemoryService:
                 "SELECT id, mtype, COALESCE(valid_from, ingested_at, 0) AS support_time "
                 "FROM memories WHERE workspace_id=? AND id IN (" + marks + ") "
                 "AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to "
-                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-                "AND (ingested_at IS NULL OR ingested_at<=?) "
-                "AND (expired_at IS NULL OR ?<expired_at)"
             )
-            memory_params: list[Any] = [
-                wid, *chunk, t, t, known_t, known_t, known_t,
-            ]
+            if include_history:
+                # Historical scenes may intentionally surface memories that have
+                # since been invalidated. The historical edge/support predicates
+                # already establish the valid_at/known_at anchors; applying the
+                # live valid_to window here would erase ghost relations whenever a
+                # memory facet is requested.
+                memory_sql += (
+                    "AND (ingested_at IS NULL OR ingested_at<=?) "
+                    "AND expired_at IS NULL"
+                )
+                memory_params: list[Any] = [wid, *chunk, t, known_t]
+            else:
+                memory_sql += (
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                    "AND (ingested_at IS NULL OR ingested_at<=?) "
+                    "AND (expired_at IS NULL OR ?<expired_at)"
+                )
+                memory_params = [wid, *chunk, t, t, known_t, known_t, known_t]
             memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
             if clean_memory_types:
                 type_marks = ",".join("?" for _ in clean_memory_types)
