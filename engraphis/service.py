@@ -1268,12 +1268,23 @@ class MemoryService:
                 "valid_from", "valid_to", "valid_to_recorded_at", "ingested_at",
                 "expired_at",
             ):
-                active = "" if column == "expired_at" else f" AND {alias}.expired_at IS NULL"
+                # For start-boundary columns (valid_from, ingested_at), include rows
+                # whose expired_at is still in the future — they become visible when
+                # the start boundary passes and remain so until expiration. End-boundary
+                # columns only matter on currently-active (non-expired) rows.
+                extra_params: list[Any] = []
+                if column in ("valid_from", "ingested_at"):
+                    active = f" AND ({alias}.expired_at IS NULL OR {alias}.expired_at>?)"
+                    extra_params = [at]
+                elif column == "expired_at":
+                    active = ""
+                else:
+                    active = f" AND {alias}.expired_at IS NULL"
                 boundary_sql.append(
                     f"SELECT {alias}.{column} AS boundary FROM {source} "
                     f"WHERE {scope} AND {alias}.{column}>?{active}"
                 )
-                boundary_params.extend((*source_params, at))
+                boundary_params.extend((*source_params, at, *extra_params))
         row = self.store.conn.execute(
             "SELECT MIN(boundary) FROM (" + " UNION ALL ".join(boundary_sql) + ")",
             boundary_params,
