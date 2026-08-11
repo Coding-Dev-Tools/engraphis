@@ -2340,7 +2340,7 @@ def build_graph_scene(
             community_id for community_id in ranked_communities
             if any(nodes[node_id]["entity_quality"] > 0
                    for node_id in graph["community_members"][community_id])
-        ][:24]
+        ][:36]
         chosen_communities.update(overview_communities)
         anchors = [graph["community_anchors"][community_id]
                    for community_id in overview_communities
