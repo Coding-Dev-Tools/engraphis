@@ -7763,10 +7763,11 @@ class MemoryService:
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
         )
+        # Keep the visibility scan workspace-wide so a repository filter cannot
+        # reintroduce a workspace-scoped endpoint touched only by a private edge in
+        # another repository. Selected-repository public endpoints are applied below
+        # when deciding which entities may remain visible.
         visibility_params: list[Any] = [wid]
-        if repo_id:
-            visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
-            visibility_params.append(repo_id)
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
             "visibility_edge.src, visibility_edge.dst"
@@ -7782,7 +7783,9 @@ class MemoryService:
         }
         historically_public_ids = {
             str(row[key])
-            for row in visibility_rows if bool(row["public_edge"])
+            for row in visibility_rows
+            if bool(row["public_edge"])
+            and (not repo_id or row["repo_id"] in (None, repo_id))
             for key in ("src", "dst")
             if row[key]
         }
@@ -7978,10 +7981,11 @@ class MemoryService:
                 "graph analysis exceeds the relation candidate limit; filter by repository"
             )
 
+        # This set intentionally remains workspace-wide: private edges from
+        # other repositories must still hide their workspace-scoped endpoints.
         touching_ids = {
             str(row[key])
             for row in visibility_rows
-            if not repo_id or row["repo_id"] in (None, repo_id)
             for key in ("src", "dst")
             if row[key]
         }
