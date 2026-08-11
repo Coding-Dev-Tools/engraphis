@@ -165,12 +165,17 @@
   }
   const GALAXY_LOCAL_PAIR_FRACTION = 0.15;
   const GALAXY_CORE_PAIR_MULTIPLIER = 0.75;
+  /* Different solar systems still need a small visual contact pressure when their painted
+     nodes touch. Keep it far weaker than local orbital separation so systems can pass close
+     without the cross-system slingshots caused by the generic collision force. */
+  const GALAXY_CROSS_SYSTEM_REPULSION_FRACTION = 0.18;
+  const GALAXY_CROSS_SYSTEM_REPULSION_PADDING = 1.5;
   const GALAXY_BRIDGE_SCALE = 0.35;
   const GALAXY_CENTER_ACCELERATION_CAP = 2.5;
   /* The visible black hole is a contact boundary as well as a gravity source. Its skin must
      exceed one emergency-speed drift (48 * 0.021328125 ~= 1.02 world units), so a body cannot
-     tunnel through the painted edge between fixed steps. The constraint removes inward radial
-     speed only; it never adds an outward kick or drains tangential orbital motion. */
+     tunnel through the painted edge between fixed steps. The constraint never adds an outward
+     kick; deep corrections preserve angular momentum instead of manufacturing orbital speed. */
   const GALAXY_BLACK_HOLE_EXCLUSION_PADDING = 2.5;
   /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
      while the small leapfrog step makes systems orbit over seconds instead of jumping once per
@@ -1567,7 +1572,9 @@
      collision helper above intentionally retains its pair-at-a-time contract for legacy
      callers; the live Galaxy cannot use that ordering because a dense hub would be shifted
      repeatedly within one frame. Every pair here samples one immutable phase, accumulates a
-     mass-balanced correction, and applies one globally bounded update. */
+     mass-balanced correction, and applies one globally bounded update. Local contacts use the
+     full adjustable pressure; an opt-in weaker cross-community pressure prevents painted nodes
+     from different systems bunching without turning the galaxy into hard billiards. */
   function applyGalaxyOrbitalSeparation(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -1576,6 +1583,12 @@
       ? Number(opts.padding) : 1.5);
     const strength = Math.max(0, Math.min(1, Number.isFinite(Number(opts.strength))
       ? Number(opts.strength) : 0.7));
+    const crossCommunityPadding = Math.max(0,
+      Number.isFinite(Number(opts.crossCommunityPadding))
+        ? Number(opts.crossCommunityPadding) : 1.5);
+    const crossCommunityStrength = Math.max(0, Math.min(1,
+      Number.isFinite(Number(opts.crossCommunityStrength))
+        ? Number(opts.crossCommunityStrength) : 0));
     const maximumCorrection = Math.max(0, Number.isFinite(Number(opts.maxCorrection))
       ? Number(opts.maxCorrection) : 4);
     const maximumVelocityCorrection = Math.max(0,
@@ -1583,9 +1596,11 @@
         ? Number(opts.maxVelocityCorrection) : 8);
     const stats = {
       bodies: bodies.length, pairs: 0, overlaps: 0, cells: 0,
-      correctionDistance: 0, maximumNodeShift: 0, aggregateLimited: false,
+      crossCommunityPairs: 0, crossCommunityOverlaps: 0,
+      correctionDistance: 0, crossCommunityCorrectionDistance: 0,
+      maximumNodeShift: 0, aggregateLimited: false,
     };
-    if (bodies.length < 2 || strength <= 0) return stats;
+    if (bodies.length < 2 || Math.max(strength, crossCommunityStrength) <= 0) return stats;
     const bodyRadius = node => finitePositive(
       node.radius, finitePositive(node.visual_radius,
         radiusFromGravityMass(node.gravity_mass), 80), 160
@@ -1593,7 +1608,9 @@
     const maximumRadius = bodies.reduce(
       (maximum, node) => Math.max(maximum, bodyRadius(node)), 0
     );
-    const cellSize = Math.max(1, maximumRadius * 2 + padding);
+    const cellSize = Math.max(
+      1, maximumRadius * 2 + Math.max(padding, crossCommunityPadding)
+    );
     const grid = new Map();
     const shifts = new Map(bodies.map(node => [node, { x: 0, y: 0 }]));
     const velocityShifts = new Map(bodies.map(node => [node, { x: 0, y: 0 }]));
@@ -1614,10 +1631,14 @@
             (left.cellX + offsetX) + ',' + (left.cellY + offsetY)
           ) || [];
           candidates.forEach(right => {
-            if (right.index <= left.index
-              || communityKey(left.node) !== communityKey(right.node)) return;
+            if (right.index <= left.index) return;
+            const crossCommunity = communityKey(left.node) !== communityKey(right.node);
+            const pairStrength = crossCommunity ? crossCommunityStrength : strength;
+            if (!(pairStrength > 0)) return;
+            const pairPadding = crossCommunity ? crossCommunityPadding : padding;
             stats.pairs++;
-            const minimumDistance = left.radius + right.radius + padding;
+            if (crossCommunity) stats.crossCommunityPairs++;
+            const minimumDistance = left.radius + right.radius + pairPadding;
             let normalX = right.x - left.x, normalY = right.y - left.y;
             let distance = Math.hypot(normalX, normalY);
             if (distance >= minimumDistance) return;
@@ -1630,7 +1651,7 @@
             }
             const unitDistance = Math.max(1, Math.hypot(normalX, normalY));
             const unitX = normalX / unitDistance, unitY = normalY / unitDistance;
-            const correction = (minimumDistance - distance) * strength;
+            const correction = (minimumDistance - distance) * pairStrength;
             if (!(correction > 0) || !Number.isFinite(correction)) return;
             const leftMass = finitePositive(left.node.gravity_mass, 1, 1000);
             const rightMass = finitePositive(right.node.gravity_mass, 1, 1000);
@@ -1648,10 +1669,14 @@
             rightShift.y += unitY * projection * rightInverseMass;
             contacts.push({
               left: left.node, right: right.node, oldDistance: distance,
-              leftInverseMass, rightInverseMass, inverseMass,
+              leftInverseMass, rightInverseMass, inverseMass, crossCommunity,
             });
             stats.correctionDistance += correction;
             stats.overlaps++;
+            if (crossCommunity) {
+              stats.crossCommunityCorrectionDistance += correction;
+              stats.crossCommunityOverlaps++;
+            }
           });
         }
       }
@@ -1667,6 +1692,7 @@
       node.y += shift.y * positionScale;
     });
     stats.correctionDistance *= positionScale;
+    stats.crossCommunityCorrectionDistance *= positionScale;
     stats.maximumNodeShift = maximumNodeShift * positionScale;
     stats.aggregateLimited = positionScale < 1;
 
@@ -1688,9 +1714,10 @@
       const normalSpeed = relativeVx * unitX + relativeVy * unitY;
       const tangentSpeed = relativeVx * tangentX + relativeVy * tangentY;
       const tangentScale = Math.min(1, contact.oldDistance / distance);
-      const deltaVx = -normalSpeed * unitX
+      const targetNormalSpeed = Math.max(0, normalSpeed);
+      const deltaVx = (targetNormalSpeed - normalSpeed) * unitX
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentX;
-      const deltaVy = -normalSpeed * unitY
+      const deltaVy = (targetNormalSpeed - normalSpeed) * unitY
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentY;
       const leftDelta = velocityShifts.get(contact.left);
       const rightDelta = velocityShifts.get(contact.right);
@@ -2224,14 +2251,17 @@
         fixedNodeId: opts.fixedNodeId,
       })
       : { applied: 0, maximumError: 0, correctedDistance: 0 };
-    /* Orbital separation is a dissipative close-range pressure, not negative gravity. It
-       projects only members of the same solar system, preserves their evidence-mass COM, and
-       removes closing energy instead of injecting a repulsive slingshot. Applying it after
-       Link constraints makes the visible separation control the final local safety envelope. */
+    /* Orbital separation is a dissipative close-range pressure, not negative gravity. It uses
+       full pressure inside a solar system and a weak contact-only pressure across systems,
+       preserves evidence-mass momentum, and removes closing energy instead of injecting a
+       repulsive slingshot. Applying it after Link constraints makes separation the final local
+       safety envelope before the strict black-hole horizon pass. */
     const orbitalSeparation = opts.includeOrbitalSeparation === true
       ? applyGalaxyOrbitalSeparation(bodies, {
         padding: opts.orbitalSeparationPadding,
         strength: opts.orbitalSeparationStrength,
+        crossCommunityPadding: opts.crossCommunitySeparationPadding,
+        crossCommunityStrength: opts.crossCommunitySeparationStrength,
         maxCorrection: opts.orbitalSeparationMaxCorrection,
         maxVelocityCorrection: opts.orbitalSeparationMaxVelocityCorrection,
         fixedNodeId: opts.fixedNodeId,
@@ -3220,6 +3250,7 @@
     let galaxyReheatStepsApplied = 0, galaxyLastReheatSubsteps = 0;
     let galaxyLastKinetic = 0, galaxyLastCollisions = 0, galaxyLastRelationCorrections = 0;
     let galaxyLastRelationDistance = 0, galaxyLastOrbitalSeparations = 0;
+    let galaxyLastCrossSystemSeparations = 0;
     let galaxyLastOrbitalCorrection = 0, galaxyLastLocalVelocityLimits = 0;
     let galaxySpeedCaps = 0;
     let galaxyLastBlackHoleExclusion = {
@@ -4098,6 +4129,7 @@
       galaxyLastRelationCorrections = 0;
       galaxyLastRelationDistance = 0;
       galaxyLastOrbitalSeparations = 0;
+      galaxyLastCrossSystemSeparations = 0;
       galaxyLastOrbitalCorrection = 0;
       galaxyLastLocalVelocityLimits = 0;
       galaxySpeedCaps = 0;
@@ -4130,6 +4162,7 @@
     function galaxyIntegratorOptions() {
       const orbitScale = galaxyRelationOrbitScale(state.settings.link);
       const orbitalSeparationPadding = galaxyOrbitalSeparationPadding(state.settings.repel);
+      const orbitalSeparationStrength = galaxyOrbitalSeparationStrength(state.settings.repel);
       return {
         fixedNodeId: activeDragNode ? activeDragNode.id : null,
         dragSource: activeDragNode,
@@ -4177,7 +4210,10 @@
            and target cushion are both 2x the retired normalized control. */
         includeOrbitalSeparation: true,
         orbitalSeparationPadding,
-        orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
+        orbitalSeparationStrength,
+        crossCommunitySeparationPadding: GALAXY_CROSS_SYSTEM_REPULSION_PADDING,
+        crossCommunitySeparationStrength: orbitalSeparationStrength
+          * GALAXY_CROSS_SYSTEM_REPULSION_FRACTION,
         /* Dense hubs sample one immutable phase and receive at most one bounded correction
            per frame, irrespective of how many members touch them. */
         orbitalSeparationMaxCorrection: 4,
@@ -4236,6 +4272,9 @@
         orbitalSeparationSetting: state.settings.repel,
         orbitalSeparationPadding: galaxyOrbitalSeparationPadding(state.settings.repel),
         orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
+        crossSystemRepulsionPadding: GALAXY_CROSS_SYSTEM_REPULSION_PADDING,
+        crossSystemRepulsionStrength: galaxyOrbitalSeparationStrength(state.settings.repel)
+          * GALAXY_CROSS_SYSTEM_REPULSION_FRACTION,
         blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
         blackHoleExclusion: { ...galaxyLastBlackHoleExclusion },
         active: galaxyDynamicsEligible(),
@@ -4256,6 +4295,7 @@
         lastRelationCorrections: galaxyLastRelationCorrections,
         lastRelationCorrectionDistance: galaxyLastRelationDistance,
         lastOrbitalSeparations: galaxyLastOrbitalSeparations,
+        lastCrossSystemSeparations: galaxyLastCrossSystemSeparations,
         lastOrbitalCorrectionDistance: galaxyLastOrbitalCorrection,
         lastLocalVelocityLimits: galaxyLastLocalVelocityLimits,
         localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
@@ -4309,6 +4349,8 @@
           galaxyLastRelationCorrections = report.relationConstraint.applied;
           galaxyLastRelationDistance = report.relationConstraint.correctedDistance;
           galaxyLastOrbitalSeparations = report.orbitalSeparation.overlaps;
+          galaxyLastCrossSystemSeparations =
+            report.orbitalSeparation.crossCommunityOverlaps || 0;
           galaxyLastOrbitalCorrection = report.orbitalSeparation.correctionDistance;
           galaxyLastBlackHoleExclusion = report.blackHoleExclusion;
           galaxyLastLocalVelocityLimits = report.systemVelocity.limitedSystems;
