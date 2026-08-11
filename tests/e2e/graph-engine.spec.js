@@ -13,6 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
+const stellarOrbitAssetVersion = '20260811-galaxy-release-stable-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -133,12 +134,77 @@ const blackHoleGalaxyScene = {
   meta: { algorithm_version: 'galaxy-v6', layout_seed: 91, total_nodes: 8, truncated: false },
 };
 
+/* Match the production-sized browser complaint without checking in a 542-row fixture. Sixty
+   explicit star systems with eight planets each, plus the black hole and one core satellite,
+   exercise the same live/material eligibility boundary while keeping phases deterministic. */
+function largeServedGalaxyScene() {
+  const nodes = [{
+    id: 'black-hole', label: 'Evidence core', gravity_mass: 64, visual_radius: 8,
+    community_id: 'core', anchor_role: 'global', system_anchor_id: 'black-hole',
+    orbit_tier: 0, galactic_radius: 0, galactic_target_radius: 0,
+    galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8,
+    galactic_phase: 0, x: 0, y: 0,
+  }, {
+    id: 'core-star', label: 'Core star', gravity_mass: 6, visual_radius: 5,
+    community_id: 'core', anchor_role: 'none', system_anchor_id: 'black-hole',
+    orbit_tier: 1, orbit_radius: 52, galactic_radius: 0, galactic_target_radius: 0,
+    galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8,
+    galactic_phase: 0, x: 52, y: 0,
+  }];
+  const edges = [{ id: 'core-orbit', source: 'black-hole', target: 'core-star',
+    relation: 'orbits', rest_length: 52, spring_strength: 0.08 }];
+  const communities = [{ id: 'core', mass: 70, member_count: 2,
+    anchor_id: 'black-hole', galactic_radius: 0, galactic_target_radius: 0 }];
+  for (let system = 0; system < 60; system += 1) {
+    const id = system === 0 ? 'aurora' : `system-${system}`;
+    const starId = `${id}-star`;
+    const phase = 0.31 + system * 2.399963229728653;
+    const galacticRadius = 112 + system * 3.15;
+    const centerX = Math.cos(phase) * galacticRadius;
+    const centerY = Math.sin(phase) * galacticRadius * 0.84;
+    let mass = 0;
+    for (let member = 0; member < 9; member += 1) {
+      const localRadius = member === 0 ? 0 : (member === 1 ? 40 : 18 + member * 5);
+      const localPhase = phase + member * 2.399963229728653;
+      const nodeId = member === 0 ? starId
+        : (member === 1 ? `${id}-planet` : `${id}-planet-${member}`);
+      const gravityMass = member === 0 ? 8 + system % 5 : 1 + (member % 3) * 0.25;
+      mass += gravityMass;
+      nodes.push({
+        id: nodeId, label: nodeId, gravity_mass: gravityMass,
+        visual_radius: member === 0 ? 5.5 : 2.5,
+        community_id: id, anchor_role: member === 0 ? 'community' : 'none',
+        system_anchor_id: starId, orbit_tier: member,
+        orbit_radius: localRadius, galactic_radius: galacticRadius,
+        galactic_target_radius: galacticRadius, galactic_radius_scale: 0.4,
+        galactic_initial_compactness: 0.8, galactic_phase: phase,
+        x: centerX + Math.cos(localPhase) * localRadius,
+        y: centerY + Math.sin(localPhase) * localRadius,
+      });
+      if (member > 0) edges.push({
+        id: `${starId}-orbit-${member}`, source: starId, target: nodeId,
+        relation: 'orbits', rest_length: localRadius, spring_strength: 0.08,
+      });
+    }
+    communities.push({ id, mass, member_count: 9, anchor_id: starId,
+      galactic_radius: galacticRadius, galactic_target_radius: galacticRadius,
+      galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8 });
+  }
+  return {
+    nodes, edges, communities, community_bridges: [],
+    meta: { algorithm_version: 'galaxy-v6', layout_seed: 3031,
+      total_nodes: nodes.length, truncated: false },
+  };
+}
+
+const servedLargeGalaxyScene = largeServedGalaxyScene();
+
 /**
  * Stub the dashboard's API surface and start recording everything a browser can tell us that
  * a Node harness cannot: which scripts were fetched, which CSP rules fired, and what the page
  * logged.  Returns the recorders so each test can assert on them.
  */
-async function openDashboard(page, { query = '' } = {}) {
+async function openDashboard(page, { query = '', graphScene = graphScenePayload } = {}) {
   const requested = [];
   const consoleErrors = [];
   const pageErrors = [];
@@ -229,7 +295,7 @@ async function openDashboard(page, { query = '' } = {}) {
       });
     }
     if (path === '/graph') return json(graphPayload);
-    if (path === '/graph/scene') return json(graphScenePayload);
+    if (path === '/graph/scene') return json(graphScene);
     if (path === '/health') return json({ status: 'ok' });
     if (path === '/stats') return json({ memories: 12, total_rows: 12, workspaces: 1, sessions: 1, by_type: {} });
     if (path === '/workspaces') return json({ workspaces: [{ name: workspace, memories: 12 }] });
@@ -333,6 +399,111 @@ async function galaxySystemSnapshot(page) {
         .every(value => Number.isFinite(value))),
     };
   });
+}
+
+/* Read the exact graph-space and screen-space phase that force-graph is painting. This is
+   intentionally downstream of the engine diagnostics: a healthy internal clock is not enough
+   if the adapter, renderer, camera, or served asset leaves the visible planet stationary. */
+async function renderedStellarSnapshot(page, systemId = 'aurora') {
+  return page.evaluate(id => {
+    const graph = window.__fg;
+    const engine = window.__engraphisGraph;
+    const nodes = graph.graphData().nodes.filter(node => !node.ghost);
+    const star = nodes.find(node => node.id === `${id}-star`);
+    const planet = nodes.find(node => node.id === `${id}-planet`);
+    const anchor = nodes.find(node => node.anchor_role === 'global');
+    const members = nodes.filter(node => node.community_id === id);
+    const mass = members.reduce((sum, node) => sum + Number(node.gravity_mass || 1), 0);
+    const center = {
+      x: members.reduce((sum, node) => sum
+        + node.x * Number(node.gravity_mass || 1), 0) / mass,
+      y: members.reduce((sum, node) => sum
+        + node.y * Number(node.gravity_mass || 1), 0) / mass,
+      vx: members.reduce((sum, node) => sum
+        + Number(node.vx || 0) * Number(node.gravity_mass || 1), 0) / mass,
+      vy: members.reduce((sum, node) => sum
+        + Number(node.vy || 0) * Number(node.gravity_mass || 1), 0) / mass,
+    };
+    const starPoint = graph.graph2ScreenCoords(star.x, star.y);
+    const planetPoint = graph.graph2ScreenCoords(planet.x, planet.y);
+    const starEdge = graph.graph2ScreenCoords(star.x + Number(star.radius || 0), star.y);
+    const planetEdge = graph.graph2ScreenCoords(
+      planet.x + Number(planet.radius || 0), planet.y,
+    );
+    const canvas = document.querySelector('#graph-canvas canvas');
+    const bounds = canvas.getBoundingClientRect();
+    const local = { x: planet.x - star.x, y: planet.y - star.y };
+    const screenLocal = {
+      x: planetPoint.x - starPoint.x,
+      y: planetPoint.y - starPoint.y,
+    };
+    const inside = point => point.x >= 0 && point.y >= 0
+      && point.x <= bounds.width && point.y <= bounds.height;
+    const diagnostics = engine.physicsDiagnostics();
+    const nodeRadius = node => Number(node.radius || node.visual_radius || 0);
+    const blackHolePadding = Number(diagnostics.blackHoleExclusionPadding || 0);
+    const blackHoleClearances = nodes.filter(node => node !== anchor).map(node =>
+      Math.hypot(node.x - anchor.x, node.y - anchor.y)
+        - nodeRadius(anchor) - nodeRadius(node) - blackHolePadding);
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    const stellarClearances = nodes.flatMap(node => {
+      const stellarAnchor = byId.get(node.system_anchor_id);
+      if (!stellarAnchor || stellarAnchor === node
+          || stellarAnchor.anchor_role !== 'community') return [];
+      return [Math.hypot(node.x - stellarAnchor.x, node.y - stellarAnchor.y)
+        - nodeRadius(stellarAnchor) - nodeRadius(node)
+        - Number(diagnostics.systemAnchorExclusionPadding || 0)];
+    });
+    const envelope = Number(diagnostics.farFieldConfinement
+      && diagnostics.farFieldConfinement.envelopeRadius);
+    const outerClearances = nodes.filter(node => node !== anchor).map(node =>
+      envelope - Math.hypot(node.x - anchor.x, node.y - anchor.y) - nodeRadius(node));
+    return {
+      star: { id: star.id, x: star.x, y: star.y,
+        vx: Number(star.vx) || 0, vy: Number(star.vy) || 0,
+        mass: Number(star.gravity_mass) || 1,
+        screenX: starPoint.x, screenY: starPoint.y,
+        screenRadius: Math.abs(starEdge.x - starPoint.x) },
+      planet: { id: planet.id, anchor: planet.system_anchor_id,
+        x: planet.x, y: planet.y, vx: Number(planet.vx) || 0,
+        vy: Number(planet.vy) || 0, mass: Number(planet.gravity_mass) || 1,
+        screenX: planetPoint.x, screenY: planetPoint.y,
+        screenRadius: Math.abs(planetEdge.x - planetPoint.x) },
+      local: { ...local, radius: Math.hypot(local.x, local.y),
+        angle: Math.atan2(local.y, local.x),
+        relativeSpeed: Math.hypot((Number(planet.vx) || 0) - (Number(star.vx) || 0),
+          (Number(planet.vy) || 0) - (Number(star.vy) || 0)) },
+      screenLocal: { ...screenLocal, radius: Math.hypot(screenLocal.x, screenLocal.y),
+        angle: Math.atan2(screenLocal.y, screenLocal.x) },
+      anchor: { id: anchor.id, x: anchor.x, y: anchor.y,
+        vx: Number(anchor.vx) || 0, vy: Number(anchor.vy) || 0 },
+      coreFollower: (() => {
+        const node = nodes.find(candidate => candidate.id === 'core-star');
+        return node ? { x: node.x, y: node.y,
+          vx: Number(node.vx) || 0, vy: Number(node.vy) || 0 } : null;
+      })(),
+      systemCenter: center,
+      globalAngle: Math.atan2(center.y - anchor.y, center.x - anchor.x),
+      visible: inside(starPoint) && inside(planetPoint),
+      canvas: { width: bounds.width, height: bounds.height },
+      zoom: canvas.__zoom && canvas.__zoom.k,
+      diagnostics,
+      safety: {
+        minimumBlackHoleClearance: Math.min(...blackHoleClearances),
+        minimumStellarClearance: Math.min(...stellarClearances),
+        minimumOuterClearance: Math.min(...outerClearances),
+        envelope,
+        maximumSpeed: Math.max(...nodes.map(node => Math.hypot(
+          Number(node.vx) || 0, Number(node.vy) || 0,
+        ))),
+        speedCapActivations: diagnostics.speedCapActivations,
+      },
+      settings: engine.state().settings,
+      collapsed: engine.state().collapsed,
+      finite: [star.x, star.y, planet.x, planet.y, starPoint.x, starPoint.y,
+        planetPoint.x, planetPoint.y].every(Number.isFinite),
+    };
+  }, systemId);
 }
 
 function signedAngleDelta(from, to) {
@@ -1093,6 +1264,247 @@ test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits',
   }
 });
 
+for (const reducedMotion of [false, true]) {
+  const preference = reducedMotion ? 'reduced motion' : 'normal motion';
+  test(`served primary dashboard visibly sweeps a planet around its rendered star in ${preference}`,
+    async ({ page }, testInfo) => {
+      test.setTimeout(45_000);
+      await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
+      const session = await openDashboard(page, { graphScene: servedLargeGalaxyScene });
+      // `openDashboard` installs the real lazy-asset capture on Classic without opening its
+      // graph. Navigate to the primary Ledger so its adapter, controls, and asset URL own this
+      // acceptance run.
+      await page.goto('/');
+      await page.locator('.nav-item[data-view="relations"]').click();
+      await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+      await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+        && window.__fg.graphData().nodes.length === 542
+        && window.__engraphisGraph.physicsDiagnostics().steps >= 30
+        && window.__engraphisGraph.physicsDiagnostics().active);
+      // Let the one-shot fit complete before screen-space sampling, so the measured chord is a
+      // painted planetary arc rather than camera animation.
+      await page.waitForTimeout(1200);
+
+      const samples = [await renderedStellarSnapshot(page)];
+      for (let sample = 0; sample < 10; sample += 1) {
+        await page.waitForTimeout(500);
+        samples.push(await renderedStellarSnapshot(page));
+      }
+      const angleDelta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+      const segments = samples.slice(1).map((sample, index) => ({
+        localAngle: angleDelta(samples[index].local.angle, sample.local.angle),
+        screenAngle: angleDelta(samples[index].screenLocal.angle, sample.screenLocal.angle),
+        globalAngle: angleDelta(samples[index].globalAngle, sample.globalAngle),
+        radiusChange: Math.abs(sample.local.radius - samples[index].local.radius)
+          / Math.max(1e-9, samples[index].local.radius),
+        systemCenterChord: Math.hypot(
+          sample.systemCenter.x - samples[index].systemCenter.x,
+          sample.systemCenter.y - samples[index].systemCenter.y,
+        ),
+        screenChord: Math.hypot(
+          sample.screenLocal.x - samples[index].screenLocal.x,
+          sample.screenLocal.y - samples[index].screenLocal.y,
+        ),
+      }));
+      const localTravel = segments.reduce((sum, segment) => sum + segment.localAngle, 0);
+      const screenTravel = segments.reduce((sum, segment) => sum + segment.screenAngle, 0);
+      const globalTravel = segments.reduce((sum, segment) => sum + segment.globalAngle, 0);
+      const screenChord = segments.reduce((sum, segment) => sum + segment.screenChord, 0);
+      const direction = Math.sign(localTravel);
+      const coRotatingSegments = segments.filter(segment =>
+        Math.sign(segment.localAngle) === direction && Math.abs(segment.localAngle) > 0.01).length;
+      const phaseReversals = segments.filter(segment =>
+        Math.sign(segment.localAngle) === -direction && Math.abs(segment.localAngle) > 0.01).length;
+      const localStepMagnitudes = segments.map(segment => Math.abs(segment.localAngle));
+      const localStepMean = localStepMagnitudes.reduce((sum, value) => sum + value, 0)
+        / localStepMagnitudes.length;
+      const relativeKinetics = samples.map(sample => {
+        const reducedMass = sample.star.mass * sample.planet.mass
+          / (sample.star.mass + sample.planet.mass);
+        return 0.5 * reducedMass * sample.local.relativeSpeed ** 2;
+      });
+      const before = samples[0], after = samples.at(-1);
+      const evidence = {
+        preference, elapsedMs: 5000,
+        assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
+        before: { star: before.star, planet: before.planet, local: before.local,
+          screenLocal: before.screenLocal, globalAngle: before.globalAngle,
+          steps: before.diagnostics.steps, safety: before.safety },
+        after: { star: after.star, planet: after.planet, local: after.local,
+          screenLocal: after.screenLocal, globalAngle: after.globalAngle,
+          steps: after.diagnostics.steps, safety: after.safety },
+        localTravel, screenTravel, globalTravel, screenChord, coRotatingSegments,
+        phaseReversals, localStepMagnitudes, localStepMean, relativeKinetics,
+        maximumRadiusChange: Math.max(...segments.map(segment => segment.radiusChange)),
+        maximumSystemCenterChord: Math.max(...segments.map(segment => segment.systemCenterChord)),
+      };
+      await testInfo.attach(`visible-stellar-orbit-${reducedMotion ? 'reduced' : 'normal'}.json`, {
+        body: Buffer.from(JSON.stringify(evidence, null, 2)),
+        contentType: 'application/json',
+      });
+      testInfo.annotations.push({
+        type: 'visible-orbit-evidence', description: JSON.stringify(evidence),
+      });
+
+      expect(samples.every(sample => sample.finite && sample.visible), JSON.stringify(evidence))
+        .toBe(true);
+      expect(samples.every(sample => Number.isFinite(sample.safety.envelope)
+        && sample.safety.envelope > 0), JSON.stringify(evidence)).toBe(true);
+      expect(Math.min(...samples.map(sample => sample.safety.minimumBlackHoleClearance)),
+        JSON.stringify(evidence)).toBeGreaterThanOrEqual(-1e-7);
+      expect(Math.min(...samples.map(sample => sample.safety.minimumStellarClearance)),
+        JSON.stringify(evidence)).toBeGreaterThanOrEqual(-1e-7);
+      expect(Math.min(...samples.map(sample => sample.safety.minimumOuterClearance)),
+        JSON.stringify(evidence)).toBeGreaterThanOrEqual(-1e-7);
+      expect(Math.max(...samples.map(sample => sample.safety.maximumSpeed)),
+        JSON.stringify(evidence)).toBeLessThanOrEqual(48 + 1e-9);
+      expect(Math.max(...samples.map(sample => sample.safety.speedCapActivations)),
+        JSON.stringify(evidence)).toBe(0);
+      expect(before.planet.anchor).toBe(before.star.id);
+      expect(samples.every(sample => sample.screenLocal.radius
+        > sample.star.screenRadius + sample.planet.screenRadius), JSON.stringify(evidence))
+        .toBe(true);
+      expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
+      expect(Math.abs(screenTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
+      expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(15);
+      expect(coRotatingSegments, JSON.stringify(evidence)).toBeGreaterThanOrEqual(9);
+      expect(phaseReversals, JSON.stringify(evidence)).toBe(0);
+      expect(Math.min(...localStepMagnitudes), JSON.stringify(evidence)).toBeGreaterThan(0.025);
+      expect(Math.max(...localStepMagnitudes), JSON.stringify(evidence))
+        .toBeLessThan(localStepMean * 1.8);
+      expect(evidence.maximumRadiusChange, JSON.stringify(evidence)).toBeLessThan(0.04);
+      expect(Math.max(...relativeKinetics), JSON.stringify(evidence))
+        .toBeLessThan(Math.min(...relativeKinetics) * 2);
+      expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
+      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.5);
+      expect(after.local.radius, JSON.stringify(evidence))
+        .toBeGreaterThan(before.local.radius * 0.7);
+      expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
+
+      const diagnostics = before.diagnostics;
+      expect(diagnostics.reducedMotion).toBe(reducedMotion);
+      expect(diagnostics.mode).toBe('galaxy');
+      expect(diagnostics.active).toBe(true);
+      expect(diagnostics.staticLayout).toBe(false);
+      expect(diagnostics.collapsed).toBe(false);
+      expect(diagnostics.withinGalaxyLiveLimit).toBe(true);
+      expect(diagnostics.renderedNodes).toBe(542);
+      expect(before.collapsed).toBe(false);
+      expect(before.settings).toMatchObject({
+        mode: 'galaxy', frozen: false, gravity: 48, repel: 60, link: 8,
+      });
+      expect(diagnostics.orbitalSeparationSetting).toBe(60);
+      expect(diagnostics.orbitalSeparationPadding).toBe(15);
+      expect(diagnostics.orbitalSeparationStrength).toBe(1);
+      expect(diagnostics.crossSystemRepulsionStrength).toBeCloseTo(0.18, 12);
+      expect(diagnostics.linkSetting).toBe(8);
+      expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
+      expect(diagnostics.gravitySetting).toBe(48);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(240, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(120, 12);
+      expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(18, 12);
+
+      const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
+      expect(assetRequests).toHaveLength(1);
+      const assetUrl = new URL(assetRequests[0]);
+      expect(assetUrl.searchParams.get('v')).toBe(stellarOrbitAssetVersion);
+      const servedAsset = await page.request.get(assetUrl.href);
+      expect(servedAsset.ok()).toBe(true);
+      const servedSource = await servedAsset.text();
+      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;');
+      expect(servedSource).toContain('preserveSystemRadii: true,');
+      expect(session.pageErrors).toEqual([]);
+    });
+}
+
+test('served primary dashboard keeps stellar orbits live at Gravity zero without global force',
+  async ({ page }, testInfo) => {
+    test.setTimeout(45_000);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const gravityZeroScene = {
+      ...blackHoleGalaxyScene,
+      nodes: blackHoleGalaxyScene.nodes.filter(node =>
+        ['black-hole', 'aurora-star', 'aurora-planet'].includes(node.id)).map(node =>
+        node.community_id === 'aurora' ? {
+          ...node, x: node.x + 120, galactic_radius: 192,
+          galactic_target_radius: 192,
+        } : node),
+      edges: blackHoleGalaxyScene.edges.filter(edge => edge.id === 'aurora-orbit'),
+      communities: blackHoleGalaxyScene.communities.filter(community =>
+        ['core', 'aurora'].includes(community.id)),
+      meta: { ...blackHoleGalaxyScene.meta, total_nodes: 3 },
+    };
+    const session = await openDashboard(page, { graphScene: gravityZeroScene });
+    await page.goto('/');
+    // Set the real dashboard control before lazy graph construction. This proves the adapter
+    // passes zero into both the one-shot seed and every subsequent served-engine step.
+    await page.locator('#graph-gravity').evaluate(control => {
+      control.value = '0';
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await expect(page.locator('#graph-gravity-output')).toHaveText('0');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+      && window.__fg.graphData().nodes.length === 3
+      && window.__engraphisGraph.state().settings.gravity === 0
+      && window.__engraphisGraph.physicsDiagnostics().steps >= 30);
+    await page.waitForTimeout(1200);
+    const samples = [await renderedStellarSnapshot(page)];
+    for (let sample = 0; sample < 5; sample += 1) {
+      await page.waitForTimeout(800);
+      samples.push(await renderedStellarSnapshot(page));
+    }
+    const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    const localTravel = samples.slice(1).reduce((sum, sample, index) =>
+      sum + delta(samples[index].local.angle, sample.local.angle), 0);
+    const screenChord = samples.slice(1).reduce((sum, sample, index) =>
+      sum + Math.hypot(sample.screenLocal.x - samples[index].screenLocal.x,
+        sample.screenLocal.y - samples[index].screenLocal.y), 0);
+    const before = samples[0], after = samples.at(-1);
+    const systemCenterTravel = Math.hypot(
+      after.systemCenter.x - before.systemCenter.x,
+      after.systemCenter.y - before.systemCenter.y,
+    );
+    const evidence = {
+      elapsedMs: 4000, before: { star: before.star, planet: before.planet,
+        local: before.local, systemCenter: before.systemCenter, anchor: before.anchor,
+        steps: before.diagnostics.steps },
+      after: { star: after.star, planet: after.planet, local: after.local,
+        systemCenter: after.systemCenter, anchor: after.anchor,
+        steps: after.diagnostics.steps },
+      localTravel, screenChord, systemCenterTravel,
+      systemGravity: after.diagnostics.systemGravity,
+    };
+    await testInfo.attach('gravity-zero-visible-stellar-orbit.json', {
+      body: Buffer.from(JSON.stringify(evidence, null, 2)), contentType: 'application/json',
+    });
+    testInfo.annotations.push({
+      type: 'gravity-zero-orbit-evidence', description: JSON.stringify(evidence),
+    });
+
+    expect(samples.every(sample => sample.finite && sample.visible), JSON.stringify(evidence))
+      .toBe(true);
+    expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.5);
+    expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(12);
+    expect(after.local.radius).toBeGreaterThan(before.local.radius * 0.7);
+    expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
+    expect(systemCenterTravel, JSON.stringify(evidence)).toBeLessThan(1e-6);
+    expect(after.anchor).toEqual({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
+    expect(after.settings.gravity).toBe(0);
+    expect(after.diagnostics.blackHoleGravity).toBe(0);
+    expect(after.diagnostics.systemGravity).toMatchObject({
+      gravitySetting: 0,
+      stellarGravityFloorSetting: 48,
+      stellarGravity: 750,
+      eligibleStellarAnchors: 1,
+      fallbackAnchors: 0,
+      globalAnchors: 0,
+      stellarFloorActive: true,
+    });
+    expect(fetched(session.requested, '/v2-assets/engraphis-graph.js')).toHaveLength(1);
+    expect(session.pageErrors).toEqual([]);
+  });
+
 test('Galaxy motion is 50 percent faster while core perturbation stays bound', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
@@ -1565,7 +1977,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(resumed.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
 });
 
-test('Galaxy sliders span doubled Gravity, Link, and Orbital separation', async ({ page }) => {
+test('Galaxy sliders retain full ranges with contractive release-stable response', async ({ page }) => {
   // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
   // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -1655,6 +2067,8 @@ test('Galaxy sliders span doubled Gravity, Link, and Orbital separation', async 
   expect(separatedOrbits.before.diagnostics.orbitalSeparationSetting).toBe(120);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(30);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
+  expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength)
+    .toBeCloseTo(0.18, 12);
   expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
   expect(separatedOrbits.nonAnchorAfter).toBeGreaterThan(
     compactOrbits.nonAnchorAfter * 1.35,
@@ -1836,7 +2250,7 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Reheat layout control advances a bounded Galaxy relaxation burst', async ({ page }) => {
+test('Reheat layout control never adds Galaxy bonus physics slices', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
@@ -1876,12 +2290,11 @@ test('Reheat layout control advances a bounded Galaxy relaxation burst', async (
   await page.locator('#graph-reheat, button[title="Re-run layout"]').first().click();
   await page.waitForFunction(previous => {
     const diagnostics = window.__engraphisGraph.physicsDiagnostics();
-    return diagnostics.reheatActivations > previous.activations
-      && diagnostics.reheatStepsApplied >= previous.applied + 6;
+    return diagnostics.reheatActivations > previous.activations;
   }, {
     activations: before.diagnostics.reheatActivations,
-    applied: before.diagnostics.reheatStepsApplied,
   });
+  await page.waitForTimeout(250);
   const after = await page.evaluate(() => {
     const star = window.__fg.graphData().nodes.find(node => node.id === 'cygnus-star');
     return {
@@ -1891,10 +2304,11 @@ test('Reheat layout control advances a bounded Galaxy relaxation burst', async (
     };
   });
   expect(after.diagnostics.reheatActivations).toBe(before.diagnostics.reheatActivations + 1);
-  expect(after.diagnostics.reheatStepsApplied).toBeGreaterThanOrEqual(
-    before.diagnostics.reheatStepsApplied + 6,
-  );
-  expect(after.diagnostics.reheatStepsRemaining).toBeLessThan(30);
+  expect(after.diagnostics.reheatStepsApplied).toBe(before.diagnostics.reheatStepsApplied);
+  expect(after.diagnostics.reheatStepsRemaining).toBe(0);
+  expect(after.diagnostics.lastReheatSubsteps).toBe(0);
+  expect(after.diagnostics.steps - before.diagnostics.steps).toBeLessThanOrEqual(12);
+  expect(after.diagnostics.steps).toBeGreaterThan(before.diagnostics.steps);
   expect(Math.hypot(after.phase[0] - before.phase[0], after.phase[1] - before.phase[1]))
     .toBeGreaterThan(0.01);
   expect(after.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
@@ -1997,7 +2411,7 @@ test('drag remains bounded and releases its temporary pin', async ({ page }) => 
   expect(Math.abs(after.zoom.k - start.zoom.k)).toBeLessThan(0.001);
 });
 
-test('repel and gravity slider bursts coalesce into one bounded reheat', async ({ page }) => {
+test('repel and gravity slider bursts never schedule bonus Galaxy slices', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
@@ -2006,7 +2420,8 @@ test('repel and gravity slider bursts coalesce into one bounded reheat', async (
 
   const before = await page.evaluate(() => {
     const canvas = document.querySelector('#graph-net canvas');
-    return { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y };
+    return { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y,
+      diagnostics: window.__engraphisGraph.physicsDiagnostics() };
   });
   await page.evaluate(() => {
     const graph = window.__fg;
@@ -2041,6 +2456,7 @@ test('repel and gravity slider bursts coalesce into one bounded reheat', async (
         finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
           .every(value => Number.isFinite(value))),
         zoom: { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y },
+        diagnostics: window.__engraphisGraph.physicsDiagnostics(),
       };
     }));
   }
@@ -2048,6 +2464,9 @@ test('repel and gravity slider bursts coalesce into one bounded reheat', async (
   expect(samples.every(sample => Math.abs(sample.zoom.k - before.k) < 0.001
     && Math.abs(sample.zoom.x - before.x) < 0.5
     && Math.abs(sample.zoom.y - before.y) < 0.5)).toBe(true);
+  expect(samples.every(sample => sample.diagnostics.reheatStepsRemaining === 0
+    && sample.diagnostics.reheatStepsApplied === before.diagnostics.reheatStepsApplied
+    && sample.diagnostics.lastReheatSubsteps === 0)).toBe(true);
 });
 
 test('reduced visual motion does not start the opt-in graph frozen', async ({ page }) => {
