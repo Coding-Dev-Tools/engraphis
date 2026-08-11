@@ -4865,21 +4865,24 @@
         ctx.strokeStyle = alpha(nodeMaterial.identity, 0.92);
         ctx.beginPath(); ctx.arc(node.x, node.y, r + 2.45 / scale, 0, 6.2832); ctx.stroke();
       }
+      // Labels are deferred to onRenderFramePost so they always render above
+      // every node body regardless of iteration order.
+      ctx.globalAlpha = 1;
+    }
+
+    function paintNodeLabel(node, ctx, scale) {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+      const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id);
+      const r = node.radius;
       const showLabel = (state.settings.labels && labelIds.has(node.id)) || node.id === hilite || neighbor;
-      if (showLabel && scale > 0.35) {
-        // The dashboard setting is a screen-space font size.  As on the classic renderer,
-        // compensate only for graph zoom; an extra artistic divisor makes a configured 12px
-        // label unreadable at normal zoom and makes the Font size control misleading.
-        const size = Math.max(2, state.settings.font / scale);
-        ctx.font = '500 ' + size + 'px system-ui, sans-serif';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = 'rgba(0,0,0,.5)';
-        ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
-        // Node names sit directly on the canvas, so Classic's light and sepia themes need
-        // the dashboard-resolved text colour just like relation and collapsed-cluster labels.
-        ctx.fillStyle = state.themeColors.label || (node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)');
-        ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
-      }
+      if (!showLabel || scale <= 0.35) return;
+      const size = Math.max(2, state.settings.font / scale);
+      ctx.font = '500 ' + size + 'px system-ui, sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(0,0,0,.5)';
+      ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
+      ctx.fillStyle = state.themeColors.label || (node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)');
+      ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
       ctx.globalAlpha = 1;
     }
 
@@ -5788,6 +5791,12 @@
       .nodeLabel(node => esc(nodeName(node)))
       .linkLabel(link => esc(link && link.label ? link.label : ''))
       .onRenderFramePre((ctx, scale) => { try { styleBackground(ctx, scale); } catch (e) { } })
+      .onRenderFramePost((ctx, scale) => {
+        try {
+          if (!data || !data.nodes) return;
+          for (const node of data.nodes) paintNodeLabel(node, ctx, scale);
+        } catch (e) { /* label pass must never break the render loop */ }
+      })
       .nodeCanvasObject((node, ctx, scale) => styleNode(node, ctx, scale))
       .nodePointerAreaPaint((node, color, ctx) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(node.x, node.y, node.radius + 2, 0, 6.2832); ctx.fill(); })
       .linkColor(l => {
