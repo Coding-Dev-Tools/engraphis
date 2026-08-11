@@ -8270,6 +8270,8 @@ class MemoryService:
                         "COALESCE(memory.scope, 'workspace') IN ('workspace','user')) "
                     )
                     historical_params.append(repo_id)
+                    historical_sql += "AND (memory.repo_id=? OR memory.repo_id IS NULL) "
+                    historical_params.append(repo_id)
                 historical_sql += (
                     "ORDER BY support.edge_id, support.memory_id, support.source_kind"
                 )

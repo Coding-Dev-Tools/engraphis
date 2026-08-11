@@ -2950,50 +2950,67 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
     workspace_id = service.store.get_or_create_workspace("acme")
     repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
     repo_b = service.store.get_or_create_repo(workspace_id, "beta")
-    entity_x = service.store.upsert_entity(Node(
-        id="ent_x", name="X", ntype="concept", workspace_id=workspace_id,
-    ))
-    entity_y = service.store.upsert_entity(Node(
-        id="ent_y", name="Y", ntype="concept", workspace_id=workspace_id,
-    ))
-    service.store.upsert_edge(Edge(
-        id="edge_shared", src=entity_x, dst=entity_y, relation="relates",
-        workspace_id=workspace_id,
-    ))
-    _memory_a = service.store.add_memory(MemoryRecord(
-        id="mem_a", content="Alpha-only evidence.", workspace_id=workspace_id,
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="", content="Alpha-only evidence.", workspace_id=workspace_id,
         repo_id=repo_a, scope=Scope.REPO,
     ))
-    _memory_shared = service.store.add_memory(MemoryRecord(
-        id="mem_shared", content="Shared evidence.", workspace_id=workspace_id,
+    entity_shared = service.store.upsert_entity(Node(
+        id="ent_shared_support", name="Shared", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    entity_shared2 = service.store.upsert_entity(Node(
+        id="ent_shared_support2", name="Shared2", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    _entity_b_only = service.store.upsert_entity(Node(
+        id="ent_b_only_support", name="BetaOnly", ntype="concept",
+        workspace_id=workspace_id, repo_id=repo_b,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_shared_support", src=entity_shared, dst=entity_shared2,
+        relation="relates", workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+    memory_shared = service.store.add_memory(MemoryRecord(
+        id="", content="Shared evidence.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
     ))
-    _memory_b = service.store.add_memory(MemoryRecord(
-        id="mem_b", content="Beta-only evidence.", workspace_id=workspace_id,
+    memory_b = service.store.add_memory(MemoryRecord(
+        id="", content="Beta-only evidence.", workspace_id=workspace_id,
         repo_id=repo_b, scope=Scope.REPO,
     ))
-    for memory_id, confidence in (
-        ("mem_a", 0.9), ("mem_shared", 0.7), ("mem_b", 0.8),
-    ):
-        service.store.conn.execute(
-            "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
-            "VALUES ('edge_shared', ?, 'manual', ?)",
-            (memory_id, confidence),
-        )
+    service.store.add_edge_support(
+        "edge_shared_support", {"source": "manual", "memory_id": memory_shared},
+    )
+    service.store.add_edge_support(
+        "edge_shared_support", {"source": "manual", "memory_id": memory_b},
+    )
+    closed_at = time.time() + 1.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id=?",
+        (closed_at, closed_at, memory_a),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id='edge_shared_support'",
+        (closed_at, closed_at),
+    )
     service.store.conn.commit()
 
     scene = service.graph_scene(
         workspace="acme", repo="beta", include_history=True,
-        valid_at=time.time() + 10.0, known_at=time.time() + 10.0,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
     )
 
     shared_edge = next(
-        (edge for edge in scene["edges"] if edge["id"] == "edge_shared"), None,
+        (edge for edge in scene["edges"] if edge["id"] == "edge_shared_support"),
+        None,
     )
     assert shared_edge is not None
     support_ids = set(shared_edge.get("support_memory_ids") or [])
-    assert "mem_a" not in support_ids
-    assert {"mem_shared", "mem_b"} <= support_ids
+    assert memory_a not in support_ids
+    assert {memory_shared, memory_b} <= support_ids
     assert shared_edge["support_count"] == 2
 
 
