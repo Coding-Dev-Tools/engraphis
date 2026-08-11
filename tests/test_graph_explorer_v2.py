@@ -2648,6 +2648,39 @@ def test_current_graph_scene_cache_expires_at_next_temporal_boundary(monkeypatch
     assert expired["meta"]["total_edges"] == 1
 
 
+def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    now = time.time()
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=?, ingested_at=?, expired_at=? "
+        "WHERE content='Alpha uses Beta.'",
+        (now + 1.0, now + 2.0, now + 4.0),
+    )
+    service.store.conn.commit()
+    clock = {"now": now}
+    monkeypatch.setattr(service_module, "time", types.SimpleNamespace(
+        time=lambda: clock["now"], perf_counter=time.perf_counter,
+    ))
+
+    before = service.graph_scene(workspace="acme")
+    warm = service.graph_scene(workspace="acme")
+    clock["now"] = now + 1.5
+    before_ingestion = service.graph_scene(workspace="acme")
+    clock["now"] = now + 2.5
+    after_ingestion = service.graph_scene(workspace="acme")
+    clock["now"] = now + 4.5
+    after_expiry = service.graph_scene(workspace="acme")
+
+    assert before["meta"]["total_edges"] == 1
+    assert warm["meta"]["cache_hit"] is True
+    assert before_ingestion["meta"]["cache_hit"] is False
+    assert before_ingestion["meta"]["total_edges"] == 1
+    assert after_ingestion["meta"]["cache_hit"] is False
+    assert after_ingestion["meta"]["total_edges"] == 2
+    assert after_expiry["meta"]["cache_hit"] is False
+    assert after_expiry["meta"]["total_edges"] == 1
+
+
 @pytest.mark.parametrize(("kwargs", "message"), [
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
