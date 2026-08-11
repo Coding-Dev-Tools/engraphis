@@ -831,6 +831,25 @@ def test_conflict_review_hides_another_callers_session_memory():
         set_current_user(None)
 
 
+def test_first_use_workspace_rechecks_personal_owner_after_atomic_race(monkeypatch):
+    service = MemoryService.create(':memory:')
+    try:
+        set_current_user({'id': 'usr_alice', 'email': 'alice@example.test', 'role': 'member'})
+        winner_id = service.store.create_workspace(
+            'raced', settings={'visibility': 'personal', 'owner': 'bob@example.test'},
+        )
+
+        def return_racing_winner(_name, *, settings=None):
+            del settings
+            return winner_id
+
+        monkeypatch.setattr(service.store, 'get_or_create_workspace', return_racing_winner)
+        with pytest.raises(ValidationError, match='personal folder of another user'):
+            service.remember('must not enter the raced workspace', workspace='raced')
+    finally:
+        set_current_user(None)
+
+
 def test_conflict_review_pages_past_ineligible_newer_rows_before_limit():
     service = MemoryService.create(":memory:")
     wid = service.store.get_or_create_workspace("acme")
