@@ -19,6 +19,7 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -151,6 +152,7 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
     if: >-
       github.event_name == 'push' ||
@@ -188,6 +190,7 @@ jobs:
     name: Compare independent distribution builders
     needs: [build, reproducibility-build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -279,6 +282,7 @@ jobs:
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -320,6 +324,7 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -372,6 +377,7 @@ jobs:
   installed-artifact-platform-smoke:
     name: Installed wheel smoke (${{ matrix.os }})
     needs: build
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     if: >-
       github.event_name == 'push' ||
@@ -423,6 +429,7 @@ jobs:
 
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -447,6 +454,7 @@ jobs:
 
   browser-accessibility:
     name: Browser accessibility release gate
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'push' ||
@@ -472,6 +480,7 @@ jobs:
 
   pi-extension:
     name: Pi extension release gate
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'push' ||
@@ -503,6 +512,7 @@ jobs:
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -644,6 +654,7 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -677,6 +688,7 @@ jobs:
     needs: [build, reproducibility-check, python-matrix, artifact-core-py39, installed-artifact-platform-smoke, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -754,6 +766,7 @@ jobs:
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       id-token: write
       contents: read
@@ -800,6 +813,7 @@ jobs:
     needs: publish
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
 
@@ -845,6 +859,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       inputs.release_tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: write

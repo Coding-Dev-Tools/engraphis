@@ -262,6 +262,7 @@ jobs:
     # pyproject.toml, or this workflow). No third-party actions — plain git diff.
     name: docker smoke — path gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
@@ -282,6 +283,7 @@ jobs:
   docker-smoke:
     name: docker build + health smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: docker-gate
     if: needs.docker-gate.outputs.run == 'true'
     steps:
@@ -352,6 +354,7 @@ jobs:
   build:
     name: build + install wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
