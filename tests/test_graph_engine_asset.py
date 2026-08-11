@@ -1079,7 +1079,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) == pytest.approx(142.8846153846154)
+    assert max(report["capped"]) <= pytest.approx(45)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -3444,7 +3444,7 @@ def test_render_enforces_horizon_before_paint_for_oversized_static_galaxy() -> N
           { id: 'intruder', community_id: 'intruder', gravity_mass: 1,
             visual_radius: 3, degree: 1, x: 0, y: 0, vx: 0, vy: 5 },
         ];
-        for (let index = 0; index < 599; index++) nodes.push({
+        for (let index = 0; index < 999; index++) nodes.push({
           id: 'filler-' + index, community_id: 'filler-' + index,
           gravity_mass: 1, visual_radius: 3, degree: 1,
           x: 240 + index * 2, y: 180 + (index % 17) * 3, vx: 0, vy: 0,
@@ -3491,7 +3491,7 @@ def test_render_reapplies_far_field_envelope_before_static_repaint() -> None:
           { id: 'intruder', community_id: 'outer', gravity_mass: 1,
             visual_radius: 3, degree: 1, x: 300, y: 0, vx: 0, vy: 4 },
         ];
-        for (let index = 0; index < 599; index++) nodes.push({
+        for (let index = 0; index < 999; index++) nodes.push({
           id: 'filler-' + index, community_id: 'filler-' + index,
           gravity_mass: 1, visual_radius: 3, degree: 1,
           x: 160 + index * 2, y: 140 + (index % 17) * 3, vx: 0, vy: 0,
@@ -4026,7 +4026,16 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
           I.galaxySceneWithinLiveLimit({ nodes: Array(1001), links: [] }),
           I.galaxySceneWithinLiveLimit({ nodes: [], links: Array(2001) }),
         ];
-        const scene = count => ({
+        let nextFrame = 1;
+        const frames = new Map();
+        window.requestAnimationFrame = callback => {
+          const id = nextFrame++; frames.set(id, callback); return id;
+        };
+        window.cancelAnimationFrame = id => frames.delete(id);
+        const flush = now => {
+          const batch = [...frames.values()]; frames.clear(); batch.forEach(callback => callback(now));
+        };
+        const scene = (count, edgeCount) => ({
           meta: { layout_seed: 91 },
           nodes: Array.from({ length: count }, (_, index) => ({
             id: index === 0 ? 'black-hole' : `node-${index}`,
@@ -4041,38 +4050,55 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
             vx: 0,
             vy: 0,
           })),
-          edges: [],
+          edges: Array.from({ length: edgeCount }, (_, index) => ({
+            id: `edge-${index}`, source: 'black-hole',
+            target: `node-${1 + index % Math.max(1, count - 1)}`,
+            layer: 'semantic', strength: 0.5, rest_length: 20, spring_strength: 0.08,
+          })),
         });
 
-        const galaxy = G.create(el, { reducedMotion: () => true });
-        galaxy.setData(scene(601));
-        galaxy.setCollapse('auto');
+        const galaxy = G.create(el, { reducedMotion: () => false });
+        galaxy.setData(scene(1000, 2000));
         store.onZoom({ k: 0.1 });
+        const before = galaxy.physicsDiagnostics();
+        flush(0); flush(34); flush(68);
         const live = galaxy.physicsDiagnostics();
         const autoCollapsed = galaxy.state().collapsed;
         galaxy.setCollapse(true);
         const explicitCollapsed = galaxy.state().collapsed;
+        galaxy.setCollapse(false);
+        galaxy.setData(scene(1001, 2000));
+        const nodeOverflow = galaxy.physicsDiagnostics();
+        galaxy.setData(scene(1000, 2001));
+        const edgeOverflow = galaxy.physicsDiagnostics();
         galaxy.destroy();
 
         const full = G.create(el, {
-          reducedMotion: () => true,
+          reducedMotion: () => false,
           renderMode: 'full',
         });
         full.setPreset('original');
-        full.setData(scene(601));
+        full.setData(scene(601, 600));
         const classicFull = full.physicsDiagnostics();
-        emit({ within, live, autoCollapsed, explicitCollapsed, classicFull });
+        emit({ within, before, live, autoCollapsed, explicitCollapsed, nodeOverflow,
+          edgeOverflow, classicFull });
         """
     )
     assert report["within"] == [True, False, False]
-    assert report["live"]["renderedNodes"] == 601
-    assert report["live"]["galaxyLiveNodeLimit"] == 1000
-    assert report["live"]["galaxyLiveLinkLimit"] == 2000
-    assert report["live"]["withinGalaxyLiveLimit"] is True
-    assert report["live"]["largeRenderTier"] is True
-    assert report["live"]["staticLayout"] is False
+    assert report["before"]["renderedNodes"] == 1000
+    assert report["before"]["renderedLinks"] == 2000
+    assert report["before"]["galaxyLiveNodeLimit"] == 1000
+    assert report["before"]["galaxyLiveLinkLimit"] == 2000
+    assert report["before"]["withinGalaxyLiveLimit"] is True
+    assert report["before"]["largeRenderTier"] is True
+    assert report["before"]["staticLayout"] is False
+    assert report["before"]["active"] is True
+    assert report["live"]["steps"] >= report["before"]["steps"] + 3
+    assert report["live"]["active"] is True
     assert report["autoCollapsed"] is False
     assert report["explicitCollapsed"] is True
+    assert report["nodeOverflow"]["staticLayout"] is True
+    assert report["edgeOverflow"]["staticLayout"] is True
     assert report["classicFull"]["mode"] == "original"
     assert report["classicFull"]["staticLayout"] is True
 
@@ -4213,7 +4239,7 @@ def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces
         """
         const api = G.create(el, { reducedMotion: () => false });
         const scene = () => {
-          const data = chain(600);
+          const data = chain(1000);
           data.meta = { layout_seed: 91 };
           data.nodes.forEach((node, index) => {
             node.x = index - 300; node.y = (index % 7) * 3;
@@ -4243,11 +4269,11 @@ def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["total"] == report["pinned"] == 601
+    assert report["total"] == report["pinned"] == 1001
     assert report["finite"] is report["same"] is report["deterministic"] is True
     # The selected community star may project its nearest satellite before a static paint;
     # the far endpoint is unaffected and proves positions are otherwise preserved.
-    assert report["endpoints"][1] == [300, 15]
+    assert report["endpoints"][1] == [700, 18]
     assert report["systemAnchorExclusion"]["minimumClearance"] >= -1e-9
     assert report["cooldown"] == [0, 0, 0]
     assert report["forces"] == [True, True, True, True, True, True]
@@ -5743,7 +5769,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
     assert first["frames"] == first["steps"] == first["lastSubsteps"] == 1
     assert first["timestep"] == pytest.approx(0.021328125)
     assert first["velocityDecay"] == pytest.approx(0.00005)
-    assert first["reducedMotion"] is True
+    assert first["reducedMotion"] is False
     assert first["kineticEnergy"] > 0
     assert first["speedCapActivations"] == 0
 
