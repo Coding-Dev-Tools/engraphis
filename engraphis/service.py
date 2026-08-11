@@ -8758,16 +8758,17 @@ class MemoryService:
             GRAPH_SCENE_ALGORITHM_VERSION,
         )
         cached = self._graph_scene_cache.get(cache_key)
+        # Cache hit only when both temporal axes are anchored (making the scene
+        # a fixed historical query) or before the computed expiry deadline.
+        # When known_at floats (defaults to system time), ghost state evolves as
+        # system time crosses future valid_to_recorded_at boundaries.
+        both_anchored = (
+            clean_valid_at is not None and clean_known_at is not None
+        )
         if cached is not None and (
-                clean_valid_at is not None or clean_known_at is not None
-                or time.time() < cached[0]):
+                both_anchored or time.time() < cached[0]):
             self._graph_scene_cache.move_to_end(cache_key)
             scene = copy.deepcopy(cached[1])
-            scene["meta"]["cache_hit"] = True
-            scene["meta"]["query_ms"] = round(
-                (time.perf_counter() - started) * 1000.0, 3
-            )
-            return scene
         if cached is not None:
             del self._graph_scene_cache[cache_key]
         present = time.time()
@@ -8845,10 +8846,15 @@ class MemoryService:
                     limit=MAX_GRAPH_COMPLETE_PAYLOAD_BYTES,
                 )
             scene["meta"]["payload_bytes_estimate"] = payload_bytes
+        # Indefinite cache only when both temporal axes are anchored, making the
+        # scene a fixed historical query whose content cannot change. When
+        # known_at floats (defaults to system time), ghost state evolves as
+        # system time crosses future valid_to_recorded_at boundaries — the scene
+        # must expire at those boundaries.
         valid_until = (
             math.inf if (
-                clean_valid_at is not None or clean_known_at is not None or not _wid
-            )
+                clean_valid_at is not None and clean_known_at is not None
+            ) or not _wid
             else self._graph_scene_valid_until(_wid, query_at)
         )
         # One complete scene can be many megabytes.  Keep at most one in the shared
