@@ -135,6 +135,22 @@ def test_read_only_receipt_export_uses_the_first_workspace_name_when_omitted():
     assert response.json()["verification"]["valid"] is True
 
 
+def test_read_only_receipt_export_sanitizes_unicode_workspace_name_for_header(monkeypatch):
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    monkeypatch.setattr(
+        svc, "list_workspaces", lambda: {"workspaces": [{"name": "工作区"}]}
+    )
+    monkeypatch.setattr(
+        svc, "export_receipts", lambda *, workspace: {"workspace": workspace}
+    )
+
+    response = TestClient(create_read_only_app(svc)).get("/receipts/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].isascii()
+    assert "engraphis-receipts-___-" in response.headers["content-disposition"]
+
+
 @pytest.mark.parametrize("invalid_limit", [True, "2"])
 def test_read_only_intent_recall_rejects_coerced_memory_type_limits(invalid_limit):
     svc = MemoryService.create(":memory:", graph_extractor="none")
