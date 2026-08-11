@@ -78,6 +78,12 @@ def test_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch):
     assert Settings().db_path == ":memory:"
 
 
+@pytest.mark.parametrize("uri", ["file::memory:", "file::memory:?cache=shared"])
+def test_file_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch, uri):
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+    assert Settings().db_path == uri
+
+
 def _sqlite(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
