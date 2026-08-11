@@ -5103,7 +5103,7 @@
         /* Contacts must not erase a planet's tangential phase. The dominant-star surface
            handles the hard minimum; generic local pressure removes radial closing only. */
         preserveLocalTangentialVelocity: true,
-        skipSystemAnchorPairs: true,
+        skipSystemAnchorPairs: false,
         systemAnchorExclusionPadding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
         /* The black-hole contact is independent of the adjustable local separation pressure.
            It is always strong enough to keep painted geometry outside the event horizon. */
