@@ -475,3 +475,36 @@ def test_every_registered_format_survives_the_generic_import_handoff():
         assert {row["source_format"] for row in rows} == set(DOCUMENT_FORMATS)
     finally:
         service.close()
+
+def test_secure_erase_removes_document_import_job_items():
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("erase-import-items")
+        report = DocumentImporter(service).import_scan(
+            _scan(("private.txt", b"delete this secret\\n")),
+            workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_label="Private documents", confirmed=True,
+        )
+        source = service.store.conn.execute(
+            "SELECT id, memory_id FROM source_imports WHERE vault_id=?",
+            (report["source_id"],),
+        ).fetchone()
+        assert source is not None and source["memory_id"]
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM source_import_items WHERE source_id=?",
+            (source["id"],),
+        ).fetchone()[0] == 1
+
+        service.store.secure_erase_memory(source["memory_id"])
+
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM source_import_items WHERE source_id=?",
+            (source["id"],),
+        ).fetchone()[0] == 0
+        assert service.store.conn.execute(
+            "SELECT COUNT(*) FROM source_imports WHERE id=?",
+            (source["id"],),
+        ).fetchone()[0] == 0
+    finally:
+        service.close()
