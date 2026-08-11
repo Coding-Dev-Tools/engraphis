@@ -8264,6 +8264,26 @@ class MemoryService:
                 in endpoint_canonicals
             ]
         edge_ids = [row["id"] for row in edge_rows if not str(row["id"]).startswith("code-edge:")]
+        # Preserve the distinction between a truly legacy support-less edge and an
+        # edge whose normalized supports were filtered out by scope/time. The graph
+        # builder may use edge provenance for the former, but must not resurrect a
+        # foreign memory id for the latter.
+        normalized_support_edge_ids: set[str] = set()
+        for start in range(0, len(edge_ids), 500):
+            chunk = edge_ids[start:start + 500]
+            if not chunk:
+                continue
+            marks = ",".join("?" for _ in chunk)
+            normalized_support_edge_ids.update(
+                str(row["edge_id"])
+                for row in self.store.conn.execute(
+                    f"SELECT DISTINCT edge_id FROM edge_supports WHERE edge_id IN ({marks})",
+                    chunk,
+                ).fetchall()
+            )
+        for edge in edge_rows:
+            if str(edge.get("id") or "") in normalized_support_edge_ids:
+                edge["_has_normalized_support"] = True
         # Bounded IN chunks avoid a second scan of the relation table while preserving
         # the exact selected edge ids. Weak co-occurrence is filtered after canonical
         # relation bundling, once its aggregate support is known.
