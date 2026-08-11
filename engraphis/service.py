@@ -7794,10 +7794,10 @@ class MemoryService:
             edge_sql += (
                 "AND (valid_from IS NULL OR valid_from<=?) "
                 "AND (ingested_at IS NULL OR ingested_at<=?) "
-                "AND expired_at IS NULL AND "
+                "AND (expired_at IS NULL OR ?<expired_at) AND "
                 + _graph_edge_history_visibility_sql("edges", at=t, known_at=known_t)
             )
-            edge_params: list[Any] = [wid, t, known_t]
+            edge_params: list[Any] = [wid, t, known_t, known_t]
         else:
             edge_sql += (
                 "AND (valid_from IS NULL OR valid_from<=?) "
