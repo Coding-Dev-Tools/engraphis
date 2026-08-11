@@ -8641,11 +8641,11 @@ class MemoryService:
         clean_depth = bounded_int(depth, "depth", 0, 2)
         clean_min_support = bounded_int(min_support, "min_support", 0, 1_000_000)
         clean_node_limit = (
-            bounded_int(node_limit, "node_limit", 1, 500)
+            bounded_int(node_limit, "node_limit", 1, 1000)
             if node_limit is not None else None
         )
         clean_edge_limit = (
-            bounded_int(edge_limit, "edge_limit", 0, 1000)
+            bounded_int(edge_limit, "edge_limit", 0, 2000)
             if edge_limit is not None else None
         )
         if clean_level == "complete" and (

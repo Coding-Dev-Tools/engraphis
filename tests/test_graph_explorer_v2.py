@@ -2594,8 +2594,8 @@ def test_current_graph_scene_cache_expires_at_next_temporal_boundary(monkeypatch
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
     ({"min_confidence": float("nan")}, "min_confidence"),
-    ({"node_limit": 501}, "node_limit"),
-    ({"edge_limit": 1001}, "edge_limit"),
+    ({"node_limit": 1001}, "node_limit"),
+    ({"edge_limit": 2001}, "edge_limit"),
     ({"edge_limit": -1}, "edge_limit"),
 ])
 def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
@@ -2606,15 +2606,15 @@ def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
 
 
 
-def test_graph_scene_accepts_the_500_node_1000_relation_overview_limit():
+def test_graph_scene_accepts_the_1000_node_2000_relation_overview_limit():
     service, _alpha, _beta, _gamma = _seed_service()
 
     scene = service.graph_scene(
-        workspace="acme", node_limit=500, edge_limit=1000,
+        workspace="acme", node_limit=1000, edge_limit=2000,
     )
 
-    assert scene["meta"]["shown_nodes"] <= 500
-    assert scene["meta"]["shown_edges"] <= 1000
+    assert scene["meta"]["shown_nodes"] <= 1000
+    assert scene["meta"]["shown_edges"] <= 2000
 
 def test_graph_lookup_direct_service_inputs_are_bounded():
     service, _alpha, _beta, _gamma = _seed_service()
