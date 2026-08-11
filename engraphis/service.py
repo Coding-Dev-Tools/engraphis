@@ -8363,9 +8363,9 @@ class MemoryService:
             if include_history:
                 memory_link_sql += (
                     "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
-                    "AND links.expired_at IS NULL "
+                    "AND (links.expired_at IS NULL OR ?<links.expired_at) "
                 )
-                memory_link_params.append(known_t)
+                memory_link_params.extend((known_t, known_t))
             else:
                 memory_link_sql += (
                     "AND (links.valid_to IS NULL OR ?<links.valid_to "
