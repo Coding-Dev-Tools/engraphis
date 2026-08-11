@@ -1720,18 +1720,24 @@
      geometry and relative velocities survive the contact. Members of the black-hole system
      are handled individually because translating that system would move the anchor itself.
 
-     This is a zero-restitution contact constraint: project only the penetration and remove
-     only inward radial velocity. Tangential velocity is untouched, so a grazing body keeps
-     orbiting instead of sticking to the horizon or receiving a repulsive slingshot. */
+     This is a zero-restitution contact constraint: project only the penetration, remove inward
+     radial velocity, and scale BH-frame tangential speed by old/new radius. A grazing body keeps
+     essentially all of its orbit, while a deep correction cannot manufacture angular momentum
+     or a repulsive slingshot. */
   function applyGalaxyBlackHoleExclusion(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
-    const anchor = galaxyGlobalAnchor(bodies);
+    const candidate = galaxyGlobalAnchor(bodies);
+    /* Compatibility payloads can omit anchor roles. They still receive a smooth central field,
+       but no node is painted as a black hole, so inventing a collision disc would rewrite their
+       server coordinates. The hard horizon belongs only to the explicit global anchor. */
+    const anchor = candidate && candidate.anchor_role === 'global' ? candidate : null;
     const stats = {
       anchorId: anchor ? anchor.id : null,
       contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
       correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+      tangentialVelocityRemoved: 0,
       minimumClearance: null,
     };
     if (!anchor || bodies.length < 2) return stats;
@@ -1752,7 +1758,9 @@
         / 0x100000000 * Math.PI * 2;
       return { x: Math.cos(angle), y: Math.sin(angle), distance: 0 };
     };
-    const removeSystemInwardVelocity = (members, unitX, unitY) => {
+    const stabilizeSystemContactVelocity = (
+      members, unitX, unitY, oldDistance, newDistance
+    ) => {
       let totalMass = 0, velocityX = 0, velocityY = 0;
       members.forEach(node => {
         const mass = finitePositive(node.gravity_mass, 1, 1000);
@@ -1760,16 +1768,27 @@
         velocityX += mass * (Number.isFinite(node.vx) ? node.vx : 0);
         velocityY += mass * (Number.isFinite(node.vy) ? node.vy : 0);
       });
-      if (!(totalMass > 0)) return 0;
+      if (!(totalMass > 0)) return { inward: 0, tangential: 0 };
       const relativeVx = velocityX / totalMass - anchorVx;
       const relativeVy = velocityY / totalMass - anchorVy;
-      const inwardSpeed = relativeVx * unitX + relativeVy * unitY;
-      if (!(inwardSpeed < 0)) return 0;
+      const tangentX = -unitY, tangentY = unitX;
+      const radialSpeed = relativeVx * unitX + relativeVy * unitY;
+      const tangentialSpeed = relativeVx * tangentX + relativeVy * tangentY;
+      const tangentScale = newDistance > 1e-9
+        ? Math.max(0, Math.min(1, oldDistance / newDistance)) : 0;
+      const targetRadialSpeed = Math.max(0, radialSpeed);
+      const targetTangentialSpeed = tangentialSpeed * tangentScale;
+      const targetVx = targetRadialSpeed * unitX + targetTangentialSpeed * tangentX;
+      const targetVy = targetRadialSpeed * unitY + targetTangentialSpeed * tangentY;
+      const shiftVx = targetVx - relativeVx, shiftVy = targetVy - relativeVy;
       members.forEach(node => {
-        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) - inwardSpeed * unitX;
-        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) - inwardSpeed * unitY;
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + shiftVx;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + shiftVy;
       });
-      return -inwardSpeed;
+      return {
+        inward: Math.max(0, -radialSpeed),
+        tangential: Math.abs(tangentialSpeed) * (1 - tangentScale),
+      };
     };
 
     communityCenters(bodies).forEach(center => {
@@ -1782,14 +1801,13 @@
           if (!(correction > 0) || !Number.isFinite(correction)) return;
           node.x = anchorX + radial.x * minimumDistance;
           node.y = anchorY + radial.y * minimumDistance;
-          const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - anchorVx;
-          const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0) - anchorVy;
-          const inwardSpeed = relativeVx * radial.x + relativeVy * radial.y;
-          if (inwardSpeed < 0) {
-            node.vx -= inwardSpeed * radial.x;
-            node.vy -= inwardSpeed * radial.y;
-            stats.inwardVelocityRemoved += -inwardSpeed;
-          }
+          if (Number.isFinite(node.fx)) node.fx = node.x;
+          if (Number.isFinite(node.fy)) node.fy = node.y;
+          const velocity = stabilizeSystemContactVelocity(
+            [node], radial.x, radial.y, radial.distance, minimumDistance
+          );
+          stats.inwardVelocityRemoved += velocity.inward;
+          stats.tangentialVelocityRemoved += velocity.tangential;
           stats.contacts++;
           stats.coreNodes++;
           stats.repelledNodes++;
@@ -1811,10 +1829,14 @@
       center.nodes.forEach(node => {
         node.x += shiftX;
         node.y += shiftY;
+        if (Number.isFinite(node.fx)) node.fx += shiftX;
+        if (Number.isFinite(node.fy)) node.fy += shiftY;
       });
-      stats.inwardVelocityRemoved += removeSystemInwardVelocity(
-        center.nodes, radial.x, radial.y
+      const velocity = stabilizeSystemContactVelocity(
+        center.nodes, radial.x, radial.y, radial.distance, minimumDistance
       );
+      stats.inwardVelocityRemoved += velocity.inward;
+      stats.tangentialVelocityRemoved += velocity.tangential;
       stats.contacts++;
       stats.systems++;
       stats.repelledNodes += center.nodes.length;
@@ -2127,6 +2149,18 @@
       Number.isFinite(Number(opts.velocityDecay)) ? Number(opts.velocityDecay) : 0.002));
     const speedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     if (!bodies.length) return { bodies: 0, collisions: 0, kinetic: 0 };
+    const horizonEnabled = anchorFrame && opts.includeBlackHoleExclusion !== false;
+    const projectBlackHoleHorizon = () => horizonEnabled
+      ? applyGalaxyBlackHoleExclusion(bodies, { padding: opts.blackHoleExclusionPadding })
+      : {
+        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+        correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+        tangentialVelocityRemoved: 0,
+        minimumClearance: null,
+      };
+    /* Fresh payloads and pointer updates may begin a slice inside the boundary. Repair that
+       phase before either acceleration sample or the convergence track observes it. */
+    const initialHorizon = projectBlackHoleHorizon();
     const precomputedCenters = communityCenters(bodies);
     const convergenceAnchor = opts.inwardConvergence === true ? galaxyGlobalAnchor(bodies) : null;
     const initialRadii = convergenceAnchor ? new Map(
@@ -2135,14 +2169,6 @@
           center.y - convergenceAnchor.y),
       }])
     ) : null;
-    const horizonEnabled = anchorFrame && opts.includeBlackHoleExclusion !== false;
-    const projectBlackHoleHorizon = () => horizonEnabled
-      ? applyGalaxyBlackHoleExclusion(bodies, { padding: opts.blackHoleExclusionPadding })
-      : {
-        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
-        correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
-        minimumClearance: null,
-      };
 
     const start = galaxyAccelerations(bodies, links, bridges, opts);
     bodies.forEach(node => {
@@ -2240,16 +2266,23 @@
        to cover the event horizon. */
     restoreFixedNode();
     const finalHorizon = projectBlackHoleHorizon();
+    const horizonPasses = [initialHorizon, driftHorizon, finalHorizon];
     const blackHoleExclusion = {
-      anchorId: finalHorizon.anchorId || driftHorizon.anchorId,
-      contacts: driftHorizon.contacts + finalHorizon.contacts,
-      systems: driftHorizon.systems + finalHorizon.systems,
-      coreNodes: driftHorizon.coreNodes + finalHorizon.coreNodes,
-      repelledNodes: driftHorizon.repelledNodes + finalHorizon.repelledNodes,
-      correctedDistance: driftHorizon.correctedDistance + finalHorizon.correctedDistance,
-      maximumShift: Math.max(driftHorizon.maximumShift, finalHorizon.maximumShift),
-      inwardVelocityRemoved: driftHorizon.inwardVelocityRemoved
-        + finalHorizon.inwardVelocityRemoved,
+      anchorId: finalHorizon.anchorId || driftHorizon.anchorId || initialHorizon.anchorId,
+      contacts: horizonPasses.reduce((sum, pass) => sum + pass.contacts, 0),
+      systems: horizonPasses.reduce((sum, pass) => sum + pass.systems, 0),
+      coreNodes: horizonPasses.reduce((sum, pass) => sum + pass.coreNodes, 0),
+      repelledNodes: horizonPasses.reduce((sum, pass) => sum + pass.repelledNodes, 0),
+      correctedDistance: horizonPasses.reduce(
+        (sum, pass) => sum + pass.correctedDistance, 0
+      ),
+      maximumShift: Math.max(...horizonPasses.map(pass => pass.maximumShift)),
+      inwardVelocityRemoved: horizonPasses.reduce(
+        (sum, pass) => sum + pass.inwardVelocityRemoved, 0
+      ),
+      tangentialVelocityRemoved: horizonPasses.reduce(
+        (sum, pass) => sum + pass.tangentialVelocityRemoved, 0
+      ),
       minimumClearance: finalHorizon.minimumClearance,
     };
     bodies.forEach(node => {
@@ -3192,6 +3225,7 @@
     let galaxyLastBlackHoleExclusion = {
       anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
       correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+      tangentialVelocityRemoved: 0,
       minimumClearance: null,
     };
     let galaxyLastMutualGravity = {
@@ -4070,6 +4104,7 @@
       galaxyLastBlackHoleExclusion = {
         anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
         correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+        tangentialVelocityRemoved: 0,
         minimumClearance: null,
       };
       galaxyReheatStepsRemaining = 0;
@@ -4517,6 +4552,11 @@
             state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion
           );
         } else clearPinnedPositions(data);
+        /* graphData() may paint synchronously. Enforce the event horizon after every layout
+           seed (including the pinned oversized layout) before the vendor sees the payload. */
+        if (galaxyMode) galaxyLastBlackHoleExclusion = applyGalaxyBlackHoleExclusion(
+          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+        );
         fg.graphData(data);
         seeded = data;
       } else if (staticFullLayout && fullLayoutDirty) {
@@ -4537,6 +4577,11 @@
           state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion
         );
       }
+      /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
+         receive the same strict painted-edge invariant before the next redraw. */
+      if (reused && galaxyMode) galaxyLastBlackHoleExclusion = applyGalaxyBlackHoleExclusion(
+        data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+      );
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
       /* Bound the simulation the way the classic path does. Without these force-graph keeps its
