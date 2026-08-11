@@ -729,7 +729,7 @@ def test_overview_ranks_communities_by_the_mass_sent_to_physics(monkeypatch):
     add_community("c0", [8.0], global_anchor=True)
     add_community("ca", [8.0])
     add_community("cb", [3.0, 3.0])
-    for index in range(22):
+    for index in range(34):
         add_community(f"f{index:02d}", [3.2, 3.2])
 
     fake_graph = {
