@@ -268,12 +268,14 @@ def _graph_edge_history_visibility_sql(
         f"OR history_support.valid_from<={anchor}) "
         "AND (history_support.ingested_at IS NULL "
         f"OR history_support.ingested_at<={known_anchor}) "
-        "AND history_support.expired_at IS NULL "
+        "AND (history_support.expired_at IS NULL "
+        f"OR {known_anchor}<history_support.expired_at) "
         "AND (history_memory.valid_from IS NULL "
         f"OR history_memory.valid_from<={anchor}) "
          "AND (history_memory.ingested_at IS NULL "
          f"OR history_memory.ingested_at<={known_anchor}) "
-         "AND history_memory.expired_at IS NULL "
+         "AND (history_memory.expired_at IS NULL "
+         f"OR {known_anchor}<history_memory.expired_at) "
          f"AND history_memory.workspace_id={edge_alias}.workspace_id "
          "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
      )
@@ -7889,14 +7891,14 @@ class MemoryService:
                 "WHERE graph_support.edge_id=edges.id "
                 "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
                 "AND (graph_support.ingested_at IS NULL OR graph_support.ingested_at<=?) "
-                "AND graph_support.expired_at IS NULL "
+                "AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
                 "AND graph_memory.workspace_id=? "
                 "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
                 "AND (graph_memory.ingested_at IS NULL OR graph_memory.ingested_at<=?) "
-                "AND graph_memory.expired_at IS NULL"
+                "AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
             )
             edge_params.extend((
-                t, known_t, wid, t, known_t,
+                t, known_t, known_t, wid, t, known_t, known_t,
             ))
             if restrict_sessions:
                 edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
@@ -8166,14 +8168,14 @@ class MemoryService:
                     f"WHERE support.edge_id IN ({marks}) "
                     "AND (support.valid_from IS NULL OR support.valid_from<=?) "
                     "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
-                    "AND support.expired_at IS NULL "
+                    "AND (support.expired_at IS NULL OR ?<support.expired_at) "
                     "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
                     "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
-                    "AND memory.expired_at IS NULL "
+                    "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "AND memory.workspace_id=? "
                     "ORDER BY support.edge_id, support.memory_id, support.source_kind",
-                    [*chunk, t, known_t, t, known_t, wid],
+                    [*chunk, t, known_t, known_t, t, known_t, known_t, wid],
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
             for support in historical_supports:
@@ -8218,9 +8220,9 @@ class MemoryService:
                 # memory facet is requested.
                 memory_sql += (
                     "AND (ingested_at IS NULL OR ingested_at<=?) "
-                    "AND expired_at IS NULL"
+                    "AND (expired_at IS NULL OR ?<expired_at)"
                 )
-                memory_params: list[Any] = [wid, *chunk, t, known_t]
+                memory_params: list[Any] = [wid, *chunk, t, known_t, known_t]
             else:
                 memory_sql += (
                     "AND (valid_to IS NULL OR ?<valid_to "
@@ -8295,9 +8297,9 @@ class MemoryService:
                     "workspace_id=?",
                     "(valid_from IS NULL OR valid_from<=?)",
                     "(ingested_at IS NULL OR ingested_at<=?)",
-                    "expired_at IS NULL",
+                    "(expired_at IS NULL OR ?<expired_at)",
                 ]
-                memory_params = [wid, t, known_t]
+                memory_params = [wid, t, known_t, known_t]
             else:
                 memory_where = [
                     "workspace_id=?",

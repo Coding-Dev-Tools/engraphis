@@ -1914,6 +1914,37 @@ def test_graph_history_does_not_expose_support_learned_after_known_at():
     assert "edge_ab" not in {edge["id"] for edge in scene["edges"]}
 
 
+def test_graph_history_keeps_evidence_expired_after_known_at():
+    service, _alpha, _beta, _gamma = _seed_service()
+    support = service.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+    ).fetchone()
+    assert support is not None
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE id='edge_ab'"
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE id=?",
+        (support["memory_id"],),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", valid_at=1.0, known_at=100.0,
+        include_history=True,
+    )
+
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    assert edge["ghost"] is False
+
+
 def test_complete_scene_history_returns_closed_memory_as_temporal_ghost():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
@@ -2623,4 +2654,3 @@ def test_graph_entity_evidence_resolves_synthetic_ghost_node_id():
     assert detail["canonical_id"] == alpha
     assert detail["evidence"]
     assert detail["evidence"][0]["excerpt"] == "Alpha uses Beta."
-
