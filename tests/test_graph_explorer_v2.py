@@ -3030,6 +3030,51 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo():
     assert "edge_b" not in edge_ids
 
 
+def test_graph_entity_evidence_history_scopes_to_requested_repo():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    shared = service.store.upsert_entity(Node(
+        id="shared-evidence", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="target-evidence", name="Target", ntype="concept", workspace_id=workspace_id,
+    ))
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="memory-alpha", content="Alpha-only history.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    memory_shared = service.store.add_memory(MemoryRecord(
+        id="memory-shared", content="Shared history.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    memory_b = service.store.add_memory(MemoryRecord(
+        id="memory-beta", content="Beta history.", workspace_id=workspace_id,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge-history-evidence", src=shared, dst=target, relation="relates",
+        workspace_id=workspace_id,
+    ))
+    for memory_id in (memory_a, memory_shared, memory_b):
+        service.store.add_edge_support(
+            "edge-history-evidence", {"source": "manual", "memory_id": memory_id},
+        )
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge-history-evidence", at=closed_at)
+
+    detail = service.graph_entity_evidence(
+        shared, workspace="acme", repo="beta", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert detail["repo"] == "beta"
+    assert {item["memory_id"] for item in detail["evidence"]} == {
+        memory_shared, memory_b,
+    }
+
+
 def test_graph_scene_history_support_scopes_to_requested_repo():
     """Historical support enrichment must honor the selected repository."""
     service = MemoryService.create(":memory:", graph_extractor="none")

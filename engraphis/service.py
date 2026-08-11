@@ -9437,6 +9437,7 @@ class MemoryService:
         }
 
     def graph_entity_evidence(self, canonical_id: str, *, workspace: str,
+                              repo: Optional[str] = None,
                               as_of: Optional[float] = None,
                               valid_at: Optional[float] = None,
                               known_at: Optional[float] = None,
@@ -9462,6 +9463,13 @@ class MemoryService:
         if wid is None:
             raise ValidationError(f"no workspace '{ws}'")
         self._assert_graph_index_ready(wid)
+        repo_id = None
+        clean_repo = None
+        if repo:
+            clean_repo = _clean_name(repo, field="repo")
+            repo_id = self._lookup_repo(wid, clean_repo)
+            if repo_id is None:
+                raise ValidationError(f"no repo named '{clean_repo}' in workspace '{ws}'")
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
         )
@@ -9549,6 +9557,27 @@ class MemoryService:
                 wid,
                 anchor, anchor, known_anchor, known_anchor, known_anchor,
             )
+        if repo_id is not None:
+            support_conditions = support_conditions.replace(
+                "relation.workspace_id=? AND relation.{endpoint}=target.id ",
+                "relation.workspace_id=? AND (relation.repo_id=? OR relation.repo_id IS NULL) "
+                "AND relation.{endpoint}=target.id ",
+            ).replace(
+                "AND memory.workspace_id=? ",
+                "AND memory.workspace_id=? AND (memory.repo_id=? OR memory.repo_id IS NULL) ",
+            )
+            if include_history:
+                branch_params = (
+                    wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                    anchor, known_anchor, known_anchor,
+                    wid, repo_id, anchor, known_anchor, known_anchor,
+                )
+            else:
+                branch_params = (
+                    wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                    anchor, anchor, known_anchor, known_anchor, known_anchor,
+                    wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                )
         source_conditions = support_conditions.format(endpoint="src")
         target_conditions = support_conditions.format(endpoint="dst")
         sql = """
@@ -9620,6 +9649,7 @@ class MemoryService:
             })
         return {
             "workspace": ws, "canonical_id": resolved_canonical_id,
+            "repo": clean_repo,
             "evidence": evidence,
             # This count is intentionally response-local: exact global totals would require
             # scanning every support of a hub node and defeat the click path's hard budget.

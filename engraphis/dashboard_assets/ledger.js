@@ -2064,6 +2064,7 @@
     cancelGraphConnectionMemoryLoad();
     const request = ++state.graphConnectionsRequest;
     const workspace = state.workspace;
+    const repo = (byId('graph-repo-filter').value || '').trim();
     const title = item.name || item.label || item.id;
     const historicalMemberId = includeHistory && item.ghost && Array.isArray(item.member_ids)
       ? item.member_ids.find(value => typeof value === 'string' && value) || ''
@@ -2086,7 +2087,7 @@
     const timeout = window.setTimeout(() => controller.abort(), GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS);
     try {
       const detail = await api(
-        `/graph/entities/${encodeURIComponent(item.id)}/memories?${query(workspace)}${graphAsOfQuery()}${historyQuery}`,
+        `/graph/entities/${encodeURIComponent(item.id)}/memories?${query(workspace)}${repo ? `&repo=${encodeURIComponent(repo)}` : ''}${graphAsOfQuery()}${historyQuery}`,
         { signal: controller.signal },
       );
       if (request !== state.graphConnectionsRequest || workspace !== state.workspace) return;

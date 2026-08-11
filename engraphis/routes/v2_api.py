@@ -2325,6 +2325,7 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
 
 @router.get("/graph/entities/{canonical_id}/memories")
 def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
+                          repo: Optional[str] = None,
                           as_of: Optional[float] = None,
                           valid_at: Optional[float] = None,
                           known_at: Optional[float] = None,
@@ -2334,6 +2335,7 @@ def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
     ws = workspace or _require_ws()
     return _run(
         service().graph_entity_evidence, canonical_id, workspace=ws,
+        repo=repo,
         as_of=as_of, valid_at=valid_at, known_at=known_at,
         member_id=member_id, include_history=include_history,
     )
