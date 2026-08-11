@@ -2200,7 +2200,7 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
                 include_weak_co_occurs: Optional[bool] = None,
                 include_weak_cooccurrence: Optional[bool] = None,
                 node_limit: Optional[int] = Query(default=None, ge=1, le=500),
-                edge_limit: Optional[int] = Query(default=None, ge=0, le=900)):
+                edge_limit: Optional[int] = Query(default=None, ge=0, le=1000)):
     """Complete or focused evidence-backed graph scene with deterministic identity."""
     ws = workspace or _require_ws()
     # ``full`` was the public Ledger value before graph scenes split the focused
