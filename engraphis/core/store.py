@@ -5096,6 +5096,7 @@ class Store:
             ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
             ("code_memory_links", "memory_id"), ("memory_entities", "memory_id"),
             ("edge_supports", "memory_id"),
+            ("source_imports", "memory_id"),
         ):
             if table in tables:
                 conn.execute(f"DELETE FROM {table} WHERE {column}=?", (memory_id,))
