@@ -2608,3 +2608,19 @@ def test_workspace_copy_remaps_canonical_and_support_ids():
     for edge in copied_edges:
         provenance = json.loads(edge["provenance"])
         assert provenance["memory_id"] in copied_memory_ids
+
+
+def test_graph_entity_evidence_resolves_synthetic_ghost_node_id():
+    """Regression: scene emits 'canon:ghost' IDs for historical collisions,
+    but the evidence endpoint must strip the suffix and resolve the stored entity."""
+    service, alpha, _beta, _gamma = _seed_service()
+
+    # The real entity is stored under `alpha`; the scene would project
+    # a synthetic "<alpha>:ghost" node for a historical collision.
+    ghost_id = f"{alpha}:ghost"
+    detail = service.graph_entity_evidence(ghost_id, workspace="acme")
+
+    assert detail["canonical_id"] == alpha
+    assert detail["evidence"]
+    assert detail["evidence"][0]["excerpt"] == "Alpha uses Beta."
+
