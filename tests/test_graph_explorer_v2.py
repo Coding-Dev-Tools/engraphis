@@ -1740,6 +1740,31 @@ def test_graph_scene_history_collision_uses_consistent_ghost_node_id():
     assert ghost_edge["source"] == "canon:ghost"
 
 
+def test_graph_scene_history_ghost_alias_does_not_overwrite_live_node():
+    entities = [
+        {"id": "live", "canonical_id": "canon", "name": "Current", "etype": "concept"},
+        {"id": "live-ghost", "canonical_id": "canon:ghost", "name": "Literal Ghost", "etype": "concept"},
+        {"id": "historical", "canonical_id": "canon", "name": "Former", "etype": "concept"},
+        {"id": "other", "canonical_id": "other", "name": "Other", "etype": "concept"},
+    ]
+    edges = [
+        {"id": "live-edge", "src": "live-ghost", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+        {"id": "ghost-edge", "src": "historical", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "ghost": True, "provenance": "{}"},
+    ]
+
+    scene = build_graph_scene("w", entities, edges, [], include_history=True)
+    nodes_by_id = {node["id"]: node for node in scene["nodes"]}
+
+    assert nodes_by_id["canon:ghost"].get("ghost") is not True
+    assert nodes_by_id["canon:ghost:ghost"]["ghost"] is True
+    assert {edge["id"]: edge["source"] for edge in scene["edges"]} == {
+        "live-edge": "canon:ghost",
+        "ghost-edge": "canon:ghost:ghost",
+    }
+
+
 def test_live_graph_excludes_edges_supported_only_by_session_memories():
     service, alpha, beta, _gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")
