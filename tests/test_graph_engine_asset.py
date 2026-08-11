@@ -7024,7 +7024,7 @@ def test_full_graph_beyond_responsive_force_budget_is_centred_and_responds_to_gr
         api.setData(chain(600));
         const before = span(store.graphData.nodes);
         const reheatBefore = invocations.d3ReheatSimulation || 0;
-        api.setSettings({ gravity: 98 });
+        api.setSettings({ gravity: 400 });
         const nodes = store.graphData.nodes;
         emit({
           before, after: span(nodes),
