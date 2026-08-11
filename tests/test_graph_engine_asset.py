@@ -1079,7 +1079,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) <= 45
+    assert max(report["capped"]) == pytest.approx(45)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -3947,7 +3947,7 @@ def test_orbital_seed_is_deterministic_tangential_and_one_shot() -> None:
     assert report["deterministic"] == report["second"]
     assert report["tangentialDot"] == pytest.approx(0, abs=1e-12)
     assert report["oneShot"] == [123, -456]
-    assert report["reduced"] == [[0, 0], [0, 0]]
+    assert report["reduced"] == report["deterministic"]
     assert report["ghost"] == [0, 0]
     assert report["hauntedMomentum"] == pytest.approx([0, 0], abs=1e-10)
 
@@ -4009,7 +4009,7 @@ def test_system_orbital_seed_preserves_barycentre_and_hierarchical_motion() -> N
     assert report["momentum"] == pytest.approx([0, 0], abs=1e-10)
     assert report["moving"] is True
     assert report["oneShot"] == [123, -456]
-    assert report["reduced"] == [[0, 0], [0, 0], [0, 0]]
+    assert report["reduced"] == report["deterministic"]
     assert report["late"][0] == pytest.approx([1, 2])
     assert report["late"][1] == pytest.approx([-16 / 9, -32 / 9])
     assert report["late"][2] == pytest.approx([0, 0])
@@ -4057,7 +4057,7 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
           })),
         });
 
-        const galaxy = G.create(el, { reducedMotion: () => false });
+        const galaxy = G.create(el, { reducedMotion: () => true });
         galaxy.setData(scene(1000, 2000));
         store.onZoom({ k: 0.1 });
         const before = galaxy.physicsDiagnostics();
@@ -4101,6 +4101,30 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
     assert report["edgeOverflow"]["staticLayout"] is True
     assert report["classicFull"]["mode"] == "original"
     assert report["classicFull"]["staticLayout"] is True
+
+
+@requires_node
+def test_reduced_motion_keeps_eight_independent_solar_systems_orbiting() -> None:
+    report = _run_node(
+        """
+        const nodes=[{id:'bh',anchor_role:'global',community_id:'core',gravity_mass:16,radius:10,x:0,y:0,vx:0,vy:0}],links=[];
+        for(let s=0;s<8;s++){const p=s*2.4,r=105+s*13,cx=Math.cos(p)*r,cy=Math.sin(p)*r*.82;
+          for(let m=0;m<3;m++){const id=`s${s}-${m}`,q=m?14+m*5:0;
+            nodes.push({id,community_id:`s${s}`,system_anchor_id:`s${s}-0`,anchor_role:m?'none':'community',orbit_tier:m,gravity_mass:m?1:7,radius:m?3:5,x:cx+Math.cos(p+m*1.5)*q,y:cy+Math.sin(p+m*1.5)*q,vx:0,vy:0});
+            if(m)links.push({source:`s${s}-0`,target:id,rest_length:q,spring_strength:.08});}}
+        const o={gravity:48,softening:32,centralSoftening:40,includeMutualSystems:true,mutualSystemGravityFraction:.12,mutualSystemSoftening:80,includeRelations:true,includeRelationSprings:false,skipSystemAnchorRelations:true,orbitScale:.25,relationConstraintRate:24,relationConstraintMaxCorrection:12,relationPadding:12,includeOrbitalSeparation:true,orbitalSeparationPadding:12,orbitalSeparationStrength:.8,crossCommunitySeparationPadding:1.5,crossCommunitySeparationStrength:.144,orbitalSeparationMaxCorrection:4,orbitalSeparationMaxVelocityCorrection:8,preserveLocalTangentialVelocity:true,skipSystemAnchorPairs:true,systemAnchorExclusionPadding:1.5,includeBlackHoleExclusion:true,blackHoleExclusionPadding:2.5,includeFarFieldConfinement:true,farFieldEnvelopeScale:1.75,farFieldMinimumRadius:96,farFieldSoftFraction:.82,farFieldAcceleration:12,farFieldMaxAcceleration:16,localRelativeSpeedLimit:48,timestep:.021328125,wallClockSeconds:1/30,inwardConvergence:true,velocityDecay:.00005,speedLimit:48,includeCollisions:false};
+        I.seedGalaxyOrbits(nodes,91,48,32,true); I.seedGalaxySystemOrbits(nodes,91,48,40,true);
+        const cs=()=>I.communityCenters(nodes),d=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b)),systems=[...Array(8).keys()].map(i=>`s${i}`),planets=nodes.filter(n=>n.orbit_tier>0);
+        const pg=new Map(systems.map(k=>{const c=cs().get(k);return[k,Math.atan2(c.y,c.x)]})),pl=new Map(planets.map(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id);return[n.id,Math.atan2(n.y-a.y,n.x-a.x)]})),gt=new Map(systems.map(k=>[k,0])),lt=new Map(planets.map(n=>[n.id,0]));
+        let clear=Infinity,max=0,envelope=0;for(let i=0;i<240;i++){const t=I.integrateGalaxyLeapfrog(nodes,links,[],o);max=Math.max(max,t.maximumSpeed);envelope=t.farFieldConfinement.envelopeRadius;systems.forEach(k=>{const c=cs().get(k),a=Math.atan2(c.y,c.x);gt.set(k,gt.get(k)+d(a,pg.get(k)));pg.set(k,a)});planets.forEach(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id),q=Math.atan2(n.y-a.y,n.x-a.x);lt.set(n.id,lt.get(n.id)+d(q,pl.get(n.id)));pl.set(n.id,q);clear=Math.min(clear,Math.hypot(n.x-a.x,n.y-a.y)-n.radius-a.radius-1.5)});}
+        emit({global:[...gt.values()],local:[...lt.values()],clear,max,envelope,bounded:nodes.slice(1).every(n=>Math.hypot(n.x,n.y)+n.radius<=envelope+1e-8),finite:nodes.every(n=>[n.x,n.y,n.vx,n.vy].every(Number.isFinite))});
+        """
+    )
+    assert report["finite"] is report["bounded"] is True
+    assert report["clear"] >= -1e-9
+    assert report["max"] <= 48
+    assert min(abs(value) for value in report["global"]) > 0.2
+    assert min(abs(value) for value in report["local"]) > 0.2
 
 
 @requires_node
