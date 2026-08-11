@@ -1889,6 +1889,63 @@ def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
     assert code_edge["ghost"] is True
 
 
+def test_graph_scene_history_honors_known_at_for_expired_code_rows():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="", content="Historical code note.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+    ))
+    source = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="source", fqname="source",
+        file="source.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    target = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    code_edge_id = service.store.add_code_edge(
+        repo_id=repo_id, src=source, dst=target, relation="calls", commit=False,
+    )
+    code_link_id = service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=source, memory_id=memory_id,
+        relation="documents", commit=False,
+    )
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE code_edges SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE code_memory_links SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0"
+    )
+    service.store.conn.commit()
+
+    known = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=1.0, known_at=100.0,
+    )
+    expired = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=1.0, known_at=300.0,
+    )
+
+    assert {f"code:{source}", f"code:{target}"} <= {
+        node["id"] for node in known["nodes"]
+    }
+    assert f"code-edge:{code_edge_id}" in {edge["id"] for edge in known["edges"]}
+    assert code_link_id in {edge["id"] for edge in known["edges"]}
+    assert f"code:{source}" not in {node["id"] for node in expired["nodes"]}
+    assert f"code:{target}" not in {node["id"] for node in expired["nodes"]}
+    assert f"code-edge:{code_edge_id}" not in {edge["id"] for edge in expired["edges"]}
+    assert code_link_id not in {edge["id"] for edge in expired["edges"]}
+
+
 def test_graph_history_does_not_expose_support_learned_after_known_at():
     service, _alpha, _beta, _gamma = _seed_service()
     support = service.store.conn.execute(
