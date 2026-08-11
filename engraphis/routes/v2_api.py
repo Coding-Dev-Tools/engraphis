@@ -1612,7 +1612,12 @@ def receipts_export(workspace: Optional[str] = None):
     ws = workspace or _require_ws()
     from fastapi.responses import JSONResponse
     body = _run(service().export_receipts, workspace=ws)
-    safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
+    # Restrict filename to ASCII to avoid Latin-1 encoding crashes in response
+    # headers when workspace names contain non-Latin-1 characters (e.g., CJK).
+    safe_ws = "".join(
+        c if c.isascii() and (c.isalnum() or c in "-_.") else "_"
+        for c in (ws or "workspace")
+    ) or "workspace"
     fname = "engraphis-receipts-%s-%s.json" % (
         safe_ws,
         time.strftime("%Y%m%d"),
