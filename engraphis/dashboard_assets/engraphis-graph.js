@@ -1648,16 +1648,13 @@
       const groupKey = communityKey(node);
       if (!groups.has(groupKey)) {
         groups.set(groupKey, {
-          nodes: [], mass: 0, momentumX: 0, momentumY: 0, fixed: false,
-          shift: { x: 0, y: 0 }, velocityShift: { x: 0, y: 0 },
+          nodes: [], mass: 0, fixed: false, shift: { x: 0, y: 0 },
         });
       }
       const group = groups.get(groupKey);
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       group.nodes.push(node);
       group.mass += mass;
-      group.momentumX += mass * (Number.isFinite(node.vx) ? node.vx : 0);
-      group.momentumY += mass * (Number.isFinite(node.vy) ? node.vy : 0);
       group.fixed = group.fixed || node.anchor_role === 'global' || node.id === opts.fixedNodeId;
       groupForNode.set(node, group);
       const cellX = Math.floor(node.x / cellSize), cellY = Math.floor(node.y / cellSize);
@@ -1718,10 +1715,12 @@
             leftShift.y -= unitY * projection * leftInverseMass;
             rightShift.x += unitX * projection * rightInverseMass;
             rightShift.y += unitY * projection * rightInverseMass;
-            contacts.push({
+            /* Rigid cross-system position projection is complete here. Do not enqueue those
+               dense contacts for the member-level velocity pass below: it is intentionally
+               reserved for dissipating local overlaps inside one solar system. */
+            if (!crossCommunity) contacts.push({
               left: left.node, right: right.node, oldDistance: distance,
-              leftGroup, rightGroup, leftInverseMass, rightInverseMass,
-              inverseMass, crossCommunity,
+              leftInverseMass, rightInverseMass, inverseMass,
             });
             stats.correctionDistance += correction;
             stats.overlaps++;
@@ -1753,9 +1752,11 @@
     stats.maximumNodeShift = maximumNodeShift * positionScale;
     stats.aggregateLimited = positionScale < 1;
 
-    /* Recompute normals after the simultaneous projection, then remove only the contact's
-       relative radial motion and the angular momentum manufactured by its enlarged lever arm.
-       Velocity deltas are accumulated from the unchanged velocity phase and share one cap. */
+    /* Recompute same-system normals after the simultaneous projection, then remove only the
+       local contact's relative radial motion and the angular momentum manufactured by its
+       enlarged lever arm. Cross-system geometry never reaches this velocity pass, so dense
+       contacts cannot drain the solar-system COM orbits around the black hole. Velocity
+       deltas are accumulated from the unchanged phase and share one cap. */
     contacts.forEach(contact => {
       const dx = contact.right.x - contact.left.x;
       const dy = contact.right.y - contact.left.y;
@@ -1763,18 +1764,10 @@
       if (!(distance > 1e-9)) return;
       const unitX = dx / distance, unitY = dy / distance;
       const tangentX = -unitY, tangentY = unitX;
-      const leftVx = contact.crossCommunity
-        ? contact.leftGroup.momentumX / contact.leftGroup.mass
-        : (Number.isFinite(contact.left.vx) ? contact.left.vx : 0);
-      const leftVy = contact.crossCommunity
-        ? contact.leftGroup.momentumY / contact.leftGroup.mass
-        : (Number.isFinite(contact.left.vy) ? contact.left.vy : 0);
-      const rightVx = contact.crossCommunity
-        ? contact.rightGroup.momentumX / contact.rightGroup.mass
-        : (Number.isFinite(contact.right.vx) ? contact.right.vx : 0);
-      const rightVy = contact.crossCommunity
-        ? contact.rightGroup.momentumY / contact.rightGroup.mass
-        : (Number.isFinite(contact.right.vy) ? contact.right.vy : 0);
+      const leftVx = Number.isFinite(contact.left.vx) ? contact.left.vx : 0;
+      const leftVy = Number.isFinite(contact.left.vy) ? contact.left.vy : 0;
+      const rightVx = Number.isFinite(contact.right.vx) ? contact.right.vx : 0;
+      const rightVy = Number.isFinite(contact.right.vy) ? contact.right.vy : 0;
       const relativeVx = rightVx - leftVx, relativeVy = rightVy - leftVy;
       const normalSpeed = relativeVx * unitX + relativeVy * unitY;
       const tangentSpeed = relativeVx * tangentX + relativeVy * tangentY;
@@ -1784,20 +1777,13 @@
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentX;
       const deltaVy = (targetNormalSpeed - normalSpeed) * unitY
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentY;
-      const leftDelta = contact.crossCommunity
-        ? contact.leftGroup.velocityShift : velocityShifts.get(contact.left);
-      const rightDelta = contact.crossCommunity
-        ? contact.rightGroup.velocityShift : velocityShifts.get(contact.right);
+      const leftDelta = velocityShifts.get(contact.left);
+      const rightDelta = velocityShifts.get(contact.right);
       leftDelta.x -= deltaVx * contact.leftInverseMass / contact.inverseMass;
       leftDelta.y -= deltaVy * contact.leftInverseMass / contact.inverseMass;
       rightDelta.x += deltaVx * contact.rightInverseMass / contact.inverseMass;
       rightDelta.y += deltaVy * contact.rightInverseMass / contact.inverseMass;
     });
-    groups.forEach(group => group.nodes.forEach(node => {
-      const shift = velocityShifts.get(node);
-      shift.x += group.velocityShift.x;
-      shift.y += group.velocityShift.y;
-    }));
     let maximumVelocityShift = 0;
     velocityShifts.forEach(shift => {
       maximumVelocityShift = Math.max(maximumVelocityShift, Math.hypot(shift.x, shift.y));
