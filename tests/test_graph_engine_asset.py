@@ -1079,7 +1079,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) <= pytest.approx(45)
+    assert max(report["capped"]) <= 45
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
