@@ -120,6 +120,19 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     app.state.service = svc
     app.state.owns_service = owns_service
 
+    def _default_workspace() -> Optional[str]:
+        try:
+            workspaces = svc.list_workspaces().get("workspaces") or []
+        except (ValidationError, ValueError):
+            workspaces = []
+        if not workspaces:
+            return None
+        first = workspaces[0]
+        if isinstance(first, dict):
+            name = first.get("name")
+            return name if isinstance(name, str) else None
+        return first if isinstance(first, str) else None
+
     @app.middleware("http")
     async def authorize(request, call_next):
         public = request.url.path in {"/health", "/openapi.json"}
@@ -278,11 +291,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
               known_at: Optional[float] = None):
         ws = workspace
         if ws is None:
-            try:
-                wss = svc.list_workspaces().get("workspaces") or []
-            except (ValidationError, ValueError):
-                wss = []
-            ws = wss[0] if wss else None
+            ws = _default_workspace()
         selected = None if layers is None else [
             value.strip() for value in layers.split(",") if value.strip()
         ]
@@ -342,11 +351,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     def receipts_export(workspace: Optional[str] = None):
         ws = workspace
         if ws is None:
-            try:
-                wss = svc.list_workspaces().get("workspaces") or []
-            except (ValidationError, ValueError):
-                wss = []
-            ws = wss[0] if wss else None
+            ws = _default_workspace()
         body = run(svc.export_receipts, workspace=ws)
         safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
         import time

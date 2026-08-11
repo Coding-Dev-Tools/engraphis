@@ -112,6 +112,29 @@ def test_read_only_api_serves_graph_and_intent_recall():
     assert response.json()["candidate_depth"] == "adaptive"
 
 
+def test_read_only_graph_uses_the_first_workspace_name_when_omitted():
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    svc.remember(
+        "Alice Johnson works at Acme Corporation.",
+        workspace="w", scope="workspace",
+    )
+
+    response = TestClient(create_read_only_app(svc)).get("/graph")
+
+    assert response.status_code == 200
+    assert response.json()["workspace"] == "w"
+
+
+def test_read_only_receipt_export_uses_the_first_workspace_name_when_omitted():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Receipt export fallback.", workspace="w", scope="workspace")
+
+    response = TestClient(create_read_only_app(svc)).get("/receipts/export")
+
+    assert response.status_code == 200
+    assert response.json()["verification"]["valid"] is True
+
+
 @pytest.mark.parametrize("invalid_limit", [True, "2"])
 def test_read_only_intent_recall_rejects_coerced_memory_type_limits(invalid_limit):
     svc = MemoryService.create(":memory:", graph_extractor="none")

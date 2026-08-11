@@ -2942,3 +2942,35 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo():
     assert "edge_shared" in edge_ids
     assert entity_b_only not in node_ids
     assert "edge_b" not in edge_ids
+
+
+def test_graph_scene_connected_only_uses_filtered_relations():
+    """Facet-excluded relations must not keep their endpoints connected."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="ent_source", name="Source", ntype="concept", workspace_id=workspace_id,
+    ))
+    shared = service.store.upsert_entity(Node(
+        id="ent_shared", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    excluded = service.store.upsert_entity(Node(
+        id="ent_excluded", name="Excluded", ntype="concept", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_excluded", src=source, dst=shared, relation="uses",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_selected", src=shared, dst=excluded, relation="likes",
+        workspace_id=workspace_id,
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", relations=["likes"], connected_only=True,
+    )
+
+    node_ids = {node["id"] for node in scene["nodes"]}
+    assert source not in node_ids
+    assert {shared, excluded} <= node_ids
+    assert {edge["id"] for edge in scene["edges"]} == {"edge_selected"}
