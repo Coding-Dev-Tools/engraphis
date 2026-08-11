@@ -9,6 +9,7 @@ unconditionally and v1's ``memories`` table has no ``workspace_id`` column.
 (engraphis.service._auto_migrate_v1_if_needed) before ``Store`` ever touches the file.
 """
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 
@@ -153,6 +154,20 @@ def test_memory_service_create_auto_migrates_v1_db(tmp_path):
     row = backup_conn.execute("SELECT content FROM memories").fetchone()
     assert row[0] == "User prefers dark mode."
     backup_conn.close()
+
+
+def test_memory_service_create_normalizes_file_uri(tmp_path, monkeypatch):
+    db = tmp_path / "nested" / "engraphis.db"
+    monkeypatch.chdir(tmp_path)
+
+    svc = MemoryService.create(db.as_uri(), graph_extractor="none")
+    try:
+        assert Path(svc.store.path) == db
+        assert db.exists()
+    finally:
+        svc.store.close()
+
+    assert not (tmp_path / "file:").exists()
 
 
 def test_memory_service_create_is_idempotent_after_migration(tmp_path):

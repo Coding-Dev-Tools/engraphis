@@ -152,6 +152,16 @@ def test_windows_migration_lock_uses_native_blocking_mode(tmp_path, monkeypatch)
     assert calls == [(msvcrt.LK_LOCK, 1), (msvcrt.LK_UNLCK, 1)]
 
 
+def test_migration_lock_does_not_change_permissions_on_existing_parent(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(config.os, "chmod", lambda *args: calls.append(args))
+
+    with config._migration_lock(tmp_path / "engraphis.db"):
+        pass
+
+    assert calls == []
+
+
 def test_windows_migration_lock_retries_expected_crt_contention(monkeypatch):
     import errno
 

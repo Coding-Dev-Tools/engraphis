@@ -205,6 +205,24 @@ def test_context_savings_global_covers_full_history_across_workspaces():
     }
 
 
+def test_context_savings_large_workspace_scope_stays_under_sqlite_variable_limit():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("included")
+    store.record_receipt(
+        "recall", workspace_id=workspace_id,
+        metadata={"token_usage": _usage(200, 100, counter="engraphis.regex.v1")},
+    )
+    workspace_ids = [workspace_id] + [f"ws_{index}" for index in range(1000)]
+
+    summary = store.context_savings(workspace_ids=workspace_ids)
+    grouped = store.context_savings_grouped(workspace_ids=workspace_ids)
+
+    assert summary["receipt_count"] == 1
+    assert summary["estimated"]["saved_tokens"] == 100
+    assert grouped[0]["group_key"] == workspace_id
+    assert grouped[0]["saved_tokens"] == 100
+
+
 def test_bound_context_savings_global_scope_stays_within_authorized_workspaces():
     service = MemoryService.create(":memory:", graph_extractor="none")
     first_workspace = service.store.get_or_create_workspace("history-first")

@@ -363,11 +363,19 @@ def _lock_windows_migration_file(handle, msvcrt) -> None:
 @contextmanager
 def _migration_lock(target: Path):
     """Serialize first-run migration across processes without a third-party lock."""
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Only apply private permissions to a directory created for this database.
+    # Existing parents belong to the caller and may intentionally be shared with
+    # other databases or processes; changing them here is an unexpected mutation.
     try:
-        os.chmod(target.parent, 0o700)
-    except OSError:
-        pass
+        target.parent.mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError:
+        if not target.parent.is_dir():
+            raise
+    else:
+        try:
+            os.chmod(target.parent, 0o700)
+        except OSError:
+            pass
     lock_path = target.with_name(".%s.migration.lock" % target.name)
     expected = private_file_stat(lock_path, allow_missing=True)
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
