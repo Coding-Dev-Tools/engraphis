@@ -1846,6 +1846,29 @@ def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     assert history["edges"][0]["ghost"] is True
 
 
+def test_graph_scene_history_reserves_edge_cap_for_relations_between_live_nodes():
+    entities = [
+        {"id": node_id, "canonical_id": node_id, "name": node_id, "etype": "concept"}
+        for node_id in ("left", "middle", "right")
+    ]
+    edges = [
+        {"id": "live-left", "src": "left", "dst": "middle", "relation": "uses",
+         "layer": "entity", "weight": 10.0},
+        {"id": "live-right", "src": "middle", "dst": "right", "relation": "uses",
+         "layer": "entity", "weight": 9.0},
+        {"id": "history-live", "src": "left", "dst": "middle", "relation": "used",
+         "layer": "entity", "weight": 1.0, "ghost": True},
+    ]
+
+    scene = build_graph_scene(
+        "w", entities, edges, [], include_history=True, edge_limit=1,
+    )
+
+    assert [(edge["id"], edge["ghost"]) for edge in scene["edges"]] == [
+        ("history-live", True),
+    ]
+
+
 @pytest.mark.parametrize("node_limit", [1, 2])
 def test_graph_scene_history_keeps_one_relation_atomic_beyond_node_cap(node_limit):
     entities = [

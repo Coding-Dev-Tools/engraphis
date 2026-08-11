@@ -2410,7 +2410,7 @@ def build_graph_scene(
         sorted_ghost = sorted(ghost_relations, key=lambda item: (
             -float(item.get("strength") or 0.0), item["id"]
         ))
-        if edge_cap and historical_node_ids:
+        if edge_cap and sorted_ghost:
             uncovered = set(historical_node_ids)
             for edge in sorted_ghost:
                 touched = {
@@ -2423,6 +2423,11 @@ def build_graph_scene(
                 uncovered.difference_update(touched)
                 if len(reserved_history_edges) >= edge_cap or not uncovered:
                     break
+            if not reserved_history_edges:
+                # A ghost relation can connect entities that are still live. It
+                # remains part of the requested history and needs one reserved slot
+                # even though there is no historical-only endpoint to cover.
+                reserved_history_edges.append(sorted_ghost[0])
         remaining_capacity = max(0, edge_cap - len(reserved_history_edges))
         scene_edges = _selected_edges(
             graph, selected, level, remaining_capacity,
