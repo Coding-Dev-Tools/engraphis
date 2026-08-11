@@ -4362,14 +4362,14 @@ def test_galaxy_phase_is_isolated_from_legacy_layouts_and_restores_server_seed()
           edges: [{ source: 'sun', target: 'planet' }],
         };
 
-        const first = G.create(el, { reducedMotion: () => true });
+        const first = G.create(el, { reducedMotion: () => false });
         first.setPreset('compact');
         first.setData(scene);
         const legacyDiscardedServer = store.graphData.nodes.map(node => node.x == null);
         first.setPreset('galaxy');
         const firstGalaxy = store.graphData.nodes.map(node => [node.id, node.x, node.y]);
 
-        const api = G.create(el, { reducedMotion: () => true });
+        const api = G.create(el, { reducedMotion: () => false });
         api.setData(scene);
         const byId = Object.fromEntries(store.graphData.nodes.map(node => [node.id, node]));
         byId.sun.x = -22; byId.sun.y = 11; byId.sun.vx = 1.25; byId.sun.vy = -0.5;
@@ -5599,7 +5599,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
           },
         };
 
-        const api = G.create(el, { reducedMotion: () => true });
+        const api = G.create(el, { reducedMotion: () => false });
         api.setData({
           nodes: [
             { id: 'heavy', x: -20, y: 0, gravity_mass: 4, community_id: 'one' },
@@ -5798,7 +5798,7 @@ def test_explicit_galaxy_reheat_runs_a_bounded_physical_relaxation_burst() -> No
           frameQueue.clear();
           batch.forEach(callback => callback(timestamp));
         };
-        const api = G.create(el, { reducedMotion: () => true });
+        const api = G.create(el, { reducedMotion: () => false });
         api.setData({
           nodes: [
             { id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 20,
@@ -5885,7 +5885,7 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
         } : null;
         store.screen2GraphCoords = (x, y) => ({ x, y });
 
-        const api = G.create(el, { reducedMotion: () => true });
+        const api = G.create(el, { reducedMotion: () => false });
         api.setData({
           nodes: [
             { id: 'black-hole', anchor_role: 'global', x: 0, y: 0,
