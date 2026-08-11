@@ -346,15 +346,15 @@
               <details class="graph-drawer-section graph-tuning" open>
                 <summary>Tune the simulation — forces, size, scope</summary>
                 <div class="graph-tuning-grid">
-                  <label for="graph-repel"><span id="graph-repel-label">Orbital separation</span><input id="graph-repel" type="range" min="0" max="120" value="48"><output id="graph-repel-output">48</output></label>
-                  <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8"><output id="graph-link-output">8</output></label>
-                  <label for="graph-gravity"><span id="graph-gravity-label">Gravity strength · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="100" value="48"><output id="graph-gravity-output">48</output></label>
-                  <label for="graph-node-size"><span>Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3"><output id="graph-node-size-output">3</output></label>
-                  <label for="graph-text-size"><span>Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12"><output id="graph-text-size-output">12</output></label>
-                  <label for="graph-line-width"><span>Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72"><output id="graph-line-width-output">0.72</output></label>
-                  <label for="graph-label-density"><span>Label density</span><input id="graph-label-density" type="range" min="1" max="100" value="24"><output id="graph-label-density-output">24</output></label>
-                  <label for="graph-tune-min-degree"><span>Min relations</span><input id="graph-tune-min-degree" type="range" min="0" max="12" value="1"><output id="graph-tune-min-degree-output">1</output></label>
-                  <label for="graph-depth"><span>Neighbourhood</span><input id="graph-depth" type="range" min="1" max="4" value="2"><output id="graph-depth-output">2</output></label>
+                  <label for="graph-repel"><span id="graph-repel-label">Orbital separation</span><input id="graph-repel" type="range" min="0" max="120" value="48" aria-labelledby="graph-repel-label"><output id="graph-repel-output">48</output></label>
+                  <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
+                  <label for="graph-gravity"><span id="graph-gravity-label">Gravity strength · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="100" value="48" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">48</output></label>
+                  <label for="graph-node-size"><span id="graph-node-size-label">Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3" aria-labelledby="graph-node-size-label"><output id="graph-node-size-output">3</output></label>
+                  <label for="graph-text-size"><span id="graph-text-size-label">Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12" aria-labelledby="graph-text-size-label"><output id="graph-text-size-output">12</output></label>
+                  <label for="graph-line-width"><span id="graph-line-width-label">Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72" aria-labelledby="graph-line-width-label"><output id="graph-line-width-output">0.72</output></label>
+                  <label for="graph-label-density"><span id="graph-label-density-label">Label density</span><input id="graph-label-density" type="range" min="1" max="100" value="24" aria-labelledby="graph-label-density-label"><output id="graph-label-density-output">24</output></label>
+                  <label for="graph-tune-min-degree"><span id="graph-tune-min-degree-label">Min relations</span><input id="graph-tune-min-degree" type="range" min="0" max="12" value="1" aria-labelledby="graph-tune-min-degree-label"><output id="graph-tune-min-degree-output">1</output></label>
+                  <label for="graph-depth"><span id="graph-depth-label">Neighbourhood</span><input id="graph-depth" type="range" min="1" max="4" value="2" aria-labelledby="graph-depth-label"><output id="graph-depth-output">2</output></label>
                 </div>
                 <div class="graph-layer-grid" role="group" aria-label="Graph relation layers">
                   <button class="graph-layer-chip active" type="button" data-graph-layer="temporal" aria-pressed="true"><i></i>Temporal <small id="graph-layer-temporal-count">0</small></button>
@@ -370,7 +370,7 @@
             <section class="graph-control-panel" id="graph-analyse" role="tabpanel" aria-labelledby="graph-analyse-tab" data-graph-tab-panel="analyse" hidden>
               <section class="control-group">
                 <h2>Scope</h2>
-                <label>Minimum links<input id="graph-min-degree" type="range" min="0" max="12" value="1"><output id="graph-min-degree-output">1</output></label>
+                <label for="graph-min-degree"><span id="graph-min-degree-label">Minimum links</span><input id="graph-min-degree" type="range" min="0" max="12" value="1" aria-labelledby="graph-min-degree-label"><output id="graph-min-degree-output">1</output></label>
                 <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option><option value="evidence_mass">Evidence mass</option></select></label>
                 <label class="check-row"><input id="graph-bridges" type="checkbox"> Highlight bridges</label>
                 <label class="check-row"><input id="graph-collapse" type="checkbox" checked> Auto-collapse clusters</label>
