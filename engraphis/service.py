@@ -7763,11 +7763,10 @@ class MemoryService:
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
         )
-        # Keep the visibility scan workspace-wide so a repository filter cannot
-        # reintroduce a workspace-scoped endpoint touched only by a private edge in
-        # another repository. Selected-repository public endpoints are applied below
-        # when deciding which entities may remain visible.
         visibility_params: list[Any] = [wid]
+        if repo_id:
+            visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
+            visibility_params.append(repo_id)
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
             "visibility_edge.src, visibility_edge.dst"
@@ -7775,9 +7774,17 @@ class MemoryService:
         visibility_rows = self.store.conn.execute(
             visibility_sql, visibility_params,
         ).fetchall()
+        # The joined visibility scan is intentionally repository-scoped, but the
+        # entity-pruning pass must still know which workspace entities participate
+        # in any unrelated historical/private edge. Fetch only endpoints for that
+        # workspace-wide set so those edges cannot promote private entities without
+        # materializing their support rows.
+        touching_rows = self.store.conn.execute(
+            "SELECT src, dst FROM edges WHERE workspace_id=?", (wid,)
+        ).fetchall()
         historical_touching_ids = {
             str(row[key])
-            for row in visibility_rows
+            for row in touching_rows
             for key in ("src", "dst")
             if row[key]
         }
@@ -7981,14 +7988,7 @@ class MemoryService:
                 "graph analysis exceeds the relation candidate limit; filter by repository"
             )
 
-        # This set intentionally remains workspace-wide: private edges from
-        # other repositories must still hide their workspace-scoped endpoints.
-        touching_ids = {
-            str(row[key])
-            for row in visibility_rows
-            for key in ("src", "dst")
-            if row[key]
-        }
+        touching_ids = historical_touching_ids
         visible_endpoint_ids = {
             str(edge[key])
             for edge in edge_rows

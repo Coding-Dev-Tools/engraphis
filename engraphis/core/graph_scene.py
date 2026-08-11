@@ -2135,6 +2135,8 @@ def build_graph_scene(
                 # Record the historical-only alias under a distinct key so
                 # the live node keeps its mass, community, and relations.
                 node_id = f"{node_id}:ghost"
+                while node_id in graph["nodes"] or node_id in historical_id_map.values():
+                    node_id = f"{node_id}:ghost"
             historical_id_map[historical_id] = node_id
             node["id"] = node_id
             node["ghost"] = True
