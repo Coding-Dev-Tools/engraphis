@@ -2363,6 +2363,7 @@ def build_graph_scene(
                 selected.add(node_id)
     chosen_communities = {nodes[node_id]["community_id"] for node_id in selected}
     scene_edges = _selected_edges(graph, selected, level, edge_cap)
+    total_scene_edges = len(graph["edges"])
     if include_history:
         ghost_relations, _ = _complete_relations(
             graph, [edge for edge in edge_rows if edge.get("ghost")], support_rows,
@@ -2404,6 +2405,7 @@ def build_graph_scene(
             )) if edge not in reserved_history_edges
         )
         scene_edges = scene_edges[:edge_cap]
+        total_scene_edges += len(ghost_relations)
     communities = _community_summaries(graph, chosen_communities, selected)
     bridges = _bridges(graph, chosen_communities, 80)
 
@@ -2500,10 +2502,10 @@ def build_graph_scene(
             "scene_hash": scene_hash,
             "index_generation": index_generation,
             "total_nodes": len(nodes),
-            "total_edges": len(graph["edges"]),
+            "total_edges": total_scene_edges,
             "shown_nodes": len(scene_nodes),
             "shown_edges": len(scene_edges),
-            "truncated": len(scene_nodes) < len(nodes) or len(scene_edges) < len(graph["edges"]),
+            "truncated": len(scene_nodes) < len(nodes) or len(scene_edges) < total_scene_edges,
             "query_ms": 0.0,
             "layout_seed": layout_seed,
             "index_state": "ready",
