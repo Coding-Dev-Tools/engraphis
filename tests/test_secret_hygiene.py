@@ -104,6 +104,14 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     leaked = service.remember("Legacy row placeholder.", workspace="acme")
     other = service.remember("Independent safe memory.", workspace="acme")
     mid = leaked["id"]
+    workspace_id = service.store.get_or_create_workspace("acme")
+    vault_id = service.store.register_source_vault(
+        kind="documents", root_digest="a" * 64, workspace_id=workspace_id,
+    )
+    source_id = service.store.upsert_source_import_item(
+        vault_id=vault_id, source_key="b" * 64, relative_path="secret.txt",
+        memory_id=mid,
+    )
 
     # Simulate a row captured before the boundary existed, including an FTS mirror.
     service.store.conn.execute("UPDATE memories SET content=? WHERE id=?", (_LEAK, mid))
@@ -120,6 +128,9 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     assert service.store.conn.execute("SELECT COUNT(*) FROM mem_vectors WHERE id=?", (mid,)).fetchone()[0] == 0
     assert service.store.conn.execute(
         "SELECT COUNT(*) FROM mem_links WHERE a=? OR b=?", (mid, mid)
+    ).fetchone()[0] == 0
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) FROM source_imports WHERE id=?", (source_id,)
     ).fetchone()[0] == 0
     audit_rows = service.store.conn.execute(
         "SELECT action, detail FROM audit WHERE target=?", (mid,)
