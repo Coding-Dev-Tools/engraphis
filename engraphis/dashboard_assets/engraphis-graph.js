@@ -91,6 +91,10 @@
   const GALAXY_EXACT_LIMIT = 64;
   const GALAXY_BARNES_HUT_THETA = 0.85;
   const GALAXY_GRAVITY_MAXIMUM = 200;
+  /* The safety cap retains the former 0..100 ceiling even though the visible control now
+     reaches 200. Direct callers can pass pathological values, and those must never enlarge the
+     emergency acceleration envelope beyond the tested legacy bound. */
+  const GALAXY_GRAVITY_CAP_REFERENCE = 100;
   /* One response curve owns every physical layer. It retains the former positive quadratic
      response, then adds two C1 smooth boost stages. The doubled calibration makes local gravity
      exactly 120 at the default slider; the extended 0..200 slider range adds another full
@@ -117,11 +121,18 @@
   function galaxyLocalGravityConstant(setting) {
     return galaxyBlackHoleGravityConstant(setting) * 0.5;
   }
+  function galaxyAccelerationCapReference(gravity) {
+    const raw = Number(gravity);
+    return Number.isFinite(raw)
+      ? Math.max(0, Math.min(GALAXY_GRAVITY_CAP_REFERENCE, raw)) : 0;
+  }
   function defaultGalaxyAccelerationCap(gravity) {
-    return GALAXY_CENTER_ACCELERATION_CAP * galaxyLocalGravityConstant(gravity) / 24;
+    const reference = galaxyAccelerationCapReference(gravity);
+    return GALAXY_CENTER_ACCELERATION_CAP * galaxyLocalGravityConstant(reference) / 24;
   }
   function defaultGalaxyBlackHoleAccelerationCap(gravity) {
-    return GALAXY_CENTER_ACCELERATION_CAP * galaxyBlackHoleGravityConstant(gravity) / 24;
+    const reference = galaxyAccelerationCapReference(gravity);
+    return GALAXY_CENTER_ACCELERATION_CAP * galaxyBlackHoleGravityConstant(reference) / 24;
   }
   const GALAXY_LINK_DEFAULT = 8;
   const GALAXY_LINK_REFERENCE = 16;
