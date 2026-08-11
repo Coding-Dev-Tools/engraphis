@@ -1088,12 +1088,12 @@ test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits',
     expect(startPhase[id].anchor).toBe(`${id}-star`);
     const localTravel = signedAngleDelta(startPhase[id].local, endPhase[id].local);
     const globalTravel = signedAngleDelta(startPhase[id].global, endPhase[id].global);
-    expect(Math.abs(localTravel), `${id} local phase`).toBeGreaterThan(0.1);
-    expect(Math.abs(globalTravel), `${id} system phase`).toBeGreaterThan(0.1);
+    expect(Math.abs(localTravel), `${id} local phase`).toBeGreaterThan(0.3);
+    expect(Math.abs(globalTravel), `${id} system phase`).toBeGreaterThan(0.25);
   }
 });
 
-test('Galaxy motion is another 30 percent slower while core perturbation stays bound', async ({ page }) => {
+test('Galaxy motion is 50 percent faster while core perturbation stays bound', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.EngraphisGraph);
@@ -1123,7 +1123,7 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
     };
     const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
     const start = nodes.map(node => ({ ...node }));
-    const half = start.map(node => ({ ...node }));
+    const fast = start.map(node => ({ ...node }));
     const old = start.map(node => ({ ...node }));
     const initialPhase = phase(start);
     const options = timestep => ({
@@ -1143,13 +1143,13 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
     });
     const steps = 12;
     for (let step = 0; step < steps; step += 1) {
-      I.integrateGalaxyLeapfrog(half, [], [], options(0.021328125));
-      I.integrateGalaxyLeapfrog(old, [], [], options(0.03046875));
+      I.integrateGalaxyLeapfrog(fast, [], [], options(0.032));
+      I.integrateGalaxyLeapfrog(old, [], [], options(0.021328125));
     }
-    const halfPhase = phase(half), oldPhase = phase(old);
-    const halfTurns = {
-      system: Math.abs(delta(initialPhase.system, halfPhase.system)),
-      local: Math.abs(delta(initialPhase.local, halfPhase.local)),
+    const fastPhase = phase(fast), oldPhase = phase(old);
+    const fastTurns = {
+      system: Math.abs(delta(initialPhase.system, fastPhase.system)),
+      local: Math.abs(delta(initialPhase.local, fastPhase.local)),
     };
     const oldTurns = {
       system: Math.abs(delta(initialPhase.system, oldPhase.system)),
@@ -1183,7 +1183,7 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
     let speedCaps = 0;
     for (let step = 0; step < 450; step += 1) {
       const tick = I.integrateGalaxyLeapfrog(coreOrbit, [], [], {
-        ...options(0.021328125), central: false,
+        ...options(0.032), central: false,
         includeBlackHoleExclusion: false,
         includeFarFieldConfinement: false,
       });
@@ -1219,11 +1219,11 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
 
     return {
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
-      halfTurns,
+      fastTurns,
       oldTurns,
       ratios: {
-        system: halfTurns.system / oldTurns.system,
-        local: halfTurns.local / oldTurns.local,
+        system: fastTurns.system / oldTurns.system,
+        local: fastTurns.local / oldTurns.local,
       },
       directRatio,
       coreOrbit: {
@@ -1238,14 +1238,14 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
     };
   }, blackHoleGalaxyScene);
 
-  expect(report.diagnostics.timestep).toBe(0.021328125);
+  expect(report.diagnostics.timestep).toBe(0.032);
   expect(report.diagnostics.frameIntervalMs).toBeCloseTo(1000 / 30, 8);
-  expect(report.halfTurns.system).toBeGreaterThan(0);
-  expect(report.halfTurns.local).toBeGreaterThan(0);
-  expect(report.ratios.system).toBeGreaterThan(0.65);
-  expect(report.ratios.system).toBeLessThan(0.75);
-  expect(report.ratios.local).toBeGreaterThan(0.65);
-  expect(report.ratios.local).toBeLessThan(0.75);
+  expect(report.fastTurns.system).toBeGreaterThan(0);
+  expect(report.fastTurns.local).toBeGreaterThan(0);
+  expect(report.ratios.system).toBeGreaterThan(1.35);
+  expect(report.ratios.system).toBeLessThan(1.65);
+  expect(report.ratios.local).toBeGreaterThan(1.35);
+  expect(report.ratios.local).toBeLessThan(1.65);
   expect(report.directRatio).toBeCloseTo(0.75, 10);
   expect(report.coreOrbit.finite).toBe(true);
   expect(report.coreOrbit.speedCaps).toBe(0);
@@ -1669,9 +1669,9 @@ test('Galaxy sliders span doubled Gravity, Link, and Orbital separation', async 
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
   expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
-  expect(physicalField.densityFactors[1]).toBeCloseTo(0.75 ** 0.455, 12);
+  expect(physicalField.densityFactors[1]).toBeCloseTo(0.75 ** 0.68, 12);
   expect(physicalField.densityFactors[2]).toBeCloseTo(
-    0.75 ** (11.430769230769231 * 0.455), 12,
+    0.75 ** (11.430769230769231 * 0.68), 12,
   );
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   expect(immediate.after.diagnostics.immediateGravityResponse.systems).toBe(3);
@@ -1812,7 +1812,7 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     const before = radii();
     api.freeze(false);
     const control = document.querySelector('#graph-gravity');
-    control.value = '200';
+    control.value = '400';
     control.dispatchEvent(new Event('input', { bubbles: true }));
     const after = radii();
     const diagnostics = api.physicsDiagnostics();
@@ -1820,14 +1820,14 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     api.freeze(true);
     return {
       before, after,
-      expectedRatio: I.galaxyImmediateGravityRadiusScale(200)
+      expectedRatio: I.galaxyImmediateGravityRadiusScale(400)
         / I.galaxyImmediateGravityRadiusScale(48),
       diagnostics, output,
     };
   }, blackHoleGalaxyScene);
 
-  expect(report.output).toBe('200');
-  expect(report.diagnostics.gravitySetting).toBe(200);
+  expect(report.output).toBe('400');
+  expect(report.diagnostics.gravitySetting).toBe(400);
   expect(report.diagnostics.immediateGravityResponse.systems).toBe(3);
   expect(report.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
   for (const [id, radius] of Object.entries(report.before)) {
