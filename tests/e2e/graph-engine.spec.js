@@ -1042,6 +1042,57 @@ test('black-hole Galaxy remains bounded and differential beyond 450 custom steps
   }
 });
 
+test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits', async ({ page }) => {
+  test.setTimeout(45_000);
+  // Reduced motion removes camera/paint animation only. The fixed Galaxy solver must still
+  // seed physical angular momentum rather than letting every body fall radially inward.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.evaluate(scene => {
+    const api = window.__engraphisGraph;
+    api.setPreset('galaxy');
+    api.setSettings({ gravity: 48 });
+    api.setData(scene);
+    api.setScope({ showUnlinked: true, minDegree: 0 });
+  }, blackHoleGalaxyScene);
+  await page.waitForFunction(() => window.__fg.graphData().nodes.length === 8
+    && window.__engraphisGraph.physicsDiagnostics().steps >= 5);
+
+  const localAndGlobalPhase = snapshot => Object.fromEntries(['aurora', 'borealis']
+    .map(id => {
+      const star = snapshot.nodes[`${id}-star`];
+      const planet = snapshot.nodes[`${id}-planet`];
+      const system = snapshot.systems.find(item => item.id === id);
+      return [id, {
+        anchor: star.systemAnchorId,
+        local: Math.atan2(planet.y - star.y, planet.x - star.x),
+        global: system.angle,
+      }];
+    }));
+  const start = await galaxySystemSnapshot(page);
+  const startPhase = localAndGlobalPhase(start);
+  const targetStep = start.diagnostics.steps + 450;
+  // Wait on the solver's fixed-step telemetry, never an elapsed wall-clock delay.
+  await page.waitForFunction(target => window.__engraphisGraph.physicsDiagnostics().steps >= target,
+    targetStep, { timeout: 30_000 });
+  const end = await galaxySystemSnapshot(page);
+  const endPhase = localAndGlobalPhase(end);
+
+  expect(start.diagnostics.reducedMotion).toBe(true);
+  expect(start.diagnostics.staticLayout).toBe(false);
+  expect(start.diagnostics.collapsed).toBe(false);
+  expect(end.finite).toBe(true);
+  expect(end.diagnostics.steps - start.diagnostics.steps).toBeGreaterThanOrEqual(450);
+  for (const id of ['aurora', 'borealis']) {
+    expect(startPhase[id].anchor).toBe(`${id}-star`);
+    const localTravel = signedAngleDelta(startPhase[id].local, endPhase[id].local);
+    const globalTravel = signedAngleDelta(startPhase[id].global, endPhase[id].global);
+    expect(Math.abs(localTravel), `${id} local phase`).toBeGreaterThan(0.1);
+    expect(Math.abs(globalTravel), `${id} system phase`).toBeGreaterThan(0.1);
+  }
+});
+
 test('Galaxy motion is another 30 percent slower while core perturbation stays bound', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
@@ -1515,7 +1566,8 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
 });
 
 test('Galaxy sliders span doubled Gravity, Link, and Orbital separation', async ({ page }) => {
-  // This test exercises the live fixed-step solver; reduced motion intentionally disables it.
+  // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
+  // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
