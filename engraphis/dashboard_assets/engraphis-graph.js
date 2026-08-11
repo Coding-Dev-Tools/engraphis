@@ -177,6 +177,19 @@
      tunnel through the painted edge between fixed steps. The constraint never adds an outward
      kick; deep corrections preserve angular momentum instead of manufacturing orbital speed. */
   const GALAXY_BLACK_HOLE_EXCLUSION_PADDING = 2.5;
+  /* The Plummer well keeps ordinary systems bound, but a finite visual galaxy also needs a
+     dormant outer safety field. It starts well outside the seeded scene, adds a smooth
+     inward acceleration only near that edge, then applies an exact last-resort boundary if a
+     body still escapes. The cached radius never follows an escaped body outward. */
+  const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.25;
+  const GALAXY_FAR_FIELD_MIN_RADIUS = 96;
+  const GALAXY_FAR_FIELD_SOFT_FRACTION = 0.82;
+  const GALAXY_FAR_FIELD_ACCELERATION = 12;
+  const GALAXY_FAR_FIELD_MAX_ACCELERATION = 16;
+  /* Frozen compatibility nodes swallow Object.defineProperty, so the far-field cache also
+     lives in a WeakMap keyed by anchor identity. The property-based path stays for ordinary
+     mutable nodes; the WeakMap wins when the anchor is frozen. */
+  const galaxyFarFieldEnvelopeCache = typeof WeakMap === 'function' ? new WeakMap() : null;
   /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
      while the small leapfrog step makes systems orbit over seconds instead of jumping once per
      paint frame. Damping removes numerical noise over minutes rather than erasing the seeded
@@ -1222,6 +1235,8 @@
       const right = byId.get(linkEndpoint(link, 'target'));
       const strength = galaxySpringStrength(link, byId) * strengthMultiplier;
       if (!left || !right || left === right || strength <= 0) return;
+      if (opts.skipFixedNodeRelations === true
+        && (left.id === opts.fixedNodeId || right.id === opts.fixedNodeId)) return;
       const dx = right.x - left.x, dy = right.y - left.y;
       const distance = Math.hypot(dx, dy);
       if (!Number.isFinite(distance) || distance <= 1e-9) return;
@@ -1273,12 +1288,22 @@
     const maximumCorrection = Math.max(0, Number.isFinite(Number(opts.maxCorrection))
       ? Number(opts.maxCorrection) : GALAXY_RELATION_CONSTRAINT_MAX_CORRECTION);
     const shifts = new Map((nodes || []).map(node => [node, { x: 0, y: 0 }]));
-    let applied = 0, maximumError = 0, requestedDistance = 0;
+    let applied = 0, skippedFixedEndpoint = 0, maximumError = 0, requestedDistance = 0;
     (links || []).forEach(link => {
       const left = byId.get(linkEndpoint(link, 'source'));
       const right = byId.get(linkEndpoint(link, 'target'));
       if (!left || !right || left === right || left.ghost || right.ghost
         || communityKey(left) !== communityKey(right)) return;
+      /* A pointer-owned node is an externally imposed moving source, not a spring endpoint.
+         Otherwise the fixed-endpoint correction assigns the entire (up to 4-unit) Link error
+         to its connected peer every physics slice, which turns a long pointer move into a
+         rapid positional slingshot. The bounded drag gravity below is the sole follower path
+         during a gesture; ordinary fixed-node callers retain the legacy constraint behavior. */
+      if (opts.skipFixedNodeRelations === true
+        && (left.id === opts.fixedNodeId || right.id === opts.fixedNodeId)) {
+        skippedFixedEndpoint++;
+        return;
+      }
       const strength = galaxySpringStrength(link, byId) * strengthMultiplier;
       if (!(strength > 0)) return;
       const dx = right.x - left.x, dy = right.y - left.y;
@@ -1326,6 +1351,7 @@
     });
     return {
       applied,
+      skippedFixedEndpoint,
       maximumError,
       correctedDistance: requestedDistance * aggregateScale,
       maximumNodeShift: maximumNodeShift * aggregateScale,
@@ -1574,7 +1600,8 @@
      repeatedly within one frame. Every pair here samples one immutable phase, accumulates a
      mass-balanced correction, and applies one globally bounded update. Local contacts use the
      full adjustable pressure; an opt-in weaker cross-community pressure prevents painted nodes
-     from different systems bunching without turning the galaxy into hard billiards. */
+     from different systems bunching without turning the galaxy into hard billiards. A cross-
+     community contact translates each whole system, preserving its internal orbit geometry. */
   function applyGalaxyOrbitalSeparation(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -1614,8 +1641,25 @@
     const grid = new Map();
     const shifts = new Map(bodies.map(node => [node, { x: 0, y: 0 }]));
     const velocityShifts = new Map(bodies.map(node => [node, { x: 0, y: 0 }]));
+    const groups = new Map();
+    const groupForNode = new Map();
     const contacts = [];
     bodies.forEach((node, index) => {
+      const groupKey = communityKey(node);
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, {
+          nodes: [], mass: 0, momentumX: 0, momentumY: 0, fixed: false,
+          shift: { x: 0, y: 0 }, velocityShift: { x: 0, y: 0 },
+        });
+      }
+      const group = groups.get(groupKey);
+      const mass = finitePositive(node.gravity_mass, 1, 1000);
+      group.nodes.push(node);
+      group.mass += mass;
+      group.momentumX += mass * (Number.isFinite(node.vx) ? node.vx : 0);
+      group.momentumY += mass * (Number.isFinite(node.vy) ? node.vy : 0);
+      group.fixed = group.fixed || node.anchor_role === 'global' || node.id === opts.fixedNodeId;
+      groupForNode.set(node, group);
       const cellX = Math.floor(node.x / cellSize), cellY = Math.floor(node.y / cellSize);
       const key = cellX + ',' + cellY;
       if (!grid.has(key)) grid.set(key, []);
@@ -1653,23 +1697,31 @@
             const unitX = normalX / unitDistance, unitY = normalY / unitDistance;
             const correction = (minimumDistance - distance) * pairStrength;
             if (!(correction > 0) || !Number.isFinite(correction)) return;
-            const leftMass = finitePositive(left.node.gravity_mass, 1, 1000);
-            const rightMass = finitePositive(right.node.gravity_mass, 1, 1000);
-            const leftInverseMass = left.node.anchor_role === 'global'
-              || left.node.id === opts.fixedNodeId ? 0 : 1 / leftMass;
-            const rightInverseMass = right.node.anchor_role === 'global'
-              || right.node.id === opts.fixedNodeId ? 0 : 1 / rightMass;
+            const leftGroup = groupForNode.get(left.node);
+            const rightGroup = groupForNode.get(right.node);
+            const leftMass = crossCommunity
+              ? leftGroup.mass : finitePositive(left.node.gravity_mass, 1, 1000);
+            const rightMass = crossCommunity
+              ? rightGroup.mass : finitePositive(right.node.gravity_mass, 1, 1000);
+            const leftFixed = crossCommunity ? leftGroup.fixed
+              : left.node.anchor_role === 'global' || left.node.id === opts.fixedNodeId;
+            const rightFixed = crossCommunity ? rightGroup.fixed
+              : right.node.anchor_role === 'global' || right.node.id === opts.fixedNodeId;
+            const leftInverseMass = leftFixed ? 0 : 1 / leftMass;
+            const rightInverseMass = rightFixed ? 0 : 1 / rightMass;
             const inverseMass = leftInverseMass + rightInverseMass;
             if (!(inverseMass > 0)) return;
             const projection = correction / inverseMass;
-            const leftShift = shifts.get(left.node), rightShift = shifts.get(right.node);
+            const leftShift = crossCommunity ? leftGroup.shift : shifts.get(left.node);
+            const rightShift = crossCommunity ? rightGroup.shift : shifts.get(right.node);
             leftShift.x -= unitX * projection * leftInverseMass;
             leftShift.y -= unitY * projection * leftInverseMass;
             rightShift.x += unitX * projection * rightInverseMass;
             rightShift.y += unitY * projection * rightInverseMass;
             contacts.push({
               left: left.node, right: right.node, oldDistance: distance,
-              leftInverseMass, rightInverseMass, inverseMass, crossCommunity,
+              leftGroup, rightGroup, leftInverseMass, rightInverseMass,
+              inverseMass, crossCommunity,
             });
             stats.correctionDistance += correction;
             stats.overlaps++;
@@ -1680,6 +1732,11 @@
           });
         }
       }
+    }));
+    groups.forEach(group => group.nodes.forEach(node => {
+      const shift = shifts.get(node);
+      shift.x += group.shift.x;
+      shift.y += group.shift.y;
     }));
     let maximumNodeShift = 0;
     shifts.forEach(shift => {
@@ -1706,10 +1763,18 @@
       if (!(distance > 1e-9)) return;
       const unitX = dx / distance, unitY = dy / distance;
       const tangentX = -unitY, tangentY = unitX;
-      const leftVx = Number.isFinite(contact.left.vx) ? contact.left.vx : 0;
-      const leftVy = Number.isFinite(contact.left.vy) ? contact.left.vy : 0;
-      const rightVx = Number.isFinite(contact.right.vx) ? contact.right.vx : 0;
-      const rightVy = Number.isFinite(contact.right.vy) ? contact.right.vy : 0;
+      const leftVx = contact.crossCommunity
+        ? contact.leftGroup.momentumX / contact.leftGroup.mass
+        : (Number.isFinite(contact.left.vx) ? contact.left.vx : 0);
+      const leftVy = contact.crossCommunity
+        ? contact.leftGroup.momentumY / contact.leftGroup.mass
+        : (Number.isFinite(contact.left.vy) ? contact.left.vy : 0);
+      const rightVx = contact.crossCommunity
+        ? contact.rightGroup.momentumX / contact.rightGroup.mass
+        : (Number.isFinite(contact.right.vx) ? contact.right.vx : 0);
+      const rightVy = contact.crossCommunity
+        ? contact.rightGroup.momentumY / contact.rightGroup.mass
+        : (Number.isFinite(contact.right.vy) ? contact.right.vy : 0);
       const relativeVx = rightVx - leftVx, relativeVy = rightVy - leftVy;
       const normalSpeed = relativeVx * unitX + relativeVy * unitY;
       const tangentSpeed = relativeVx * tangentX + relativeVy * tangentY;
@@ -1719,13 +1784,20 @@
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentX;
       const deltaVy = (targetNormalSpeed - normalSpeed) * unitY
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentY;
-      const leftDelta = velocityShifts.get(contact.left);
-      const rightDelta = velocityShifts.get(contact.right);
+      const leftDelta = contact.crossCommunity
+        ? contact.leftGroup.velocityShift : velocityShifts.get(contact.left);
+      const rightDelta = contact.crossCommunity
+        ? contact.rightGroup.velocityShift : velocityShifts.get(contact.right);
       leftDelta.x -= deltaVx * contact.leftInverseMass / contact.inverseMass;
       leftDelta.y -= deltaVy * contact.leftInverseMass / contact.inverseMass;
       rightDelta.x += deltaVx * contact.rightInverseMass / contact.inverseMass;
       rightDelta.y += deltaVy * contact.rightInverseMass / contact.inverseMass;
     });
+    groups.forEach(group => group.nodes.forEach(node => {
+      const shift = velocityShifts.get(node);
+      shift.x += group.velocityShift.x;
+      shift.y += group.velocityShift.y;
+    }));
     let maximumVelocityShift = 0;
     velocityShifts.forEach(shift => {
       maximumVelocityShift = Math.max(maximumVelocityShift, Math.hypot(shift.x, shift.y));
@@ -1762,7 +1834,7 @@
     const anchor = candidate && candidate.anchor_role === 'global' ? candidate : null;
     const stats = {
       anchorId: anchor ? anchor.id : null,
-      contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+      contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0, repelledNodes: 0,
       correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
       tangentialVelocityRemoved: 0,
       minimumClearance: null,
@@ -1817,29 +1889,44 @@
         tangential: Math.abs(tangentialSpeed) * (1 - tangentScale),
       };
     };
+    const projectIndividualNode = node => {
+      const radial = radialUnit(node.id, node.x - anchorX, node.y - anchorY);
+      const minimumDistance = anchorRadius + bodyRadius(node) + padding;
+      const correction = minimumDistance - radial.distance;
+      if (!(correction > 0) || !Number.isFinite(correction)) return false;
+      node.x = anchorX + radial.x * minimumDistance;
+      node.y = anchorY + radial.y * minimumDistance;
+      if (Number.isFinite(node.fx)) node.fx = node.x;
+      if (Number.isFinite(node.fy)) node.fy = node.y;
+      const velocity = stabilizeSystemContactVelocity(
+        [node], radial.x, radial.y, radial.distance, minimumDistance
+      );
+      stats.inwardVelocityRemoved += velocity.inward;
+      stats.tangentialVelocityRemoved += velocity.tangential;
+      stats.contacts++;
+      stats.repelledNodes++;
+      stats.correctedDistance += correction;
+      stats.maximumShift = Math.max(stats.maximumShift, correction);
+      return true;
+    };
 
     communityCenters(bodies).forEach(center => {
       if (center.id === coreKey) {
         center.nodes.forEach(node => {
           if (node === anchor) return;
-          const radial = radialUnit(node.id, node.x - anchorX, node.y - anchorY);
-          const minimumDistance = anchorRadius + bodyRadius(node) + padding;
-          const correction = minimumDistance - radial.distance;
-          if (!(correction > 0) || !Number.isFinite(correction)) return;
-          node.x = anchorX + radial.x * minimumDistance;
-          node.y = anchorY + radial.y * minimumDistance;
-          if (Number.isFinite(node.fx)) node.fx = node.x;
-          if (Number.isFinite(node.fy)) node.fy = node.y;
-          const velocity = stabilizeSystemContactVelocity(
-            [node], radial.x, radial.y, radial.distance, minimumDistance
-          );
-          stats.inwardVelocityRemoved += velocity.inward;
-          stats.tangentialVelocityRemoved += velocity.tangential;
-          stats.contacts++;
-          stats.coreNodes++;
-          stats.repelledNodes++;
-          stats.correctedDistance += correction;
-          stats.maximumShift = Math.max(stats.maximumShift, correction);
+          if (projectIndividualNode(node)) stats.coreNodes++;
+        });
+        return;
+      }
+
+      /* A dragged node is a cursor-owned external source. Rigidly translating its entire
+         community when that cursor touches the horizon creates positive feedback: restore
+         puts only the source back at the cursor, while every follower retains the displacement
+         and inflates the next system radius. Keep the horizon strict per painted member but
+         never move those followers as a group. */
+      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
+        center.nodes.forEach(node => {
+          if (projectIndividualNode(node)) stats.fixedSystemNodes++;
         });
         return;
       }
@@ -1879,6 +1966,31 @@
         ? clearance : Math.min(stats.minimumClearance, clearance);
     });
     return stats;
+  }
+
+  function combineGalaxyBlackHoleExclusions(passes) {
+    const usable = (passes || []).filter(pass => pass && typeof pass === 'object');
+    const last = usable[usable.length - 1] || {
+      anchorId: null, contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+      repelledNodes: 0,
+      correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+      tangentialVelocityRemoved: 0, minimumClearance: null,
+    };
+    return {
+      anchorId: usable.map(pass => pass.anchorId).find(Boolean) || null,
+      contacts: usable.reduce((sum, pass) => sum + (pass.contacts || 0), 0),
+      systems: usable.reduce((sum, pass) => sum + (pass.systems || 0), 0),
+      coreNodes: usable.reduce((sum, pass) => sum + (pass.coreNodes || 0), 0),
+      fixedSystemNodes: usable.reduce((sum, pass) => sum + (pass.fixedSystemNodes || 0), 0),
+      repelledNodes: usable.reduce((sum, pass) => sum + (pass.repelledNodes || 0), 0),
+      correctedDistance: usable.reduce((sum, pass) => sum + (pass.correctedDistance || 0), 0),
+      maximumShift: usable.reduce((maximum, pass) => Math.max(maximum,
+        pass.maximumShift || 0), 0),
+      inwardVelocityRemoved: usable.reduce((sum, pass) => sum + (pass.inwardVelocityRemoved || 0), 0),
+      tangentialVelocityRemoved: usable.reduce((sum, pass) => sum
+        + (pass.tangentialVelocityRemoved || 0), 0),
+      minimumClearance: last.minimumClearance,
+    };
   }
 
   /* Bound only anomalous motion inside each solar system. Free systems are scaled about their
@@ -2000,6 +2112,14 @@
       })
       : { systems: 0, interactions: 0, traversals: 0, approximations: 0,
         maximumAcceleration: 0, capScale: 1 };
+    /* Sample the outer restoring field in both leapfrog kicks. External systems receive one
+       shared COM acceleration; anchor-community satellites receive their own radial sample so
+       neither population can drift through the finite painted edge. */
+    const farFieldGravity = opts.includeFarFieldConfinement === false
+      ? { anchorId: null, envelopeRadius: 0, softRadius: 0,
+        acceleratedSystems: 0, acceleratedCoreNodes: 0, acceleratedFixedFollowers: 0,
+        maximumAcceleration: 0 }
+      : applyGalaxyFarFieldGravity(bodies, opts);
     /* Cross-system bridges and relation springs are intentionally opt-in at the
        integrator boundary.  A caller that wants the evidence layout enables bridges;
        relation springs stay a weak visual constraint, never an accidental replacement for
@@ -2019,6 +2139,8 @@
         strengthMultiplier: opts.relationStrengthMultiplier,
         accelerationCap: opts.relationAccelerationCap,
         padding: opts.relationPadding,
+        fixedNodeId: opts.fixedNodeId,
+        skipFixedNodeRelations: !!opts.dragSource,
       });
     }
     const dragGravity = opts.dragSource ? applyDraggedNodeAcceleration(
@@ -2046,6 +2168,7 @@
     });
     accelerations.dragGravity = dragGravity;
     accelerations.mutualGravity = mutualGravity;
+    accelerations.farFieldGravity = farFieldGravity;
     return accelerations;
   }
 
@@ -2137,6 +2260,420 @@
     return { applied, outwardCandidates, overrides, factor };
   }
 
+  /* The black-hole Plummer field deliberately stays gentle at the outer edge so seeded
+     tangential motion remains legible.  This separate field is an equally smooth, *system*
+     level restoring term in the narrow outer band.  It is not fitted from live coordinates:
+     the painted extent is derived once from scene hints and retained on the explicit global
+     anchor, so one bad outward kick cannot make the galaxy's permitted radius grow with it. */
+  function galaxyFarFieldEnvelope(nodes, options) {
+    const opts = options || {};
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const candidate = galaxyGlobalAnchor(bodies);
+    const anchor = candidate && candidate.anchor_role === 'global' ? candidate : null;
+    const empty = {
+      anchor: null, centers: [], coreKey: null, envelopeRadius: 0, softRadius: 0,
+    };
+    if (!anchor) return empty;
+    const centers = [...communityCenters(bodies).values()];
+    const coreKey = communityKey(anchor);
+    const bodyRadius = node => finitePositive(node.radius, evidenceNodeRadius(node, 3), 160);
+    const systemRadius = center => center.nodes.reduce((maximum, node) => Math.max(maximum,
+      Math.hypot(node.x - center.x, node.y - center.y) + bodyRadius(node)), 0);
+    const seededRadius = node => ['galactic_target_radius', 'galactic_radius', 'orbit_radius']
+      .reduce((maximum, key) => {
+        const value = Number(node[key]);
+        return Number.isFinite(value) && value > 0 ? Math.max(maximum, value) : maximum;
+      }, 0);
+    const anchorRadius = bodyRadius(anchor);
+    let hintedExtent = 0, observedExtent = 0, horizonExtent = anchorRadius;
+    let hasHint = false;
+    centers.forEach(center => {
+      const extent = systemRadius(center);
+      const radial = Math.hypot(center.x - anchor.x, center.y - anchor.y);
+      const hint = center.nodes.reduce((maximum, node) => Math.max(maximum, seededRadius(node)), 0);
+      if (center.id === coreKey) {
+        center.nodes.forEach(node => {
+          if (node === anchor) return;
+          const radius = bodyRadius(node);
+          const nodeHint = seededRadius(node);
+          if (nodeHint > 0) {
+            hintedExtent = Math.max(hintedExtent, nodeHint + radius);
+            hasHint = true;
+          }
+          observedExtent = Math.max(observedExtent,
+            Math.hypot(node.x - anchor.x, node.y - anchor.y) + radius);
+          /* The eventual outer edge must leave enough radial room for both sides of this
+             satellite's painted body at the inner horizon. */
+          horizonExtent = Math.max(horizonExtent,
+            anchorRadius + radius * 2 + GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+        });
+      } else {
+        /* A declared system orbit plus the real painted system radius is a hard geometric
+           seed. Include the radius even when a stale payload claims a tiny orbit. */
+        if (hint > 0) {
+          hintedExtent = Math.max(hintedExtent, hint + extent);
+          hasHint = true;
+        }
+        observedExtent = Math.max(observedExtent, radial + extent);
+        /* A rigid system that is just clear of the black hole extends one full system radius
+           again on its far side. Reserve that geometry before caching the finite envelope. */
+        horizonExtent = Math.max(horizonExtent,
+          anchorRadius + extent * 2 + GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+      }
+    });
+    const configuredMinimum = Number.isFinite(Number(opts.farFieldMinimumRadius))
+      ? Number(opts.farFieldMinimumRadius) : GALAXY_FAR_FIELD_MIN_RADIUS;
+    const minimumRadius = Math.max(1, configuredMinimum, horizonExtent);
+    const scale = Math.max(1, Number.isFinite(Number(opts.farFieldEnvelopeScale))
+      ? Number(opts.farFieldEnvelopeScale) : GALAXY_FAR_FIELD_ENVELOPE_SCALE);
+    const explicitRadius = Number(opts.farFieldEnvelopeRadius);
+    const weakCached = galaxyFarFieldEnvelopeCache
+      ? galaxyFarFieldEnvelopeCache.get(anchor) : undefined;
+    const propCached = anchor.__galaxyFarFieldEnvelope;
+    const cachedRadius = Number(
+      Number.isFinite(Number(weakCached)) && Number(weakCached) > 0 ? weakCached : propCached
+    );
+    const seedExtent = Math.max(minimumRadius,
+      hasHint ? hintedExtent : observedExtent);
+    const envelopeRadius = Number.isFinite(explicitRadius) && explicitRadius > 0
+      ? Math.max(minimumRadius, explicitRadius)
+      : Number.isFinite(cachedRadius) && cachedRadius > 0 ? cachedRadius
+        : Math.max(minimumRadius, seedExtent * scale);
+    if (!(Number.isFinite(cachedRadius) && cachedRadius > 0)
+      && !(Number.isFinite(explicitRadius) && explicitRadius > 0)) {
+      if (galaxyFarFieldEnvelopeCache) galaxyFarFieldEnvelopeCache.set(anchor, envelopeRadius);
+      try {
+        Object.defineProperty(anchor, '__galaxyFarFieldEnvelope', {
+          value: envelopeRadius, writable: false, configurable: true, enumerable: false,
+        });
+      } catch (error) { /* Frozen compatibility nodes keep the WeakMap value above. */ }
+    }
+    const softFraction = Math.max(0, Math.min(1, Number.isFinite(Number(opts.farFieldSoftFraction))
+      ? Number(opts.farFieldSoftFraction) : GALAXY_FAR_FIELD_SOFT_FRACTION));
+    const requestedBand = Number(opts.farFieldSoftBand);
+    const softBand = Number.isFinite(requestedBand) && requestedBand > 0
+      ? Math.min(envelopeRadius, requestedBand)
+      : Math.max(16, Math.min(32, envelopeRadius * (1 - softFraction)));
+    return {
+      anchor, centers, coreKey, bodyRadius, systemRadius,
+      envelopeRadius, softRadius: Math.max(0, envelopeRadius - softBand),
+    };
+  }
+
+  function applyGalaxyFarFieldGravity(nodes, options) {
+    const opts = options || {};
+    const field = galaxyFarFieldEnvelope(nodes, opts);
+    const stats = {
+      anchorId: field.anchor ? field.anchor.id : null,
+      envelopeRadius: field.envelopeRadius, softRadius: field.softRadius,
+      acceleratedSystems: 0, acceleratedCoreNodes: 0, acceleratedFixedFollowers: 0,
+      maximumAcceleration: 0,
+    };
+    if (!field.anchor || opts.includeFarFieldConfinement === false) return stats;
+    const acceleration = Math.max(0, Number.isFinite(Number(opts.farFieldAcceleration))
+      ? Number(opts.farFieldAcceleration) : GALAXY_FAR_FIELD_ACCELERATION);
+    const accelerationCap = Math.max(0, Number.isFinite(Number(opts.farFieldMaxAcceleration))
+      ? Number(opts.farFieldMaxAcceleration) : GALAXY_FAR_FIELD_MAX_ACCELERATION);
+    const band = Math.max(1e-9, field.envelopeRadius - field.softRadius);
+    const accelerate = (members, key, dx, dy, outerRadius, scope) => {
+      if (!(outerRadius > field.softRadius)) return;
+      const distance = Math.hypot(dx, dy);
+      let unitX = 1, unitY = 0;
+      if (distance > 1e-9) {
+        unitX = dx / distance;
+        unitY = dy / distance;
+      } else {
+        const angle = seededHash(0, 'far-field:' + String(key)) / 0x100000000 * Math.PI * 2;
+        unitX = Math.cos(angle);
+        unitY = Math.sin(angle);
+      }
+      const ratio = (outerRadius - field.softRadius) / band;
+      const magnitude = Math.min(acceleration,
+        accelerationCap > 0 ? accelerationCap : acceleration,
+        acceleration * galaxySmoothstep(ratio));
+      if (!(magnitude > 0) || !Number.isFinite(magnitude)) return;
+      members.forEach(node => {
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) - unitX * magnitude;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) - unitY * magnitude;
+      });
+      if (scope === 'core') stats.acceleratedCoreNodes += members.length;
+      else if (scope === 'fixed') stats.acceleratedFixedFollowers += members.length;
+      else stats.acceleratedSystems++;
+      stats.maximumAcceleration = Math.max(stats.maximumAcceleration, magnitude);
+    };
+    field.centers.forEach(center => {
+      if (center.id === field.coreKey) {
+        center.nodes.forEach(node => {
+          if (node === field.anchor || node.id === opts.fixedNodeId) return;
+          const dx = node.x - field.anchor.x, dy = node.y - field.anchor.y;
+          accelerate([node], node.id, dx, dy,
+            Math.hypot(dx, dy) + field.bodyRadius(node), 'core');
+        });
+        return;
+      }
+      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
+        /* Preserve the cursor-owned source exactly, but do not make its companions immune to
+           the smooth outer well. They get their own radial sample until the hard cap is needed. */
+        center.nodes.forEach(node => {
+          if (node.id === opts.fixedNodeId) return;
+          const dx = node.x - field.anchor.x, dy = node.y - field.anchor.y;
+          accelerate([node], node.id, dx, dy,
+            Math.hypot(dx, dy) + field.bodyRadius(node), 'fixed');
+        });
+        return;
+      }
+      const dx = center.x - field.anchor.x, dy = center.y - field.anchor.y;
+      accelerate(center.nodes, center.id, dx, dy,
+        Math.hypot(dx, dy) + field.systemRadius(center), 'system');
+    });
+    return stats;
+  }
+
+  /* Exact outer counterpart to the black-hole contact. External systems are translated as
+     rigid bodies; anchor-community satellites are projected one at a time so the anchor never
+     moves. In either case only outward radial COM velocity is removed. Because this correction
+     moves inward, tangential speed is retained rather than increased (a cap must not inject
+     angular energy). An oversized system has a rare per-member fallback, since no rigid
+     translation can fit a radius larger than the finite envelope. */
+  function applyGalaxyFarFieldConfinement(nodes, options) {
+    const opts = options || {};
+    const field = galaxyFarFieldEnvelope(nodes, opts);
+    const stats = {
+      anchorId: field.anchor ? field.anchor.id : null,
+      envelopeRadius: field.envelopeRadius, softRadius: field.softRadius,
+      acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
+      boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+      correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
+      tangentialVelocityRemoved: 0,
+      annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
+        infeasibleNodes: 0 },
+    };
+    if (!field.anchor || opts.includeFarFieldConfinement === false) return stats;
+    const anchorX = field.anchor.x, anchorY = field.anchor.y;
+    const anchorVx = Number.isFinite(field.anchor.vx) ? field.anchor.vx : 0;
+    const anchorVy = Number.isFinite(field.anchor.vy) ? field.anchor.vy : 0;
+    const radial = (key, dx, dy) => {
+      const distance = Math.hypot(dx, dy);
+      if (distance > 1e-9) return { x: dx / distance, y: dy / distance, distance };
+      const angle = seededHash(0, 'far-field-boundary:' + String(key))
+        / 0x100000000 * Math.PI * 2;
+      return { x: Math.cos(angle), y: Math.sin(angle), distance: 0 };
+    };
+    const stabilizeVelocity = (members, unitX, unitY, oldDistance, newDistance) => {
+      let mass = 0, velocityX = 0, velocityY = 0;
+      members.forEach(node => {
+        const nodeMass = finitePositive(node.gravity_mass, 1, 1000);
+        mass += nodeMass;
+        velocityX += nodeMass * (Number.isFinite(node.vx) ? node.vx : 0);
+        velocityY += nodeMass * (Number.isFinite(node.vy) ? node.vy : 0);
+      });
+      if (!(mass > 0)) return { outward: 0, tangential: 0 };
+      const relativeX = velocityX / mass - anchorVx;
+      const relativeY = velocityY / mass - anchorVy;
+      const tangentX = -unitY, tangentY = unitX;
+      const radialSpeed = relativeX * unitX + relativeY * unitY;
+      const tangentSpeed = relativeX * tangentX + relativeY * tangentY;
+      const tangentScale = newDistance > 1e-9
+        ? Math.max(0, Math.min(1, oldDistance / newDistance)) : 0;
+      const targetRadial = Math.min(0, radialSpeed);
+      const targetTangent = tangentSpeed * tangentScale;
+      const targetX = targetRadial * unitX + targetTangent * tangentX;
+      const targetY = targetRadial * unitY + targetTangent * tangentY;
+      const shiftX = targetX - relativeX, shiftY = targetY - relativeY;
+      members.forEach(node => {
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + shiftX;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + shiftY;
+      });
+      return {
+        outward: Math.max(0, radialSpeed),
+        tangential: Math.abs(tangentSpeed) * (1 - tangentScale),
+      };
+    };
+    field.centers.forEach(center => {
+      if (center.id === field.coreKey) {
+        center.nodes.forEach(node => {
+          if (node === field.anchor || node.id === opts.fixedNodeId) return;
+          const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
+          const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
+          const correction = unit.distance - targetDistance;
+          if (!(correction > 0)) return;
+          node.x = anchorX + unit.x * targetDistance;
+          node.y = anchorY + unit.y * targetDistance;
+          if (Number.isFinite(node.fx)) node.fx = node.x;
+          if (Number.isFinite(node.fy)) node.fy = node.y;
+          const velocity = stabilizeVelocity([node], unit.x, unit.y,
+            unit.distance, targetDistance);
+          stats.boundedCoreNodes++;
+          stats.correctedDistance += correction;
+          stats.maximumShift = Math.max(stats.maximumShift, correction);
+          stats.outwardVelocityRemoved += velocity.outward;
+          stats.tangentialVelocityRemoved += velocity.tangential;
+        });
+        return;
+      }
+      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
+        /* The cursor owns exactly one source coordinate. Its companions are still free bodies:
+           cap them one at a time rather than exempting the whole dragged system, otherwise a
+           long gesture can carry a follower beyond the cached envelope and snap it on release. */
+        center.nodes.forEach(node => {
+          if (node.id === opts.fixedNodeId) return;
+          const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
+          const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
+          const correction = unit.distance - targetDistance;
+          if (!(correction > 0)) return;
+          node.x = anchorX + unit.x * targetDistance;
+          node.y = anchorY + unit.y * targetDistance;
+          if (Number.isFinite(node.fx)) node.fx = node.x;
+          if (Number.isFinite(node.fy)) node.fy = node.y;
+          const velocity = stabilizeVelocity([node], unit.x, unit.y,
+            unit.distance, targetDistance);
+          stats.boundedFixedFollowers++;
+          stats.correctedDistance += correction;
+          stats.maximumShift = Math.max(stats.maximumShift, correction);
+          stats.outwardVelocityRemoved += velocity.outward;
+          stats.tangentialVelocityRemoved += velocity.tangential;
+        });
+        return;
+      }
+      const unit = radial(center.id, center.x - anchorX, center.y - anchorY);
+      const radius = field.systemRadius(center);
+      /* A compact system fits inside R after one COM translation. A just-released drag can
+         leave a source at the cursor and companions at the cap, making q_s >= R; translating
+         that stretched geometry by its COM would throw the already-safe follower hundreds of
+         units. Resolve that impossible rigid fit member-by-member for this slice instead. */
+      if (radius >= field.envelopeRadius - 1e-9) {
+        let bounded = false;
+        center.nodes.forEach(node => {
+          const memberUnit = radial(node.id, node.x - anchorX, node.y - anchorY);
+          const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
+          const correction = memberUnit.distance - targetDistance;
+          if (!(correction > 1e-9)) return;
+          node.x = anchorX + memberUnit.x * targetDistance;
+          node.y = anchorY + memberUnit.y * targetDistance;
+          if (Number.isFinite(node.fx)) node.fx = node.x;
+          if (Number.isFinite(node.fy)) node.fy = node.y;
+          const velocity = stabilizeVelocity([node], memberUnit.x, memberUnit.y,
+            memberUnit.distance, targetDistance);
+          stats.boundedOversizedNodes++;
+          stats.correctedDistance += correction;
+          stats.maximumShift = Math.max(stats.maximumShift, correction);
+          stats.outwardVelocityRemoved += velocity.outward;
+          stats.tangentialVelocityRemoved += velocity.tangential;
+          bounded = true;
+        });
+        if (bounded) stats.boundedDeformedSystems++;
+        return;
+      }
+      const targetDistance = Math.max(0, field.envelopeRadius - radius);
+      const correction = unit.distance - targetDistance;
+      if (!(correction > 0)) return;
+      const shiftX = -unit.x * correction, shiftY = -unit.y * correction;
+      center.nodes.forEach(node => {
+        node.x += shiftX;
+        node.y += shiftY;
+        if (Number.isFinite(node.fx)) node.fx += shiftX;
+        if (Number.isFinite(node.fy)) node.fy += shiftY;
+      });
+      const velocity = stabilizeVelocity(center.nodes, unit.x, unit.y,
+        unit.distance, targetDistance);
+      stats.boundedSystems++;
+      stats.correctedDistance += correction;
+      stats.maximumShift = Math.max(stats.maximumShift, correction);
+      stats.outwardVelocityRemoved += velocity.outward;
+      stats.tangentialVelocityRemoved += velocity.tangential;
+    });
+    /* The COM/system-radius projection above is exact whenever q_s <= R. If an extreme late
+       local deformation has made q_s > R, fitting it rigidly is mathematically impossible.
+       Finish with a member-level cap so the public invariant remains every free painted node
+       lies inside the cached envelope; normal systems never enter this branch. */
+    field.centers.forEach(center => {
+      center.nodes.forEach(node => {
+        if (node === field.anchor || node.id === opts.fixedNodeId) return;
+        const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
+        const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
+        const correction = unit.distance - targetDistance;
+        if (!(correction > 1e-9)) return;
+        node.x = anchorX + unit.x * targetDistance;
+        node.y = anchorY + unit.y * targetDistance;
+        if (Number.isFinite(node.fx)) node.fx = node.x;
+        if (Number.isFinite(node.fy)) node.fy = node.y;
+        const velocity = stabilizeVelocity([node], unit.x, unit.y,
+          unit.distance, targetDistance);
+        stats.boundedOversizedNodes++;
+        stats.correctedDistance += correction;
+        stats.maximumShift = Math.max(stats.maximumShift, correction);
+        stats.outwardVelocityRemoved += velocity.outward;
+        stats.tangentialVelocityRemoved += velocity.tangential;
+      });
+    });
+    return stats;
+  }
+
+  /* Last coordinate check after alternating the two system-level contacts. A normal scene is
+     already feasible (the cached envelope reserved its horizon geometry), so this is a no-op.
+     It exists for a pathological late deformation whose system radius grew beyond that cache:
+     individual members are then the only way to satisfy both painted edges at once. The one
+     pointer-owned source remains exempt from the outer edge, but its free companions do not. */
+  function applyGalaxyAnnularBounds(nodes, options) {
+    const opts = options || {};
+    const field = galaxyFarFieldEnvelope(nodes, opts);
+    const stats = { anchorId: field.anchor ? field.anchor.id : null,
+      innerCorrectedNodes: 0, outerCorrectedNodes: 0, infeasibleNodes: 0 };
+    if (!field.anchor || opts.includeFarFieldConfinement === false) return stats;
+    const anchorX = field.anchor.x, anchorY = field.anchor.y;
+    const anchorRadius = field.bodyRadius(field.anchor);
+    const padding = Math.max(0, Number.isFinite(Number(opts.blackHoleExclusionPadding))
+      ? Number(opts.blackHoleExclusionPadding) : GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+    field.centers.forEach(center => center.nodes.forEach(node => {
+      if (node === field.anchor || node.id === opts.fixedNodeId) return;
+      const dx = node.x - anchorX, dy = node.y - anchorY;
+      const distance = Math.hypot(dx, dy);
+      const radius = field.bodyRadius(node);
+      const lower = anchorRadius + radius + padding;
+      const upper = field.envelopeRadius - radius;
+      if (!(upper >= lower)) {
+        /* This can only arise from an externally forced, mathematically impossible geometry.
+           Keep the black-hole edge authoritative rather than emitting a non-finite position. */
+        stats.infeasibleNodes++;
+        return;
+      }
+      const target = Math.max(lower, Math.min(upper, distance));
+      if (!(Math.abs(target - distance) > 1e-9)) return;
+      let unitX = 1, unitY = 0;
+      if (distance > 1e-9) {
+        unitX = dx / distance;
+        unitY = dy / distance;
+      } else {
+        const angle = seededHash(0, 'galaxy-annulus:' + String(node.id))
+          / 0x100000000 * Math.PI * 2;
+        unitX = Math.cos(angle);
+        unitY = Math.sin(angle);
+      }
+      node.x = anchorX + unitX * target;
+      node.y = anchorY + unitY * target;
+      if (Number.isFinite(node.fx)) node.fx = node.x;
+      if (Number.isFinite(node.fy)) node.fy = node.y;
+      const vx = (Number.isFinite(node.vx) ? node.vx : 0)
+        - (Number.isFinite(field.anchor.vx) ? field.anchor.vx : 0);
+      const vy = (Number.isFinite(node.vy) ? node.vy : 0)
+        - (Number.isFinite(field.anchor.vy) ? field.anchor.vy : 0);
+      const tangentX = -unitY, tangentY = unitX;
+      const radialSpeed = vx * unitX + vy * unitY;
+      const tangentSpeed = vx * tangentX + vy * tangentY;
+      const tangentScale = target > 1e-9 ? Math.max(0, Math.min(1, distance / target)) : 0;
+      const targetRadial = target > distance ? Math.max(0, radialSpeed)
+        : Math.min(0, radialSpeed);
+      node.vx = (Number.isFinite(field.anchor.vx) ? field.anchor.vx : 0)
+        + targetRadial * unitX + tangentSpeed * tangentScale * tangentX;
+      node.vy = (Number.isFinite(field.anchor.vy) ? field.anchor.vy : 0)
+        + targetRadial * unitY + tangentSpeed * tangentScale * tangentY;
+      if (target > distance) stats.innerCorrectedNodes++;
+      else stats.outerCorrectedNodes++;
+    }));
+    return stats;
+  }
+
   /* One deterministic velocity-Verlet / leapfrog step.  The time step is intentionally
      dimensionless: the force constants were calibrated in force-graph tick units, so a
      value of one is the physically equivalent fixed replacement for one former D3 tick.
@@ -2178,9 +2715,13 @@
     if (!bodies.length) return { bodies: 0, collisions: 0, kinetic: 0 };
     const horizonEnabled = anchorFrame && opts.includeBlackHoleExclusion !== false;
     const projectBlackHoleHorizon = () => horizonEnabled
-      ? applyGalaxyBlackHoleExclusion(bodies, { padding: opts.blackHoleExclusionPadding })
+      ? applyGalaxyBlackHoleExclusion(bodies, {
+        padding: opts.blackHoleExclusionPadding,
+        fixedNodeId: opts.fixedNodeId,
+      })
       : {
-        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+        repelledNodes: 0,
         correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
         tangentialVelocityRemoved: 0,
         minimumClearance: null,
@@ -2249,6 +2790,7 @@
         maxCorrection: opts.relationConstraintMaxCorrection,
         padding: opts.relationPadding,
         fixedNodeId: opts.fixedNodeId,
+        skipFixedNodeRelations: !!opts.dragSource,
       })
       : { applied: 0, maximumError: 0, correctedDistance: 0 };
     /* Orbital separation is a dissipative close-range pressure, not negative gravity. It uses
@@ -2295,13 +2837,31 @@
        actual penetration. This keeps ordinary dragging exact without allowing a dragged node
        to cover the event horizon. */
     restoreFixedNode();
+    /* Relations, cross-system contact and drag can all add a finite late displacement. Alternate
+       the strict inner and outer contacts, then verify their annulus member-by-member only for
+       a pathological oversized system that no rigid translation can satisfy. */
+    const preOuterHorizon = projectBlackHoleHorizon();
+    const farFieldConfinement = opts.includeFarFieldConfinement === false
+      ? { anchorId: null, envelopeRadius: 0, softRadius: 0,
+        acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
+        boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+        correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
+        tangentialVelocityRemoved: 0 }
+      : applyGalaxyFarFieldConfinement(bodies, opts);
     const finalHorizon = projectBlackHoleHorizon();
-    const horizonPasses = [initialHorizon, driftHorizon, finalHorizon];
+    const annulus = opts.includeFarFieldConfinement === false
+      ? { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0, infeasibleNodes: 0 }
+      : applyGalaxyAnnularBounds(bodies, opts);
+    farFieldConfinement.annulus = annulus;
+    const horizonPasses = [initialHorizon, driftHorizon, preOuterHorizon, finalHorizon];
     const blackHoleExclusion = {
       anchorId: finalHorizon.anchorId || driftHorizon.anchorId || initialHorizon.anchorId,
       contacts: horizonPasses.reduce((sum, pass) => sum + pass.contacts, 0),
       systems: horizonPasses.reduce((sum, pass) => sum + pass.systems, 0),
       coreNodes: horizonPasses.reduce((sum, pass) => sum + pass.coreNodes, 0),
+      fixedSystemNodes: horizonPasses.reduce(
+        (sum, pass) => sum + (pass.fixedSystemNodes || 0), 0
+      ),
       repelledNodes: horizonPasses.reduce((sum, pass) => sum + pass.repelledNodes, 0),
       correctedDistance: horizonPasses.reduce(
         (sum, pass) => sum + pass.correctedDistance, 0
@@ -2331,6 +2891,26 @@
     });
     const dragAcceleration = end.dragGravity || start.dragGravity
       || { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
+    /* A leapfrog step samples the field twice. Keep both counts rather than overwriting the
+       first kick with the second, so live diagnostics can distinguish a dormant envelope from
+       a system that actually entered its smooth outer band during this physical slice. */
+    const farFieldSamples = [start.farFieldGravity, end.farFieldGravity].filter(Boolean);
+    const farFieldGravity = {
+      anchorId: farFieldSamples.map(sample => sample.anchorId).find(Boolean) || null,
+      envelopeRadius: farFieldSamples.reduce((radius, sample) => Math.max(radius,
+        Number(sample.envelopeRadius) || 0), 0),
+      softRadius: farFieldSamples.reduce((radius, sample) => Math.max(radius,
+        Number(sample.softRadius) || 0), 0),
+      samples: farFieldSamples.length,
+      acceleratedSystems: farFieldSamples.reduce((sum, sample) => sum
+        + (sample.acceleratedSystems || 0), 0),
+      acceleratedCoreNodes: farFieldSamples.reduce((sum, sample) => sum
+        + (sample.acceleratedCoreNodes || 0), 0),
+      acceleratedFixedFollowers: farFieldSamples.reduce((sum, sample) => sum
+        + (sample.acceleratedFixedFollowers || 0), 0),
+      maximumAcceleration: farFieldSamples.reduce((maximum, sample) => Math.max(maximum,
+        sample.maximumAcceleration || 0), 0),
+    };
     return {
       bodies: bodies.length,
       collisions: collision.overlaps,
@@ -2341,6 +2921,8 @@
       relationConstraint,
       orbitalSeparation,
       blackHoleExclusion,
+      farFieldConfinement,
+      farFieldGravity,
       systemVelocity,
       mutualGravity: end.mutualGravity || start.mutualGravity
         || { systems: 0, interactions: 0, traversals: 0, approximations: 0,
@@ -3254,10 +3836,25 @@
     let galaxyLastOrbitalCorrection = 0, galaxyLastLocalVelocityLimits = 0;
     let galaxySpeedCaps = 0;
     let galaxyLastBlackHoleExclusion = {
-      anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+      anchorId: null, contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+      repelledNodes: 0,
       correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
       tangentialVelocityRemoved: 0,
       minimumClearance: null,
+    };
+    let galaxyLastFarFieldConfinement = {
+      anchorId: null, envelopeRadius: 0, softRadius: 0,
+      acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
+      boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+      correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
+      tangentialVelocityRemoved: 0,
+      annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
+        infeasibleNodes: 0 },
+    };
+    let galaxyLastFarFieldGravity = {
+      anchorId: null, envelopeRadius: 0, softRadius: 0, samples: 0,
+      acceleratedSystems: 0, acceleratedCoreNodes: 0, acceleratedFixedFollowers: 0,
+      maximumAcceleration: 0,
     };
     let galaxyLastMutualGravity = {
       systems: 0, interactions: 0, traversals: 0, approximations: 0,
@@ -4134,10 +4731,25 @@
       galaxyLastLocalVelocityLimits = 0;
       galaxySpeedCaps = 0;
       galaxyLastBlackHoleExclusion = {
-        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+        repelledNodes: 0,
         correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
         tangentialVelocityRemoved: 0,
         minimumClearance: null,
+      };
+      galaxyLastFarFieldConfinement = {
+        anchorId: null, envelopeRadius: 0, softRadius: 0,
+        acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
+        boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+        correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
+        tangentialVelocityRemoved: 0,
+        annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
+          infeasibleNodes: 0 },
+      };
+      galaxyLastFarFieldGravity = {
+        anchorId: null, envelopeRadius: 0, softRadius: 0, samples: 0,
+        acceleratedSystems: 0, acceleratedCoreNodes: 0, acceleratedFixedFollowers: 0,
+        maximumAcceleration: 0,
       };
       galaxyReheatStepsRemaining = 0;
       galaxyReheatActivations = 0;
@@ -4222,6 +4834,14 @@
            It is always strong enough to keep painted geometry outside the event horizon. */
         includeBlackHoleExclusion: true,
         blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
+        /* The outer well is intentionally scene-seeded, not coupled to a slider. A cached
+           envelope makes its threshold deterministic across normal frames and drag release. */
+        includeFarFieldConfinement: true,
+        farFieldEnvelopeScale: GALAXY_FAR_FIELD_ENVELOPE_SCALE,
+        farFieldMinimumRadius: GALAXY_FAR_FIELD_MIN_RADIUS,
+        farFieldSoftFraction: GALAXY_FAR_FIELD_SOFT_FRACTION,
+        farFieldAcceleration: GALAXY_FAR_FIELD_ACCELERATION,
+        farFieldMaxAcceleration: GALAXY_FAR_FIELD_MAX_ACCELERATION,
         localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
         timestep: GALAXY_FIXED_TIMESTEP,
         /* The render loop consumes one fixed 30 Hz physical slice per substep. Passing that
@@ -4277,6 +4897,13 @@
           * GALAXY_CROSS_SYSTEM_REPULSION_FRACTION,
         blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
         blackHoleExclusion: { ...galaxyLastBlackHoleExclusion },
+        farFieldEnvelopeScale: GALAXY_FAR_FIELD_ENVELOPE_SCALE,
+        farFieldMinimumRadius: GALAXY_FAR_FIELD_MIN_RADIUS,
+        farFieldSoftFraction: GALAXY_FAR_FIELD_SOFT_FRACTION,
+        farFieldAcceleration: GALAXY_FAR_FIELD_ACCELERATION,
+        farFieldMaxAcceleration: GALAXY_FAR_FIELD_MAX_ACCELERATION,
+        farFieldConfinement: { ...galaxyLastFarFieldConfinement },
+        farFieldGravity: { ...galaxyLastFarFieldGravity },
         active: galaxyDynamicsEligible(),
         scheduled: galaxyFrame !== 0,
         frameIntervalMs: GALAXY_FRAME_INTERVAL_MS,
@@ -4353,6 +4980,8 @@
             report.orbitalSeparation.crossCommunityOverlaps || 0;
           galaxyLastOrbitalCorrection = report.orbitalSeparation.correctionDistance;
           galaxyLastBlackHoleExclusion = report.blackHoleExclusion;
+          galaxyLastFarFieldConfinement = report.farFieldConfinement;
+          galaxyLastFarFieldGravity = report.farFieldGravity;
           galaxyLastLocalVelocityLimits = report.systemVelocity.limitedSystems;
           galaxyLastMutualGravity = report.mutualGravity;
           dragFollowerGravityReport = report.dragGravity;
@@ -4596,9 +5225,37 @@
         } else clearPinnedPositions(data);
         /* graphData() may paint synchronously. Enforce the event horizon after every layout
            seed (including the pinned oversized layout) before the vendor sees the payload. */
-        if (galaxyMode) galaxyLastBlackHoleExclusion = applyGalaxyBlackHoleExclusion(
-          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
-        );
+        if (galaxyMode) {
+          const prePaintHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          /* Static and reused payloads do not enter the live integrator, but still paint the
+             same finite galaxy. Apply the exact outer extent before handing coordinates to
+             force-graph, then reassert the inner horizon after any inward system shift. */
+          galaxyLastFarFieldConfinement = applyGalaxyFarFieldConfinement(data.nodes, {
+            includeFarFieldConfinement: true,
+            farFieldEnvelopeScale: GALAXY_FAR_FIELD_ENVELOPE_SCALE,
+            farFieldMinimumRadius: GALAXY_FAR_FIELD_MIN_RADIUS,
+            farFieldSoftFraction: GALAXY_FAR_FIELD_SOFT_FRACTION,
+          });
+          galaxyLastFarFieldGravity = {
+            anchorId: galaxyLastFarFieldConfinement.anchorId,
+            envelopeRadius: galaxyLastFarFieldConfinement.envelopeRadius,
+            softRadius: galaxyLastFarFieldConfinement.softRadius,
+            samples: 0, acceleratedSystems: 0, acceleratedCoreNodes: 0,
+            acceleratedFixedFollowers: 0, maximumAcceleration: 0,
+          };
+          const postOuterHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          galaxyLastFarFieldConfinement.annulus = applyGalaxyAnnularBounds(data.nodes, {
+            includeFarFieldConfinement: true,
+            blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
+          });
+          galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
+            [prePaintHorizon, postOuterHorizon]
+          );
+        }
         fg.graphData(data);
         seeded = data;
       } else if (staticFullLayout && fullLayoutDirty) {
@@ -4621,9 +5278,34 @@
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
          receive the same strict painted-edge invariant before the next redraw. */
-      if (reused && galaxyMode) galaxyLastBlackHoleExclusion = applyGalaxyBlackHoleExclusion(
-        data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
-      );
+      if (reused && galaxyMode) {
+        const prePaintHorizon = applyGalaxyBlackHoleExclusion(
+          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+        );
+        galaxyLastFarFieldConfinement = applyGalaxyFarFieldConfinement(data.nodes, {
+          includeFarFieldConfinement: true,
+          farFieldEnvelopeScale: GALAXY_FAR_FIELD_ENVELOPE_SCALE,
+          farFieldMinimumRadius: GALAXY_FAR_FIELD_MIN_RADIUS,
+          farFieldSoftFraction: GALAXY_FAR_FIELD_SOFT_FRACTION,
+        });
+        galaxyLastFarFieldGravity = {
+          anchorId: galaxyLastFarFieldConfinement.anchorId,
+          envelopeRadius: galaxyLastFarFieldConfinement.envelopeRadius,
+          softRadius: galaxyLastFarFieldConfinement.softRadius,
+          samples: 0, acceleratedSystems: 0, acceleratedCoreNodes: 0,
+          acceleratedFixedFollowers: 0, maximumAcceleration: 0,
+        };
+        const postOuterHorizon = applyGalaxyBlackHoleExclusion(
+          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+        );
+        galaxyLastFarFieldConfinement.annulus = applyGalaxyAnnularBounds(data.nodes, {
+          includeFarFieldConfinement: true,
+          blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
+        });
+        galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
+          [prePaintHorizon, postOuterHorizon]
+        );
+      }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
       /* Bound the simulation the way the classic path does. Without these force-graph keeps its
@@ -5567,6 +6249,8 @@
       applyDraggedNodeGravity, applyDraggedNodeAcceleration,
       applyGalaxyCollisions, applyGalaxyOrbitalSeparation,
       applyGalaxyBlackHoleExclusion,
+      galaxyFarFieldEnvelope, applyGalaxyFarFieldGravity, applyGalaxyFarFieldConfinement,
+      applyGalaxyAnnularBounds,
       stabilizeGalaxySystemVelocities,
       galaxyAccelerations, integrateGalaxyLeapfrog, galaxyMotionDiagnostics,
       galaxyInwardConvergencePerMinute, galaxyInwardConvergenceFactor,
