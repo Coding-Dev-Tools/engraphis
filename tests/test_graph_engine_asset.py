@@ -1685,6 +1685,59 @@ def test_orbital_separation_has_double_strength_and_preserves_local_mass_center(
 
 
 @requires_node
+def test_cross_system_repulsion_is_weak_bounded_and_only_cancels_closing_motion() -> None:
+    report = _run_node(
+        """
+        const fixture = (leftVx, rightVx) => [
+          { id: 'heavy', community_id: 'left-system', x: 0, y: 0,
+            vx: leftVx, vy: 0, radius: 3, gravity_mass: 4 },
+          { id: 'light', community_id: 'right-system', x: 4, y: 0,
+            vx: rightVx, vy: 0, radius: 3, gravity_mass: 1 },
+        ];
+        const options = {
+          padding: 12, strength: 0,
+          crossCommunityPadding: 1.5, crossCommunityStrength: 0.16,
+          maxCorrection: 4, maxVelocityCorrection: 8,
+        };
+        const closing = fixture(1, -1);
+        const separating = fixture(-1, 1);
+        const disabled = fixture(1, -1);
+        const beforeCom = (closing[0].x * 4 + closing[1].x) / 5;
+        const beforeMomentum = closing[0].vx * 4 + closing[1].vx;
+        const stats = I.applyGalaxyOrbitalSeparation(closing, options);
+        I.applyGalaxyOrbitalSeparation(separating, options);
+        const disabledStats = I.applyGalaxyOrbitalSeparation(disabled, {
+          ...options, crossCommunityStrength: 0,
+        });
+        emit({
+          stats, disabledStats,
+          distance: closing[1].x - closing[0].x,
+          center: (closing[0].x * 4 + closing[1].x) / 5,
+          beforeCom,
+          momentum: closing[0].vx * 4 + closing[1].vx,
+          beforeMomentum,
+          closingVelocity: closing.map(node => node.vx),
+          separatingVelocity: separating.map(node => node.vx),
+          disabledPhase: disabled.map(node => [node.x, node.y, node.vx, node.vy]),
+          finite: closing.concat(separating).every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["stats"]["crossCommunityPairs"] == 1
+    assert report["stats"]["crossCommunityOverlaps"] == 1
+    assert report["stats"]["crossCommunityCorrectionDistance"] == pytest.approx(0.56)
+    assert report["distance"] == pytest.approx(4.56)
+    assert report["center"] == pytest.approx(report["beforeCom"], abs=1e-12)
+    assert report["momentum"] == pytest.approx(report["beforeMomentum"], abs=1e-12)
+    assert report["closingVelocity"] == pytest.approx([0.6, 0.6], abs=1e-12)
+    assert report["separatingVelocity"] == pytest.approx([-1, 1], abs=1e-12)
+    assert report["disabledStats"]["overlaps"] == 0
+    assert report["disabledPhase"] == [[0, 0, 1, 0], [4, 0, -1, 0]]
+
+
+@requires_node
 def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> None:
     report = _run_node(
         """
