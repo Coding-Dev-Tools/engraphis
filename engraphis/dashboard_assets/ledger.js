@@ -2059,6 +2059,12 @@
     const request = ++state.graphConnectionsRequest;
     const workspace = state.workspace;
     const title = item.name || item.label || item.id;
+    const historicalMemberId = item.ghost && Array.isArray(item.member_ids)
+      ? item.member_ids.find(value => typeof value === 'string' && value) || ''
+      : '';
+    const historyQuery = item.ghost
+      ? `&include_history=true${historicalMemberId ? `&member_id=${encodeURIComponent(historicalMemberId)}` : ''}`
+      : '';
     byId('graph-connection-memory-title').textContent = `Memories for ${title}`;
     renderGraphConnectionMemories([], 'Loading memory evidence…');
     if (isGraphMemoryNode(item)) {
@@ -2074,7 +2080,7 @@
     const timeout = window.setTimeout(() => controller.abort(), GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS);
     try {
       const detail = await api(
-        `/graph/entities/${encodeURIComponent(item.id)}/memories?${query(workspace)}${graphAsOfQuery()}`,
+        `/graph/entities/${encodeURIComponent(item.id)}/memories?${query(workspace)}${graphAsOfQuery()}${historyQuery}`,
         { signal: controller.signal },
       );
       if (request !== state.graphConnectionsRequest || workspace !== state.workspace) return;

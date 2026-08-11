@@ -14,6 +14,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
   2,000 relations; larger Galaxy scenes and non-Galaxy full views retain the deterministic
   fallback.
+- Historical graph views now keep at least one ghost relation's endpoints together under
+  undersized node caps, and ghost evidence drilldowns resolve invalidated supporting memories
+  instead of a colliding live canonical alias.
 
 ## [1.6] - 2026-08-08
 

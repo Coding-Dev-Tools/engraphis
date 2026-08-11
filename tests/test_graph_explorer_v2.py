@@ -1819,6 +1819,32 @@ def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     assert history["edges"][0]["ghost"] is True
 
 
+@pytest.mark.parametrize("node_limit", [1, 2])
+def test_graph_scene_history_keeps_one_relation_atomic_beyond_node_cap(node_limit):
+    entities = [
+        {"id": node_id, "canonical_id": node_id, "name": node_id, "etype": "concept"}
+        for node_id in ("hub", "live-a", "live-b", "old-a", "old-b")
+    ]
+    edges = [
+        {"id": "live-a", "src": "hub", "dst": "live-a", "relation": "uses",
+         "layer": "entity", "weight": 10.0},
+        {"id": "live-b", "src": "hub", "dst": "live-b", "relation": "uses",
+         "layer": "entity", "weight": 9.0},
+        {"id": "history", "src": "old-a", "dst": "old-b", "relation": "used",
+         "layer": "entity", "weight": 1.0, "ghost": True},
+    ]
+
+    scene = build_graph_scene(
+        "w", entities, edges, [], include_history=True,
+        node_limit=node_limit, edge_limit=1,
+    )
+
+    assert {node["id"] for node in scene["nodes"]} == {"old-a", "old-b"}
+    assert [(edge["id"], edge["ghost"]) for edge in scene["edges"]] == [
+        ("history", True),
+    ]
+
+
 def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
     service, _alpha, _beta, _gamma = _seed_service()
     other_workspace_id = service.store.get_or_create_workspace("other")
@@ -2735,19 +2761,80 @@ def test_workspace_copy_remaps_canonical_and_support_ids():
         assert provenance["memory_id"] in copied_memory_ids
 
 
-def test_graph_entity_evidence_resolves_synthetic_ghost_node_id():
-    """Regression: scene emits 'canon:ghost' IDs for historical collisions,
-    but the evidence endpoint must strip the suffix and resolve the stored entity."""
-    service, alpha, _beta, _gamma = _seed_service()
+def test_graph_entity_evidence_resolves_nested_ghost_to_historical_member():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    archived_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Archived relation evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    current_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Current relation evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    literal_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Literal suffix evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    archived = service.store.upsert_entity(Node(
+        id="archived-member", name="Archived Origin", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon",
+    ))
+    current = service.store.upsert_entity(Node(
+        id="current-member", name="Current Primary", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon",
+    ))
+    literal = service.store.upsert_entity(Node(
+        id="literal-member", name="Literal Suffix", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon:ghost",
+    ))
+    shared = service.store.upsert_entity(Node(
+        id="shared-member", name="Shared Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    for edge_id, source, memory_id in (
+        ("archived-edge", archived, archived_memory),
+        ("current-edge", current, current_memory),
+        ("literal-edge", literal, literal_memory),
+    ):
+        service.store.upsert_edge(Edge(
+            id=edge_id, src=source, dst=shared, relation="uses",
+            workspace_id=workspace_id,
+            provenance={"source": "manual", "memory_id": memory_id},
+        ))
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("archived-edge", at=closed_at)
 
-    # The real entity is stored under `alpha`; the scene would project
-    # a synthetic "<alpha>:ghost" node for a historical collision.
-    ghost_id = f"{alpha}:ghost"
-    detail = service.graph_entity_evidence(ghost_id, workspace="acme")
+    scene = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+    ghost = next(
+        node for node in scene["nodes"]
+        if node.get("ghost") and archived in node["member_ids"]
+    )
+    assert ghost["id"] == "canon:ghost:ghost"
 
-    assert detail["canonical_id"] == alpha
-    assert detail["evidence"]
-    assert detail["evidence"][0]["excerpt"] == "Alpha uses Beta."
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    response = TestClient(app).get(
+        f"/api/graph/entities/{ghost['id']}/memories",
+        params={
+            "workspace": "acme",
+            "valid_at": closed_at + 1.0,
+            "known_at": closed_at + 1.0,
+            "member_id": archived,
+            "include_history": True,
+        },
+    )
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["canonical_id"] == "canon"
+    assert [item["excerpt"] for item in detail["evidence"]] == [
+        "Archived relation evidence.",
+    ]
 
 
 def test_graph_scene_history_visibility_scopes_to_requested_repo():
