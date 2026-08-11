@@ -9288,8 +9288,6 @@ class MemoryService:
         clean_canonical_id = _clean_text(
             canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
         )
-        if clean_canonical_id.endswith(":ghost"):
-            clean_canonical_id = clean_canonical_id[:-6]
         as_of, valid_at, known_at = _temporal_anchors(
             as_of=as_of, valid_at=valid_at, known_at=known_at
         )
