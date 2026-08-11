@@ -5106,7 +5106,7 @@ class Store:
             name for name in (
                 "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
                 "memory_entities", "edge_supports", "edges", "entities", "mem_links",
-                "source_imports", "audit",
+                "source_imports", "source_import_items", "audit",
             ) if cls._has_table(conn, name)
         }
         incident_entities: list[str] = []
@@ -5119,6 +5119,18 @@ class Store:
             supported_edges = [str(item[0]) for item in conn.execute(
                 "SELECT DISTINCT edge_id FROM edge_supports WHERE memory_id=?", (memory_id,)
             ).fetchall()]
+
+        source_import_ids: list[str] = []
+        if "source_imports" in tables:
+            source_import_ids = [str(item[0]) for item in conn.execute(
+                "SELECT id FROM source_imports WHERE memory_id=?", (memory_id,)
+            ).fetchall()]
+        if source_import_ids and "source_import_items" in tables:
+            marks = ",".join("?" for _ in source_import_ids)
+            conn.execute(
+                f"DELETE FROM source_import_items WHERE source_id IN ({marks})",
+                source_import_ids,
+            )
 
         for table, column in (
             ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
