@@ -8014,33 +8014,24 @@ class Store:
     @staticmethod
     def _receipt_workspace_scope(
         *, workspace_id: Optional[str], workspace_ids: Optional[Iterable[str]],
-    ) -> tuple[str, list[str], Optional[list[str]]]:
-        """Build a receipt scope predicate and retain the exact verification scope."""
+    ) -> tuple[list[tuple[str, list[str]]], Optional[list[str]]]:
+        """Build bounded receipt predicates and retain the exact verification scope."""
         if workspace_id is not None and workspace_ids is not None:
             raise ValueError("workspace_id and workspace_ids are mutually exclusive")
         if workspace_id is not None:
             ids = [str(workspace_id)]
-            return "workspace_id=?", ids, ids
+            return [("workspace_id=?", ids)], ids
         if workspace_ids is None:
-            return "1=1", [], None
+            return [("1=1", [])], None
         ids = list(dict.fromkeys(str(value) for value in workspace_ids))
         if not ids:
-            return "1=0", [], ids
-        # SQLite limits the total number of bound variables in a statement, not
-        # just the size of one IN clause. For a very large authorization set,
-        # fetch only non-null workspace receipts and apply the exact set below
-        # after the query; this keeps the SQL statement below the limit without
-        # weakening the aggregate's scope.
-        if len(ids) > IN_CLAUSE_CHUNK:
-            return "workspace_id IS NOT NULL", [], ids
-        clauses: list[str] = []
-        params: list[str] = []
+            return [("1=0", [])], ids
+        scopes: list[tuple[str, list[str]]] = []
         for start in range(0, len(ids), IN_CLAUSE_CHUNK):
             chunk = ids[start:start + IN_CLAUSE_CHUNK]
             placeholders = ",".join("?" for _ in chunk)
-            clauses.append(f"workspace_id IN ({placeholders})")
-            params.extend(chunk)
-        return "(" + " OR ".join(clauses) + ")", params, ids
+            scopes.append((f"workspace_id IN ({placeholders})", chunk))
+        return scopes, ids
 
     def context_savings(
         self,
@@ -8073,31 +8064,27 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        workspace_where, workspace_params, scoped_workspace_ids = self._receipt_workspace_scope(
+        workspace_scopes, scoped_workspace_ids = self._receipt_workspace_scope(
             workspace_id=workspace_id, workspace_ids=workspace_ids,
         )
-        where = workspace_where
-        params: list[Any] = list(workspace_params)
-        if repo_id is not None:
-            where += " AND repo_id=?"
-            params.append(repo_id)
-        if from_ts is not None:
-            where += " AND ts>=?"
-            params.append(float(from_ts))
-        if to_ts is not None:
-            where += " AND ts<?"
-            params.append(float(to_ts))
-        rows = self.conn.execute(
-            "SELECT id, workspace_id, repo_id, ts, payload, prev_hash, receipt_hash "
-            "FROM operation_receipts WHERE " + where,
-            params,
-        ).fetchall()
-        if scoped_workspace_ids is not None and len(scoped_workspace_ids) > IN_CLAUSE_CHUNK:
-            allowed_workspace_ids = set(scoped_workspace_ids)
-            rows = [
-                row for row in rows
-                if str(row["workspace_id"] or "") in allowed_workspace_ids
-            ]
+        rows = []
+        for workspace_where, workspace_params in workspace_scopes:
+            where = workspace_where
+            params: list[Any] = list(workspace_params)
+            if repo_id is not None:
+                where += " AND repo_id=?"
+                params.append(repo_id)
+            if from_ts is not None:
+                where += " AND ts>=?"
+                params.append(float(from_ts))
+            if to_ts is not None:
+                where += " AND ts<?"
+                params.append(float(to_ts))
+            rows.extend(self.conn.execute(
+                "SELECT id, workspace_id, repo_id, ts, payload, prev_hash, receipt_hash "
+                "FROM operation_receipts WHERE " + where,
+                params,
+            ).fetchall())
         has_active_filters = repo_id is not None or from_ts is not None or to_ts is not None
         if has_active_filters and rows:
             verification_ids = sorted({str(r["workspace_id"]) for r in rows if r["workspace_id"]})
@@ -8418,30 +8405,27 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        workspace_where, workspace_params, scoped_workspace_ids = self._receipt_workspace_scope(
+        workspace_scopes, scoped_workspace_ids = self._receipt_workspace_scope(
             workspace_id=workspace_id, workspace_ids=workspace_ids,
         )
-        where = workspace_where
-        params: list[Any] = list(workspace_params)
-        if repo_id is not None:
-            where += " AND repo_id=?"
-            params.append(repo_id)
-        if from_ts is not None:
-            where += " AND ts>=?"
-            params.append(float(from_ts))
-        if to_ts is not None:
-            where += " AND ts<?"
-            params.append(float(to_ts))
-        rows = self.conn.execute(
-            "SELECT id, workspace_id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
-            params,
-        ).fetchall()
-        if scoped_workspace_ids is not None and len(scoped_workspace_ids) > IN_CLAUSE_CHUNK:
-            allowed_workspace_ids = set(scoped_workspace_ids)
-            rows = [
-                row for row in rows
-                if str(row["workspace_id"] or "") in allowed_workspace_ids
-            ]
+        rows = []
+        for workspace_where, workspace_params in workspace_scopes:
+            where = workspace_where
+            params: list[Any] = list(workspace_params)
+            if repo_id is not None:
+                where += " AND repo_id=?"
+                params.append(repo_id)
+            if from_ts is not None:
+                where += " AND ts>=?"
+                params.append(float(from_ts))
+            if to_ts is not None:
+                where += " AND ts<?"
+                params.append(float(to_ts))
+            rows.extend(self.conn.execute(
+                "SELECT id, workspace_id, ts, repo_id, actor, payload, prev_hash, receipt_hash "
+                "FROM operation_receipts WHERE " + where,
+                params,
+            ).fetchall())
         groups: dict[tuple[str, str], dict] = {}
 
         def _bucket() -> dict:

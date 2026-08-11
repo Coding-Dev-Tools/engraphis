@@ -361,25 +361,27 @@ def _lock_windows_migration_file(handle, msvcrt) -> None:
 
 
 def _normalize_sqlite_lock_path(path_str: str) -> Optional[Path]:
-    """Normalize a SQLite path for filesystem locking.
-
-    Returns ``None`` for in-memory databases (no filesystem lock needed).
-    Handles ``file:`` URIs by extracting the real filesystem path, so that
-    ``Path`` is never handed a literal ``file:/...`` prefix that would
-    create a bogus directory.  Relative paths are resolved to absolute
-    before returning so the lock file is never placed relative to a
-    caller-owned working directory.
-    """
-    if not path_str or path_str == ":memory:":
+    """Return the physical path a SQLite target uses, or ``None`` for memory databases."""
+    raw = str(path_str or "")
+    if not raw or raw == ":memory:":
         return None
-    if path_str.startswith("file:"):
-        from urllib.parse import urlparse, unquote
-        parsed = urlparse(path_str)
-        if parsed.path:
-            return Path(unquote(parsed.path)).resolve()
-        # Malformed URI without a path component — fall back to literal.
-        return Path(path_str).resolve()
-    return Path(path_str).expanduser().resolve()
+    if not raw.startswith("file:"):
+        return Path(raw).expanduser().resolve()
+
+    from urllib.parse import parse_qs, unquote, urlsplit
+    from urllib.request import url2pathname
+
+    parsed = urlsplit(raw.replace("\\", "/"))
+    query = parse_qs(parsed.query)
+    uri_path = unquote(parsed.path)
+    if uri_path == ":memory:" or "memory" in query.get("mode", []):
+        return None
+    if not uri_path:
+        return None
+    physical = url2pathname(uri_path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        physical = "//%s%s" % (parsed.netloc, physical)
+    return Path(physical).expanduser().resolve()
 
 
 @contextmanager
