@@ -104,8 +104,8 @@
       state.scopedRequests[kind] = number(state.scopedRequests[kind]) + 1;
     });
   };
-  const GRAPH_INITIAL_NODE_LIMIT = 500;
-  const GRAPH_INITIAL_EDGE_LIMIT = 1000;
+  const GRAPH_INITIAL_NODE_LIMIT = 1000;
+  const GRAPH_INITIAL_EDGE_LIMIT = 2000;
   const GRAPH_FULL_NODE_LIMIT = 20_000;
   const GRAPH_LOAD_TIMEOUT_MS = 12_000;
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
