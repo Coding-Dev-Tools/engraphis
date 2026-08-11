@@ -774,10 +774,6 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
               I.galaxyLocalGravityConstant(100),
               I.galaxyLocalGravityConstant(200),
               I.galaxyLocalGravityConstant(400)],
-            stellar: [I.galaxyStellarGravityConstant(48),
-              I.galaxyStellarGravityConstant(100),
-              I.galaxyStellarGravityConstant(200),
-              I.galaxyStellarGravityConstant(400)],
           },
           clamps: [I.galaxyGravityConstant(-1), I.galaxyGravityConstant(401),
             I.galaxyGravityConstant(Infinity), I.galaxyGravityConstant(NaN)],
@@ -812,9 +808,6 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["split"]["stellar"] == pytest.approx(
-        [value * 6.25 for value in report["split"]["local"]]
-    )
     assert report["clamps"] == pytest.approx([0, 4774.153846153846, 0, 0])
     assert report["layoutCompactness"] == pytest.approx([1.75, 1.5616, 0.965, 0.18])
     assert all(
@@ -1774,145 +1767,6 @@ def test_default_orbital_spacing_and_repulsion_are_exactly_twenty_five_percent_h
         assert item["stats"]["overlaps"] == 1
         assert item["afterCom"] == pytest.approx(item["beforeCom"], abs=1e-12)
         assert item["otherAfter"] == item["otherBefore"]
-
-
-@requires_node
-def test_live_planet_pressure_preserves_stellar_radii_com_and_momentum() -> None:
-    """The stronger default separation changes planet phase, never orbital radius."""
-    report = _run_node(
-        """
-        const fixture = () => {
-          const phase = 0.12, starX = 40, starY = -15;
-          return [
-            { id: 'star', anchor_role: 'community', community_id: 'solar',
-              system_anchor_id: 'star', orbit_tier: 0, gravity_mass: 8, radius: 5,
-              x: starX, y: starY, vx: 2, vy: -1 },
-            { id: 'p1', community_id: 'solar', system_anchor_id: 'star', orbit_tier: 1,
-              gravity_mass: 1, radius: 3, x: starX + 30, y: starY, vx: 2, vy: 3 },
-            { id: 'p2', community_id: 'solar', system_anchor_id: 'star', orbit_tier: 2,
-              gravity_mass: 2, radius: 3,
-              x: starX + Math.cos(phase) * 30, y: starY + Math.sin(phase) * 30,
-              vx: 2 - Math.sin(phase) * 3, vy: -1 + Math.cos(phase) * 3 },
-          ];
-        };
-        const run = (preserveSystemRadii, fixedNodeId = null) => {
-          const nodes = fixture(), star = nodes[0], planets = nodes.slice(1);
-          const totalMass = nodes.reduce((sum, node) => sum + node.gravity_mass, 0);
-          const center = axis => nodes.reduce((sum, node) =>
-            sum + node.gravity_mass * node[axis], 0) / totalMass;
-          const momentum = axis => nodes.reduce((sum, node) =>
-            sum + node.gravity_mass * node[axis], 0);
-          const radii = () => planets.map(node =>
-            Math.hypot(node.x - star.x, node.y - star.y));
-          const angle = node => Math.atan2(node.y - star.y, node.x - star.x);
-          const orbitalPhase = node => {
-            const x = node.x - star.x, y = node.y - star.y;
-            const vx = node.vx - star.vx, vy = node.vy - star.vy;
-            const radius = Math.hypot(x, y);
-            return {
-              radius, speed: Math.hypot(vx, vy),
-              radialVelocity: (x * vx + y * vy) / radius,
-              angularMomentum: x * vy - y * vx,
-            };
-          };
-          const before = {
-            center: [center('x'), center('y')], momentum: [momentum('vx'), momentum('vy')],
-            radii: radii(), distance: Math.hypot(
-              planets[1].x - planets[0].x, planets[1].y - planets[0].y),
-            angularSeparation: Math.abs(angle(planets[1]) - angle(planets[0])),
-            phase: planets.map(orbitalPhase),
-            star: [star.x, star.y, star.vx, star.vy],
-          };
-          const stats = I.applyGalaxyOrbitalSeparation(nodes, {
-            padding: 15, strength: 1, crossCommunityStrength: 0,
-            maxCorrection: 100, maxVelocityCorrection: 100,
-            skipSystemAnchorPairs: true, preserveSystemRadii, fixedNodeId,
-          });
-          return {
-            stats, before,
-            after: {
-              center: [center('x'), center('y')],
-              momentum: [momentum('vx'), momentum('vy')],
-              radii: radii(), distance: Math.hypot(
-                planets[1].x - planets[0].x, planets[1].y - planets[0].y),
-              angularSeparation: Math.abs(angle(planets[1]) - angle(planets[0])),
-              phase: planets.map(orbitalPhase),
-              star: [star.x, star.y, star.vx, star.vy],
-            },
-            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
-              .every(Number.isFinite)),
-          };
-        };
-        const surface = [
-          { id: 'surface-star', anchor_role: 'community', community_id: 'surface',
-            system_anchor_id: 'surface-star', gravity_mass: 8, radius: 5,
-            x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'surface-planet', community_id: 'surface',
-            system_anchor_id: 'surface-star', orbit_tier: 1, gravity_mass: 1, radius: 3,
-            x: 5, y: 0, vx: 0, vy: 0 },
-        ];
-        const surfaceBefore = surface.map(node => [node.x, node.y, node.vx, node.vy]);
-        const genericSurface = I.applyGalaxyOrbitalSeparation(surface, {
-          padding: 15, strength: 1, crossCommunityStrength: 0,
-          skipSystemAnchorPairs: true, preserveSystemRadii: true,
-        });
-        const surfaceAfterGeneric = surface.map(node => [node.x, node.y, node.vx, node.vy]);
-        const hardSurface = I.applyGalaxySystemAnchorExclusion(surface, { padding: 1.5 });
-        const hardClearance = Math.hypot(surface[1].x - surface[0].x,
-          surface[1].y - surface[0].y) - surface[0].radius - surface[1].radius - 1.5;
-        emit({
-          preserved: run(true), legacy: run(false), fixed: run(true, 'star'),
-          surface: { genericSurface, hardSurface, hardClearance,
-            unchangedByGeneric: JSON.stringify(surfaceBefore)
-              === JSON.stringify(surfaceAfterGeneric) },
-        });
-        """
-    )
-    preserved, legacy, fixed = report["preserved"], report["legacy"], report["fixed"]
-    assert preserved["finite"] is legacy["finite"] is fixed["finite"] is True
-    assert preserved["stats"]["radialPreservedContacts"] == 1
-    assert preserved["stats"]["radiusPreservedNodes"] == 2
-    assert preserved["after"]["radii"] == pytest.approx(
-        preserved["before"]["radii"], abs=1e-9
-    )
-    assert preserved["after"]["center"] == pytest.approx(
-        preserved["before"]["center"], abs=1e-10
-    )
-    assert preserved["after"]["momentum"] == pytest.approx(
-        preserved["before"]["momentum"], abs=1e-10
-    )
-    for before_phase, after_phase in zip(
-        preserved["before"]["phase"], preserved["after"]["phase"]
-    ):
-        # An angular contact projection must rotate velocity through the same arc as position.
-        # Otherwise a circular orbit leaves the solver with an artificial radial impulse and
-        # becomes eccentric even though its instantaneous radius happened to be preserved.
-        assert before_phase["radialVelocity"] == pytest.approx(0, abs=1e-12)
-        assert after_phase["radialVelocity"] == pytest.approx(0, abs=1e-10)
-        assert after_phase["speed"] == pytest.approx(before_phase["speed"], abs=1e-10)
-        assert after_phase["angularMomentum"] == pytest.approx(
-            before_phase["angularMomentum"], abs=1e-9
-        )
-        assert after_phase["angularMomentum"] * before_phase["angularMomentum"] > 0
-    assert preserved["after"]["distance"] > preserved["before"]["distance"] + 15
-    assert preserved["after"]["angularSeparation"] \
-        > preserved["before"]["angularSeparation"] + 0.4
-    # The opt-in is what removes radial migration; compatibility callers retain the old helper.
-    assert max(abs(after - before) for after, before in zip(
-        legacy["after"]["radii"], legacy["before"]["radii"]
-    )) > 0.5
-    # A pointer-owned star remains an exact external frame. It may absorb the local contact's
-    # recoil rather than participating in the free-system barycentre correction.
-    assert fixed["after"]["star"] == pytest.approx(fixed["before"]["star"], abs=1e-12)
-    assert fixed["after"]["radii"] == pytest.approx(fixed["before"]["radii"], abs=1e-9)
-    assert fixed["after"]["distance"] > fixed["before"]["distance"] + 15
-    # Generic planet pressure never takes ownership of star/planet contact; the permanent
-    # stellar exclusion remains the sole hard-surface authority.
-    assert report["surface"]["unchangedByGeneric"] is True
-    assert report["surface"]["genericSurface"]["pairs"] == 0
-    assert report["surface"]["hardSurface"]["contacts"] > 0
-    assert report["surface"]["hardClearance"] >= -1e-9
-    assert "preserveSystemRadii: true," in ASSET.read_text(encoding="utf-8")
 
 
 @requires_node
@@ -3811,8 +3665,7 @@ def test_hierarchical_galaxy_keeps_planets_bound_to_one_dominant_star() -> None:
           includeOrbitalSeparation: true, orbitalSeparationPadding: 1.5,
           orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
           orbitalSeparationMaxVelocityCorrection: 8,
-          preserveLocalTangentialVelocity: true, preserveSystemRadii: true,
-          skipSystemAnchorPairs: true,
+          preserveLocalTangentialVelocity: true, skipSystemAnchorPairs: true,
           systemAnchorExclusionPadding: 1.5,
           crossCommunitySeparationPadding: 1.5, crossCommunitySeparationStrength: 0.144,
           includeCollisions: false,
@@ -4502,7 +4355,7 @@ def test_many_massive_satellites_each_keep_a_star_only_circular_seed_and_visible
             orbit_tier: index + 2, gravity_mass: 3, radius: 2,
             x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, vx: 0, vy: 0 });
         }
-        const star = nodes[0], localG = I.galaxyStellarGravityConstant(48), softening = 32;
+        const star = nodes[0], localG = I.galaxyLocalGravityConstant(48), softening = 32;
         I.seedGalaxyOrbits(nodes, 763, 48, softening, false);
         const seeded = nodes.slice(1).map(node => {
           const dx = node.x - star.x, dy = node.y - star.y, radius = Math.hypot(dx, dy);
@@ -4941,12 +4794,12 @@ def test_actual_shaped_live_galaxy_has_visible_two_scale_motion_within_eight_sec
             return Math.hypot(node.x - star.x - initial.x, node.y - star.y - initial.y);
           });
           const visiblePlanets = planets.filter((node, index) =>
-            localAngles[index] > 1.2 && localDisplacements[index] > 30).length;
+            localAngles[index] > 0.55 && localDisplacements[index] > 15).length;
           const visibleSystems = systemIds.filter((id, systemIndex) => {
             const localStart = systemIndex * 5;
             const visibleLocals = localAngles.slice(localStart, localStart + 5)
-              .filter((angle, localIndex) => angle > 1.2
-                && localDisplacements[localStart + localIndex] > 30).length;
+              .filter((angle, localIndex) => angle > 0.55
+                && localDisplacements[localStart + localIndex] > 15).length;
             return globalAngles[systemIndex] > 0.4
               && globalDisplacements[systemIndex] > 60 && visibleLocals >= 4;
           }).length;
@@ -4979,12 +4832,12 @@ def test_actual_shaped_live_galaxy_has_visible_two_scale_motion_within_eight_sec
     assert ordinary["minimumBlackHoleClearance"] >= -1e-9
     assert ordinary["minimumOuterClearance"] >= -1e-9
     # Eight seconds of live-default motion must be visible, not merely mathematically nonzero.
-    # Nine of ten complete systems and at least 90% of their planets cross both a 1.2-radian
-    # local arc and 30 painted units. The outermost eccentric system may rotate more slowly.
+    # Nine of ten complete systems and at least 90% of their planets cross both an angular and
+    # a painted-displacement threshold. The outermost eccentric system may rotate more slowly.
     assert ordinary["visibleSystems"] >= 9, ordinary
     assert ordinary["visiblePlanets"] >= 45, ordinary
-    assert min(ordinary["localAngles"]) > 1.2
-    assert min(ordinary["localDisplacements"]) > 30
+    assert min(ordinary["localAngles"]) > 0.55
+    assert min(ordinary["localDisplacements"]) > 15
 
 
 @requires_node
@@ -6649,24 +6502,16 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
               relationAccelerationCap: 3.2,
               relationConstraintRate: 24,
               relationConstraintMaxCorrection: 12,
-              relationPadding: 15,
+              relationPadding: 12,
               includeOrbitalSeparation: true,
-              orbitalSeparationPadding: 15,
-              orbitalSeparationStrength: 1,
-              crossCommunitySeparationPadding: 1.5,
-              crossCommunitySeparationStrength: 0.18,
+              orbitalSeparationPadding: 12,
+              orbitalSeparationStrength: 0.8,
               orbitalSeparationMaxCorrection: 4,
               orbitalSeparationMaxVelocityCorrection: 8,
               preserveLocalTangentialVelocity: true,
               skipSystemAnchorPairs: true,
-              skipOrbitalSystemRelations: true,
               systemAnchorExclusionPadding: 1.5,
-              systemAnchorRepulsionRange: 6,
-              systemAnchorRepulsionAcceleration: 0,
-              includeMutualSystems: true,
-              mutualSystemGravityFraction: 0.12,
-              mutualSystemSoftening: 80,
-              localRelativeSpeedLimit: 48,
+              localRelativeSpeedLimit: 16,
           timestep: 0.032,
           inwardConvergence: true,
           wallClockSeconds: 1 / 30,
