@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A proof gallery for Engraphis local-first memory for coding agents.">
+  <title>Engraphis | Grounded, not guessed</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --paper: #f4f7f2;
+      --paper-strong: #ffffff;
+      --ink: #102017;
+      --muted: #5d6a62;
+      --line: #cbd5cd;
+      --accent: #086b42;
+      --accent-soft: #dcefe3;
+      --quiet: #e8eee9;
+      --shadow: 0 18px 50px rgba(16, 32, 23, 0.08);
+      --radius: 14px;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #101612;
+        --paper-strong: #172019;
+        --ink: #edf5ee;
+        --muted: #a8b6aa;
+        --line: #34443a;
+        --accent: #65d59b;
+        --accent-soft: #193c2a;
+        --quiet: #1d2a21;
+        --shadow: 0 18px 50px rgba(0, 0, 0, 0.24);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      line-height: 1.55;
+    }
+    a { color: var(--accent); }
+    a:focus-visible, summary:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 4px;
+    }
+    .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 72px;
+      border-bottom: 1px solid var(--line);
+    }
+    .wordmark {
+      color: var(--ink);
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      text-decoration: none;
+    }
+    .nav { display: flex; gap: 22px; font-size: 0.88rem; }
+    .nav a { color: var(--muted); text-decoration: none; }
+    .nav a:hover { color: var(--ink); }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 0.92fr) minmax(420px, 1.08fr);
+      gap: clamp(34px, 7vw, 96px);
+      align-items: center;
+      min-height: 620px;
+      padding: 72px 0 86px;
+    }
+    .kicker, .label {
+      margin: 0 0 15px;
+      color: var(--accent);
+      font: 700 0.72rem/1.2 var(--mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      max-width: 560px;
+      margin-bottom: 22px;
+      font-size: clamp(3.2rem, 7vw, 6.6rem);
+      line-height: 0.94;
+      letter-spacing: -0.085em;
+    }
+    h1 span { color: var(--accent); }
+    .hero-copy > p:not(.kicker) {
+      max-width: 480px;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 1.12rem;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 17px;
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      font-weight: 750;
+      text-decoration: none;
+      transition: transform 180ms ease, background 180ms ease, color 180ms ease;
+    }
+    .button.primary { background: var(--accent); color: #ffffff; }
+    .button.secondary { color: var(--accent); }
+    .button:hover { transform: translateY(-2px); }
+    .button:active { transform: translateY(1px); }
+    .hero-visual {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-strong);
+      box-shadow: var(--shadow);
+    }
+    .hero-visual svg, .diagram svg { display: block; width: 100%; height: auto; }
+    .source-note {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font: 0.72rem/1.4 var(--mono);
+    }
+    section { padding: 92px 0; border-top: 1px solid var(--line); }
+    .section-head { max-width: 650px; margin-bottom: 42px; }
+    h2 {
+      margin-bottom: 12px;
+      font-size: clamp(2rem, 4vw, 3.8rem);
+      line-height: 1;
+      letter-spacing: -0.065em;
+    }
+    .section-head p { max-width: 610px; margin-bottom: 0; color: var(--muted); font-size: 1.04rem; }
+    .proof-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+      gap: 26px;
+      align-items: stretch;
+    }
+    .proof-feature, .proof-aside {
+      border-top: 2px solid var(--accent);
+      padding: 28px 0 0;
+    }
+    .metric {
+      margin-bottom: 12px;
+      color: var(--accent);
+      font-size: clamp(3.4rem, 8vw, 7.8rem);
+      font-weight: 800;
+      line-height: 0.92;
+      letter-spacing: -0.09em;
+    }
+    .metric-caption { max-width: 500px; margin-bottom: 28px; font-size: 1.2rem; }
+    .evidence-list { margin: 0; padding: 0; list-style: none; }
+    .evidence-list li {
+      display: grid;
+      grid-template-columns: 112px 1fr;
+      gap: 18px;
+      padding: 15px 0;
+      border-top: 1px solid var(--line);
+    }
+    .evidence-list strong { font-family: var(--mono); font-size: 0.83rem; }
+    .evidence-list span { color: var(--muted); }
+    .proof-aside { padding-left: 26px; border-left: 1px solid var(--line); }
+    .proof-aside h3, .story-copy h3, .setup-card h3 { margin-bottom: 10px; font-size: 1.35rem; letter-spacing: -0.035em; }
+    .proof-aside p, .story-copy p, .setup-card p { color: var(--muted); }
+    .text-link { font-weight: 750; text-underline-offset: 4px; }
+    .story {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 0.75fr);
+      gap: clamp(28px, 8vw, 110px);
+      align-items: center;
+    }
+    .story.reverse { grid-template-columns: minmax(280px, 0.75fr) minmax(0, 1fr); }
+    .diagram {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-strong);
+      box-shadow: var(--shadow);
+    }
+    .diagram-caption { margin: 13px 0 0; color: var(--muted); font: 0.74rem/1.45 var(--mono); }
+    .story-copy p { max-width: 540px; font-size: 1.06rem; }
+    .story-copy .text-link { display: inline-block; margin-top: 8px; }
+    .setup-grid {
+      display: grid;
+      grid-template-columns: 1.35fr 0.82fr 0.82fr;
+      gap: 22px;
+      align-items: stretch;
+    }
+    .setup-card {
+      display: flex;
+      flex-direction: column;
+      min-height: 250px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-strong);
+    }
+    .setup-card.featured { background: var(--accent-soft); border-color: var(--accent); }
+    .setup-card .text-link { margin-top: auto; }
+    code, pre { font-family: var(--mono); }
+    pre {
+      overflow-x: auto;
+      margin: 0 0 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 0.78rem;
+    }
+    .campaign {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(250px, 0.7fr);
+      gap: 40px;
+      align-items: end;
+    }
+    .campaign-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .campaign-list li { padding: 15px 0; border-top: 1px solid var(--line); }
+    .campaign-list strong { display: block; margin-bottom: 3px; }
+    .campaign-list span { color: var(--muted); }
+    details { border-top: 1px solid var(--line); }
+    summary { cursor: pointer; padding: 17px 0; font-weight: 750; }
+    details p { max-width: 760px; color: var(--muted); }
+    footer { padding: 38px 0 60px; border-top: 1px solid var(--line); color: var(--muted); }
+    footer p { max-width: 740px; }
+    footer nav { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.88rem; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .hero-copy, .hero-visual { animation: rise 650ms ease both; }
+      .hero-visual { animation-delay: 90ms; }
+      .button:hover { transition-duration: 120ms; }
+    }
+    @media (max-width: 860px) {
+      .hero, .story, .story.reverse, .campaign { grid-template-columns: 1fr; }
+      .hero { min-height: 0; padding-top: 58px; }
+      .hero-visual { max-width: 680px; }
+      .proof-layout, .setup-grid { grid-template-columns: 1fr; }
+      .proof-aside { padding: 26px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+      .setup-card { min-height: 0; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 28px, 1180px); }
+      .site-header { min-height: 62px; }
+      .nav { gap: 12px; font-size: 0.78rem; }
+      .nav a:nth-child(3) { display: none; }
+      h1 { font-size: clamp(3rem, 17vw, 5.2rem); }
+      section { padding: 68px 0; }
+      .evidence-list li { grid-template-columns: 1fr; gap: 3px; }
+      .hero-visual, .diagram { padding: 12px; }
+    }
+  </style>
+</head>
+<body id="top">
+  <div class="shell">
+    <header class="site-header">
+      <a class="wordmark" href="#top">Engraphis</a>
+      <nav class="nav" aria-label="Advertising gallery navigation">
+        <a href="#proof">Proof</a>
+        <a href="#stories">Stories</a>
+        <a href="#setup">Setup</a>
+        <a href="campaign.md">Campaign guide</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="kicker">Local-first memory for agents</p>
+          <h1 id="hero-title">Grounded, <span>not guessed.</span></h1>
+          <p>Memory with receipts. Keep project history local, retrieve evidence, and carry the right context into every session.</p>
+          <div class="actions">
+            <a class="button primary" data-event="advertising_install_click" href="#setup">Install free</a>
+            <a class="button secondary" data-event="advertising_demo_open" href="../../demo/engraphis_screen_demo.html">Watch continuity demo</a>
+          </div>
+        </div>
+        <figure class="hero-visual">
+          <svg viewBox="0 0 640 430" role="img" aria-labelledby="receipt-title receipt-desc">
+            <title id="receipt-title">A memory receipt from source to grounded answer</title>
+            <desc id="receipt-desc">Project history enters scoped memory, retrieval finds supporting evidence, and a cited answer leaves the system.</desc>
+            <rect x="0" y="0" width="640" height="430" rx="10" fill="none" stroke="currentColor" opacity="0.18"/>
+            <path d="M80 106H560M80 215H560M80 324H560" stroke="currentColor" opacity="0.18"/>
+            <path d="M138 106H225M306 106H392M473 106H560" stroke="var(--accent)" stroke-width="4"/>
+            <path d="M138 215H225M306 215H392M473 215H560" stroke="var(--accent)" stroke-width="4"/>
+            <path d="M138 324H225M306 324H392M473 324H560" stroke="var(--accent)" stroke-width="4"/>
+            <g fill="var(--paper-strong)" stroke="var(--accent)" stroke-width="3">
+              <circle cx="118" cy="106" r="20"/><circle cx="286" cy="106" r="20"/><circle cx="453" cy="106" r="20"/>
+              <circle cx="118" cy="215" r="20"/><circle cx="286" cy="215" r="20"/><circle cx="453" cy="215" r="20"/>
+              <circle cx="118" cy="324" r="20"/><circle cx="286" cy="324" r="20"/><circle cx="453" cy="324" r="20"/>
+            </g>
+            <g fill="var(--ink)" font-family="var(--mono)" font-size="15" text-anchor="middle">
+              <text x="118" y="111">SRC</text><text x="286" y="111">SCOPE</text><text x="453" y="111">MEM</text>
+              <text x="118" y="220">ASK</text><text x="286" y="220">RANK</text><text x="453" y="220">CITE</text>
+              <text x="118" y="329">OLD</text><text x="286" y="329">NEW</text><text x="453" y="329">WHY</text>
+            </g>
+            <g fill="var(--muted)" font-family="var(--mono)" font-size="13">
+              <text x="80" y="54">SOURCE + HISTORY</text>
+              <text x="80" y="163">RETRIEVAL + SUPPORT</text>
+              <text x="80" y="272">CHANGE + PROVENANCE</text>
+              <text x="80" y="385">one local record, many inspectable paths</text>
+            </g>
+          </svg>
+          <figcaption class="source-note">Built from the repository's memory, retrieval, provenance, and temporal contracts.</figcaption>
+        </figure>
+      </section>
+
+      <section id="proof" aria-labelledby="proof-title">
+        <div class="section-head">
+          <h2 id="proof-title">Proof you can inspect.</h2>
+          <p>Every headline below maps to a registered fixture, an existing demo, or a visible local product surface.</p>
+        </div>
+        <div class="proof-layout">
+          <div class="proof-feature">
+            <div class="metric">740.3 → 214.3</div>
+            <p class="metric-caption">Structure-aware chunks returned the relevant passage instead of the whole document, with Recall@5 held at 1.000 in the registered fixture.</p>
+            <a class="text-link" data-event="advertising_benchmark_click" href="../images/context-efficiency.svg">Open context efficiency evidence</a>
+          </div>
+          <aside class="proof-aside">
+            <h3>Two other proof points</h3>
+            <ul class="evidence-list">
+              <li><strong>CITED</strong><span>Answer with attached support and source references.</span></li>
+              <li><strong>ABSTAIN</strong><span>No support means no answer dressed up as fact.</span></li>
+              <li><strong>HISTORY</strong><span>Changed facts keep their earlier versions and why.</span></li>
+            </ul>
+            <p><a class="text-link" data-event="advertising_benchmark_click" href="../images/evidence-backed-agent-examples.svg">Open grounded recall evidence</a></p>
+          </aside>
+        </div>
+      </section>
+
+      <section id="stories" aria-labelledby="stories-title">
+        <div class="section-head">
+          <h2 id="stories-title">Memory has a timeline.</h2>
+          <p>Use a living fact, not a feature list, to show what makes Engraphis different from a chat replay or a flat note store.</p>
+        </div>
+        <div class="story">
+          <div class="diagram">
+            <svg viewBox="0 0 720 300" role="img" aria-labelledby="timeline-title timeline-desc">
+              <title id="timeline-title">A supersession timeline</title>
+              <desc id="timeline-desc">An old repository decision is superseded by a newer decision while both remain visible.</desc>
+              <path d="M78 151H642" stroke="var(--accent)" stroke-width="4"/>
+              <circle cx="178" cy="151" r="22" fill="var(--paper-strong)" stroke="var(--accent)" stroke-width="4"/>
+              <circle cx="430" cy="151" r="22" fill="var(--accent)" stroke="var(--accent)" stroke-width="4"/>
+              <circle cx="608" cy="151" r="22" fill="var(--paper-strong)" stroke="var(--accent)" stroke-width="4"/>
+              <path d="M178 129V72M430 173V228M608 129V72" stroke="currentColor" opacity="0.42"/>
+              <g fill="var(--ink)" font-family="var(--mono)" font-size="15">
+                <text x="88" y="46">SESSION 01</text><text x="380" y="268">SESSION 02</text><text x="536" y="46">WHY</text>
+              </g>
+              <g fill="var(--muted)" font-family="var(--sans)" font-size="16">
+                <text x="88" y="99">old decision</text><text x="336" y="214">supersedes</text><text x="536" y="99">timeline</text>
+              </g>
+            </svg>
+            <p class="diagram-caption">A correction closes the old validity window. It does not erase the record.</p>
+          </div>
+          <div class="story-copy">
+            <h3>Facts change. History stays useful.</h3>
+            <p>Show one subject moving from an earlier decision to a current one. The audience sees the old fact, the new fact, and the evidence chain that explains the transition.</p>
+            <a class="text-link" data-event="advertising_demo_open" href="../../demo/engraphis_screen_demo.html">Open the continuity demo</a>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="graph-title">
+        <div class="story reverse">
+          <div class="story-copy">
+            <h3 id="graph-title">Search the code. Explain the decision.</h3>
+            <p>Make the repository graph the bridge between a symbol, the related path, and the memory that explains why the system looks that way.</p>
+            <a class="text-link" data-event="advertising_graph_click" href="../../README.md#quickstart-repository-graph">Open the graph quickstart</a>
+          </div>
+          <div class="diagram">
+            <svg viewBox="0 0 720 300" role="img" aria-labelledby="graph-visual-title graph-visual-desc">
+              <title id="graph-visual-title">From code search to explanation</title>
+              <desc id="graph-visual-desc">A named symbol leads to a connected path, then to a memory-backed explanation and a standalone export.</desc>
+              <path d="M112 150H250M300 150H438M488 150H626" stroke="var(--accent)" stroke-width="4"/>
+              <g fill="var(--paper-strong)" stroke="var(--accent)" stroke-width="4">
+                <rect x="40" y="106" width="144" height="88" rx="14"/><rect x="226" y="106" width="144" height="88" rx="14"/>
+                <rect x="412" y="106" width="144" height="88" rx="14"/><rect x="598" y="106" width="90" height="88" rx="14"/>
+              </g>
+              <g fill="var(--ink)" font-family="var(--mono)" font-size="15" text-anchor="middle">
+                <text x="112" y="143">SYMBOL</text><text x="298" y="143">PATH</text><text x="484" y="143">EXPLAIN</text><text x="643" y="143">HTML</text>
+                <text x="112" y="168">search</text><text x="298" y="168">impact</text><text x="484" y="168">memory</text><text x="643" y="168">export</text>
+              </g>
+            </svg>
+            <p class="diagram-caption">The code graph is best-effort. The explanation remains memory-backed and inspectable.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="setup" aria-labelledby="setup-title">
+        <div class="section-head">
+          <h2 id="setup-title">Pick your path.</h2>
+          <p>Keep the first action concrete. Different audiences can enter through the local dashboard, Smart MCP, or the Python library.</p>
+        </div>
+        <div class="setup-grid">
+          <article class="setup-card featured">
+            <h3>Connect MCP</h3>
+            <pre><code>pip install "engraphis[mcp]"
+engraphis-init
+codex mcp add engraphis -- engraphis-mcp</code></pre>
+            <p>Give coding agents scoped recall, durable memory, and compact context through the zero-configuration Smart gateway.</p>
+            <a class="text-link" data-event="advertising_mcp_click" href="../../README.md#quickstart-mcp-server-for-coding-agents">Connect the gateway</a>
+          </article>
+          <article class="setup-card">
+            <h3>Open dashboard</h3>
+            <p>Inspect memories, graph relationships, provenance, receipts, and temporal changes locally.</p>
+            <a class="text-link" data-event="advertising_gallery_open" href="../../README.md#quickstart-dashboard">Open the dashboard path</a>
+          </article>
+          <article class="setup-card">
+            <h3>Use Python</h3>
+            <p>Start with the offline library when you need a memory engine without a hosted dependency.</p>
+            <a class="text-link" data-event="advertising_gallery_open" href="../../README.md#quickstart-python-library">Use the library</a>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="campaign-title">
+        <div class="campaign">
+          <div>
+            <h2 id="campaign-title">Turn proof into a campaign.</h2>
+            <p class="section-head">A four-week sequence turns continuity, grounded recall, temporal memory, and context economy into one repeatable story.</p>
+            <a class="button primary" data-event="advertising_gallery_open" href="campaign.md">Open campaign guide</a>
+          </div>
+          <ul class="campaign-list">
+            <li><strong>Week 1: Local</strong><span>No account. No API key. Still remembers.</span></li>
+            <li><strong>Week 2: Grounded</strong><span>Cited answer or explicit abstain.</span></li>
+            <li><strong>Week 3: Temporal</strong><span>Facts change. History stays visible.</span></li>
+            <li><strong>Week 4: Efficient</strong><span>Fewer tokens, better evidence.</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <section aria-labelledby="guardrails-title">
+        <div class="section-head">
+          <h2 id="guardrails-title">Keep the proof honest.</h2>
+          <p>Trust is part of the product story. These boundaries keep the gallery useful to technical readers.</p>
+        </div>
+        <details open>
+          <summary>What the numbers mean</summary>
+          <p>The 740.3 to 214.3 comparison is retrieved memory content in a deterministic fixture. It is not provider billing, latency, or a universal customer outcome.</p>
+        </details>
+        <details>
+          <summary>What the demo means</summary>
+          <p>The continuity demo is generated from a real in-memory MemoryService run. Any sample fallback is labeled and must not be presented as customer evidence.</p>
+        </details>
+        <details>
+          <summary>What the graph means</summary>
+          <p>Symbol and file search, memory-backed explanation, path, impact, and export are distinct actions. The gallery keeps those terms separate.</p>
+        </details>
+      </section>
+    </main>
+
+    <footer>
+      <p>Engraphis is local-first, inspectable, scoped, and built for agents that need project memory with evidence.</p>
+      <nav aria-label="Source links">
+        <a href="../../README.md">README</a>
+        <a href="../../BENCHMARKS.md">Benchmarks</a>
+        <a href="../../docs/PUBLIC_BENCHMARK_RUNBOOK.md">Public runbook</a>
+        <a href="../images/context-efficiency.svg">Context evidence</a>
+        <a href="../images/evidence-backed-agent-examples.svg">Grounded evidence</a>
+      </nav>
+    </footer>
+  </div>
+</body>
+</html>
