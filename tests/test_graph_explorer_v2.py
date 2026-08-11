@@ -2604,6 +2604,14 @@ def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
         service.graph_scene(workspace="acme", **kwargs)
 
 
+def test_graph_scene_accepts_the_500_node_overview_limit():
+    service, _alpha, _beta, _gamma = _seed_service()
+
+    scene = service.graph_scene(workspace="acme", node_limit=500)
+
+    assert scene["meta"]["shown_nodes"] <= 500
+
+
 def test_graph_lookup_direct_service_inputs_are_bounded():
     service, _alpha, _beta, _gamma = _seed_service()
 
