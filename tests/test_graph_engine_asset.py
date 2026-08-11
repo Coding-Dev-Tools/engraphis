@@ -7073,7 +7073,7 @@ def test_node_labels_are_capped_at_the_configured_density() -> None:
         api.setData(chain(20));
         api.setSettings({ labels: true, labelDensity: 3 });
         store.graphData.nodes.forEach((node, index) => {
-          node.x = index * 10; node.y = 0; store.nodeCanvasObject(node, ctx, 1);
+          node.x = index * 10; node.y = 0;
         });
         const beforePost = labels.slice();
         store.onRenderFramePost(ctx, 1);
@@ -7113,7 +7113,6 @@ def test_node_labels_use_the_active_theme_text_colour() -> None:
           createRadialGradient() { return { addColorStop() {} }; },
           createLinearGradient() { return { addColorStop() {} }; },
         };
-        store.nodeCanvasObject(data.nodes[0], ctx, 1);
         store.onRenderFramePost(ctx, 1);
         emit({ styles });
         """
