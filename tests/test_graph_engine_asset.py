@@ -1838,7 +1838,7 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
             radius: 5, x: 600, y: 0, vx: 0, vy: 3 },
           { id: 'outer-moon', community_id: 'outer', gravity_mass: 1,
             radius: 3, x: 760, y: 0, vx: 0, vy: 5 },
-          /* A dragged/fixed system is intentionally excluded from the guard. */
+          /* A pointer-owned system exercises the same painted outer guard. */
           { id: 'fixed-star', community_id: 'fixed', gravity_mass: 2,
             radius: 3, x: 300, y: -40, vx: 2, vy: 1 },
           { id: 'fixed-moon', community_id: 'fixed', gravity_mass: 1,
@@ -1876,8 +1876,8 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
           moon.x - star.x, moon.y - star.y, moon.vx - star.vx, moon.vy - star.vy,
         ];
         const coreAngularAfterConstraint = core.x * core.vy - core.y * core.vx;
-        /* A pointer-owned system is allowed outside while held; release re-admits the whole
-           system without a NaN or speed-cap burst. */
+        /* Pointer targets outside the envelope are clamped before paint for the source and
+           every companion, so release does not need to repair stretched geometry. */
         const fixedStar = nodes[4], fixedMoon = nodes[5];
         fixedStar.x = envelope + 240; fixedStar.y = -40; fixedStar.vx = 12; fixedStar.vy = 1;
         fixedMoon.x = envelope + 260; fixedMoon.y = -40; fixedMoon.vx = 12; fixedMoon.vy = 4;
@@ -1886,7 +1886,12 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
           ...options, fixedNodeId: 'fixed-star',
         });
         const fixedHeldAfter = nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]);
+        const fixedHeldClearance = nodes.slice(4).map(node =>
+          envelope - (Math.hypot(node.x, node.y) + node.radius));
+        const fixedBeforeRelease = nodes.slice(4).map(node => [node.x, node.y]);
         const released = I.applyGalaxyFarFieldConfinement(nodes, options);
+        const maximumFixedReleaseStep = Math.max(...nodes.slice(4).map((node, index) =>
+          Math.hypot(node.x - fixedBeforeRelease[index][0], node.y - fixedBeforeRelease[index][1])));
         const clearance = node => envelope - (Math.hypot(node.x, node.y) + node.radius);
         const nonFixed = nodes.slice(1, 4);
         let maximumRadius = Math.max(...nonFixed.map(node => Math.hypot(node.x, node.y) + node.radius));
@@ -1918,7 +1923,8 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
           coreTangentAfterConstraint: core.vy,
           coreAngularAfter: core.x * core.vy - core.y * core.vx,
           fixedPhase,
-          fixedHeld, fixedHeldBefore, fixedHeldAfter, released,
+          fixedHeld, fixedHeldBefore, fixedHeldAfter, fixedHeldClearance, released,
+          maximumFixedReleaseStep,
           fixedAfterRelease: nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]),
           minimumClearance, maximumRadius,
           finalEnvelope: finalStep.farFieldConfinement.envelopeRadius,
@@ -1944,8 +1950,11 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
     assert 0 < report["coreAngularAfterConstraint"] <= report["coreAngularBefore"]
     assert report["coreTangentAfterConstraint"] > 0
     assert report["coreAngularAfter"] > 0
-    assert report["fixedHeldAfter"] == report["fixedHeldBefore"]
-    assert report["released"]["boundedSystems"] >= 1
+    assert report["fixedHeld"]["boundedFixedSource"] >= 1
+    assert report["fixedHeld"]["boundedFixedFollowers"] >= 1
+    assert min(report["fixedHeldClearance"]) >= -1e-8
+    assert abs(report["fixedHeldClearance"][0]) <= 1e-8
+    assert report["maximumFixedReleaseStep"] <= 48
     assert all(
         math.hypot(phase[0], phase[1]) + radius <= report["finalEnvelope"] + 1e-8
         for phase, radius in zip(report["fixedAfterRelease"], [3, 2])
@@ -2406,7 +2415,7 @@ def test_live_drag_force_is_fixed_step_acceleration_not_pointer_displacement() -
 
 @requires_node
 def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -> None:
-    """A cursor-owned source stays exact without turning connected bodies into projectiles."""
+    """A cursor-owned source obeys painted bounds without turning bodies into projectiles."""
     report = _run_node(
         """
         const nodes = [
@@ -2456,9 +2465,11 @@ def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -
         const followers = [
           { node: followerA, link: links[0] }, { node: followerB, link: links[1] },
         ];
-        let exactPointer = true, finite = true, maximumSpeed = 0, maximumFollowerStep = 0;
+        let finite = true, maximumSpeed = 0, maximumFollowerStep = 0;
         let maximumLinkDistance = 0, maximumRemoteRadius = 0, maximumRemoteStep = 0;
         let dragAcceleration = 0, dragPull = 0;
+        let requestedBeyondEnvelope = false, minimumSourceOuterClearance = Infinity;
+        let sourceEdgeContact = false;
         for (const [x, y] of targets) {
           const beforeFollowers = [followerA, followerB].map(node => [node.x, node.y]);
           const beforeRemote = nodes.slice(4).map(node => [node.x, node.y]);
@@ -2466,8 +2477,11 @@ def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -
           const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
             ...common, fixedNodeId: 'dragged', dragSource: dragged, dragFollowers: followers,
           });
-          exactPointer = exactPointer && dragged.x === x && dragged.y === y
-            && dragged.vx === 0 && dragged.vy === 0;
+          requestedBeyondEnvelope = requestedBeyondEnvelope
+            || Math.hypot(x, y) + dragged.radius > envelope + 1e-8;
+          const sourceClearance = envelope - (Math.hypot(dragged.x, dragged.y) + dragged.radius);
+          minimumSourceOuterClearance = Math.min(minimumSourceOuterClearance, sourceClearance);
+          sourceEdgeContact = sourceEdgeContact || Math.abs(sourceClearance) <= 1e-8;
           dragAcceleration = Math.max(dragAcceleration, tick.dragGravity.maximumAcceleration);
           dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
           maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
@@ -2499,13 +2513,16 @@ def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -
             .every(Number.isFinite));
         }
         emit({
-          envelope, exactPointer, finite, maximumSpeed, releaseSpeed,
+          envelope, requestedBeyondEnvelope, minimumSourceOuterClearance, sourceEdgeContact,
+          finite, maximumSpeed, releaseSpeed,
           maximumFollowerStep, maximumLinkDistance, maximumRemoteRadius, maximumRemoteStep,
           dragAcceleration, dragPull, held, released: [dragged.x, dragged.y],
         });
         """
     )
-    assert report["exactPointer"] is True
+    assert report["requestedBeyondEnvelope"] is True
+    assert report["minimumSourceOuterClearance"] >= -1e-8
+    assert report["sourceEdgeContact"] is True
     assert report["finite"] is True
     assert report["dragAcceleration"] > 0
     assert report["dragPull"] > 0
@@ -2611,10 +2628,10 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
             .every(Number.isFinite));
         }
         const centreHeld = [dragged.x, dragged.y];
-        /* An external pointer-owned system may put its source outside the envelope, but its
-           nonfixed followers must remain inside it throughout a long, gradual outward drag.
-           This is the former 400-slice runaway: a skipped fixed system let followers drift
-           hundreds of units out, then snap back only after release. */
+        /* An external pointer may request a source beyond the envelope, but the painted source
+           and its nonfixed followers must remain inside it throughout a long, gradual outward
+           drag. This is the former 400-slice runaway: a skipped fixed system let followers
+           drift hundreds of units out, then snap back only after release. */
         if (externalSystem) {
           const startRadius = nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding;
           const endRadius = envelope + 320;

@@ -2443,7 +2443,8 @@
       anchorId: field.anchor ? field.anchor.id : null,
       envelopeRadius: field.envelopeRadius, softRadius: field.softRadius,
       acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
-      boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+      boundedFixedSource: 0, boundedFixedFollowers: 0, boundedDeformedSystems: 0,
+      boundedOversizedNodes: 0,
       correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
       tangentialVelocityRemoved: 0,
       annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
@@ -2513,11 +2514,11 @@
         return;
       }
       if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
-        /* The cursor owns exactly one source coordinate. Its companions are still free bodies:
-           cap them one at a time rather than exempting the whole dragged system, otherwise a
-           long gesture can carry a follower beyond the cached envelope and snap it on release. */
+        /* Pointer coordinates are an input target, not permission to paint outside the finite
+           galaxy. Cap this stretched system one body at a time—including the source—so a long
+           outward hold cannot create release-only geometry. The next pointer event supplies a
+           fresh target; its final painted fx/fy remains on the outer annulus. */
         center.nodes.forEach(node => {
-          if (node.id === opts.fixedNodeId) return;
           const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = unit.distance - targetDistance;
@@ -2528,7 +2529,8 @@
           if (Number.isFinite(node.fy)) node.fy = node.y;
           const velocity = stabilizeVelocity([node], unit.x, unit.y,
             unit.distance, targetDistance);
-          stats.boundedFixedFollowers++;
+          if (node.id === opts.fixedNodeId) stats.boundedFixedSource++;
+          else stats.boundedFixedFollowers++;
           stats.correctedDistance += correction;
           stats.maximumShift = Math.max(stats.maximumShift, correction);
           stats.outwardVelocityRemoved += velocity.outward;
@@ -2613,8 +2615,9 @@
   /* Last coordinate check after alternating the two system-level contacts. A normal scene is
      already feasible (the cached envelope reserved its horizon geometry), so this is a no-op.
      It exists for a pathological late deformation whose system radius grew beyond that cache:
-     individual members are then the only way to satisfy both painted edges at once. The one
-     pointer-owned source remains exempt from the outer edge, but its free companions do not. */
+     individual members are then the only way to satisfy both painted edges at once. A dragged
+     source is likewise clamped here: its pointer target is preserved as input, while the final
+     painted coordinate always remains inside the finite annulus. */
   function applyGalaxyAnnularBounds(nodes, options) {
     const opts = options || {};
     const field = galaxyFarFieldEnvelope(nodes, opts);
@@ -2626,7 +2629,7 @@
     const padding = Math.max(0, Number.isFinite(Number(opts.blackHoleExclusionPadding))
       ? Number(opts.blackHoleExclusionPadding) : GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
     field.centers.forEach(center => center.nodes.forEach(node => {
-      if (node === field.anchor || node.id === opts.fixedNodeId) return;
+      if (node === field.anchor) return;
       const dx = node.x - anchorX, dy = node.y - anchorY;
       const distance = Math.hypot(dx, dy);
       const radius = field.bodyRadius(node);
@@ -2684,9 +2687,9 @@
     // kick-drift-kick: sample at x(t), drift from the half kick, then close at x(t + dt).
     const opts = options || {};
     /* Pointer coordinates are already expressed in the currently rendered chart frame. Do
-       not translate that frame underneath an active drag: the owned node must remain exactly
-       under the cursor while every other body integrates around it. Once released, the next
-       ordinary step may recenter the black-hole frame without changing any relative phase. */
+       not translate that frame underneath an active drag: it remains the source target while
+       every other body integrates around it. The final inner/outer annulus may clamp the
+       painted source edge; once released, the next ordinary step may recenter normally. */
     const requestedFixedNode = opts.fixedNodeId == null ? null : (nodes || []).find(
       node => node && !node.ghost && node.id === opts.fixedNodeId
         && Number.isFinite(node.x) && Number.isFinite(node.y)
@@ -2832,10 +2835,9 @@
       limit: opts.localRelativeSpeedLimit,
       fixedNodeId: opts.fixedNodeId,
     });
-    /* The pointer owns this phase point everywhere except inside the black-hole boundary.
-       Restore its exact cursor position first, then let the final horizon pass clamp only an
-       actual penetration. This keeps ordinary dragging exact without allowing a dragged node
-       to cover the event horizon. */
+    /* Restore the pointer target before the final contacts. The strict horizon and cached outer
+       annulus then clamp only an actual penetration/escape, so dragging cannot paint a node
+       through either boundary or leave a release-only stretched system. */
     restoreFixedNode();
     /* Relations, cross-system contact and drag can all add a finite late displacement. Alternate
        the strict inner and outer contacts, then verify their annulus member-by-member only for
@@ -2844,7 +2846,8 @@
     const farFieldConfinement = opts.includeFarFieldConfinement === false
       ? { anchorId: null, envelopeRadius: 0, softRadius: 0,
         acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
-        boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+        boundedFixedSource: 0, boundedFixedFollowers: 0, boundedDeformedSystems: 0,
+        boundedOversizedNodes: 0,
         correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
         tangentialVelocityRemoved: 0 }
       : applyGalaxyFarFieldConfinement(bodies, opts);
@@ -3845,7 +3848,8 @@
     let galaxyLastFarFieldConfinement = {
       anchorId: null, envelopeRadius: 0, softRadius: 0,
       acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
-      boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+      boundedFixedSource: 0, boundedFixedFollowers: 0, boundedDeformedSystems: 0,
+      boundedOversizedNodes: 0,
       correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
       tangentialVelocityRemoved: 0,
       annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
@@ -4740,7 +4744,8 @@
       galaxyLastFarFieldConfinement = {
         anchorId: null, envelopeRadius: 0, softRadius: 0,
         acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
-        boundedFixedFollowers: 0, boundedDeformedSystems: 0, boundedOversizedNodes: 0,
+        boundedFixedSource: 0, boundedFixedFollowers: 0, boundedDeformedSystems: 0,
+        boundedOversizedNodes: 0,
         correctedDistance: 0, maximumShift: 0, outwardVelocityRemoved: 0,
         tangentialVelocityRemoved: 0,
         annulus: { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
