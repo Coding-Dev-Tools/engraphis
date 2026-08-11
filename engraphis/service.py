@@ -1260,6 +1260,20 @@ class MemoryService:
                 (workspace_id, workspace_id),
                 "link",
             ),
+            (
+                "symbols symbol "
+                "JOIN repos symbol_repo ON symbol_repo.id=symbol.repo_id",
+                "symbol_repo.workspace_id=?",
+                (workspace_id,),
+                "symbol",
+            ),
+            (
+                "code_edges code_edge "
+                "JOIN repos code_edge_repo ON code_edge_repo.id=code_edge.repo_id",
+                "code_edge_repo.workspace_id=?",
+                (workspace_id,),
+                "code_edge",
+            ),
         ]
         boundary_sql: list[str] = []
         boundary_params: list[Any] = []
@@ -1279,7 +1293,8 @@ class MemoryService:
                 elif column == "expired_at":
                     active = ""
                 else:
-                    active = f" AND {alias}.expired_at IS NULL"
+                    active = f" AND ({alias}.expired_at IS NULL OR {alias}.expired_at>?)"
+                    extra_params = [at]
                 boundary_sql.append(
                     f"SELECT {alias}.{column} AS boundary FROM {source} "
                     f"WHERE {scope} AND {alias}.{column}>?{active}"

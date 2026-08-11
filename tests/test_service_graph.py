@@ -270,6 +270,43 @@ def test_graph_scene_cache_deadline_tracks_memory_and_connector_boundaries():
     assert ingestion_svc._graph_scene_valid_until(ingestion_workspace_id, 100.0) == 175.0
 
 
+def test_graph_scene_cache_deadline_tracks_code_graph_boundaries():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    repo_id = svc.store.get_or_create_repo(wid, "repo")
+    now = time.time()
+    svc.store.conn.execute(
+        "INSERT INTO symbols(id, repo_id, name, valid_from) VALUES (?, ?, ?, ?)",
+        ("sym_future", repo_id, "future", now + 4.0),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO code_edges(id, repo_id, src, dst, relation, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("code_edge_future", repo_id, "sym_future", "sym_other", "calls", now + 2.0),
+    )
+    svc.store.conn.commit()
+
+    assert svc._graph_scene_valid_until(wid, now) == now + 2.0
+
+
+def test_graph_scene_cache_deadline_tracks_end_boundaries_before_expiration():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    memory = _approve(svc, svc.remember(
+        "Future validity end boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    wid = svc.store.get_or_create_workspace("acme")
+    now = time.time()
+    svc.store.conn.execute(
+        "UPDATE memories SET valid_to=?, valid_to_recorded_at=?, expired_at=? "
+        "WHERE id=?",
+        (now + 5.0, now + 2.0, now + 10.0, memory["id"]),
+    )
+    svc.store.conn.commit()
+
+    assert svc._graph_scene_valid_until(wid, now) == now + 2.0
+
+
 def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     wid = svc.store.get_or_create_workspace("acme")
