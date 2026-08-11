@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
@@ -56,7 +56,7 @@ class IntentRecallRequest(BaseModel):
     response_mode: str = Field("compact", max_length=32)
     diagnostics: bool = False
     planning: str = Field("off", max_length=32)
-    mtype_limits: Optional[dict[str, int]] = Field(None, max_length=16)
+    mtype_limits: Optional[dict[str, StrictInt]] = Field(None, max_length=16)
 
 
 class CodePathRequest(BaseModel):
