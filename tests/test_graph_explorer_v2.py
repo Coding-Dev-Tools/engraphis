@@ -2690,6 +2690,50 @@ def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch
     assert after_expiry["meta"]["total_edges"] == 1
 
 
+def test_history_cache_expires_when_known_time_is_unanchored(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    recorded_at = 105.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE workspace_id=?",
+        (recorded_at, workspace_id),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE edge_id='edge_ab'",
+        (recorded_at,),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE id='edge_ab'",
+        (recorded_at,),
+    )
+    service.store.conn.execute(
+        "UPDATE entities SET created_at=0 WHERE workspace_id=?",
+        (workspace_id,),
+    )
+    service.store.conn.commit()
+    clock = {"now": 100.0}
+    monkeypatch.setattr(service_module, "time", types.SimpleNamespace(
+        time=lambda: clock["now"], perf_counter=time.perf_counter,
+    ))
+
+    before_recording = service.graph_scene(
+        workspace="acme", level="complete", include_history=True, valid_at=10.0,
+    )
+    clock["now"] = 106.0
+    after_recording = service.graph_scene(
+        workspace="acme", level="complete", include_history=True, valid_at=10.0,
+    )
+
+    before_edge = next(edge for edge in before_recording["edges"] if edge["id"] == "edge_ab")
+    after_edge = next(edge for edge in after_recording["edges"] if edge["id"] == "edge_ab")
+    assert before_edge["ghost"] is False
+    assert after_recording["meta"]["cache_hit"] is False
+    assert after_edge["ghost"] is True
+
+
 @pytest.mark.parametrize(("kwargs", "message"), [
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
