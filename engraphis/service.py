@@ -7749,7 +7749,7 @@ class MemoryService:
         # Classify physical entity visibility across the complete workspace history
         # before applying the entity candidate cap. The same set-wise result is reused
         # below for canonical endpoint pruning so the edge index is scanned only once.
-        visibility_sql = (
+        visibility_rows = self.store.conn.execute(
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
             "WHEN visibility_support.edge_id IS NULL THEN 1 "
@@ -7762,17 +7762,9 @@ class MemoryService:
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
-        )
-        visibility_params: list[Any] = [wid]
-        if repo_id:
-            visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
-            visibility_params.append(repo_id)
-        visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst"
-        )
-        visibility_rows = self.store.conn.execute(
-            visibility_sql, visibility_params,
+            "visibility_edge.src, visibility_edge.dst",
+            (wid,),
         ).fetchall()
         # The joined visibility scan is intentionally repository-scoped, but the
         # entity-pruning pass must still know which workspace entities participate
