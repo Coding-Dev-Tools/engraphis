@@ -215,6 +215,48 @@ def test_graph_scene_filters_session_only_edge_when_endpoints_are_public():
     assert "session_only_relation" not in repr(scene)
 
 
+def test_graph_scene_cache_deadline_tracks_memory_and_connector_boundaries():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    first = _approve(svc, svc.remember(
+        "First cache boundary.", workspace="acme", scope="workspace",
+        valid_from=150.0,
+    ))
+    second = _approve(svc, svc.remember(
+        "Second cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+    svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=? WHERE a=? AND b=?",
+        (200.0, first["id"], second["id"]),
+    )
+    svc.store.conn.commit()
+    workspace_id = svc.store.get_or_create_workspace("acme")
+
+    assert svc._graph_scene_valid_until(workspace_id, 100.0) == 150.0
+
+    connector_svc = MemoryService.create(":memory:", graph_extractor="none")
+    connector_first = _approve(connector_svc, connector_svc.remember(
+        "Connector cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    connector_second = _approve(connector_svc, connector_svc.remember(
+        "Connector cache target.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    connector_svc.link(
+        connector_first["id"], connector_second["id"],
+        workspace="acme", relation="causes",
+    )
+    connector_svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=? WHERE a=? AND b=?",
+        (200.0, connector_first["id"], connector_second["id"]),
+    )
+    connector_svc.store.conn.commit()
+    connector_workspace_id = connector_svc.store.get_or_create_workspace("acme")
+    assert connector_svc._graph_scene_valid_until(connector_workspace_id, 100.0) == 200.0
+
+
 def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     wid = svc.store.get_or_create_workspace("acme")

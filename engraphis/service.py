@@ -1234,19 +1234,48 @@ class MemoryService:
 
     def _graph_scene_valid_until(self, workspace_id: str, at: float) -> float:
         """Earliest future world-time boundary that can change a current graph scene."""
+        sources = [
+            ("edges edge", "edge.workspace_id=?", (workspace_id,), "edge"),
+            (
+                "edge_supports support JOIN edges parent_edge "
+                "ON parent_edge.id=support.edge_id",
+                "parent_edge.workspace_id=?",
+                (workspace_id,),
+                "support",
+            ),
+            ("memories memory", "memory.workspace_id=?", (workspace_id,), "memory"),
+            (
+                "mem_links link "
+                "JOIN memories left_memory ON left_memory.id=link.a "
+                "JOIN memories right_memory ON right_memory.id=link.b",
+                "left_memory.workspace_id=? AND right_memory.workspace_id=?",
+                (workspace_id, workspace_id),
+                "link",
+            ),
+            (
+                "code_memory_links link "
+                "JOIN memories linked_memory ON linked_memory.id=link.memory_id "
+                "JOIN repos linked_repo ON linked_repo.id=link.repo_id",
+                "linked_memory.workspace_id=? AND linked_repo.workspace_id=?",
+                (workspace_id, workspace_id),
+                "link",
+            ),
+        ]
+        boundary_sql: list[str] = []
+        boundary_params: list[Any] = []
+        for source, scope, source_params, alias in sources:
+            for column in (
+                "valid_from", "valid_to", "valid_to_recorded_at", "expired_at",
+            ):
+                active = "" if column == "expired_at" else f" AND {alias}.expired_at IS NULL"
+                boundary_sql.append(
+                    f"SELECT {alias}.{column} AS boundary FROM {source} "
+                    f"WHERE {scope} AND {alias}.{column}>?{active}"
+                )
+                boundary_params.extend((*source_params, at))
         row = self.store.conn.execute(
-            "SELECT MIN(boundary) FROM ("
-            "SELECT valid_from AS boundary FROM edges "
-            "WHERE workspace_id=? AND valid_from>? AND expired_at IS NULL "
-            "UNION ALL SELECT valid_to FROM edges "
-            "WHERE workspace_id=? AND valid_to>? AND expired_at IS NULL "
-            "UNION ALL SELECT s.valid_from FROM edge_supports s "
-            "JOIN edges e ON e.id=s.edge_id WHERE e.workspace_id=? "
-            "AND s.valid_from>? AND s.expired_at IS NULL "
-            "UNION ALL SELECT s.valid_to FROM edge_supports s "
-            "JOIN edges e ON e.id=s.edge_id WHERE e.workspace_id=? "
-            "AND s.valid_to>? AND s.expired_at IS NULL)",
-            (workspace_id, at, workspace_id, at, workspace_id, at, workspace_id, at),
+            "SELECT MIN(boundary) FROM (" + " UNION ALL ".join(boundary_sql) + ")",
+            boundary_params,
         ).fetchone()
         return float(row[0]) if row is not None and row[0] is not None else math.inf
 

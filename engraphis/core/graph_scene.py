@@ -2194,20 +2194,27 @@ def build_graph_scene(
             if community_id not in graph["community_anchors"]:
                 graph["community_anchors"][community_id] = anchor
 
+    filtered_history_relations: list[dict[str, Any]] = []
+    if include_history:
+        filtered_history_relations, _ = _complete_relations(
+            graph, [edge for edge in edge_rows if edge.get("ghost")], support_rows,
+            memory_ids=set(), include_weak_cooccurrence=include_weak_cooccurrence,
+            layers=layers, relations=relations, min_support=min_support,
+            min_confidence=min_confidence,
+        )
+
     if connected_only:
         connected_canonical_ids = {
-            graph["member_to_canonical"].get(str(edge.get(endpoint) or ""), "")
-            for edge in edge_rows
-            if not edge.get("ghost")
-            for endpoint in ("src", "dst")
+            str(edge[endpoint])
+            for edge in graph["edges"]
+            for endpoint in ("source", "target")
         }
         connected_canonical_ids.discard("")
         if include_history:
             connected_canonical_ids |= {
-                graph["member_to_canonical"].get(str(edge.get(endpoint) or ""), "")
-                for edge in edge_rows
-                if edge.get("ghost")
-                for endpoint in ("src", "dst")
+                str(edge[endpoint])
+                for edge in filtered_history_relations
+                for endpoint in ("source", "target")
             }
             connected_canonical_ids.discard("")
         graph["nodes"] = {
@@ -2274,16 +2281,10 @@ def build_graph_scene(
     historical_node_ids = {
         node_id for node_id, node in nodes.items() if node.get("ghost")
     }
-    ghost_relations: list[dict[str, Any]] = []
+    ghost_relations = filtered_history_relations
     reserved_history_endpoints: set[str] = set()
     history_required_node_ids = set(historical_node_ids)
     if include_history:
-        ghost_relations, _ = _complete_relations(
-            graph, [edge for edge in edge_rows if edge.get("ghost")], support_rows,
-            memory_ids=set(), include_weak_cooccurrence=include_weak_cooccurrence,
-            layers=layers, relations=relations, min_support=min_support,
-            min_confidence=min_confidence,
-        )
         history_required_node_ids.update(
             node_id
             for edge in ghost_relations
