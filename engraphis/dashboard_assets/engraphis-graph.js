@@ -560,14 +560,10 @@
         node.vy = 0;
         return;
       }
-      /* Reduced motion is an explicit no-animation preference for Galaxy as well as the
-         classic renderer. Mark the node as seeded while keeping its velocity at rest so a later
-         preference toggle cannot inject a delayed orbital kick. */
-      if (reducedMotion) {
-        node.vx = 0;
-        node.vy = 0;
-        return;
-      }
+      /* Reduced motion suppresses cosmetic particles and animated camera travel; it does not
+         switch the persistent Galaxy solver to a radial-only physical model. The clock remains
+         active under that preference, so omitting this one-shot angular seed makes every planet
+         fall straight into its dominant star. Freeze/static layout are the no-physics controls. */
       if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const key = communityKey(node);
       if (!freshlySeeded.has(key)) freshlySeeded.set(key, []);
@@ -642,15 +638,9 @@
        Scope/filter changes reuse node objects; sweeping only newly revealed systems would add
        momentum without counter-motion from the already seeded galaxy. Mark late arrivals but
        let ordinary gravity settle them instead of injecting a partial second initial condition. */
-    /* Reduced motion keeps the whole Galaxy scene stationary. The flags are still recorded above
-       so turning the preference off later does not replay a one-shot orbital kick. */
-    if (reducedMotion) {
-      centers.forEach(center => center.nodes.forEach(node => {
-        node.vx = 0;
-        node.vy = 0;
-      }));
-      return nodes;
-    }
+    /* Reduced motion is a paint/camera preference. The live solver still advances, so it must
+       receive the same barycentric initial condition or whole systems contract radially without
+       rotating around the black hole. */
     if (hadSeededSystem || gravitationalConstant <= 0 || centers.length < 2) {
       return nodes;
     }
@@ -5018,7 +5008,7 @@
 
     function galaxyDynamicsEligible() {
       if (!hasBrowserFrameClock || destroyed || !running || pageHidden()) return false;
-      if (state.settings.mode !== 'galaxy' || state.settings.frozen || reduced()
+      if (state.settings.mode !== 'galaxy' || state.settings.frozen
         || staticFullLayout || collapsed) return false;
       const data = fg.graphData() || {};
       return Array.isArray(data.nodes) && data.nodes.some(node => node && !node.ghost);
