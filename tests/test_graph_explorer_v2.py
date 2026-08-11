@@ -3168,6 +3168,59 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
     assert shared_edge["support_count"] == 2
 
 
+def test_graph_repo_filter_keeps_legacy_workspace_memory_ancestors():
+    """Scope, not a retained legacy repo id, controls ancestor visibility."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("acme")
+        repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+        service.store.get_or_create_repo(workspace_id, "beta")
+        service.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?, ?, NULL, ?, 'concept', 0)",
+            [
+                ("legacy-ancestor-source", workspace_id, "Legacy Source"),
+                ("legacy-ancestor-target", workspace_id, "Legacy Target"),
+            ],
+        )
+        service.store.conn.execute("PRAGMA ignore_check_constraints=ON")
+        workspace_memory = service.store.add_memory(MemoryRecord(
+            id="mem_legacy_workspace_ancestor", content="shared ancestor evidence",
+            workspace_id=workspace_id, repo_id=repo_a, scope=Scope.WORKSPACE,
+            valid_from=0.0, valid_to=100.0, valid_to_recorded_at=100.0,
+            ingested_at=0.0,
+        ))
+        service.store.conn.execute("PRAGMA ignore_check_constraints=OFF")
+        edge_id = service.store.upsert_edge(Edge(
+            id="edge_legacy_workspace_ancestor", src="legacy-ancestor-source",
+            dst="legacy-ancestor-target", relation="relates", workspace_id=workspace_id,
+            valid_from=0.0, valid_to=100.0, valid_to_recorded_at=100.0,
+            ingested_at=0.0,
+        ))
+        service.store.add_edge_support(edge_id, {"memory_id": workspace_memory})
+        service.store.conn.execute(
+            "UPDATE edge_supports SET valid_from=0, valid_to=100, "
+            "valid_to_recorded_at=100, ingested_at=0 WHERE edge_id=? AND memory_id=?",
+            (edge_id, workspace_memory),
+        )
+        service.store.conn.commit()
+
+        scene = service.graph_scene(
+            workspace="acme", repo="beta", include_history=True,
+            valid_at=150.0, known_at=150.0,
+        )
+        edge = next(item for item in scene["edges"] if item["id"] == edge_id)
+        assert workspace_memory in edge["support_memory_ids"]
+
+        detail = service.graph_entity_evidence(
+            "legacy-ancestor-source", workspace="acme", repo="beta",
+            include_history=True, valid_at=150.0, known_at=150.0,
+        )
+        assert [item["memory_id"] for item in detail["evidence"]] == [workspace_memory]
+    finally:
+        service.close()
+
+
 def test_graph_scene_connected_only_uses_filtered_relations():
     """Facet-excluded relations must not keep their endpoints connected."""
     service = MemoryService.create(":memory:", graph_extractor="none")

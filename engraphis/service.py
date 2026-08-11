@@ -8326,13 +8326,7 @@ class MemoryService:
                     *chunk, t, known_t, known_t, t, known_t, known_t, wid,
                 ]
                 if repo_id:
-                    historical_sql += (
-                        "AND ((COALESCE(memory.scope, 'workspace')='repo' "
-                        "AND memory.repo_id=?) OR "
-                        "COALESCE(memory.scope, 'workspace') IN ('workspace','user')) "
-                    )
-                    historical_params.append(repo_id)
-                    historical_sql += "AND (memory.repo_id=? OR memory.repo_id IS NULL) "
+                    historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
                     historical_params.append(repo_id)
                 historical_sql += (
                     "ORDER BY support.edge_id, support.memory_id, support.source_kind"
@@ -8377,7 +8371,7 @@ class MemoryService:
             )
             memory_params: list[Any] = [wid, *chunk, t]
             if repo_id is not None:
-                memory_sql += "AND (repo_id=? OR repo_id IS NULL) "
+                memory_sql += "AND " + _repo_memory_scope_sql() + " "
                 memory_params.append(repo_id)
             if include_history:
                 # Historical scenes may intentionally surface memories that have
@@ -8479,7 +8473,7 @@ class MemoryService:
                 memory_params = [wid, t, t, known_t, known_t, known_t]
             memory_where.append("COALESCE(scope, 'workspace')!='session'")
             if repo_id:
-                memory_where.append("(repo_id=? OR repo_id IS NULL)")
+                memory_where.append(_repo_memory_scope_sql())
                 memory_params.append(repo_id)
             if clean_memory_types:
                 marks = ",".join("?" for _ in clean_memory_types)
@@ -9192,7 +9186,7 @@ class MemoryService:
                 memory_sql += " AND COALESCE(valid_from, ingested_at, 0)<=?"
                 memory_params.append(upper_time)
             if repo_id:
-                memory_sql += " AND (repo_id=? OR repo_id IS NULL)"
+                memory_sql += " AND " + _repo_memory_scope_sql()
                 memory_params.append(repo_id)
             memory_sql += (
                 " ORDER BY COALESCE(last_access, valid_from, ingested_at) DESC, id LIMIT ?"
@@ -9582,7 +9576,7 @@ class MemoryService:
                 "AND relation.{endpoint}=target.id ",
             ).replace(
                 "AND memory.workspace_id=? ",
-                "AND memory.workspace_id=? AND (memory.repo_id=? OR memory.repo_id IS NULL) ",
+                "AND memory.workspace_id=? AND " + _repo_memory_scope_sql("memory") + " ",
             )
             if include_history:
                 branch_params = (
@@ -10503,6 +10497,22 @@ def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_
         mtypes=mtypes, graph_layers=graph_layers, as_of=as_of,
         valid_at=valid_at, known_at=known_at,
         include_ancestors=True,
+    )
+
+
+def _repo_memory_scope_sql(alias: str = "") -> str:
+    """Match memories visible from a repository while retaining workspace ancestors.
+
+    Normal writes keep workspace/user rows repo-less, but migrated or legacy rows may
+    retain a repo id. Visibility follows ``SearchFilter.include_ancestors`` semantics:
+    repo-scoped rows must match the selected repository; workspace/user rows remain
+    ancestors even when their stored repo id is non-null.
+    """
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"((COALESCE({prefix}scope, 'workspace')='repo' "
+        f"AND {prefix}repo_id=?) OR "
+        f"COALESCE({prefix}scope, 'workspace') IN ('workspace','user'))"
     )
 
 
