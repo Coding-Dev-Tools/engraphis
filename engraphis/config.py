@@ -596,7 +596,7 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
         # current working directory, which is the expected behaviour.
         if PureWindowsPath(configured).anchor and not PureWindowsPath(configured).is_absolute():
             return configured
-        configured_path = Path(configured).expanduser()
+
         if (configured_path.is_absolute()
                 or PurePosixPath(configured).is_absolute()
                 or PureWindowsPath(configured).is_absolute()):

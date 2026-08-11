@@ -246,6 +246,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
 
     @app.get("/graph")
     def graph(workspace: str, limit: int = Query(default=2_000, ge=1, le=5_000),
+              layers: Optional[str] = None,
               include_code: bool = False, repo: Optional[str] = None,
               as_of: Optional[float] = None,
               valid_at: Optional[float] = None,
