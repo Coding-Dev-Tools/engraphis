@@ -5119,12 +5119,12 @@ class Store:
             supported_edges = [str(item[0]) for item in conn.execute(
                 "SELECT DISTINCT edge_id FROM edge_supports WHERE memory_id=?", (memory_id,)
             ).fetchall()]
-
         source_import_ids: list[str] = []
         if "source_imports" in tables:
             source_import_ids = [str(item[0]) for item in conn.execute(
                 "SELECT id FROM source_imports WHERE memory_id=?", (memory_id,)
             ).fetchall()]
+
         if source_import_ids and "source_import_items" in tables:
             marks = ",".join("?" for _ in source_import_ids)
             conn.execute(
