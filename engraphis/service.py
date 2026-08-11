@@ -8769,6 +8769,11 @@ class MemoryService:
                 both_anchored or time.time() < cached[0]):
             self._graph_scene_cache.move_to_end(cache_key)
             scene = copy.deepcopy(cached[1])
+            scene["meta"]["cache_hit"] = True
+            scene["meta"]["query_ms"] = round(
+                (time.perf_counter() - started) * 1000.0, 3
+            )
+            return scene
         if cached is not None:
             del self._graph_scene_cache[cache_key]
         present = time.time()
