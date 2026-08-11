@@ -17,7 +17,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - The Galaxy default orbital separation is now `60`, a 25% increase from `48`. Link and contact
   projections remain contractive and correction-capped so dense layouts cannot overshoot or
   ping-pong. Same-system contacts project along each declared stellar orbit so they preserve
-  radius, relative velocity, and system momentum instead of inflating the solar system.
+  radius and relative velocity while the dominant star remains fixed in the local system frame.
 - Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
   the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
@@ -35,8 +35,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   clock, and visible historical ghosts move as massless test particles without entering gravity,
   contacts, or momentum.
 - Galaxy members that appear before their eventual star, arrive through a later reveal, change
-  parent systems, or return with a zeroed local phase now receive one momentum-balanced circular
-  seed around the selected dominant node. Existing healthy stellar orbits remain untouched.
+  parent systems, or return with a zeroed local phase now receive one star-relative circular seed
+  without recoiling the dominant node. Existing healthy stellar orbits remain untouched.
+- Dominant community stars now remain inertial at the centre of their moving solar-system frame.
+  Local gravity, stellar contact, dense separation, seeding, speed limiting, and the oversized
+  kinematic fallback move planets around that star instead of wobbling the star with its planets.
 - Galaxy Reheat now wakes the persistent fixed-step clock without injecting bonus physics slices,
   and cross-system separation is bounded so it cannot kick entire solar systems into a visible
   fast-forward, ping-pong, or speed-cap pulse.

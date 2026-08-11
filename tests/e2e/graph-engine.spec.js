@@ -799,6 +799,15 @@ async function orbitalSeparationTrial(page, separation, stepCount = 8) {
     corrections: samples.map(sample =>
       sample.diagnostics.lastRelationCorrectionDistance
         + sample.diagnostics.lastOrbitalCorrectionDistance),
+    contactTrace: samples.map(sample => ({
+      relation: sample.diagnostics.lastRelationCorrectionDistance,
+      orbital: sample.diagnostics.lastOrbitalCorrectionDistance,
+      overlaps: sample.diagnostics.lastOrbitalSeparations,
+      anchorClearance: sample.diagnostics.systemAnchorExclusion.minimumClearance,
+      planet: sample.nodes['aurora-planet'],
+      moon: sample.nodes['aurora-moon'],
+      star: sample.nodes['aurora-star'],
+    })),
   };
 }
 
@@ -2515,7 +2524,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(resumed.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
 });
 
-test('Galaxy sliders retain full ranges with contractive release-stable response', async ({ page }) => {
+test('Galaxy sliders retain full ranges with contractive release-stable response', async ({ page }, testInfo) => {
   // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
   // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -2526,6 +2535,10 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
   const strong = await gravityTrial(page, 200);
   const compactOrbits = await orbitalSeparationTrial(page, 0);
   const separatedOrbits = await orbitalSeparationTrial(page, 120, 16);
+  await testInfo.attach('orbital-separation-convergence.json', {
+    body: Buffer.from(JSON.stringify({ compactOrbits, separatedOrbits }, null, 2)),
+    contentType: 'application/json',
+  });
   const immediate = await page.evaluate(scene => {
     const api = window.__engraphisGraph;
     const I = window.EngraphisGraph._internals;

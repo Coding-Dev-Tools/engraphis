@@ -1779,7 +1779,7 @@
   /* Complete/oversized Galaxy views deliberately bypass the O(n²) live solver. They still
      need to look alive: a static galaxy with thousands of painted bodies reads as a failure,
      not as a performance policy. This O(n) clock advances cached hierarchical phases exactly:
-     each system COM sweeps the black hole, then each satellite sweeps its dominant star. It is
+     each dominant star sweeps the black hole, then each satellite sweeps that star. It is
      kinematic only—no mass, contact, link, or recoil is introduced into the evidence model. */
   function advanceGalaxyKinematicOrbits(nodes, options) {
     const opts = options || {};
@@ -2509,6 +2509,8 @@
     const groups = new Map();
     const groupForNode = new Map();
     const contacts = [];
+    const phaseAdvances = new Map();
+    const phaseAdvanceLimits = new Map();
     bodies.forEach((node, index) => {
       const groupKey = communityKey(node);
       if (!groups.has(groupKey)) {
@@ -2549,7 +2551,32 @@
             const pairPadding = crossCommunity ? crossCommunityPadding : padding;
             stats.pairs++;
             if (crossCommunity) stats.crossCommunityPairs++;
-            const minimumDistance = left.radius + right.radius + pairPadding;
+            let minimumDistance = left.radius + right.radius + pairPadding;
+            let preservedOrbitPair = null;
+            /* Same-star planets are constrained to circular manifolds. A large Repel padding can
+               demand a centre distance greater than those two circles can ever supply (the
+               release moon fixture requested 46 on two 19.2-radius orbits whose absolute maximum
+               chord is 38.4). Do not run a permanent correction against impossible geometry.
+               Clamp the target to the maximum feasible chord, then solve the remaining chord
+               deficit as a bounded forward angular advance below. */
+            if (!crossCommunity && opts.preserveSystemRadii === true && leftGroup.anchor) {
+              const anchor = leftGroup.anchor;
+              const explicitAnchorId = anchor.id === undefined || anchor.id === null
+                ? '' : String(anchor.id);
+              const explicitlyAnchored = explicitAnchorId
+                && [left.node, right.node].every(node => node.system_anchor_id !== undefined
+                  && node.system_anchor_id !== null
+                  && String(node.system_anchor_id) === explicitAnchorId);
+              if (explicitlyAnchored && left.node !== anchor && right.node !== anchor) {
+                const leftOrbit = Math.hypot(left.node.x - anchor.x, left.node.y - anchor.y);
+                const rightOrbit = Math.hypot(right.node.x - anchor.x, right.node.y - anchor.y);
+                if (leftOrbit > 1e-9 && rightOrbit > 1e-9) {
+                  const maximumChord = (leftOrbit + rightOrbit) * (1 - 1e-6);
+                  minimumDistance = Math.min(minimumDistance, maximumChord);
+                  preservedOrbitPair = { anchor, leftOrbit, rightOrbit };
+                }
+              }
+            }
             let normalX = right.x - left.x, normalY = right.y - left.y;
             let distance = Math.hypot(normalX, normalY);
             if (distance >= minimumDistance) return;
@@ -2576,6 +2603,58 @@
             const rightInverseMass = rightFixed ? 0 : 1 / rightMass;
             const inverseMass = leftInverseMass + rightInverseMass;
             if (!(inverseMass > 0)) return;
+            if (preservedOrbitPair && !leftFixed && !rightFixed) {
+              const anchor = preservedOrbitPair.anchor;
+              const leftDx = left.node.x - anchor.x, leftDy = left.node.y - anchor.y;
+              const rightDx = right.node.x - anchor.x, rightDy = right.node.y - anchor.y;
+              const leftAngle = Math.atan2(leftDy, leftDx);
+              const rightAngle = Math.atan2(rightDy, rightDx);
+              const tangentDirection = (node, dx, dy, radius) => {
+                const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
+                  - (Number.isFinite(anchor.vx) ? anchor.vx : 0);
+                const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
+                  - (Number.isFinite(anchor.vy) ? anchor.vy : 0);
+                return Math.sign((-dy * relativeVx + dx * relativeVy) / radius);
+              };
+              const leftDirection = tangentDirection(
+                left.node, leftDx, leftDy, preservedOrbitPair.leftOrbit);
+              const rightDirection = tangentDirection(
+                right.node, rightDx, rightDy, preservedOrbitPair.rightOrbit);
+              const direction = leftDirection && leftDirection === rightDirection
+                ? leftDirection : (leftDirection || rightDirection || 1);
+              const cosine = Math.max(-1, Math.min(1,
+                (preservedOrbitPair.leftOrbit * preservedOrbitPair.leftOrbit
+                  + preservedOrbitPair.rightOrbit * preservedOrbitPair.rightOrbit
+                  - minimumDistance * minimumDistance)
+                / (2 * preservedOrbitPair.leftOrbit * preservedOrbitPair.rightOrbit)));
+              const requiredAngle = Math.acos(cosine);
+              const fullTurn = Math.PI * 2;
+              const directedGap = ((direction * (rightAngle - leftAngle)) % fullTurn
+                + fullTurn) % fullTurn;
+              const currentAngle = Math.min(directedGap, fullTurn - directedGap);
+              const deficit = Math.max(0, requiredAngle - currentAngle);
+              if (deficit > 1e-12) {
+                /* Advance whichever body already leads in the common orbital direction. Moving
+                   the trailer backward would satisfy the contact but visibly reverse a planet. */
+                const leading = directedGap <= Math.PI ? right.node : left.node;
+                const previous = Number(phaseAdvances.get(leading)) || 0;
+                /* An isolated star/planet/moon contact can spend the larger phase budget without
+                   interacting with another planet. Dense systems share the conservative release
+                   budget so simultaneous contacts cannot aggregate into a visible jump. */
+                const maximumDirectPhase = leftGroup.nodes.length <= 3 ? 0.158 : 0.072;
+                const advance = Math.min(deficit * pairStrength, maximumDirectPhase);
+                phaseAdvances.set(leading, direction * Math.min(
+                  maximumDirectPhase, Math.abs(previous) + advance));
+                phaseAdvanceLimits.set(leading, maximumDirectPhase);
+              }
+              contacts.push({
+                left: left.node, right: right.node, oldDistance: distance,
+                leftInverseMass, rightInverseMass, inverseMass,
+              });
+              stats.correctionDistance += correction;
+              stats.overlaps++;
+              return;
+            }
             const projection = correction / inverseMass;
             const leftShift = crossCommunity ? leftGroup.shift : shifts.get(left.node);
             const rightShift = crossCommunity ? rightGroup.shift : shifts.get(right.node);
@@ -2628,7 +2707,8 @@
         if (!(radius > 1e-9)) return { node, mass, radius: 0, angle: 0, arc: 0 };
         const shift = shifts.get(node);
         const tangentX = -dy / radius, tangentY = dx / radius;
-        let arc = shift.x * tangentX + shift.y * tangentY;
+        const directPhase = Number(phaseAdvances.get(node)) || 0;
+        let arc = shift.x * tangentX + shift.y * tangentY + directPhase * radius;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
           - (Number.isFinite(anchor.vx) ? anchor.vx : 0);
         const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
@@ -2637,11 +2717,15 @@
         /* Contact pressure may advance a planet along its established orbit, but it must never
            step backward through the stationary-star frame. Blocking only the opposing arc keeps
            dense separation dissipative without altering radius or manufacturing phase reversal. */
-        if (orbitalDirection && arc * orbitalDirection < 0) arc = 0;
-        /* A contact correction is not an orbital clock. Cap its same-direction manifold advance
-           to 0.04 rad per fixed slice so maximum Repel cannot make a planet visibly jump ahead
-           even though its physical tangent remains continuous. */
-        arc = Math.sign(arc) * Math.min(Math.abs(arc), radius * 0.04);
+        if (orbitalDirection && arc * orbitalDirection < 0) {
+          arc = 0;
+        }
+        /* A contact correction is not an orbital clock. Ordinary projected pressure stays below
+           the 0.085-rad release gate; the explicit chord-deficit solve may use the larger bounded
+           advance needed to clear a deeply overlapping moon within 16 fixed slices. */
+        const maximumPhase = directPhase
+          ? (phaseAdvanceLimits.get(node) || 0.072) : 0.072;
+        arc = Math.sign(arc) * Math.min(Math.abs(arc), radius * maximumPhase);
         return {
           node, mass, radius, angle: Math.atan2(dy, dx),
           arc,
@@ -2982,11 +3066,10 @@
     };
   }
 
-  /* Bound only anomalous motion inside each solar system. Free systems are scaled about their
-     evidence-mass COM velocity, preserving their exact momentum and black-hole orbit. The
-     global anchor is an intentional fixed external frame, so its own velocity remains zero
-     while only its satellites are dissipated. A common per-system scale preserves relative
-     directions and cannot manufacture a new radial kick. */
+  /* Bound only anomalous motion inside each solar system. Explicit systems are scaled about the
+     dominant star's carrier velocity, keeping that local origin exact while limiting only planet
+     motion. Compatibility groups retain their mass-COM reference. One non-negative per-system
+     scale preserves every relative direction and cannot manufacture a new radial kick. */
   function stabilizeGalaxySystemVelocities(nodes, options) {
     const opts = options || {};
     const limit = Math.max(0.01, Number.isFinite(Number(opts.limit))
