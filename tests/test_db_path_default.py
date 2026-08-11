@@ -162,6 +162,33 @@ def test_migration_lock_does_not_change_permissions_on_existing_parent(tmp_path,
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [":memory:", "file::memory:", "file::memory:?cache=shared",
+     "file:engraphis-shared?mode=memory&cache=shared"],
+)
+def test_migration_lock_skips_in_memory_uris(tmp_path, monkeypatch, uri):
+    monkeypatch.chdir(tmp_path)
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("in-memory SQLite targets must not create migration locks")
+
+    monkeypatch.setattr(config.os, "open", unexpected_open)
+    with config._migration_lock(Path(uri)):
+        pass
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_migration_lock_uses_file_uri_physical_path(tmp_path):
+    target = tmp_path / "data" / "engraphis.db"
+
+    with config._migration_lock(Path(target.as_uri())):
+        pass
+
+    assert (target.parent / ".engraphis.db.migration.lock").is_file()
+    assert not (tmp_path / "file:").exists()
+
+
 def test_windows_migration_lock_retries_expected_crt_contention(monkeypatch):
     import errno
 
