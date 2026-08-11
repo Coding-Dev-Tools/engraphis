@@ -20,6 +20,7 @@ from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.core.interfaces import MemoryType, Scope  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
+from engraphis.core.schema import SCHEMA_VERSION  # noqa: E402
 from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
 
@@ -143,7 +144,7 @@ def test_bound_dashboard_bootstraps_with_no_visible_workspace(monkeypatch, tmp_p
         "total_rows": 0,
         "workspaces": 0,
         "sessions": 0,
-        "schema_version": 16,
+        "schema_version": SCHEMA_VERSION,
         "prompt_eligibility": {},
         "embedding": {},
     }

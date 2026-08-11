@@ -17,6 +17,8 @@ from engraphis.local_auth import bearer_ok
 from engraphis.netutil import is_local_request
 from engraphis.service import (
     DEFAULT_CODE_QUERY_CAPACITY,
+    GraphIndexRebuilding,
+    GraphSceneCapacityExceeded,
     MAX_CODE_QUERY_CAPACITY,
     MemoryService,
     ValidationError,
@@ -192,8 +194,28 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     def run(fn, *args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except GraphIndexRebuilding as exc:
+            logger.info("graph index unavailable (%s, job_id=%s)", type(exc).__name__, exc.job_id)
+            raise HTTPException(status_code=409, detail={
+                "error": f"graph index rebuilding (job {exc.job_id})",
+                "index_state": "rebuilding",
+                "job_id": exc.job_id,
+            }) from None
+        except GraphSceneCapacityExceeded as exc:
+            logger.info("graph scene exceeds capacity (%s, resource=%s, count=%s, limit=%s)",
+                        type(exc).__name__, exc.resource, exc.count, exc.limit)
+            raise HTTPException(status_code=413, detail={
+                "error": "graph scene exceeds the safety limit",
+                "safety_state": "capacity_exceeded",
+                "degraded": True,
+                "truncated": False,
+                "resource": exc.resource,
+                "count": exc.count,
+                "limit": exc.limit,
+                "recommended_action": "narrow repository, time, type, or relation filters",
+            }) from None
         except ValidationError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail="invalid request") from exc
 
     @app.get("/health")
     def health():
@@ -245,18 +267,27 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         )
 
     @app.get("/graph")
-    def graph(workspace: str, limit: int = Query(default=2_000, ge=1, le=5_000),
+    def graph(workspace: Optional[str] = None, limit: int = Query(default=2_000, ge=1, le=5_000),
               layers: Optional[str] = None,
               include_code: bool = False, repo: Optional[str] = None,
+              full: bool = False, connected_only: bool = False,
               as_of: Optional[float] = None,
               valid_at: Optional[float] = None,
               known_at: Optional[float] = None):
+        ws = workspace
+        if ws is None:
+            try:
+                wss = svc.list_workspaces().get("workspaces") or []
+            except (ValidationError, ValueError):
+                wss = []
+            ws = wss[0] if wss else None
         selected = None if layers is None else [
             value.strip() for value in layers.split(",") if value.strip()
         ]
         return run(
-            svc.graph, workspace=workspace, limit=limit, layers=selected,
+            svc.graph, workspace=ws, limit=limit, layers=selected,
             include_code=include_code, repo=repo, backfill=False,
+            full=full, connected_only=connected_only,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
 
@@ -305,6 +336,26 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     def receipts(workspace: str, limit: int = Query(default=100, ge=1, le=10_000)):
         return run(svc.receipt_log, workspace=workspace, limit=limit)
 
+    @app.get("/receipts/export")
+    def receipts_export(workspace: Optional[str] = None):
+        ws = workspace
+        if ws is None:
+            try:
+                wss = svc.list_workspaces().get("workspaces") or []
+            except (ValidationError, ValueError):
+                wss = []
+            ws = wss[0] if wss else None
+        body = run(svc.export_receipts, workspace=ws)
+        safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
+        import time
+        fname = "engraphis-receipts-%s-%s.json" % (
+            safe_ws,
+            time.strftime("%Y%m%d"),
+        )
+        return JSONResponse(body, headers={
+            "Content-Disposition": 'attachment; filename="%s"' % fname,
+        })
+
     @app.get("/context-savings")
     def context_savings(
         workspace: Optional[str] = None,
@@ -317,7 +368,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     ):
         return run(
             svc.context_savings,
-            workspace=workspace.strip() if isinstance(workspace, str) else None,
+            workspace=workspace,
             repo=repo,
             from_ts=from_ts,
             to_ts=to_ts,

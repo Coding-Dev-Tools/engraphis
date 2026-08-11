@@ -4600,6 +4600,7 @@
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
     // degree threshold. Keeping chosen IDs outside the paint callback bounds fillText work.
     let labelIds = new Set();
+    let pendingLabels = [];
     let zoom = 1, collapsed = false;
     /* Recomputed from the *rendered* data on every render, exactly as the classic path
        recomputes GPERF — filters and focus can take a huge store down to a small view. */
@@ -4609,6 +4610,7 @@
        the data in and d3 resets the simulation alpha to 1, so a paint-only change would restart
        the whole layout. See `sameData`/`render`. */
     let seeded = null;
+    let clusterExpandTimer = 0;
     let destroyed = false, running = true, fitTimer = 0, suspended = 0, pendingRender = null;
     let physicsFrame = 0, physicsReheatPending = false;
     let galaxyFrame = 0, galaxyLastFrameTime = null, galaxyAccumulator = 0;
@@ -5346,11 +5348,7 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(node.members), node.x, node.y);
-        ctx.font = '500 ' + Math.max(2.6, r * 0.4) + 'px system-ui, sans-serif';
-        // Cluster names sit outside the coloured bubble.  They therefore need the active
-        // theme's text colour, not the dark-theme near-white that disappears on light canvas.
-        ctx.fillStyle = state.themeColors.label || '#e7e9ee';
-        ctx.fillText(nodeName(node), node.x, node.y + r * 1.5 + r * 0.5);
+        pendingLabels.push({ x: node.x, y: node.y + r * 1.5 + r * 0.5, text: nodeName(node), cluster: true, scale, r });
         ctx.textAlign = 'left';
         ctx.globalAlpha = 1;
         return;
@@ -5416,14 +5414,12 @@
       const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id);
       const r = node.radius;
       const showLabel = (state.settings.labels && labelIds.has(node.id)) || node.id === hilite || neighbor;
-      if (!showLabel || scale <= 0.35) return;
-      const size = Math.max(2, state.settings.font / scale);
-      ctx.font = '500 ' + size + 'px system-ui, sans-serif';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(0,0,0,.5)';
-      ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
-      ctx.fillStyle = state.themeColors.label || (node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)');
-      ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
+      if (showLabel && scale > 0.35) {
+        pendingLabels.push({
+          x: node.x + r + 1.6, y: node.y, r, text: nodeName(node),
+          isHilite: node.id === hilite, scale,
+        });
+      }
       ctx.globalAlpha = 1;
     }
 
@@ -6279,7 +6275,8 @@
         collapsed = false;
         state.collapse = false;
         render(false, true);
-        setTimeout(() => { fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60);
+        clearTimeout(clusterExpandTimer);
+        clusterExpandTimer = setTimeout(() => { clusterExpandTimer = 0; fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60);
         if (opts.onCollapseChange) opts.onCollapseChange(false);
         return;
       }
@@ -6398,9 +6395,33 @@
       .onRenderFramePost((ctx, scale) => {
         try {
           const currentData = fg.graphData() || {};
-          if (!Array.isArray(currentData.nodes)) return;
-          for (const node of currentData.nodes) paintNodeLabel(node, ctx, scale);
+          if (Array.isArray(currentData.nodes)) {
+            for (const node of currentData.nodes) paintNodeLabel(node, ctx, scale);
+          }
         } catch (e) { /* label pass must never break the render loop */ }
+        const batch = pendingLabels;
+        pendingLabels = [];
+        if (!batch.length) return;
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        for (const label of batch) {
+          if (label.cluster) {
+            ctx.font = '500 ' + Math.max(2.6, label.r * 0.4) + 'px system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = state.themeColors.label || '#e7e9ee';
+            ctx.fillText(label.text, label.x, label.y);
+            ctx.textAlign = 'left';
+          } else {
+            const size = Math.max(2, state.settings.font / scale);
+            ctx.font = '500 ' + size + 'px system-ui, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillStyle = 'rgba(0,0,0,.5)';
+            ctx.fillText(label.text, label.x + 0.3, label.y + 0.3);
+            ctx.fillStyle = state.themeColors.label || (label.isHilite ? '#ffffff' : 'rgba(232,236,245,.86)');
+            ctx.fillText(label.text, label.x, label.y);
+          }
+        }
+        ctx.restore();
       })
       .nodeCanvasObject((node, ctx, scale) => styleNode(node, ctx, scale))
       .nodePointerAreaPaint((node, color, ctx) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(node.x, node.y, node.radius + 2, 0, 6.2832); ctx.fill(); })
@@ -7082,6 +7103,8 @@
       fitTimer = 0;
       clearTimeout(softAlphaTimer);
       softAlphaTimer = 0;
+      clearTimeout(clusterExpandTimer);
+      clusterExpandTimer = 0;
       cancelFrame(initialFitFrame);
       initialFitFrame = 0;
       cancelFrame(dragClickFrame);
