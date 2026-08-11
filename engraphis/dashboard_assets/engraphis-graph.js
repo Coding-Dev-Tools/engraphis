@@ -80,11 +80,12 @@
   const FULL_FORCE_LINK_LIMIT = LARGE_LINK_LIMIT;
   const GALAXY_EXACT_LIMIT = 64;
   const GALAXY_BARNES_HUT_THETA = 0.85;
+  const GALAXY_GRAVITY_MAXIMUM = 200;
   /* One response curve owns every physical layer. It retains the former positive quadratic
      response, then adds two C1 smooth boost stages. The doubled calibration makes local gravity
-     exactly 120 at the default slider and 432 at maximum; the black-hole field is twice that at
-     240 and 864. The boost is never below one, so recalibration cannot weaken any prior slider
-     value; zero remains a true zero-gravity endpoint. */
+     exactly 120 at the default slider; the extended 0..200 slider range adds another full
+     movement span above the former 100 maximum. The boost is never below one, so recalibration
+     cannot weaken any prior slider value; zero remains a true zero-gravity endpoint. */
   function galaxySmoothstep(value) {
     const raw = Number(value);
     const t = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
@@ -92,7 +93,7 @@
   }
   function galaxyGravityConstant(setting) {
     const raw = Number(setting);
-    const value = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 0;
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
     const base = value * (772 + 11 * value) / 2600;
     const boost = 1 + 0.25 * galaxySmoothstep(value / 48)
       + 0.25 * galaxySmoothstep((value - 48) / 52);
@@ -186,7 +187,7 @@
      dormant outer safety field. It starts well outside the seeded scene, adds a smooth
      inward acceleration only near that edge, then applies an exact last-resort boundary if a
      body still escapes. The cached radius never follows an escaped body outward. */
-  const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.25;
+  const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.75;
   const GALAXY_FAR_FIELD_MIN_RADIUS = 96;
   const GALAXY_FAR_FIELD_SOFT_FRACTION = 0.82;
   const GALAXY_FAR_FIELD_ACCELERATION = 12;
@@ -222,9 +223,10 @@
 
   /* Density follows the same effective-G curve as orbital acceleration. Gravity 0 keeps
      the seeded loose radius (while still rejecting outward escape), the default follows
-     the former 25%/minute trajectory at 45.5% speed, and maximum retains its 3.6x response.
-     This makes the full slider visibly control whole-galaxy looseness instead of changing
-     only imperceptible acceleration underneath a fixed radial projector. */
+     the former 25%/minute trajectory at 45.5% speed, and the former 100-setting response
+     remains 3.6x while the extended range adds another full movement span. This makes the
+     full slider visibly control whole-galaxy looseness instead of changing only imperceptible
+     acceleration underneath a fixed radial projector. */
   function galaxyInwardConvergencePerMinute(gravitySetting) {
     const setting = gravitySetting === undefined ? 48 : gravitySetting;
     const relativeGravity = galaxyBlackHoleGravityConstant(setting)
@@ -240,7 +242,7 @@
      geometry and velocity, and never wakes D3. Lowering gravity is an explicit user-requested
      loosening action; automatic dynamics remain inward-only. */
   function galaxyImmediateGravityRadiusScale(setting) {
-    const maximum = Math.max(1e-9, galaxyBlackHoleGravityConstant(100));
+    const maximum = Math.max(1e-9, galaxyBlackHoleGravityConstant(GALAXY_GRAVITY_MAXIMUM));
     const normalized = Math.max(0, Math.min(1,
       galaxyBlackHoleGravityConstant(setting) / maximum));
     return Math.exp(Math.log(0.6) * normalized);
@@ -537,11 +539,14 @@
         node.vy = 0;
         return;
       }
-      /* Reduced motion suppresses cosmetic particles and animated camera travel; it does not
-         switch the persistent Galaxy solver to a different, radial-only physical model. The
-         clock remains active under that preference, so omitting this one-shot angular seed
-         made every system fall straight into its dominant star and permanently marked the
-         node as already seeded. Freeze/static layout are the explicit no-physics controls. */
+      /* Reduced motion is an explicit no-animation preference for Galaxy as well as the
+         classic renderer. Mark the node as seeded while keeping its velocity at rest so a later
+         preference toggle cannot inject a delayed orbital kick. */
+      if (reducedMotion) {
+        node.vx = 0;
+        node.vy = 0;
+        return;
+      }
       if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const key = communityKey(node);
       if (!freshlySeeded.has(key)) freshlySeeded.set(key, []);
@@ -616,9 +621,15 @@
        Scope/filter changes reuse node objects; sweeping only newly revealed systems would add
        momentum without counter-motion from the already seeded galaxy. Mark late arrivals but
        let ordinary gravity settle them instead of injecting a partial second initial condition. */
-    /* As with local orbital seeding, reduced motion is a paint/camera preference. The live
-       solver still advances, so it must receive the same barycentric initial condition or the
-       solar systems contract radially without rotating around the black hole. */
+    /* Reduced motion keeps the whole Galaxy scene stationary. The flags are still recorded above
+       so turning the preference off later does not replay a one-shot orbital kick. */
+    if (reducedMotion) {
+      centers.forEach(center => center.nodes.forEach(node => {
+        node.vx = 0;
+        node.vy = 0;
+      }));
+      return nodes;
+    }
     if (hadSeededSystem || gravitationalConstant <= 0 || centers.length < 2) {
       return nodes;
     }
@@ -4717,11 +4728,11 @@
       });
       const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
       const s = state.settings;
-      const gravity = Math.max(0, Math.min(1, Number(s.gravity) / 100 || 0));
+      const gravity = Math.max(0, Math.min(2, Number(s.gravity) / 100 || 0));
       const repel = Math.max(0, Number(s.repel) || 0);
       const link = Math.max(4, Number(s.link) || 4);
       const nodeSize = Math.max(1, Number(s.size) || 3);
-      const compactness = 1.75 - gravity * 1.4;
+      const compactness = Math.max(0.18, 1.75 - gravity * 1.4);
       const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16) * compactness;
       const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
       const largestGroup = ordered.reduce((largest, [, nodes]) => Math.max(largest, nodes.length), 1);
@@ -4977,7 +4988,7 @@
 
     function galaxyDynamicsEligible() {
       if (!hasBrowserFrameClock || destroyed || !running || pageHidden()) return false;
-      if (state.settings.mode !== 'galaxy' || state.settings.frozen
+      if (state.settings.mode !== 'galaxy' || state.settings.frozen || reduced()
         || staticFullLayout || collapsed) return false;
       const data = fg.graphData() || {};
       return Array.isArray(data.nodes) && data.nodes.some(node => node && !node.ghost);
@@ -5801,8 +5812,9 @@
       .onRenderFramePre((ctx, scale) => { try { styleBackground(ctx, scale); } catch (e) { } })
       .onRenderFramePost((ctx, scale) => {
         try {
-          if (!data || !data.nodes) return;
-          for (const node of data.nodes) paintNodeLabel(node, ctx, scale);
+          const currentData = fg.graphData() || {};
+          if (!Array.isArray(currentData.nodes)) return;
+          for (const node of currentData.nodes) paintNodeLabel(node, ctx, scale);
         } catch (e) { /* label pass must never break the render loop */ }
       })
       .nodeCanvasObject((node, ctx, scale) => styleNode(node, ctx, scale))
@@ -6558,7 +6570,7 @@
     _internals: {
       esc, hexRgb, alpha, contrastOn, communities, betweenness, findBridges, maxOf,
       graphNodeRadius, evidenceNodeRadius, sanitizeEvidenceMetrics, fallbackGravityMass,
-      radiusFromGravityMass, galaxyGravityConstant,
+      radiusFromGravityMass, galaxyGravityConstant, galaxyGravityMaximum: GALAXY_GRAVITY_MAXIMUM,
       galaxyBlackHoleGravityConstant, galaxyLocalGravityConstant,
       galaxyRelationOrbitScale,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
