@@ -245,7 +245,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         )
 
     @app.get("/graph")
-    def graph(workspace: str, limit: int = 2_000, layers: Optional[str] = None,
+    def graph(workspace: str, limit: int = Query(default=2_000, ge=1, le=5_000),
               include_code: bool = False, repo: Optional[str] = None,
               as_of: Optional[float] = None,
               valid_at: Optional[float] = None,
@@ -260,7 +260,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         )
 
     @app.get("/code/search")
-    def code_search(query: str, workspace: str, repo: str, limit: int = 20,
+    def code_search(query: str, workspace: str, repo: str, limit: int = Query(default=20, ge=1, le=1_000),
                     as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None):
@@ -301,7 +301,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         )
 
     @app.get("/receipts")
-    def receipts(workspace: str, limit: int = 100):
+    def receipts(workspace: str, limit: int = Query(default=100, ge=1, le=10_000)):
         return run(svc.receipt_log, workspace=workspace, limit=limit)
 
     @app.get("/context-savings")

@@ -1032,7 +1032,7 @@ def workspaces_merge(req: _MergeWsReq):
 
 class _ImportFolderReq(BaseModel):
     workspace: str
-    path: str
+    path: str = Field(max_length=1024)
     file_pattern: str = "*.md"
     memory_type: str = "semantic"
     derive_facts: bool = False
@@ -2477,7 +2477,7 @@ def code_path(req: _CodePathReq):
 class _CodeImpactReq(BaseModel):
     workspace: str
     repo: str
-    changed_files: list[str]
+    changed_files: list[str] = Field(default_factory=list, max_length=2_000)
     capacity: int = Field(
         default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
     )
