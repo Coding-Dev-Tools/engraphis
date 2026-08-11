@@ -724,10 +724,10 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
             nodes[1].vy - nodes[0].vy);
           return speed * speed;
         };
-        const settings = [0, 1, 12, 24, 48, 72, 100];
+        const settings = [0, 1, 12, 24, 48, 72, 100, 200];
         const response = settings.map(I.galaxyGravityConstant);
         const legacy = setting => setting * (772 + 11 * setting) / 2600;
-        const fullRange = Array.from({ length: 101 }, (_, setting) => setting);
+        const fullRange = Array.from({ length: 201 }, (_, setting) => setting);
         const centralCap = (gravity, explicit) => {
           const nodes = [
             { id: 'black-hole', anchor_role: 'global', community_id: 'core',
@@ -763,14 +763,15 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         };
         emit({
           response,
-          endpoints: [I.galaxyGravityConstant(48), I.galaxyGravityConstant(100)],
+          endpoints: [I.galaxyGravityConstant(48), I.galaxyGravityConstant(100),
+            I.galaxyGravityConstant(200)],
           split: {
             blackHole: [I.galaxyBlackHoleGravityConstant(48),
               I.galaxyBlackHoleGravityConstant(100)],
             local: [I.galaxyLocalGravityConstant(48),
               I.galaxyLocalGravityConstant(100)],
           },
-          clamps: [I.galaxyGravityConstant(-1), I.galaxyGravityConstant(101),
+          clamps: [I.galaxyGravityConstant(-1), I.galaxyGravityConstant(201),
             I.galaxyGravityConstant(Infinity), I.galaxyGravityConstant(NaN)],
           caps: [centralCap(48), centralCap(100), centralCap(100, 1)],
           compatibilityCaps: [compatibilityCentralCap(48), compatibilityCentralCap(100)],
@@ -790,13 +791,14 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         });
         """
     )
-    assert report["endpoints"] == [120, 432]
+    assert report["endpoints"][:2] == [120, 432]
+    assert report["endpoints"][2] == pytest.approx(1371.6923076923076)
     assert report["split"]["blackHole"] == [240, 864]
     assert report["split"]["local"] == [120, 432]
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["clamps"] == [0, 432, 0, 0]
+    assert report["clamps"] == pytest.approx([0, 1371.6923076923076, 0, 0])
     assert report["caps"] == pytest.approx([25, 90, 1])
     assert report["compatibilityCaps"] == pytest.approx([25, 90])
     assert report["localCaps"] == pytest.approx([12.5, 45])
@@ -808,6 +810,9 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     assert report["neverWeaker"] is True
     assert report["fullRangeMonotone"] is True
     assert all(value == pytest.approx(3.6, rel=1e-12) for value in report["ratios"].values())
+    source = ASSET.read_text(encoding="utf-8")
+    assert "const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.75;" in source
+    assert "const GALAXY_GRAVITY_MAXIMUM = 200;" in source
 
 
 @requires_node
