@@ -2272,6 +2272,21 @@ def build_graph_scene(
     historical_node_ids = {
         node_id for node_id, node in nodes.items() if node.get("ghost")
     }
+    ghost_relations: list[dict[str, Any]] = []
+    history_required_node_ids = set(historical_node_ids)
+    if include_history:
+        ghost_relations, _ = _complete_relations(
+            graph, [edge for edge in edge_rows if edge.get("ghost")], support_rows,
+            memory_ids=set(), include_weak_cooccurrence=include_weak_cooccurrence,
+            layers=layers, relations=relations, min_support=min_support,
+            min_confidence=min_confidence,
+        )
+        history_required_node_ids.update(
+            node_id
+            for edge in ghost_relations
+            for node_id in (edge["source"], edge["target"])
+            if node_id in nodes
+        )
 
     def eligible(node_id: str) -> bool:
         return nodes[node_id]["entity_quality"] > 0 or node_id in explicit_requested
@@ -2333,17 +2348,10 @@ def build_graph_scene(
             )
 
     if include_history:
-        selected.update(historical_node_ids)
         # Retain endpoints of ghost relations so forced historical nodes keep
         # their explanatory edges even when the other endpoint would not
         # otherwise be selected by the overview/community filter.
-        for edge in edge_rows:
-            if edge.get("ghost"):
-                for endpoint in ("src", "dst"):
-                    canonical = graph["member_to_canonical"].get(
-                        str(edge.get(endpoint) or ""), "")
-                    if canonical and canonical in nodes:
-                        selected.add(canonical)
+        selected.update(history_required_node_ids)
 
     if len(selected) > node_cap:
         forced = {
@@ -2351,12 +2359,12 @@ def build_graph_scene(
         }
         forced.add(graph["global_anchor"])
         forced.update(explicit_requested)
-        forced.update(historical_node_ids)
+        forced.update(history_required_node_ids)
         selected = set(sorted(
             (
                 node_id for node_id in forced
                 if node_id in selected
-                and (eligible(node_id) or node_id in historical_node_ids)
+                and (eligible(node_id) or node_id in history_required_node_ids)
             ),
             key=lambda node_id: (
                 0 if node_id in explicit_requested else 1,
@@ -2373,14 +2381,8 @@ def build_graph_scene(
                 selected.add(node_id)
     chosen_communities = {nodes[node_id]["community_id"] for node_id in selected}
     scene_edges = _selected_edges(graph, selected, level, edge_cap)
-    total_scene_edges = len(graph["edges"])
+    total_scene_edges = len(graph["edges"]) + len(ghost_relations)
     if include_history:
-        ghost_relations, _ = _complete_relations(
-            graph, [edge for edge in edge_rows if edge.get("ghost")], support_rows,
-            memory_ids=set(), include_weak_cooccurrence=include_weak_cooccurrence,
-            layers=layers, relations=relations, min_support=min_support,
-            min_confidence=min_confidence,
-        )
         ghost_relations = [
             edge for edge in ghost_relations
             if edge["source"] in selected and edge["target"] in selected
@@ -2415,7 +2417,6 @@ def build_graph_scene(
             )) if edge not in reserved_history_edges
         )
         scene_edges = scene_edges[:edge_cap]
-        total_scene_edges += len(ghost_relations)
     communities = _community_summaries(graph, chosen_communities, selected)
     bridges = _bridges(graph, chosen_communities, 80)
 
