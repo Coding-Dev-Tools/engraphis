@@ -9,7 +9,7 @@
    with both the dashboard adapter and standalone scene payloads. */
 (function () {
   const PRESETS = {
-    galaxy: { label: 'Galaxy gravity', repel: 48, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
+    galaxy: { label: 'Galaxy gravity', repel: 60, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
     original: { label: 'Original force', repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40, curve: 0, particles: 0 },
     compact: { label: 'Compact clusters', repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30, curve: 0.08, particles: 0 },
     communities: { label: 'Community islands', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
@@ -113,12 +113,24 @@
     return base * boost * 4;
   }
   /* Gravity strength is a black-hole control first. The center field is twice the prior
-     all-purpose response; local solar-system gravity receives exactly 50% of that field. */
+     all-purpose response and the compatibility local field remains half of that. */
   function galaxyBlackHoleGravityConstant(setting) {
     return galaxyGravityConstant(setting) * 2;
   }
   function galaxyLocalGravityConstant(setting) {
     return galaxyBlackHoleGravityConstant(setting) * 0.5;
+  }
+  /* A fit-to-view galaxy compresses stellar and galactic distances onto one canvas, so using
+     one physical clock made a valid planet orbit visually disappear under its system's
+     black-hole sweep. Give independent community stars a 1.5x angular clock by multiplying
+     their gravitational parameter by clock^2. Both the circular seed and every live
+     inverse-square sample consume this same constant: the result is a faster bound central
+     orbit, not a per-frame carousel or an unbalanced tangential kick. The global anchor keeps
+     the original local scale because its surrounding bulge belongs to the black-hole well. */
+  const GALAXY_STELLAR_ORBIT_CLOCK = 1.5;
+  function galaxyStellarGravityConstant(setting) {
+    return galaxyLocalGravityConstant(setting)
+      * GALAXY_STELLAR_ORBIT_CLOCK * GALAXY_STELLAR_ORBIT_CLOCK;
   }
   function galaxyAccelerationCapReference(gravity) {
     const raw = Number(gravity);
@@ -571,7 +583,6 @@
        can point outward in a dense/asymmetric system and incorrectly seed zero angular motion.
        Other satellites and the near-surface pressure are perturbations for the live integrator,
        not independent local wells or inputs to a planet's circular initial condition. */
-    const localGravity = galaxyLocalGravityConstant(gravity);
     const localAccelerationCap = defaultGalaxyAccelerationCap(gravity);
     const freshlySeeded = new Map();
     (nodes || []).forEach(node => {
@@ -603,6 +614,8 @@
       const center = centers.get(key);
       if (!center || center.nodes.length < 2) return;
       const anchor = galaxySystemAnchor(center.nodes);
+      const localGravity = anchor.anchor_role === 'global'
+        ? galaxyLocalGravityConstant(gravity) : galaxyStellarGravityConstant(gravity);
       const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
       const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
       const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
@@ -997,7 +1010,7 @@
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(node);
     });
-    const gravity = galaxyLocalGravityConstant(opts.gravity);
+    const localGravity = galaxyLocalGravityConstant(opts.gravity);
     const softening = Math.max(0.1, Number(opts.softening) || 8);
     const alphaValue = Number.isFinite(opts.alpha) ? Math.max(0, opts.alpha) : 1;
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
@@ -1027,6 +1040,8 @@
       const anchor = galaxySystemAnchor(members);
       if (!anchor) return;
       stats.anchors++;
+      const gravity = anchor.anchor_role === 'global'
+        ? localGravity : galaxyStellarGravityConstant(opts.gravity);
       const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
       const accelerations = new Map(members.map(node => [node, { ax: 0, ay: 0 }]));
       let systemMaximumRepulsion = 0, systemMaximumSampledAttraction = 0;
@@ -6927,7 +6942,8 @@
       esc, hexRgb, alpha, contrastOn, communities, betweenness, findBridges, maxOf,
       graphNodeRadius, evidenceNodeRadius, sanitizeEvidenceMetrics, fallbackGravityMass,
       radiusFromGravityMass, galaxyGravityConstant, galaxyGravityMaximum: GALAXY_GRAVITY_MAXIMUM,
-      galaxyBlackHoleGravityConstant, galaxyLocalGravityConstant, galaxySceneWithinLiveLimit,
+      galaxyBlackHoleGravityConstant, galaxyLocalGravityConstant,
+      galaxyStellarGravityConstant, galaxySceneWithinLiveLimit,
       galaxyRelationOrbitScale,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, ensureGalaxyPositions,
