@@ -5139,6 +5139,12 @@ class Store:
             ("source_imports", "memory_id"),
         ):
             if table in tables:
+                if table == "source_imports" and "source_import_items" in tables:
+                    conn.execute(
+                        "DELETE FROM source_import_items WHERE source_id IN "
+                        "(SELECT id FROM source_imports WHERE memory_id=?)",
+                        (memory_id,),
+                    )
                 conn.execute(f"DELETE FROM {table} WHERE {column}=?", (memory_id,))
         if "mem_links" in tables:
             conn.execute("DELETE FROM mem_links WHERE a=? OR b=?", (memory_id, memory_id))
