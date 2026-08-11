@@ -78,7 +78,23 @@ logger = logging.getLogger("engraphis.service")
 
 
 def _is_memory_database_path(db_path: str) -> bool:
-    return db_path == ":memory:" or db_path.startswith("file::memory:")
+    """Detect SQLite memory databases including named shared-memory URIs.
+
+    Handles ``:memory:``, ``file::memory:``, and ``file:name?mode=memory``
+    (with any query parameter order or case).
+    """
+    text = str(db_path or "")
+    if not text or text == ":memory:":
+        return True
+    if not text.startswith("file:"):
+        return False
+    from urllib.parse import parse_qs, unquote, urlsplit
+    parsed = urlsplit(text.replace("\\", "/"))
+    uri_path = unquote(parsed.path)
+    if uri_path == ":memory:":
+        return True
+    query = parse_qs(parsed.query)
+    return "memory" in query.get("mode", [])
 
 
 def _physical_database_path(db_path: str) -> str:
@@ -87,7 +103,8 @@ def _physical_database_path(db_path: str) -> str:
     Store opens paths with ``uri=False``, so passing a ``file:`` URI through to
     pathlib or sqlite would treat the URI text as a literal filename.  Strip
     URI-only query options here and decode the path before migration locking and
-    database opening both see it.
+    database opening both see it.  Named shared-memory URIs (``mode=memory``)
+    are returned verbatim so SQLite keeps them in-memory.
     """
     text = str(db_path)
     if _is_memory_database_path(text) or not text.startswith("file:"):
@@ -8606,7 +8623,7 @@ class MemoryService:
         clean_depth = bounded_int(depth, "depth", 0, 2)
         clean_min_support = bounded_int(min_support, "min_support", 0, 1_000_000)
         clean_node_limit = (
-            bounded_int(node_limit, "node_limit", 1, 300)
+            bounded_int(node_limit, "node_limit", 1, 500)
             if node_limit is not None else None
         )
         clean_edge_limit = (

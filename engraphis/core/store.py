@@ -25,6 +25,8 @@ import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, cast
+from urllib.parse import parse_qs, unquote, urlsplit
+
 
 import numpy as np
 
@@ -81,6 +83,25 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+
+def _is_memory_database_path(path: str) -> bool:
+    """Detect SQLite memory databases including named shared-memory URIs.
+
+    Handles ``:memory:``, ``file::memory:``, and ``file:name?mode=memory``
+    (with any query parameter order).
+    """
+    text = str(path or "")
+    if not text or text == ":memory:":
+        return True
+    if not text.startswith("file:"):
+        return False
+    parsed = urlsplit(text.replace("\\", "/"))
+    uri_path = unquote(parsed.path)
+    if uri_path == ":memory:":
+        return True
+    query = parse_qs(parsed.query)
+    return "memory" in query.get("mode", [])
+
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 120.0
 _LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
 _LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
@@ -1091,7 +1112,7 @@ class Store:
                     "open_read_only(path) method"
                 )
             read_only_path = self._preflight_read_only_path(path)
-        if path != ":memory:" and not self.read_only:
+        if not _is_memory_database_path(path) and not self.read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         raw_conn = self._open_connection(read_only_path or path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
@@ -1154,6 +1175,13 @@ class Store:
             uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
             conn = sqlite3.connect(
                 uri, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
+                check_same_thread=False,
+            )
+        elif _is_memory_database_path(path) and path.startswith("file:"):
+            # Named shared-memory URI: pass through with uri=True so SQLite
+            # recognizes the mode=memory query parameter.
+            conn = sqlite3.connect(
+                path, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
                 check_same_thread=False,
             )
         else:
