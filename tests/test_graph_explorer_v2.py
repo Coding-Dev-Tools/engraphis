@@ -1421,6 +1421,33 @@ def test_graph_scene_code_overlay_degrades_without_repo_filter(monkeypatch):
     assert response.json()["meta"]["include_code"] is False
 
 
+def test_graph_scene_code_overlay_failure_does_not_fail_entity_graph(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    calls = []
+
+    def fake_graph_scene(**kwargs):
+        calls.append(kwargs)
+        if kwargs["include_code"]:
+            raise RuntimeError("private code overlay failure")
+        return {"meta": {"level": kwargs["level"]}, "nodes": [], "edges": []}
+
+    monkeypatch.setattr(service, "graph_scene", fake_graph_scene)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    try:
+        response = TestClient(app).get("/api/graph/scene", params={
+            "workspace": "acme", "include_code": True,
+        })
+    finally:
+        v2_api.set_service(None)
+
+    assert response.status_code == 200
+    assert [call["include_code"] for call in calls] == [True, False]
+    assert response.json()["meta"]["degraded_reason"] == "code_overlay_failed"
+    assert response.json()["meta"]["include_code"] is False
+
+
 def test_complete_scene_capacity_error_is_explicit_and_never_samples(monkeypatch):
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
@@ -1914,6 +1941,11 @@ def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
     edge_id = service.store.add_code_edge(
         repo_id=repo_id, src=source, dst=target, relation="calls", commit=False,
     )
+    live = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_memory_nodes=False,
+    )
+    assert f"code-edge:{edge_id}" in {edge["id"] for edge in live["edges"]}
     closed_at = time.time() + 10.0
     service.store.conn.execute(
         "UPDATE symbols SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
@@ -2818,6 +2850,17 @@ def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoi
     app = FastAPI()
     app.include_router(v2_api.router)
     v2_api.set_service(service)
+    literal_response = TestClient(app).get(
+        "/api/graph/entities/canon:ghost/memories",
+        params={"workspace": "acme"},
+    )
+    assert literal_response.status_code == 200
+    literal_detail = literal_response.json()
+    assert literal_detail["canonical_id"] == "canon:ghost"
+    assert [item["excerpt"] for item in literal_detail["evidence"]] == [
+        "Literal suffix evidence.",
+    ]
+
     response = TestClient(app).get(
         f"/api/graph/entities/{ghost['id']}/memories",
         params={

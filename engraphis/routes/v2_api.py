@@ -2246,6 +2246,17 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
     }
 
     def run_scene():
+        def without_code_overlay(reason: str):
+            fallback_kwargs = {**graph_kwargs, "include_code": False}
+            scene = service().graph_scene(**fallback_kwargs)
+            meta = scene.get("meta")
+            if isinstance(meta, dict):
+                meta["degraded"] = True
+                meta["degraded_reason"] = reason
+                meta["requested_include_code"] = True
+                meta["include_code"] = False
+            return scene
+
         try:
             return service().graph_scene(**graph_kwargs)
         except ValidationError as exc:
@@ -2257,15 +2268,15 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
             if not (code_enabled and not repo and "code overlay" in str(exc).lower()
                     and "filter" in str(exc).lower() and "repository" in str(exc).lower()):
                 raise
-            fallback_kwargs = {**graph_kwargs, "include_code": False}
-            scene = service().graph_scene(**fallback_kwargs)
-            meta = scene.get("meta")
-            if isinstance(meta, dict):
-                meta["degraded"] = True
-                meta["degraded_reason"] = "code_overlay_requires_repository_filter"
-                meta["requested_include_code"] = True
-                meta["include_code"] = False
-            return scene
+            return without_code_overlay("code_overlay_requires_repository_filter")
+        except Exception as exc:  # noqa: BLE001 - optional overlay must not break the graph
+            if not code_enabled:
+                raise
+            logger.error(
+                "graph code overlay failed; serving the entity graph (%s)",
+                type(exc).__name__,
+            )
+            return without_code_overlay("code_overlay_failed")
 
     return _run(run_scene)
 
