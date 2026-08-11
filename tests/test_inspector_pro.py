@@ -137,6 +137,22 @@ def test_local_owner_can_export_their_data_without_a_local_license_issuer(make_c
     assert payload["counts"]["memories"] == 1
 
 
+def test_inspector_export_sanitizes_unicode_workspace_name_for_header(
+    make_client, monkeypatch
+):
+    app, client, _ = make_client()
+    monkeypatch.setattr(
+        app.state.service,
+        "export_workspace",
+        lambda *, workspace, recovery: {"workspace": workspace, "recovery": recovery},
+    )
+
+    response = client.get("/api/export", params={"workspace": "工作"})
+
+    assert response.status_code == 200
+    assert 'filename="engraphis-export-__-' in response.headers["content-disposition"]
+
+
 def test_manual_consolidation_remains_local_but_automatic_policy_does_not(make_client):
     _, client, _ = make_client()
     manual = client.post(
