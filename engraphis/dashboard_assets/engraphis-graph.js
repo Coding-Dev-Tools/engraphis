@@ -167,6 +167,11 @@
   const GALAXY_CORE_PAIR_MULTIPLIER = 0.75;
   const GALAXY_BRIDGE_SCALE = 0.35;
   const GALAXY_CENTER_ACCELERATION_CAP = 2.5;
+  /* The visible black hole is a contact boundary as well as a gravity source. Its skin must
+     exceed one emergency-speed drift (48 * 0.021328125 ~= 1.02 world units), so a body cannot
+     tunnel through the painted edge between fixed steps. The constraint removes inward radial
+     speed only; it never adds an outward kick or drains tangential orbital motion. */
+  const GALAXY_BLACK_HOLE_EXCLUSION_PADDING = 2.5;
   /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
      while the small leapfrog step makes systems orbit over seconds instead of jumping once per
      paint frame. Damping removes numerical noise over minutes rather than erasing the seeded
@@ -1710,6 +1715,123 @@
     return stats;
   }
 
+  /* The black hole is an impenetrable visual boundary, not a generic collision partner.
+     External solar systems cross that boundary as one rigid translation so their local
+     geometry and relative velocities survive the contact. Members of the black-hole system
+     are handled individually because translating that system would move the anchor itself.
+
+     This is a zero-restitution contact constraint: project only the penetration and remove
+     only inward radial velocity. Tangential velocity is untouched, so a grazing body keeps
+     orbiting instead of sticking to the horizon or receiving a repulsive slingshot. */
+  function applyGalaxyBlackHoleExclusion(nodes, options) {
+    const opts = options || {};
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const anchor = galaxyGlobalAnchor(bodies);
+    const stats = {
+      anchorId: anchor ? anchor.id : null,
+      contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+      correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+      minimumClearance: null,
+    };
+    if (!anchor || bodies.length < 2) return stats;
+    const padding = Math.max(0, Number.isFinite(Number(opts.padding))
+      ? Number(opts.padding) : GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+    const bodyRadius = node => finitePositive(
+      node.radius, evidenceNodeRadius(node, 3), 160
+    );
+    const anchorRadius = bodyRadius(anchor);
+    const anchorX = anchor.x, anchorY = anchor.y;
+    const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
+    const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
+    const coreKey = communityKey(anchor);
+    const radialUnit = (key, dx, dy) => {
+      const distance = Math.hypot(dx, dy);
+      if (distance > 1e-9) return { x: dx / distance, y: dy / distance, distance };
+      const angle = seededHash(0, 'black-hole-horizon:' + String(key))
+        / 0x100000000 * Math.PI * 2;
+      return { x: Math.cos(angle), y: Math.sin(angle), distance: 0 };
+    };
+    const removeSystemInwardVelocity = (members, unitX, unitY) => {
+      let totalMass = 0, velocityX = 0, velocityY = 0;
+      members.forEach(node => {
+        const mass = finitePositive(node.gravity_mass, 1, 1000);
+        totalMass += mass;
+        velocityX += mass * (Number.isFinite(node.vx) ? node.vx : 0);
+        velocityY += mass * (Number.isFinite(node.vy) ? node.vy : 0);
+      });
+      if (!(totalMass > 0)) return 0;
+      const relativeVx = velocityX / totalMass - anchorVx;
+      const relativeVy = velocityY / totalMass - anchorVy;
+      const inwardSpeed = relativeVx * unitX + relativeVy * unitY;
+      if (!(inwardSpeed < 0)) return 0;
+      members.forEach(node => {
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) - inwardSpeed * unitX;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) - inwardSpeed * unitY;
+      });
+      return -inwardSpeed;
+    };
+
+    communityCenters(bodies).forEach(center => {
+      if (center.id === coreKey) {
+        center.nodes.forEach(node => {
+          if (node === anchor) return;
+          const radial = radialUnit(node.id, node.x - anchorX, node.y - anchorY);
+          const minimumDistance = anchorRadius + bodyRadius(node) + padding;
+          const correction = minimumDistance - radial.distance;
+          if (!(correction > 0) || !Number.isFinite(correction)) return;
+          node.x = anchorX + radial.x * minimumDistance;
+          node.y = anchorY + radial.y * minimumDistance;
+          const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - anchorVx;
+          const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0) - anchorVy;
+          const inwardSpeed = relativeVx * radial.x + relativeVy * radial.y;
+          if (inwardSpeed < 0) {
+            node.vx -= inwardSpeed * radial.x;
+            node.vy -= inwardSpeed * radial.y;
+            stats.inwardVelocityRemoved += -inwardSpeed;
+          }
+          stats.contacts++;
+          stats.coreNodes++;
+          stats.repelledNodes++;
+          stats.correctedDistance += correction;
+          stats.maximumShift = Math.max(stats.maximumShift, correction);
+        });
+        return;
+      }
+
+      /* A circular envelope around the evidence-mass COM is conservative but exact as a
+         safety bound: once its near edge clears the black hole, every painted member does. */
+      const systemRadius = center.nodes.reduce((maximum, node) => Math.max(maximum,
+        Math.hypot(node.x - center.x, node.y - center.y) + bodyRadius(node)), 0);
+      const radial = radialUnit(center.id, center.x - anchorX, center.y - anchorY);
+      const minimumDistance = anchorRadius + systemRadius + padding;
+      const correction = minimumDistance - radial.distance;
+      if (!(correction > 0) || !Number.isFinite(correction)) return;
+      const shiftX = radial.x * correction, shiftY = radial.y * correction;
+      center.nodes.forEach(node => {
+        node.x += shiftX;
+        node.y += shiftY;
+      });
+      stats.inwardVelocityRemoved += removeSystemInwardVelocity(
+        center.nodes, radial.x, radial.y
+      );
+      stats.contacts++;
+      stats.systems++;
+      stats.repelledNodes += center.nodes.length;
+      stats.correctedDistance += correction;
+      stats.maximumShift = Math.max(stats.maximumShift, correction);
+    });
+
+    bodies.forEach(node => {
+      if (node === anchor) return;
+      const clearance = Math.hypot(node.x - anchorX, node.y - anchorY)
+        - anchorRadius - bodyRadius(node) - padding;
+      stats.minimumClearance = stats.minimumClearance === null
+        ? clearance : Math.min(stats.minimumClearance, clearance);
+    });
+    return stats;
+  }
+
   /* Bound only anomalous motion inside each solar system. Free systems are scaled about their
      evidence-mass COM velocity, preserving their exact momentum and black-hole orbit. The
      global anchor is an intentional fixed external frame, so its own velocity remains zero
@@ -2013,6 +2135,14 @@
           center.y - convergenceAnchor.y),
       }])
     ) : null;
+    const horizonEnabled = anchorFrame && opts.includeBlackHoleExclusion !== false;
+    const projectBlackHoleHorizon = () => horizonEnabled
+      ? applyGalaxyBlackHoleExclusion(bodies, { padding: opts.blackHoleExclusionPadding })
+      : {
+        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+        correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+        minimumClearance: null,
+      };
 
     const start = galaxyAccelerations(bodies, links, bridges, opts);
     bodies.forEach(node => {
@@ -2027,6 +2157,9 @@
       node.x += node.vx * timestep;
       node.y += node.vy * timestep;
     });
+    /* Clamp before the second force sample so a tunnelling body never contributes an
+       acceleration from inside the painted black-hole disc. */
+    const driftHorizon = projectBlackHoleHorizon();
     const end = galaxyAccelerations(bodies, links, bridges, opts);
     bodies.forEach(node => {
       if (node === fixedNode) return;
@@ -2101,10 +2234,24 @@
       limit: opts.localRelativeSpeedLimit,
       fixedNodeId: opts.fixedNodeId,
     });
-    /* The pointer owns this one phase point. It remains a live mass source for both force
-       samples, but no solver, convergence projection, or contact correction may move it away
-       from the cursor. Every other body keeps integrating normally. */
+    /* The pointer owns this phase point everywhere except inside the black-hole boundary.
+       Restore its exact cursor position first, then let the final horizon pass clamp only an
+       actual penetration. This keeps ordinary dragging exact without allowing a dragged node
+       to cover the event horizon. */
     restoreFixedNode();
+    const finalHorizon = projectBlackHoleHorizon();
+    const blackHoleExclusion = {
+      anchorId: finalHorizon.anchorId || driftHorizon.anchorId,
+      contacts: driftHorizon.contacts + finalHorizon.contacts,
+      systems: driftHorizon.systems + finalHorizon.systems,
+      coreNodes: driftHorizon.coreNodes + finalHorizon.coreNodes,
+      repelledNodes: driftHorizon.repelledNodes + finalHorizon.repelledNodes,
+      correctedDistance: driftHorizon.correctedDistance + finalHorizon.correctedDistance,
+      maximumShift: Math.max(driftHorizon.maximumShift, finalHorizon.maximumShift),
+      inwardVelocityRemoved: driftHorizon.inwardVelocityRemoved
+        + finalHorizon.inwardVelocityRemoved,
+      minimumClearance: finalHorizon.minimumClearance,
+    };
     bodies.forEach(node => {
       maximumSpeed = Math.max(maximumSpeed, Math.hypot(node.vx, node.vy));
     });
@@ -2130,6 +2277,7 @@
       convergence,
       relationConstraint,
       orbitalSeparation,
+      blackHoleExclusion,
       systemVelocity,
       mutualGravity: end.mutualGravity || start.mutualGravity
         || { systems: 0, interactions: 0, traversals: 0, approximations: 0,
@@ -3041,6 +3189,11 @@
     let galaxyLastRelationDistance = 0, galaxyLastOrbitalSeparations = 0;
     let galaxyLastOrbitalCorrection = 0, galaxyLastLocalVelocityLimits = 0;
     let galaxySpeedCaps = 0;
+    let galaxyLastBlackHoleExclusion = {
+      anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+      correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+      minimumClearance: null,
+    };
     let galaxyLastMutualGravity = {
       systems: 0, interactions: 0, traversals: 0, approximations: 0,
       maximumAcceleration: 0, capScale: 1,
@@ -3914,6 +4067,11 @@
       galaxyLastOrbitalCorrection = 0;
       galaxyLastLocalVelocityLimits = 0;
       galaxySpeedCaps = 0;
+      galaxyLastBlackHoleExclusion = {
+        anchorId: null, contacts: 0, systems: 0, coreNodes: 0, repelledNodes: 0,
+        correctedDistance: 0, maximumShift: 0, inwardVelocityRemoved: 0,
+        minimumClearance: null,
+      };
       galaxyReheatStepsRemaining = 0;
       galaxyReheatActivations = 0;
       galaxyReheatStepsApplied = 0;
@@ -3989,6 +4147,10 @@
            per frame, irrespective of how many members touch them. */
         orbitalSeparationMaxCorrection: 4,
         orbitalSeparationMaxVelocityCorrection: 8,
+        /* The black-hole contact is independent of the adjustable local separation pressure.
+           It is always strong enough to keep painted geometry outside the event horizon. */
+        includeBlackHoleExclusion: true,
+        blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
         localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
         timestep: GALAXY_FIXED_TIMESTEP,
         /* The render loop consumes one fixed 30 Hz physical slice per substep. Passing that
@@ -4039,6 +4201,8 @@
         orbitalSeparationSetting: state.settings.repel,
         orbitalSeparationPadding: galaxyOrbitalSeparationPadding(state.settings.repel),
         orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
+        blackHoleExclusionPadding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
+        blackHoleExclusion: { ...galaxyLastBlackHoleExclusion },
         active: galaxyDynamicsEligible(),
         scheduled: galaxyFrame !== 0,
         frameIntervalMs: GALAXY_FRAME_INTERVAL_MS,
@@ -4111,6 +4275,7 @@
           galaxyLastRelationDistance = report.relationConstraint.correctedDistance;
           galaxyLastOrbitalSeparations = report.orbitalSeparation.overlaps;
           galaxyLastOrbitalCorrection = report.orbitalSeparation.correctionDistance;
+          galaxyLastBlackHoleExclusion = report.blackHoleExclusion;
           galaxyLastLocalVelocityLimits = report.systemVelocity.limitedSystems;
           galaxyLastMutualGravity = report.mutualGravity;
           dragFollowerGravityReport = report.dragGravity;
@@ -5314,6 +5479,7 @@
       applyGalaxyRelationSprings, applyGalaxyRelationDistanceConstraints,
       applyDraggedNodeGravity, applyDraggedNodeAcceleration,
       applyGalaxyCollisions, applyGalaxyOrbitalSeparation,
+      applyGalaxyBlackHoleExclusion,
       stabilizeGalaxySystemVelocities,
       galaxyAccelerations, integrateGalaxyLeapfrog, galaxyMotionDiagnostics,
       galaxyInwardConvergencePerMinute, galaxyInwardConvergenceFactor,

@@ -2334,6 +2334,16 @@ def build_graph_scene(
 
     if include_history:
         selected.update(historical_node_ids)
+        # Retain endpoints of ghost relations so forced historical nodes keep
+        # their explanatory edges even when the other endpoint would not
+        # otherwise be selected by the overview/community filter.
+        for edge in edge_rows:
+            if edge.get("ghost"):
+                for endpoint in ("src", "dst"):
+                    canonical = graph["member_to_canonical"].get(
+                        str(edge.get(endpoint) or ""), "")
+                    if canonical and canonical in nodes:
+                        selected.add(canonical)
 
     if len(selected) > node_cap:
         forced = {

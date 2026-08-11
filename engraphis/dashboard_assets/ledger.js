@@ -3993,6 +3993,10 @@
     if (state.graphEngine) state.graphEngine.setRepoFilter(event.target.value);
     clearGraphSavedView();
     saveGraphPreferences();
+    // Code overlay payloads are repository-scoped server-side. Changing the
+    // filter while code overlay is active must trigger a fresh request or
+    // the rendered graph keeps the previous repository's relations.
+    if (state.graphIncludeCode) loadGraph({ force: true });
   });
   all('[data-graph-preset-choice]').forEach(control => control.addEventListener('click', () => {
     const preset = control.dataset.graphPresetChoice;

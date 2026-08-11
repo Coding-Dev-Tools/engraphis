@@ -1685,6 +1685,64 @@ def test_orbital_separation_has_double_strength_and_preserves_local_mass_center(
 
 
 @requires_node
+def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            x: 0, y: 0, vx: 0, vy: 0, radius: 12, gravity_mass: 64 },
+          { id: 'core-satellite', community_id: 'core',
+            x: 2, y: 0, vx: -4, vy: 7, radius: 3, gravity_mass: 1 },
+          { id: 'outer-star', community_id: 'outer',
+            x: 4, y: 0, vx: -3, vy: 2, radius: 4, gravity_mass: 4 },
+          { id: 'outer-planet', community_id: 'outer',
+            x: 8, y: 0, vx: -3, vy: 7, radius: 2, gravity_mass: 1 },
+        ];
+        const before = {
+          diameter: Math.hypot(nodes[3].x - nodes[2].x, nodes[3].y - nodes[2].y),
+          relativeVelocity: [nodes[3].vx - nodes[2].vx, nodes[3].vy - nodes[2].vy],
+          coreTangent: nodes[1].vy,
+          outerTangent: (nodes[2].vy * 4 + nodes[3].vy) / 5,
+        };
+        const stats = I.applyGalaxyBlackHoleExclusion(nodes, { padding: 2.5 });
+        const anchor = nodes[0];
+        const clearances = nodes.slice(1).map(node => Math.hypot(
+          node.x - anchor.x, node.y - anchor.y
+        ) - anchor.radius - node.radius - 2.5);
+        emit({
+          stats,
+          anchor: [anchor.x, anchor.y, anchor.vx, anchor.vy],
+          clearances,
+          core: [nodes[1].x, nodes[1].y, nodes[1].vx, nodes[1].vy],
+          diameter: Math.hypot(nodes[3].x - nodes[2].x, nodes[3].y - nodes[2].y),
+          relativeVelocity: [nodes[3].vx - nodes[2].vx, nodes[3].vy - nodes[2].vy],
+          outerTangent: (nodes[2].vy * 4 + nodes[3].vy) / 5,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          before,
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert min(report["clearances"]) >= -1e-10
+    assert report["stats"]["contacts"] == 2
+    assert report["stats"]["systems"] == 1
+    assert report["stats"]["coreNodes"] == 1
+    assert report["stats"]["repelledNodes"] == 3
+    assert report["stats"]["minimumClearance"] == pytest.approx(0, abs=1e-10)
+    assert report["stats"]["inwardVelocityRemoved"] == pytest.approx(7, abs=1e-12)
+    assert report["core"][2] == pytest.approx(0, abs=1e-12)
+    assert report["core"][3] == pytest.approx(report["before"]["coreTangent"], abs=1e-12)
+    assert report["diameter"] == pytest.approx(report["before"]["diameter"], abs=1e-12)
+    assert report["relativeVelocity"] == pytest.approx(
+        report["before"]["relativeVelocity"], abs=1e-12
+    )
+    assert report["outerTangent"] == pytest.approx(
+        report["before"]["outerTangent"], abs=1e-12
+    )
+
+
+@requires_node
 def test_link_and_orbital_separation_share_one_settling_target_without_jitter() -> None:
     report = _run_node(
         """
@@ -2094,6 +2152,90 @@ def test_galaxy_leapfrog_is_fixed_step_deterministic_and_does_not_depend_on_alph
                         source.index("function fallbackCommunityBridges")]
     assert "alpha" not in integrator
     assert "kick-drift-kick" in integrator
+
+
+@requires_node
+def test_integrator_keeps_rotating_nodes_outside_black_hole_and_clamps_drag() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'aurora', community_id: 'aurora', gravity_mass: 4, radius: 3,
+            x: 18, y: 0, vx: 0, vy: 0 },
+          { id: 'borealis', community_id: 'borealis', gravity_mass: 3, radius: 3,
+            x: 0, y: -22, vx: 0, vy: 0 },
+          { id: 'cygnus', community_id: 'cygnus', gravity_mass: 2, radius: 2,
+            x: -26, y: 4, vx: 0, vy: 0 },
+        ];
+        I.seedGalaxySystemOrbits(nodes, 123, 48, 40, false);
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localPairFraction: 0.15, corePairMultiplier: 0.75,
+          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+          mutualSystemSoftening: 80, includeRelations: false,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 12,
+          orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeCollisions: false, inwardConvergence: true,
+          timestep: 0.021328125, wallClockSeconds: 1 / 30,
+          velocityDecay: 0.00005, speedLimit: 48, localRelativeSpeedLimit: 16,
+        };
+        const angles = new Map(nodes.slice(1).map(node => [node.id, Math.atan2(node.y, node.x)]));
+        const angularTravel = new Map(nodes.slice(1).map(node => [node.id, 0]));
+        let minimumClearance = Infinity, contacts = 0, finalStep = null;
+        for (let step = 0; step < 600; step++) {
+          finalStep = I.integrateGalaxyLeapfrog(nodes, [], [], options);
+          contacts += finalStep.blackHoleExclusion.contacts;
+          nodes.slice(1).forEach(node => {
+            const clearance = Math.hypot(node.x, node.y)
+              - nodes[0].radius - node.radius - 2.5;
+            minimumClearance = Math.min(minimumClearance, clearance);
+            const angle = Math.atan2(node.y, node.x);
+            const previous = angles.get(node.id);
+            angularTravel.set(node.id, angularTravel.get(node.id)
+              + Math.abs(Math.atan2(Math.sin(angle - previous), Math.cos(angle - previous))));
+            angles.set(node.id, angle);
+          });
+        }
+
+        const dragged = [
+          { id: 'drag-anchor', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'dragged', community_id: 'dragged-system', gravity_mass: 1, radius: 2,
+            x: 0, y: 0, vx: 0, vy: 0 },
+        ];
+        const dragStep = I.integrateGalaxyLeapfrog(dragged, [], [], {
+          gravity: 0, central: true, fixedNodeId: 'dragged', timestep: 0.021328125,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeCollisions: false, includeRelations: false, inwardConvergence: false,
+          velocityDecay: 0, speedLimit: 48,
+        });
+        emit({
+          minimumClearance, contacts,
+          angularTravel: Object.fromEntries(angularTravel),
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          finalRadii: nodes.slice(1).map(node => Math.hypot(node.x, node.y)),
+          finite: nodes.concat(dragged).every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          maximumSpeed: finalStep.maximumSpeed,
+          finalClearance: finalStep.blackHoleExclusion.minimumClearance,
+          draggedClearance: Math.hypot(dragged[1].x, dragged[1].y)
+            - dragged[0].radius - dragged[1].radius - 2.5,
+          dragContacts: dragStep.blackHoleExclusion.contacts,
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert report["minimumClearance"] >= -1e-9
+    assert report["finalClearance"] >= -1e-9
+    assert report["contacts"] > 0
+    assert min(report["angularTravel"].values()) > 0.05
+    assert report["maximumSpeed"] <= 48
+    assert report["draggedClearance"] >= -1e-9
+    assert report["dragContacts"] > 0
 
 
 @requires_node
