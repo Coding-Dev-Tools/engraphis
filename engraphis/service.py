@@ -8311,7 +8311,7 @@ class MemoryService:
                 "FROM memories WHERE workspace_id=? AND id IN (" + marks + ") "
                 "AND (valid_from IS NULL OR valid_from<=?) "
             )
-            memory_params: list[Any] = [wid, *chunk]
+            memory_params: list[Any] = [wid, *chunk, t]
             if repo_id is not None:
                 memory_sql += "AND (repo_id=? OR repo_id IS NULL) "
                 memory_params.append(repo_id)
@@ -8325,7 +8325,7 @@ class MemoryService:
                     "AND (ingested_at IS NULL OR ingested_at<=?) "
                     "AND (expired_at IS NULL OR ?<expired_at)"
                 )
-                memory_params.extend([t, known_t, known_t])
+                memory_params.extend([known_t, known_t])
             else:
                 memory_sql += (
                     "AND (valid_to IS NULL OR ?<valid_to "
@@ -8333,7 +8333,7 @@ class MemoryService:
                     "AND (ingested_at IS NULL OR ingested_at<=?) "
                     "AND (expired_at IS NULL OR ?<expired_at)"
                 )
-                memory_params.extend([t, t, known_t, known_t, known_t])
+                memory_params.extend([t, t, known_t, known_t])
             memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
             if clean_memory_types:
                 type_marks = ",".join("?" for _ in clean_memory_types)
