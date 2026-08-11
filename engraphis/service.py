@@ -9351,18 +9351,24 @@ class MemoryService:
     def graph_entity_evidence(self, canonical_id: str, *, workspace: str,
                               as_of: Optional[float] = None,
                               valid_at: Optional[float] = None,
-                              known_at: Optional[float] = None) -> dict:
+                              known_at: Optional[float] = None,
+                              member_id: Optional[str] = None,
+                              include_history: bool = False) -> dict:
         """Return one graph entity's public supporting memories without rebuilding the graph.
 
-        The full entity inspector calculates canonical relations, history, and graph metrics,
-        which materializes the workspace-wide graph. A graph click only needs its evidence
-        cards, so this path stays indexed and bounded even for a large workspace.
+        Historical scenes project colliding canonical IDs as synthetic ``:ghost`` IDs.
+        Those IDs are not reversible when a real canonical ID has the same suffix, so
+        callers carry one physical member ID to identify the historical canonical group.
         """
         clean_canonical_id = _clean_text(
             canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
         )
         if clean_canonical_id.endswith(":ghost"):
             clean_canonical_id = clean_canonical_id[:-6]
+        clean_member_id = (
+            _clean_text(member_id, field="member_id", max_chars=MAX_NAME_CHARS)
+            if member_id is not None else None
+        )
         ws = self._clean_ws(workspace)
         wid = self._lookup_workspace(ws)
         if wid is None:
@@ -9375,55 +9381,88 @@ class MemoryService:
         anchor = valid_at if valid_at is not None else present
         known_anchor = known_at if known_at is not None else present
 
-        target = self.store.conn.execute(
-            "SELECT id, canonical_id FROM entities WHERE workspace_id=? AND id=? LIMIT 1",
-            (wid, clean_canonical_id),
-        ).fetchone()
-        if target is None:
+        target = None
+        if clean_member_id is not None:
+            target = self.store.conn.execute(
+                "SELECT id, canonical_id FROM entities "
+                "WHERE workspace_id=? AND id=? LIMIT 1",
+                (wid, clean_member_id),
+            ).fetchone()
+        if target is None and clean_member_id is None:
+            target = self.store.conn.execute(
+                "SELECT id, canonical_id FROM entities WHERE workspace_id=? AND id=? LIMIT 1",
+                (wid, clean_canonical_id),
+            ).fetchone()
+        if target is None and clean_member_id is None:
             target = self.store.conn.execute(
                 "SELECT id, canonical_id FROM entities WHERE workspace_id=? "
                 "AND canonical_id=? LIMIT 1",
                 (wid, clean_canonical_id),
             ).fetchone()
         if target is None:
+            missing_id = clean_member_id or clean_canonical_id
             raise ValidationError(
-                f"no entity '{clean_canonical_id}' in workspace '{ws}'"
+                f"no entity '{missing_id}' in workspace '{ws}'"
             )
         resolved_canonical_id = str(target["canonical_id"] or target["id"])
         target_params = (wid, resolved_canonical_id, resolved_canonical_id)
 
-        support_conditions = (
-            "relation.workspace_id=? AND relation.{endpoint}=target.id "
-            "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
-            "AND (relation.valid_to IS NULL OR ?<relation.valid_to "
-            "OR (relation.valid_to_recorded_at IS NOT NULL "
-            "AND ?<relation.valid_to_recorded_at)) "
-            "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
-            "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
-            "AND (support.valid_from IS NULL OR support.valid_from<=?) "
-            "AND (support.valid_to IS NULL OR ?<support.valid_to "
-            "OR (support.valid_to_recorded_at IS NOT NULL "
-            "AND ?<support.valid_to_recorded_at)) "
-            "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
-            "AND (support.expired_at IS NULL OR ?<support.expired_at) "
-            "AND memory.workspace_id=? "
-            "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
-            "AND (memory.valid_to IS NULL OR ?<memory.valid_to "
-            "OR (memory.valid_to_recorded_at IS NOT NULL "
-            "AND ?<memory.valid_to_recorded_at)) "
-            "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
-            "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
-            "AND COALESCE(memory.scope, 'workspace')!='session'"
-        )
+        if include_history:
+            support_conditions = (
+                "relation.workspace_id=? AND relation.{endpoint}=target.id "
+                "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
+                "AND relation.valid_to IS NOT NULL AND relation.valid_to<=? "
+                "AND (relation.valid_to_recorded_at IS NULL "
+                "OR relation.valid_to_recorded_at<=?) "
+                "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
+                "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
+                "AND (support.valid_from IS NULL OR support.valid_from<=?) "
+                "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
+                "AND (support.expired_at IS NULL OR ?<support.expired_at) "
+                "AND memory.workspace_id=? "
+                "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
+                "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
+                "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
+                "AND COALESCE(memory.scope, 'workspace')!='session'"
+            )
+            branch_params = (
+                wid, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                anchor, known_anchor, known_anchor,
+                wid, anchor, known_anchor, known_anchor,
+            )
+        else:
+            support_conditions = (
+                "relation.workspace_id=? AND relation.{endpoint}=target.id "
+                "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
+                "AND (relation.valid_to IS NULL OR ?<relation.valid_to "
+                "OR (relation.valid_to_recorded_at IS NOT NULL "
+                "AND ?<relation.valid_to_recorded_at)) "
+                "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
+                "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
+                "AND (support.valid_from IS NULL OR support.valid_from<=?) "
+                "AND (support.valid_to IS NULL OR ?<support.valid_to "
+                "OR (support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<support.valid_to_recorded_at)) "
+                "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
+                "AND (support.expired_at IS NULL OR ?<support.expired_at) "
+                "AND memory.workspace_id=? "
+                "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
+                "AND (memory.valid_to IS NULL OR ?<memory.valid_to "
+                "OR (memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<memory.valid_to_recorded_at)) "
+                "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
+                "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
+                "AND COALESCE(memory.scope, 'workspace')!='session'"
+            )
+            branch_params = (
+                wid,
+                anchor, anchor, known_anchor, known_anchor, known_anchor,
+                anchor, anchor, known_anchor, known_anchor, known_anchor,
+                wid,
+                anchor, anchor, known_anchor, known_anchor, known_anchor,
+            )
         source_conditions = support_conditions.format(endpoint="src")
         target_conditions = support_conditions.format(endpoint="dst")
-        branch_params = (
-            wid,
-            anchor, anchor, known_anchor, known_anchor, known_anchor,
-            anchor, anchor, known_anchor, known_anchor, known_anchor,
-            wid,
-            anchor, anchor, known_anchor, known_anchor, known_anchor,
-        )
         sql = """
             WITH target AS (
                 SELECT id FROM entities WHERE workspace_id=? AND (id=? OR canonical_id=?)

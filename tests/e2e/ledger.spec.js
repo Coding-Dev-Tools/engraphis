@@ -144,6 +144,7 @@ async function mockApi(page, options = {}) {
       if (typeof options.deferGraphRequest === 'function') {
         await options.deferGraphRequest(requestUrl);
       }
+      if (options.graphScene) return ok(options.graphScene);
       const asOf = Number(requestUrl.searchParams.get('as_of'));
       const includeUnlinked = requestUrl.searchParams.get('connected_only') !== 'true';
       // Make the historical payload depend on the server's selected-day anchor. A client
@@ -1161,6 +1162,46 @@ test('graph node connections expose linked memory evidence without leaving the g
   await expect(page.locator('#graph-connection-memory-list')).toContainText('Database choice');
   await expect(page.locator('#graph-connections-dialog')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open in Library' })).toBeVisible();
+});
+
+test('ghost connections request their historical physical member evidence', async ({ page }) => {
+  await mockApi(page, {
+    graphScene: {
+      nodes: [
+        {
+          id: 'live-node', label: 'Live Node', member_ids: ['live-member'],
+          gravity_mass: 4, visual_radius: 8, community_id: 'graph', x: -20, y: 0,
+        },
+        {
+          id: 'canon:ghost:ghost', label: 'Archived Node', ghost: true,
+          member_ids: ['archived-member'], gravity_mass: 0, visual_radius: 0,
+          community_id: 'history', x: 20, y: 0,
+        },
+      ],
+      edges: [{
+        id: 'historical-edge', source: 'live-node', target: 'canon:ghost:ghost',
+        relation: 'used', ghost: true, rest_length: 18, spring_strength: 0,
+      }],
+      communities: [{ id: 'graph', mass: 4 }],
+      community_bridges: [],
+      meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  await page.locator('#graph-top button').filter({ hasText: 'Live Node' }).click();
+  await expect(page.locator('#graph-connections-list')).toContainText('Archived Node');
+
+  const evidenceRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.endsWith('/memories')
+      && url.searchParams.get('member_id') === 'archived-member'
+      && url.searchParams.get('include_history') === 'true';
+  });
+  await page.locator('#graph-connections-list').getByRole('button', { name: 'Memories' }).click();
+  await evidenceRequest;
+  await expect(page.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
 test('changing the time anchor replaces a pending graph request', async ({ page }) => {

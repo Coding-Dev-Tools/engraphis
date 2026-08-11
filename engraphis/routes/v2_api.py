@@ -2316,12 +2316,15 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
 def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
                           as_of: Optional[float] = None,
                           valid_at: Optional[float] = None,
-                          known_at: Optional[float] = None):
+                          known_at: Optional[float] = None,
+                          member_id: Optional[str] = None,
+                          include_history: bool = False):
     """Bounded evidence cards for one graph node, without rebuilding the full inspector."""
     ws = workspace or _require_ws()
     return _run(
         service().graph_entity_evidence, canonical_id, workspace=ws,
         as_of=as_of, valid_at=valid_at, known_at=known_at,
+        member_id=member_id, include_history=include_history,
     )
 
 

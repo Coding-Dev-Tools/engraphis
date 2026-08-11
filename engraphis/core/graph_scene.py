@@ -2275,6 +2275,7 @@ def build_graph_scene(
         node_id for node_id, node in nodes.items() if node.get("ghost")
     }
     ghost_relations: list[dict[str, Any]] = []
+    reserved_history_endpoints: set[str] = set()
     history_required_node_ids = set(historical_node_ids)
     if include_history:
         ghost_relations, _ = _complete_relations(
@@ -2289,6 +2290,17 @@ def build_graph_scene(
             for node_id in (edge["source"], edge["target"])
             if node_id in nodes
         )
+        if edge_cap:
+            for edge in sorted(ghost_relations, key=lambda item: (
+                -float(item.get("strength") or 0.0), item["id"]
+            )):
+                if edge["source"] in nodes and edge["target"] in nodes:
+                    reserved_history_endpoints.update((edge["source"], edge["target"]))
+                    break
+    # A historical relation is atomic in the UI: returning only one endpoint makes
+    # the edge disappear and leaves an unexplained ghost. An undersized caller cap
+    # therefore yields the two endpoints of one deterministic relation.
+    selection_node_cap = max(node_cap, len(reserved_history_endpoints))
 
     def eligible(node_id: str) -> bool:
         return nodes[node_id]["entity_quality"] > 0 or node_id in explicit_requested
@@ -2333,9 +2345,9 @@ def build_graph_scene(
         anchors = [graph["community_anchors"][community_id]
                    for community_id in overview_communities
                    if nodes[graph["community_anchors"][community_id]]["entity_quality"] > 0]
-        selected.update(anchors[:node_cap])
+        selected.update(anchors[:selection_node_cap])
         for node_id in ranked_nodes:
-            if len(selected) >= node_cap:
+            if len(selected) >= selection_node_cap:
                 break
             if (nodes[node_id]["community_id"] in chosen_communities
                     and nodes[node_id]["entity_quality"] > 0):
@@ -2355,7 +2367,7 @@ def build_graph_scene(
         # otherwise be selected by the overview/community filter.
         selected.update(history_required_node_ids)
 
-    if len(selected) > node_cap:
+    if len(selected) > selection_node_cap:
         forced = {
             graph["community_anchors"][community_id] for community_id in chosen_communities
         }
@@ -2369,13 +2381,14 @@ def build_graph_scene(
                 and (eligible(node_id) or node_id in history_required_node_ids)
             ),
             key=lambda node_id: (
+                0 if node_id in reserved_history_endpoints else 1,
                 0 if node_id in explicit_requested else 1,
                 0 if node_id == graph["global_anchor"] else 1,
                 -nodes[node_id]["scene_rank"], node_id,
             ),
-        )[:node_cap])
+        )[:selection_node_cap])
         for node_id in ranked_nodes:
-            if len(selected) >= node_cap:
+            if len(selected) >= selection_node_cap:
                 break
             if eligible(node_id) and (
                 not chosen_communities or nodes[node_id]["community_id"] in chosen_communities
