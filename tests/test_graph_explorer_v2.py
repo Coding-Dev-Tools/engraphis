@@ -2594,7 +2594,7 @@ def test_current_graph_scene_cache_expires_at_next_temporal_boundary(monkeypatch
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
     ({"min_confidence": float("nan")}, "min_confidence"),
-    ({"node_limit": 301}, "node_limit"),
+    ({"node_limit": 501}, "node_limit"),
     ({"edge_limit": -1}, "edge_limit"),
 ])
 def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
