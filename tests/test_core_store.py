@@ -2978,3 +2978,85 @@ def test_add_memory_advances_hlc_only_for_real_local_descriptive_overwrite(store
     assert lattice_only is not None
     assert lattice_only.stability == idempotent.stability
     assert lattice_only.modified_hlc == changed_clock
+
+def test_context_savings_handles_workspace_ids_above_sqlite_variable_limit(store, monkeypatch):
+    """Regression: context_savings and context_savings_grouped must not build
+    an unbounded IN(...) clause. SQLite caps variables at 999 on older builds;
+    passing 1,100+ authorized workspace IDs used to raise ``too many SQL
+    variables``. The fix chunks the predicate; totals and authorization scope
+    must remain exact.
+    """
+    from engraphis.core import store as store_mod
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 100)
+
+    authorized_count = 1100
+    unauthorized_count = 3
+    per_source = 500
+    per_context = 300
+    per_saved = per_source - per_context
+
+    authorized_ids = []
+    for index in range(authorized_count):
+        wid = store.get_or_create_workspace(f"auth-ws-{index:04d}")
+        authorized_ids.append(wid)
+        store.record_receipt(
+            "recall",
+            workspace_id=wid,
+            metadata={
+                "token_usage": {
+                    "source_tokens": per_source,
+                    "context_tokens": per_context,
+                    "saved_tokens": per_saved,
+                    "budget_tokens": 0,
+                    "packed_count": 0,
+                    "omitted_count": 0,
+                    "token_counter": "engraphis.regex.v1",
+                    "baseline_tokens": per_source,
+                    "emitted_tokens": per_context,
+                    "estimated_saved_tokens": per_saved,
+                    "estimated_savings_ratio": per_saved / per_source,
+                    "savings_basis": "context_window",
+                    "savings_confidence": "exact",
+                    "savings_eligible": True,
+                },
+            },
+        )
+
+    unauthorized_ids = []
+    for index in range(unauthorized_count):
+        wid = store.get_or_create_workspace(f"unauth-ws-{index:04d}")
+        unauthorized_ids.append(wid)
+        store.record_receipt(
+            "recall",
+            workspace_id=wid,
+            metadata={
+                "token_usage": {
+                    "source_tokens": 9999,
+                    "context_tokens": 1111,
+                    "saved_tokens": 9999 - 1111,
+                    "token_counter": "engraphis.regex.v1",
+                },
+            },
+        )
+
+    result = store.context_savings(workspace_ids=authorized_ids)
+    assert result["receipt_count"] == authorized_count
+    assert result["savings_receipt_count"] == authorized_count
+    assert result["source_tokens"] == per_source * authorized_count
+    assert result["context_tokens"] == per_context * authorized_count
+    assert result["saved_tokens"] == per_saved * authorized_count
+
+    grouped = store.context_savings_grouped(
+        workspace_ids=authorized_ids, group_by="workspace",
+    )
+    grouped_ids = {row["workspace"] for row in grouped}
+    assert grouped_ids == set(authorized_ids)
+    assert all(wid not in grouped_ids for wid in unauthorized_ids)
+
+    empty = store.context_savings(workspace_ids=[])
+    assert empty["receipt_count"] == 0
+
+    deduped = store.context_savings(
+        workspace_ids=authorized_ids[:5] + authorized_ids[:5],
+    )
+    assert deduped["receipt_count"] == 5

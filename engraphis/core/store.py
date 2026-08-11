@@ -5078,7 +5078,7 @@ class Store:
             name for name in (
                 "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
                 "memory_entities", "edge_supports", "edges", "entities", "mem_links",
-                "memory_sync_exports", "source_imports", "audit",
+                "source_imports", "audit",
             ) if cls._has_table(conn, name)
         }
         incident_entities: list[str] = []
