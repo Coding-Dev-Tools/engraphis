@@ -968,7 +968,7 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
 
 
 @requires_node
-def test_system_halo_matches_seed_law_and_preserves_free_system_com() -> None:
+def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> None:
     report = _run_node(
         """
         const free = [
@@ -1012,8 +1012,9 @@ def test_system_halo_matches_seed_law_and_preserves_free_system_com() -> None:
         const pinnedAcceleration = I.galaxyAccelerations(pinnedPair, [], [], {
           gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
         });
-        const expectedPinned = -I.galaxyGravityConstant(100)
-          * (0.85 * 9 + 0.15 * 8) * 24
+        /* The live integrator now gives a global/pinned planet only its dominant star's
+           well.  The direct legacy-halo calls above deliberately retain their old contract. */
+        const expectedPinned = -I.galaxyGravityConstant(100) * 8 * 24
           / Math.pow(24 * 24 + 12 * 12, 1.5);
         const seededPair = freePair.map(node => ({ ...node, vx: 0, vy: 0 }));
         I.seedGalaxyOrbits(seededPair, 72, 100, 12, false, 0.15);
@@ -1268,19 +1269,63 @@ def test_actual_shaped_multi_member_galaxy_stays_bound_for_1800_steps() -> None:
         let minimumMedian = initial.median, maximumP95 = initial.p95;
         let maximumNode = initial.maxNode, minimumEnergy = initialEnergy;
         let maximumEnergy = initialEnergy, exactCenter = true, speedCaps = 0;
+        const angleStep = (next, previous) => Math.atan2(
+          Math.sin(next - previous), Math.cos(next - previous)
+        );
+        const globalAngles = new Map([...I.communityCenters(nodes).values()]
+          .filter(center => center.id !== 'core')
+          .map(center => [center.id, Math.atan2(center.y, center.x)]));
+        const localAngles = new Map(nodes.slice(1).filter(node => node.anchor_role !== 'community')
+          .map(node => {
+            const star = nodes.find(candidate => candidate.community_id === node.community_id
+              && candidate.anchor_role === 'community');
+            return [node.id, Math.atan2(node.y - star.y, node.x - star.x)];
+          }));
+        let globalTravel = 0, localTravel = 0, minimumStarClearance = Infinity;
+        let starContacts = 0;
         for (let step = 0; step < 1800; step++) {
           const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
             gravity: 100, softening: 32, centralSoftening: 40,
             timestep: 0.021328125, velocityDecay: 0.00005, speedLimit: 48,
             localPairFraction: 0.15, corePairMultiplier: 0.75,
-            includeBridges: false, includeRelations: true, orbitScale: 0.25,
-            relationStrengthMultiplier: 2, relationForceCap: 1.6,
-            relationAccelerationCap: 3.2,
-            includeCollisions: false, collisionPadding: 1.5,
-            collisionStrength: 0.7, collisionIterations: 1,
+            includeBridges: false, includeMutualSystems: true,
+            mutualSystemGravityFraction: 0.12, mutualSystemSoftening: 80,
+            includeRelations: true, includeRelationSprings: false,
+            skipSystemAnchorRelations: true, relationStrengthMultiplier: 2,
+            relationForceCap: 1.6, relationAccelerationCap: 3.2,
+            relationConstraintRate: 24, relationConstraintMaxCorrection: 12,
+            relationPadding: 1.5,
+            includeOrbitalSeparation: true, orbitalSeparationPadding: 1.5,
+            orbitalSeparationStrength: 0.8, crossCommunitySeparationPadding: 1.5,
+            crossCommunitySeparationStrength: 0.144,
+            orbitalSeparationMaxCorrection: 4, orbitalSeparationMaxVelocityCorrection: 8,
+            preserveLocalTangentialVelocity: true, skipSystemAnchorPairs: true,
+            systemAnchorExclusionPadding: 1.5,
+            includeCollisions: false,
+            includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+            includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.25,
+            farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
+            farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
             inwardConvergence: true, wallClockSeconds: 1 / 30,
           });
           if (tick.speedCapped) speedCaps++;
+          starContacts += tick.systemAnchorExclusion.contacts;
+          I.communityCenters(nodes).forEach(center => {
+            if (center.id === 'core') return;
+            const angle = Math.atan2(center.y, center.x);
+            globalTravel += Math.abs(angleStep(angle, globalAngles.get(center.id)));
+            globalAngles.set(center.id, angle);
+          });
+          localAngles.forEach((previous, id) => {
+            const node = nodes.find(candidate => candidate.id === id);
+            const star = nodes.find(candidate => candidate.community_id === node.community_id
+              && candidate.anchor_role === 'community');
+            const angle = Math.atan2(node.y - star.y, node.x - star.x);
+            localTravel += Math.abs(angleStep(angle, previous));
+            localAngles.set(id, angle);
+            minimumStarClearance = Math.min(minimumStarClearance,
+              Math.hypot(node.x - star.x, node.y - star.y) - node.radius - star.radius - 1.5);
+          });
           const sample = snapshot();
           minimumMedian = Math.min(minimumMedian, sample.median);
           maximumP95 = Math.max(maximumP95, sample.p95);
@@ -1314,6 +1359,7 @@ def test_actual_shaped_multi_member_galaxy_stays_bound_for_1800_steps() -> None:
         emit({ initial, final: snapshot(), minimumMedian, maximumP95, maximumNode,
           energyDrift: (maximumEnergy - minimumEnergy) / Math.abs(initialEnergy),
           exactCenter, speedCaps, overlaps, minimumSeparation, minimumSystemDiameter,
+          globalTravel, localTravel, minimumStarClearance, starContacts,
           finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
             .every(Number.isFinite)) });
         """
@@ -1327,6 +1373,10 @@ def test_actual_shaped_multi_member_galaxy_stays_bound_for_1800_steps() -> None:
     assert report["overlaps"] <= 18
     assert report["minimumSeparation"] > 0.1
     assert report["minimumSystemDiameter"] > 15
+    assert report["starContacts"] > 0
+    assert report["minimumStarClearance"] >= -1e-8
+    assert report["globalTravel"] > 1
+    assert report["localTravel"] > 1
     assert report["minimumMedian"] > report["initial"]["median"] * 0.05
     assert report["maximumP95"] < report["initial"]["p95"] * 1.45
     assert report["maximumNode"] < report["initial"]["maxNode"] * 1.45
@@ -2724,6 +2774,156 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
 
 
 @requires_node
+@pytest.mark.parametrize("drag_id", ["star", "planet"])
+def test_dragging_star_or_planet_across_stellar_surface_stays_bounded(drag_id: str) -> None:
+    """A fixed source may cross a stellar surface without a follower feedback runaway."""
+    report = _run_node(
+        "const dragId = " + repr(drag_id) + ";\n" + """
+        const nodes = [
+          { id: 'bh', anchor_role: 'global', community_id: 'core', gravity_mass: 8,
+            radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', community_id: 'solar', gravity_mass: 14,
+            radius: 5, x: 54, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', orbit_tier: 1, community_id: 'solar', gravity_mass: 1,
+            radius: 3, x: 64, y: 0, vx: 0, vy: 0 },
+          { id: 'moon', orbit_tier: 2, community_id: 'solar', gravity_mass: 1,
+            radius: 3, x: 54, y: 16, vx: 0, vy: 0 },
+          { id: 'remote-star', community_id: 'remote', gravity_mass: 10,
+            radius: 5, x: -60, y: 0, vx: 0, vy: 0 },
+          { id: 'remote-planet', orbit_tier: 1, community_id: 'remote', gravity_mass: 1,
+            radius: 3, x: -48, y: 0, vx: 0, vy: 0 },
+        ];
+        const links = [
+          { source: 'star', target: 'planet', rest_length: 10, spring_strength: 0.08 },
+          { source: 'star', target: 'moon', rest_length: 16, spring_strength: 0.08 },
+        ];
+        const dragSourceNode = nodes.find(node => node.id === dragId);
+        const star = nodes.find(node => node.id === 'star');
+        const planet = nodes.find(node => node.id === 'planet');
+        const target = dragId === 'star' ? [planet.x, planet.y] : [star.x, star.y];
+        const followers = nodes.filter(node => node !== dragSourceNode && node.id !== 'bh')
+          .map(node => ({ node, link: links.find(link => link.source === node.id
+            || link.target === node.id) || null }));
+        const options = {
+          gravity: 48, central: true, fixedNodeId: dragId, dragSource: dragSourceNode,
+          dragFollowers: followers, softening: 12, centralSoftening: 40,
+          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+          mutualSystemSoftening: 80, includeCollisions: false,
+          includeRelations: true, includeRelationSprings: false,
+          skipSystemAnchorRelations: true, relationStrengthMultiplier: 1,
+          relationConstraintRate: 24, relationConstraintMaxCorrection: 12,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 1.5,
+          orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8, preserveLocalTangentialVelocity: true,
+          skipSystemAnchorPairs: true, systemAnchorExclusionPadding: 1.5,
+          crossCommunitySeparationPadding: 1.5, crossCommunitySeparationStrength: 0.144,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.25,
+          farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
+          farFieldAcceleration: 12, farFieldMaxAcceleration: 16, inwardConvergence: true,
+          timestep: 0.021328125, wallClockSeconds: 1 / 30,
+          velocityDecay: 0.00005, speedLimit: 24, localRelativeSpeedLimit: 16,
+        };
+        let anchorContacts = 0, minimumStarClearance = Infinity, maximumFollowerStep = 0;
+        let maximumSpeed = 0, finite = true, envelope = 0;
+        for (let step = 0; step < 120; step++) {
+          const before = followers.map(follower => [follower.node.x, follower.node.y]);
+          dragSourceNode.x = target[0]; dragSourceNode.y = target[1];
+          dragSourceNode.vx = 0; dragSourceNode.vy = 0;
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          anchorContacts += tick.systemAnchorExclusion.contacts;
+          envelope = tick.farFieldConfinement.envelopeRadius;
+          maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+          followers.forEach((follower, index) => {
+            maximumFollowerStep = Math.max(maximumFollowerStep,
+              Math.hypot(follower.node.x - before[index][0], follower.node.y - before[index][1]));
+          });
+          [planet, nodes.find(node => node.id === 'moon')].forEach(satellite => {
+            if (satellite === star) return;
+            minimumStarClearance = Math.min(minimumStarClearance,
+              Math.hypot(satellite.x - star.x, satellite.y - star.y)
+                - star.radius - satellite.radius - options.systemAnchorExclusionPadding);
+          });
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        const held = [dragSourceNode.x, dragSourceNode.y];
+        let maximumReleaseStep = 0;
+        for (let step = 0; step < 40; step++) {
+          const before = nodes.map(node => [node.x, node.y]);
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
+            ...options, fixedNodeId: null, dragSource: null, dragFollowers: [],
+          });
+          maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+          maximumReleaseStep = Math.max(maximumReleaseStep, ...nodes.map((node, index) =>
+            Math.hypot(node.x - before[index][0], node.y - before[index][1])));
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        emit({
+          anchorContacts, minimumStarClearance, maximumFollowerStep, maximumReleaseStep,
+          maximumSpeed, finite, held, released: [dragSourceNode.x, dragSourceNode.y],
+          outerBounded: nodes.slice(1).every(node =>
+            Math.hypot(node.x, node.y) + node.radius <= envelope + 1e-8),
+        });
+        """
+    )
+    assert report["anchorContacts"] > 0
+    assert report["minimumStarClearance"] >= -1e-9
+    assert report["finite"] is True
+    assert report["outerBounded"] is True
+    assert report["maximumSpeed"] <= 24
+    assert report["maximumFollowerStep"] <= 32
+    assert report["maximumReleaseStep"] <= 32
+    assert math.dist(report["held"], report["released"]) > 1e-4
+
+
+@requires_node
+def test_dense_stellar_surface_exclusion_keeps_com_momentum_and_tangential_phase() -> None:
+    """Many simultaneous planets must clear a star without a contact-induced slingshot."""
+    report = _run_node(
+        """
+        const star = { id: 'star', anchor_role: 'community', community_id: 'solar',
+          gravity_mass: 20, radius: 5, x: 40, y: -12, vx: 1.5, vy: -0.75 };
+        const nodes = [star];
+        for (let index = 0; index < 16; index++) {
+          const angle = index * Math.PI * 2 / 16;
+          const radius = 6; // strictly inside the 5 + 2 + 1.5 painted stellar surface
+          nodes.push({ id: 'planet-' + index, community_id: 'solar', gravity_mass: 1,
+            radius: 2, x: star.x + Math.cos(angle) * radius,
+            y: star.y + Math.sin(angle) * radius,
+            vx: star.vx - Math.sin(angle) * 3,
+            vy: star.vy + Math.cos(angle) * 3 });
+        }
+        const totals = () => nodes.reduce((sum, node) => ({
+          mass: sum.mass + node.gravity_mass,
+          x: sum.x + node.gravity_mass * node.x,
+          y: sum.y + node.gravity_mass * node.y,
+          px: sum.px + node.gravity_mass * node.vx,
+          py: sum.py + node.gravity_mass * node.vy,
+        }), { mass: 0, x: 0, y: 0, px: 0, py: 0 });
+        const before = totals();
+        const exclusion = I.applyGalaxySystemAnchorExclusion(nodes, { padding: 1.5 });
+        const after = totals();
+        emit({
+          exclusion,
+          comShift: Math.hypot(after.x / after.mass - before.x / before.mass,
+            after.y / after.mass - before.y / before.mass),
+          momentumDelta: Math.hypot(after.px - before.px, after.py - before.py),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["exclusion"]["contacts"] >= 16
+    assert report["exclusion"]["minimumClearance"] >= -1e-10
+    assert report["comShift"] <= 1e-10
+    assert report["momentumDelta"] <= 1e-10
+    assert report["exclusion"]["tangentialVelocityRemoved"] == 0
+    assert report["finite"] is True
+
+
+@requires_node
 def test_galaxy_collision_uses_evidence_mass_without_injecting_system_momentum() -> None:
     report = _run_node(
         """
@@ -3063,6 +3263,167 @@ def test_nested_galaxy_orbits_keep_global_and_local_angular_motion() -> None:
     assert report["minimumSystemSpeed"] > 3
     assert min(report["globalTravel"].values()) > 1
     assert min(report["localTravel"].values()) > 0.3
+
+
+@requires_node
+def test_hierarchical_galaxy_keeps_planets_bound_to_one_dominant_star() -> None:
+    """A local star is the sole source for its planets while its system orbits the hole.
+
+    This deliberately starts one planet slightly inside its star's painted exclusion radius.
+    The contact layer must repair that hard local boundary without draining either the
+    system's black-hole orbit or the satellites' signed local angular phase.
+    """
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'bh', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'a-star', community_id: 'a', gravity_mass: 14, radius: 5,
+            x: 46, y: 0, vx: 0, vy: 0 },
+          { id: 'a-inner', orbit_tier: 1, community_id: 'a', gravity_mass: 1, radius: 3,
+            x: 54, y: 0, vx: 0, vy: 0 },
+          { id: 'a-outer', orbit_tier: 2, community_id: 'a', gravity_mass: 1, radius: 3,
+            x: 54, y: 7, vx: 0, vy: 0 },
+          { id: 'b-star', community_id: 'b', gravity_mass: 12, radius: 5,
+            x: -54, y: 0, vx: 0, vy: 0 },
+          { id: 'b-inner', orbit_tier: 1, community_id: 'b', gravity_mass: 1, radius: 3,
+            x: -44, y: 0, vx: 0, vy: 0 },
+          { id: 'b-outer', orbit_tier: 2, community_id: 'b', gravity_mass: 1, radius: 3,
+            x: -54, y: -16, vx: 0, vy: 0 },
+        ];
+        const links = [
+          { source: 'a-star', target: 'a-inner', rest_length: 10, spring_strength: 0.08 },
+          { source: 'a-star', target: 'a-outer', rest_length: 16, spring_strength: 0.08 },
+          { source: 'b-star', target: 'b-inner', rest_length: 10, spring_strength: 0.08 },
+          { source: 'b-star', target: 'b-outer', rest_length: 16, spring_strength: 0.08 },
+        ];
+        const systemIds = ['a', 'b'];
+        const planetIds = ['a-inner', 'a-outer', 'b-inner', 'b-outer'];
+        const byId = id => nodes.find(node => node.id === id);
+        const centers = () => I.communityCenters(nodes);
+        const angleStep = (next, previous) => Math.atan2(
+          Math.sin(next - previous), Math.cos(next - previous)
+        );
+        const localSourceAcceleration = innerMass => {
+          /* A planet's inertial mass must not make it an additional local gravity source. */
+          const sample = [
+            { id: 'star', anchor_role: 'community', community_id: 'sample',
+              gravity_mass: 14, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'inner', community_id: 'sample', gravity_mass: innerMass,
+              x: 16, y: 0, vx: 0, vy: 0 },
+            { id: 'outer', community_id: 'sample', gravity_mass: 1,
+              x: 0, y: 24, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxySystemAnchorGravity(sample, {
+            gravity: 48, softening: 12, accelerationCap: 100,
+          });
+          return [sample[2].vx, sample[2].vy];
+        };
+        const lightPlanetField = localSourceAcceleration(1);
+        const heavyPlanetField = localSourceAcceleration(8);
+
+        I.seedGalaxyOrbits(nodes, 9, 48, 12, false, 0.15, 0.75);
+        I.seedGalaxySystemOrbits(nodes, 9, 48, 40, false);
+        const globalAngles = new Map(systemIds.map(id => {
+          const center = centers().get(id);
+          return [id, Math.atan2(center.y, center.x)];
+        }));
+        const localAngles = new Map(planetIds.map(id => {
+          const planet = byId(id), star = byId(id.slice(0, 1) + '-star');
+          return [id, Math.atan2(planet.y - star.y, planet.x - star.x)];
+        }));
+        const globalTravel = new Map(systemIds.map(id => [id, 0]));
+        const localTravel = new Map(planetIds.map(id => [id, 0]));
+        const options = {
+          gravity: 48, softening: 12, centralSoftening: 40,
+          localPairFraction: 0.15, corePairMultiplier: 0.75,
+          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+          mutualSystemSoftening: 80, includeRelations: true,
+          relationStrengthMultiplier: 1, relationConstraintRate: 24,
+          relationConstraintMaxCorrection: 12,
+          includeRelationSprings: false, skipSystemAnchorRelations: true,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 1.5,
+          orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8,
+          preserveLocalTangentialVelocity: true, skipSystemAnchorPairs: true,
+          systemAnchorExclusionPadding: 1.5,
+          crossCommunitySeparationPadding: 1.5, crossCommunitySeparationStrength: 0.144,
+          includeCollisions: false,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.25,
+          farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
+          farFieldAcceleration: 12, farFieldMaxAcceleration: 16, inwardConvergence: true,
+          timestep: 0.021328125, wallClockSeconds: 1 / 30,
+          velocityDecay: 0.00005, speedLimit: 48, localRelativeSpeedLimit: 16,
+        };
+        let localContacts = 0, systemAnchorContacts = 0, relationAnchorSkips = 0;
+        let maximumSpeed = 0, minimumBlackHoleClearance = Infinity;
+        let minimumStarClearance = Infinity, maximumInnerOrbitRadius = 0, finalTick = null;
+        for (let step = 0; step < 600; step++) {
+          finalTick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          localContacts += finalTick.orbitalSeparation.overlaps;
+          systemAnchorContacts += finalTick.systemAnchorExclusion.contacts;
+          relationAnchorSkips += finalTick.relationConstraint.skippedSystemAnchor;
+          maximumSpeed = Math.max(maximumSpeed, finalTick.maximumSpeed);
+          systemIds.forEach(id => {
+            const center = centers().get(id);
+            const angle = Math.atan2(center.y, center.x);
+            globalTravel.set(id, globalTravel.get(id) + angleStep(angle, globalAngles.get(id)));
+            globalAngles.set(id, angle);
+          });
+          planetIds.forEach(id => {
+            const planet = byId(id), star = byId(id.slice(0, 1) + '-star');
+            const angle = Math.atan2(planet.y - star.y, planet.x - star.x);
+            localTravel.set(id, localTravel.get(id) + angleStep(angle, localAngles.get(id)));
+            localAngles.set(id, angle);
+            minimumStarClearance = Math.min(minimumStarClearance,
+              Math.hypot(planet.x - star.x, planet.y - star.y)
+              - star.radius - planet.radius - 1.5);
+            if (id.endsWith('-inner')) maximumInnerOrbitRadius = Math.max(
+              maximumInnerOrbitRadius, Math.hypot(planet.x - star.x, planet.y - star.y)
+            );
+          });
+          nodes.slice(1).forEach(node => {
+            minimumBlackHoleClearance = Math.min(minimumBlackHoleClearance,
+              Math.hypot(node.x, node.y) - nodes[0].radius - node.radius - 2.5);
+          });
+        }
+        const envelope = finalTick.farFieldConfinement.envelopeRadius;
+        emit({
+          dominantOnly: systemIds.every(id => {
+            const star = byId(id + '-star');
+            return !star.__galaxyOrbitOrder && ['inner', 'outer'].every(tier =>
+              !!byId(id + '-' + tier).__galaxyOrbitOrder);
+          }),
+          localSourceShift: Math.hypot(
+            lightPlanetField[0] - heavyPlanetField[0],
+            lightPlanetField[1] - heavyPlanetField[1],
+          ),
+          globalTravel: Object.fromEntries(globalTravel),
+          localTravel: Object.fromEntries(localTravel),
+          localContacts, systemAnchorContacts, relationAnchorSkips,
+          maximumSpeed, minimumBlackHoleClearance, minimumStarClearance,
+          maximumInnerOrbitRadius,
+          outerBounded: nodes.slice(1).every(node =>
+            Math.hypot(node.x, node.y) + node.radius <= envelope + 1e-8),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["dominantOnly"] is True
+    assert report["localSourceShift"] <= 1e-10
+    assert report["finite"] is True
+    assert report["outerBounded"] is True
+    assert report["localContacts"] > 0
+    assert report["systemAnchorContacts"] > 0
+    assert report["relationAnchorSkips"] > 0
+    assert report["minimumBlackHoleClearance"] >= -1e-9
+    assert report["minimumStarClearance"] >= -1e-9
+    assert report["maximumInnerOrbitRadius"] < 16
+    assert report["maximumSpeed"] <= 48
+    assert min(abs(value) for value in report["globalTravel"].values()) > 1
+    assert min(abs(value) for value in report["localTravel"].values()) > 1
 
 
 @requires_node
@@ -3783,34 +4144,45 @@ def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces
     report = _run_engine(
         """
         const api = G.create(el, { reducedMotion: () => false });
-        const scene = chain(600);
-        scene.meta = { layout_seed: 91 };
-        scene.nodes.forEach((node, index) => { node.x = index - 300; node.y = (index % 7) * 3; });
-        api.setData(scene);
+        const scene = () => {
+          const data = chain(600);
+          data.meta = { layout_seed: 91 };
+          data.nodes.forEach((node, index) => {
+            node.x = index - 300; node.y = (index % 7) * 3;
+          });
+          return data;
+        };
+        api.setData(scene());
+        const first = store.graphData.nodes.map(node => [node.x, node.y, node.fx, node.fy]);
+        api.setData(scene());
         const nodes = store.graphData.nodes;
+        const repeated = nodes.map(node => [node.x, node.y, node.fx, node.fy]);
+        const diagnostics = api.physicsDiagnostics();
         emit({
           mode: api.state().settings.mode,
           total: nodes.length,
           pinned: nodes.filter(node => Number.isFinite(node.fx) && Number.isFinite(node.fy)).length,
           finite: nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y)),
           same: nodes.every(node => node.fx === node.x && node.fy === node.y),
-          seeded: [[nodes[0].x, nodes[0].y], [nodes.at(-1).x, nodes.at(-1).y]],
+          deterministic: first.every((position, index) => position.every((value, axis) =>
+            value === repeated[index][axis])),
+          endpoints: [[nodes[0].x, nodes[0].y], [nodes.at(-1).x, nodes.at(-1).y]],
+          systemAnchorExclusion: diagnostics.systemAnchorExclusion,
           cooldown: [store.cooldownTime, store.cooldownTicks, store.warmupTicks],
           forces: ['galaxy', 'galaxyCenter', 'galaxyRelations', 'communityBridges',
             'charge', 'link'].map(name => store.d3Forces[name] === null),
         });
         """
     )
-    assert report == {
-        "mode": "galaxy",
-        "total": 601,
-        "pinned": 601,
-        "finite": True,
-        "same": True,
-        "seeded": [[-300, 0], [300, 15]],
-        "cooldown": [0, 0, 0],
-        "forces": [True, True, True, True, True, True],
-    }
+    assert report["mode"] == "galaxy"
+    assert report["total"] == report["pinned"] == 601
+    assert report["finite"] is report["same"] is report["deterministic"] is True
+    # The selected community star may project its nearest satellite before a static paint;
+    # the far endpoint is unaffected and proves positions are otherwise preserved.
+    assert report["endpoints"][1] == [300, 15]
+    assert report["systemAnchorExclusion"]["minimumClearance"] >= -1e-9
+    assert report["cooldown"] == [0, 0, 0]
+    assert report["forces"] == [True, True, True, True, True, True]
 
 
 @requires_node
@@ -5177,6 +5549,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
               includeBridges: false,
               includeRelations: true,
               includeRelationSprings: false,
+              skipSystemAnchorRelations: true,
               orbitScale: 0.25,
               relationStrengthMultiplier: 2,
               relationForceCap: 1.6,
@@ -5189,6 +5562,9 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
               orbitalSeparationStrength: 0.8,
               orbitalSeparationMaxCorrection: 4,
               orbitalSeparationMaxVelocityCorrection: 8,
+              preserveLocalTangentialVelocity: true,
+              skipSystemAnchorPairs: true,
+              systemAnchorExclusionPadding: 1.5,
               localRelativeSpeedLimit: 16,
           timestep: 0.021328125,
           inwardConvergence: true,
@@ -5440,6 +5816,8 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
         const api = G.create(el, { reducedMotion: () => true });
         api.setData({
           nodes: [
+            { id: 'black-hole', anchor_role: 'global', x: 0, y: 0,
+              gravity_mass: 8, community_id: 'core' },
             { id: 'heavy', x: -30, y: 0, gravity_mass: 4, community_id: 'one' },
             { id: 'light', x: 30, y: 0, gravity_mass: 1, community_id: 'one' },
             { id: 'moon', x: 50, y: 20, gravity_mass: 1, community_id: 'one' },
