@@ -8215,7 +8215,7 @@ class MemoryService:
                 if not chunk:
                     continue
                 marks = ",".join("?" for _ in chunk)
-                rows = self.store.conn.execute(
+                historical_sql = (
                     "SELECT support.edge_id, support.memory_id, support.source_kind, "
                     "support.confidence, support.valid_from, support.valid_to, "
                     "support.valid_to_recorded_at, support.ingested_at, "
@@ -8230,8 +8230,22 @@ class MemoryService:
                     "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "AND memory.workspace_id=? "
-                    "ORDER BY support.edge_id, support.memory_id, support.source_kind",
-                    [*chunk, t, known_t, known_t, t, known_t, known_t, wid],
+                )
+                historical_params: list[Any] = [
+                    *chunk, t, known_t, known_t, t, known_t, known_t, wid,
+                ]
+                if repo_id:
+                    historical_sql += (
+                        "AND ((COALESCE(memory.scope, 'workspace')='repo' "
+                        "AND memory.repo_id=?) OR "
+                        "COALESCE(memory.scope, 'workspace') IN ('workspace','user')) "
+                    )
+                    historical_params.append(repo_id)
+                historical_sql += (
+                    "ORDER BY support.edge_id, support.memory_id, support.source_kind"
+                )
+                rows = self.store.conn.execute(
+                    historical_sql, historical_params,
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
             for support in historical_supports:
