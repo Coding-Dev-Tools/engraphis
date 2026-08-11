@@ -3202,7 +3202,7 @@ def test_graph_scene_connected_only_uses_filtered_relations():
 
 def test_graph_entity_preserves_literal_ghost_suffix():
     """Regression: canonical IDs ending in :ghost must not be stripped.
-    
+
     The member_to_canonical mapping already resolves ghost aliases to their
     live canonical IDs when needed. Unconditionally stripping :ghost would
     corrupt legitimate IDs like 'canon:ghost' that happen to end with that
@@ -3210,12 +3210,13 @@ def test_graph_entity_preserves_literal_ghost_suffix():
     """
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
-    entity = service.store.upsert_entity(Node(
-        id="canon:ghost", name="Literal Ghost", ntype="concept",
-        workspace_id=workspace_id,
-    ))
-    service.store.conn.commit()
-    
+    service.store.upsert_entity(
+        Node(
+            id="canon:ghost", name="Literal Ghost", ntype="concept",
+            workspace_id=workspace_id,
+        )
+    )
+
     result = service.graph_entity("canon:ghost", workspace="acme")
-    assert result["entity"]["id"] == "canon:ghost"
-    assert result["entity"]["name"] == "Literal Ghost"
+    assert result["canonical_id"] == "canon:ghost"
+    assert result["label"] == "Literal Ghost"
