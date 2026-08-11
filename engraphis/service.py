@@ -8645,7 +8645,7 @@ class MemoryService:
             if node_limit is not None else None
         )
         clean_edge_limit = (
-            bounded_int(edge_limit, "edge_limit", 0, 900)
+            bounded_int(edge_limit, "edge_limit", 0, 1000)
             if edge_limit is not None else None
         )
         if clean_level == "complete" and (
