@@ -2836,8 +2836,12 @@
           renderMode: targetMode,
           onNodeClick: item => openGraphConnections(item),
           onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
-          onStats: graphStatsChanged,
-          onMetrics: graphMetricsChanged,
+          onStats: stats => {
+            if (state.graphLoadRequest === request.id) graphStatsChanged(stats);
+          },
+          onMetrics: metrics => {
+            if (state.graphLoadRequest === request.id) graphMetricsChanged(metrics);
+          },
           onCollapseChange: collapsed => {
             if (targetMode === 'overview') showNotice(collapsed ? 'Clusters collapsed for overview.' : '');
           },
