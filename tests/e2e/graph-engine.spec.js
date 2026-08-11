@@ -380,13 +380,39 @@ async function reducedGravityTrial(page, gravity, stepCount = 8) {
 async function reducedOrbitalSeparationTrial(page, separation, stepCount = 8) {
   await page.evaluate(({ scene, setting }) => {
     const api = window.__engraphisGraph;
+    /* Dominant star↔planet pairs use the stellar-surface exclusion rather than generic
+       Repel pressure. Add one linked non-anchor moon so this trial still exercises the
+       adjustable planet↔moon separation and Link constraints. */
+    const trialScene = {
+      ...scene,
+      nodes: scene.nodes.map(node => ({ ...node })),
+      edges: scene.edges.map(edge => ({ ...edge })),
+      communities: scene.communities.map(community => ({ ...community })),
+      community_bridges: scene.community_bridges.map(bridge => ({ ...bridge })),
+      meta: { ...scene.meta },
+    };
+    const auroraPlanet = trialScene.nodes.find(node => node.id === 'aurora-planet');
+    trialScene.nodes.push({
+      id: 'aurora-moon', label: 'Aurora moon', gravity_mass: 1, visual_radius: 8,
+      community_id: 'aurora', anchor_role: 'none', system_anchor_id: 'aurora-star',
+      orbit_tier: 2, orbit_radius: 19.2, galactic_radius: auroraPlanet.galactic_radius,
+      galactic_target_radius: auroraPlanet.galactic_target_radius,
+      galactic_radius_scale: auroraPlanet.galactic_radius_scale,
+      galactic_initial_compactness: auroraPlanet.galactic_initial_compactness,
+      galactic_phase: auroraPlanet.galactic_phase, x: auroraPlanet.x + 1.8,
+      y: auroraPlanet.y - 0.4,
+    });
+    trialScene.edges.push({
+      id: 'aurora-planet-moon', source: 'aurora-planet', target: 'aurora-moon',
+      relation: 'orbits with', rest_length: 20, spring_strength: 0.08,
+    });
     api.freeze(true);
     api.setPreset('galaxy');
     api.setSettings({ gravity: 0, repel: setting, link: 8, size: 1 });
-    api.setData(scene);
+    api.setData(trialScene);
     api.setScope({ showUnlinked: true, minDegree: 0 });
   }, { scene: blackHoleGalaxyScene, setting: separation });
-  await page.waitForFunction(() => window.__fg.graphData().nodes.length === 8
+  await page.waitForFunction(() => window.__fg.graphData().nodes.length === 9
     && window.__engraphisGraph.physicsDiagnostics().frozen);
   const before = await galaxySystemSnapshot(page);
   await page.evaluate(() => window.__engraphisGraph.freeze(false));
@@ -402,6 +428,21 @@ async function reducedOrbitalSeparationTrial(page, separation, stepCount = 8) {
   const meanDiameter = snapshot => snapshot.systems.reduce(
     (sum, system) => sum + system.internalDiameter, 0,
   ) / snapshot.systems.length;
+  const stellarRadius = snapshot => {
+    const star = snapshot.nodes['aurora-star'];
+    const planet = snapshot.nodes['aurora-planet'];
+    return Math.hypot(star.x - planet.x, star.y - planet.y);
+  };
+  const nonAnchorRadius = snapshot => {
+    const planet = snapshot.nodes['aurora-planet'];
+    const moon = snapshot.nodes['aurora-moon'];
+    return Math.hypot(planet.x - moon.x, planet.y - moon.y);
+  };
+  const stellarRepelTarget = snapshot => {
+    const star = snapshot.nodes['aurora-star'];
+    const planet = snapshot.nodes['aurora-planet'];
+    return star.radius + planet.radius + snapshot.diagnostics.orbitalSeparationPadding;
+  };
   return {
     before,
     after,
@@ -410,6 +451,13 @@ async function reducedOrbitalSeparationTrial(page, separation, stepCount = 8) {
     maximumSeparations: Math.max(...samples.map(
       sample => sample.diagnostics.lastOrbitalSeparations,
     )),
+    starPlanetBefore: stellarRadius(before),
+    starPlanetAfter: stellarRadius(after),
+    starPlanetRepelTarget: stellarRepelTarget(after),
+    nonAnchorBefore: nonAnchorRadius(before),
+    nonAnchorAfter: nonAnchorRadius(after),
+    minimumSystemAnchorClearance: Math.min(...samples.map(sample =>
+      sample.diagnostics.systemAnchorExclusion.minimumClearance)),
     corrections: samples.map(sample =>
       sample.diagnostics.lastRelationCorrectionDistance
         + sample.diagnostics.lastOrbitalCorrectionDistance),
@@ -1555,9 +1603,13 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
   expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(30);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
-  expect(separatedOrbits.afterDiameter).toBeGreaterThan(
-    compactOrbits.afterDiameter * 1.35,
+  expect(separatedOrbits.nonAnchorAfter).toBeGreaterThan(
+    compactOrbits.nonAnchorAfter * 1.35,
   );
+  // Repel remains active for the linked non-anchor planet↔moon contact, but it must not
+  // turn the dominant star↔planet orbit into the old large-radius slider cushion.
+  expect(separatedOrbits.starPlanetAfter).toBeLessThan(separatedOrbits.starPlanetRepelTarget);
+  expect(separatedOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
   expect(Math.max(...separatedOrbits.corrections.slice(-4))).toBeLessThan(
     Math.max(...separatedOrbits.corrections.slice(0, 4)) * 0.05,
   );

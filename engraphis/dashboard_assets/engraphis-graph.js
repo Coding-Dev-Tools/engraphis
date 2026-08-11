@@ -5101,9 +5101,9 @@
         orbitalSeparationMaxCorrection: 4,
         orbitalSeparationMaxVelocityCorrection: 8,
         /* Contacts must not erase a planet's tangential phase. The dominant-star surface
-           handles the hard minimum; generic local pressure removes radial closing only. */
+           handles that hard minimum; generic pressure remains active for non-anchor pairs. */
         preserveLocalTangentialVelocity: true,
-        skipSystemAnchorPairs: false,
+        skipSystemAnchorPairs: true,
         systemAnchorExclusionPadding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
         /* The black-hole contact is independent of the adjustable local separation pressure.
            It is always strong enough to keep painted geometry outside the event horizon. */
