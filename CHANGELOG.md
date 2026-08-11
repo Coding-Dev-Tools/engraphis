@@ -5,6 +5,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard Galaxy graph now caches its outer safety radius at 1.75× the initial painted
+  extent; escaped nodes are confined to that fixed envelope instead of expanding it.
+- The Galaxy gravity slider now spans `0..200`, doubling the available movement range while
+  retaining the existing default at `48`.
+
 ## [1.6] - 2026-08-08
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
