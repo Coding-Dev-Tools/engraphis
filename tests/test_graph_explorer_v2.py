@@ -2944,6 +2944,59 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo():
     assert "edge_b" not in edge_ids
 
 
+def test_graph_scene_history_support_scopes_to_requested_repo():
+    """Historical support enrichment must honor the selected repository."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    entity_x = service.store.upsert_entity(Node(
+        id="ent_x", name="X", ntype="concept", workspace_id=workspace_id,
+    ))
+    entity_y = service.store.upsert_entity(Node(
+        id="ent_y", name="Y", ntype="concept", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_shared", src=entity_x, dst=entity_y, relation="relates",
+        workspace_id=workspace_id,
+    ))
+    _memory_a = service.store.add_memory(MemoryRecord(
+        id="mem_a", content="Alpha-only evidence.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    _memory_shared = service.store.add_memory(MemoryRecord(
+        id="mem_shared", content="Shared evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    _memory_b = service.store.add_memory(MemoryRecord(
+        id="mem_b", content="Beta-only evidence.", workspace_id=workspace_id,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+    for memory_id, confidence in (
+        ("mem_a", 0.9), ("mem_shared", 0.7), ("mem_b", 0.8),
+    ):
+        service.store.conn.execute(
+            "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
+            "VALUES ('edge_shared', ?, 'manual', ?)",
+            (memory_id, confidence),
+        )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", repo="beta", include_history=True,
+        valid_at=time.time() + 10.0, known_at=time.time() + 10.0,
+    )
+
+    shared_edge = next(
+        (edge for edge in scene["edges"] if edge["id"] == "edge_shared"), None,
+    )
+    assert shared_edge is not None
+    support_ids = set(shared_edge.get("support_memory_ids") or [])
+    assert "mem_a" not in support_ids
+    assert {"mem_shared", "mem_b"} <= support_ids
+    assert shared_edge["support_count"] == 2
+
+
 def test_graph_scene_connected_only_uses_filtered_relations():
     """Facet-excluded relations must not keep their endpoints connected."""
     service = MemoryService.create(":memory:", graph_extractor="none")
