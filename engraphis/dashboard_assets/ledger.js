@@ -2868,10 +2868,6 @@
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
         state.graphEngine.setData(data);
-        // Publish the loaded payload immediately. The engine emits the same stats during
-        // render(), but a fresh retry can otherwise leave the count at its initial zero while
-        // the asset promise and force-graph callback settle in different turns.
-        graphStatsChanged({ nodes: data.nodes.length, links: data.links.length });
         state.graphEngine.freeze(state.graphFrozen);
         byId('graph-empty').hidden = Boolean(data.nodes.length);
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
