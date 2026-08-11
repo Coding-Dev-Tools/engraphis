@@ -1515,9 +1515,8 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
 });
 
 test('Galaxy sliders span density plus doubled Link and Orbital separation', async ({ page }) => {
-  // Reduced motion removes the cosmetic sweep. Automatic motion advances the established
-  // trajectory at 45.5% speed while maximum gravity retains its 3.6x physical field.
-  await page.emulateMedia({ reducedMotion: 'reduce' });
+  // This test exercises the live fixed-step solver; reduced motion intentionally disables it.
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
@@ -1639,8 +1638,8 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
   }
 
   for (const trial of [baseline, strong]) {
-    expect(trial.before.diagnostics.reducedMotion).toBe(true);
-    expect(trial.after.diagnostics.reducedMotion).toBe(true);
+    expect(trial.before.diagnostics.reducedMotion).toBe(false);
+    expect(trial.after.diagnostics.reducedMotion).toBe(false);
     expect(trial.before.anchor.x).toBe(0);
     expect(trial.before.anchor.y).toBe(0);
     expect(trial.after.anchor.x).toBe(0);
@@ -1763,7 +1762,12 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     const diagnostics = api.physicsDiagnostics();
     const output = document.querySelector('#graph-gravity-output').textContent;
     api.freeze(true);
-    return { before, after, diagnostics, output };
+    return {
+      before, after,
+      expectedRatio: I.galaxyImmediateGravityRadiusScale(100)
+        / I.galaxyImmediateGravityRadiusScale(48),
+      diagnostics, output,
+    };
   }, blackHoleGalaxyScene);
 
   expect(report.output).toBe('100');
@@ -1771,8 +1775,7 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
   expect(report.diagnostics.immediateGravityResponse.systems).toBe(3);
   expect(report.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
   for (const [id, radius] of Object.entries(report.before)) {
-    expect(report.after[id], id).toBeLessThan(radius * 0.75);
-    expect(report.after[id], id).toBeGreaterThan(radius * 0.6);
+    expect(report.after[id] / radius, id).toBeCloseTo(report.expectedRatio, 10);
   }
   expect(session.pageErrors).toEqual([]);
 });
