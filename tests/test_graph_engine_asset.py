@@ -727,6 +727,18 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         const settings = [0, 1, 12, 24, 48, 72, 100, 200, 400];
         const response = settings.map(I.galaxyGravityConstant);
         const legacy = setting => setting * (772 + 11 * setting) / 2600;
+            // This is the release-stable calibration restored after the unsafe speed-up.
+        const priorCalibration = setting => {
+          const value = Math.max(0, Math.min(400, Number(setting) || 0));
+          const base = value * (772 + 11 * value) / 2600;
+          const smoothstep = raw => {
+            const t = Math.max(0, Math.min(1, raw));
+            return t * t * (3 - 2 * t);
+          };
+          const boost = 1 + 0.25 * smoothstep(value / 48)
+            + 0.25 * smoothstep((value - 48) / 52);
+          return base * boost * 4;
+        };
         const fullRange = Array.from({ length: 401 }, (_, setting) => setting);
         const centralCap = (gravity, explicit) => {
           const nodes = [
@@ -783,6 +795,10 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
           localCaps: [localHaloCap(48), localHaloCap(100)],
           neverWeaker: fullRange.every(setting =>
             I.galaxyGravityConstant(setting) >= legacy(setting) - 1e-12),
+          matchesStableCalibration: fullRange.every(setting => Math.abs(
+            I.galaxyGravityConstant(setting) - priorCalibration(setting)
+          ) <= 1e-10),
+          priorEndpoints: [48, 100, 200, 400].map(priorCalibration),
           fullRangeMonotone: fullRange.slice(1).every((setting, index) =>
             I.galaxyGravityConstant(setting) > I.galaxyGravityConstant(index)),
           ratios: {
@@ -823,6 +839,8 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         for left, right in zip(report["response"], report["response"][1:])
     )
     assert report["neverWeaker"] is True
+    assert report["matchesStableCalibration"] is True
+    assert report["endpoints"] == pytest.approx(report["priorEndpoints"])
     assert report["fullRangeMonotone"] is True
     assert all(value == pytest.approx(3.6, rel=1e-12) for value in report["ratios"].values())
     source = ASSET.read_text(encoding="utf-8")
@@ -866,6 +884,110 @@ def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> 
     assert report["constants"] == [240, 120]
     assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
     assert report["masses"] == [8, 101, 109]
+
+
+@requires_node
+def test_gravity_zero_retains_only_the_independent_stellar_floor() -> None:
+    """Gravity zero stops the black-hole well without freezing declared solar systems."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', orbit_tier: 0, gravity_mass: 20, radius: 10,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'core-planet', community_id: 'core', system_anchor_id: 'black-hole',
+            orbit_tier: 1, gravity_mass: 1, radius: 3,
+            x: 45, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', orbit_tier: 0, gravity_mass: 8, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 3,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        I.seedGalaxyOrbits(nodes, 404, 0, 38.4, false);
+        I.seedGalaxySystemOrbits(nodes, 404, 0, 48, false);
+        const [blackHole, corePlanet, star, planet] = nodes;
+        const systemCenter = () => ({
+          x: (star.x * 8 + planet.x) / 9,
+          y: (star.y * 8 + planet.y) / 9,
+          vx: (star.vx * 8 + planet.vx) / 9,
+          vy: (star.vy * 8 + planet.vy) / 9,
+        });
+        const relative = () => ({
+          x: planet.x - star.x, y: planet.y - star.y,
+          vx: planet.vx - star.vx, vy: planet.vy - star.vy,
+        });
+        const before = { center: systemCenter(), relative: relative(),
+          blackHole: [blackHole.x, blackHole.y, blackHole.vx, blackHole.vy],
+          corePlanet: [corePlanet.x, corePlanet.y, corePlanet.vx, corePlanet.vy] };
+        let previousAngle = Math.atan2(before.relative.y, before.relative.x);
+        let angularTravel = 0, minimumRadius = Infinity, maximumRadius = 0, tick;
+        for (let step = 0; step < 180; step += 1) {
+          tick = I.integrateGalaxyLeapfrog(nodes, [], [], {
+            gravity: 0, softening: 38.4, centralSoftening: 48,
+            includeMutualSystems: false, includeRelations: false,
+            includeOrbitalSeparation: false, skipSystemAnchorPairs: true,
+            systemAnchorExclusionPadding: 1.5, systemAnchorRepulsionAcceleration: 0,
+            includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+            includeFarFieldConfinement: false, inwardConvergence: false,
+            localRelativeSpeedLimit: 48, timestep: 0.032, wallClockSeconds: 1 / 30,
+            velocityDecay: 0.00005, speedLimit: 48, includeCollisions: false,
+          });
+          const phase = relative(), radius = Math.hypot(phase.x, phase.y);
+          const angle = Math.atan2(phase.y, phase.x);
+          angularTravel += Math.atan2(Math.sin(angle - previousAngle),
+            Math.cos(angle - previousAngle));
+          previousAngle = angle;
+          minimumRadius = Math.min(minimumRadius, radius);
+          maximumRadius = Math.max(maximumRadius, radius);
+        }
+        emit({
+          floorSetting: I.galaxyStellarGravityFloorSetting,
+          mappedSettings: [0, 47, 48, 100, Infinity, NaN]
+            .map(I.galaxyStellarGravitySetting),
+          constants: {
+            blackHole: I.galaxyBlackHoleGravityConstant(0),
+            compatibilityLocal: I.galaxyLocalGravityConstant(0),
+            stellar: I.galaxyStellarGravityConstant(0),
+            defaultStellar: I.galaxyStellarGravityConstant(48),
+          },
+          before, after: { center: systemCenter(), relative: relative(),
+            blackHole: [blackHole.x, blackHole.y, blackHole.vx, blackHole.vy],
+            corePlanet: [corePlanet.x, corePlanet.y, corePlanet.vx, corePlanet.vy] },
+          angularTravel, minimumRadius, maximumRadius,
+          telemetry: tick.systemGravity,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["floorSetting"] == 48
+    assert report["mappedSettings"] == [48, 48, 48, 100, 48, 48]
+    assert report["constants"] == {
+        "blackHole": 0,
+        "compatibilityLocal": 0,
+        "stellar": 750,
+        "defaultStellar": 750,
+    }
+    before, after = report["before"], report["after"]
+    assert math.hypot(before["relative"]["vx"], before["relative"]["vy"]) > 1
+    assert before["relative"]["x"] * before["relative"]["vx"] \
+        + before["relative"]["y"] * before["relative"]["vy"] == pytest.approx(0, abs=1e-10)
+    assert abs(report["angularTravel"]) > 1
+    assert report["minimumRadius"] > 28
+    assert report["maximumRadius"] < 32
+    assert after["center"] == pytest.approx(before["center"], abs=1e-9)
+    assert after["blackHole"] == before["blackHole"] == [0, 0, 0, 0]
+    assert after["corePlanet"] == pytest.approx(before["corePlanet"], abs=1e-12)
+    assert report["telemetry"]["gravitySetting"] == 0
+    assert report["telemetry"]["stellarGravityFloorSetting"] == 48
+    assert report["telemetry"]["stellarGravity"] == 750
+    assert report["telemetry"]["eligibleStellarAnchors"] == 1
+    assert report["telemetry"]["fallbackAnchors"] == 0
+    assert report["telemetry"]["globalAnchors"] == 1
+    assert report["telemetry"]["stellarFloorActive"] is True
 
 
 @requires_node
@@ -1024,7 +1146,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
           - freeAcceleration.get(freePair[0]).ax;
         // The live local field is star-only in the star frame; the system-wide recoil is a
         // common translation, not an extra planet mass in this relative acceleration.
-        const expectedFree = -I.galaxyGravityConstant(100) * 8 * 24
+        const expectedFree = -I.galaxyStellarGravityConstant(100) * 8 * 24
           / Math.pow(24 * 24 + 12 * 12, 1.5);
 
         const pinnedPair = freePair.map((node, index) => ({ ...node,
@@ -1388,7 +1510,10 @@ def test_actual_shaped_multi_member_galaxy_stays_bound_for_1800_steps() -> None:
     )
     assert report["finite"] is True
     assert report["exactCenter"] is True
-    assert report["speedCaps"] == 0
+    # Gravity 100 is more than twice the live default.  Its emergency guard may engage for a
+    # bounded minority of stress ticks (the default-48 fixture below remains cap-free), but it
+    # must not become the system's steady state or replace the asserted orbital travel.
+    assert report["speedCaps"] < 1800 * 0.3
     # The controlled projection deliberately permits painted envelopes to overlap as it draws
     # every orbit inward. Collision impulses remain off here because they can create the
     # outward/ejection response this mode forbids; the systems must still retain real extent.
@@ -1467,9 +1592,9 @@ def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track
     )
     assert report["nodes"] == 300
     assert report["monotone"] is True
-    # The established emergency cap remains 48. Strong inner encounters may touch it, but
-    # must be rare rather than a persistent artefact that erases the disk's angular motion.
-    assert report["speedCaps"] < 180
+    # The established emergency cap remains 48.  At this >2x-default stress field, inner
+    # encounters may touch it for a bounded minority of ticks without owning the simulation.
+    assert report["speedCaps"] < 1800 * 0.3
     assert report["maxSpeed"] <= 48 + 1e-10
     # A full wall-clock minute advances the convergence trajectory at 68% speed,
     # while retaining the maximum field's 3.6x response. Individual escape attempts may
@@ -1617,10 +1742,11 @@ def test_galaxy_relation_springs_are_local_mass_aware_and_momentum_symmetric() -
 
 
 @requires_node
-def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response() -> None:
+def test_galaxy_link_distance_has_squared_scale_and_release_stable_response() -> None:
     report = _run_node(
         """
-        const spring = setting => {
+        const spring = (setting, strengthMultiplier = 2,
+          forceCap = 1.6, accelerationCap = 3.2) => {
           const nodes = [
             { id: 'star', x: 0, y: 0, vx: 0, vy: 0,
               gravity_mass: 4, radius: 1, community_id: 'solar' },
@@ -1631,8 +1757,8 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
             rest_length: 20, spring_strength: 0.1 };
           const orbitScale = I.galaxyRelationOrbitScale(setting);
           const stats = I.applyGalaxyRelationSprings(nodes, [link], {
-            alpha: 1, orbitScale, strengthMultiplier: 2,
-            forceCap: 1.6, accelerationCap: 3.2,
+            alpha: 1, orbitScale, strengthMultiplier,
+            forceCap, accelerationCap,
           });
           return {
             orbitScale,
@@ -1654,6 +1780,7 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
         }], { alpha: 1, orbitScale: 0.25, forceCap: 1.6, accelerationCap: 3.2 });
         emit({
           tight: spring(4), baseline: spring(8), reference: spring(16), loose: spring(80),
+          unsafeLoose: spring(80, 4, 3.2, 6.4),
           ordinary: ordinary.map(node => node.vx),
           constraint: (() => {
             const make = () => [
@@ -1664,19 +1791,24 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
             ];
             const link = { source: 'star', target: 'planet',
               rest_length: 20, spring_strength: 0.1 };
-            const run = setting => {
+            const run = (setting, responseMultiplier, maxCorrection) => {
               const nodes = make();
               const beforeCom = (nodes[0].x * 4 + nodes[1].x) / 5;
               const stats = I.applyGalaxyRelationDistanceConstraints(nodes, [link], {
                 orbitScale: I.galaxyRelationOrbitScale(setting), strengthMultiplier: 2,
-                wallClockSeconds: 1 / 30, rate: 24, maxCorrection: 12,
+                responseMultiplier, wallClockSeconds: 1 / 30, rate: 24, maxCorrection,
               });
               return {
                 distance: Math.abs(nodes[1].x - nodes[0].x),
+                target: I.galaxySpringDistance(link, I.galaxyRelationOrbitScale(setting)),
                 beforeCom, afterCom: (nodes[0].x * 4 + nodes[1].x) / 5, stats,
               };
             };
-            return { tight: run(8), loose: run(80) };
+            return {
+              tight: run(8, 1, 12), loose: run(80, 1, 12),
+              responseStable: run(8, 1, 100), unsafeDoubled: run(8, 2, 100),
+              capStable: run(80, 1, 12), unsafeCapDoubled: run(80, 2, 12),
+            };
           })(),
         });
         """
@@ -1691,12 +1823,41 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
     assert report["baseline"]["velocities"] == pytest.approx(
         [value * 2 for value in report["ordinary"]]
     )
+    assert report["loose"]["target"] == report["unsafeLoose"]["target"]
+    assert report["unsafeLoose"]["velocities"] == pytest.approx(
+        [value * 2 for value in report["loose"]["velocities"]]
+    )
+    assert report["unsafeLoose"]["stats"]["maximumAcceleration"] == pytest.approx(
+        report["loose"]["stats"]["maximumAcceleration"] * 2
+    )
     assert report["tight"]["velocities"][0] > 0
     assert report["loose"]["velocities"][0] < 0
     assert report["constraint"]["tight"]["distance"] < 10
     assert report["constraint"]["loose"]["distance"] > 10
     assert report["constraint"]["tight"]["stats"]["applied"] == 1
     assert report["constraint"]["loose"]["stats"]["applied"] == 1
+    assert report["constraint"]["unsafeDoubled"]["target"] == \
+        report["constraint"]["responseStable"]["target"]
+    # Doubling a continuous convergence rate squares the fraction of relation error left
+    # after one frame.  It must not multiply the completed displacement past the target.
+    prior_correction = report["constraint"]["responseStable"]["stats"]["correctedDistance"]
+    initial_error = 5
+    prior_response = prior_correction / initial_error
+    doubled_response = 1 - (1 - prior_response) ** 2
+    assert report["constraint"]["unsafeDoubled"]["stats"]["correctedDistance"] \
+        == pytest.approx(initial_error * doubled_response, rel=1e-12)
+    assert report["constraint"]["unsafeDoubled"]["stats"]["correctedDistance"] \
+        < prior_correction * 2
+    assert report["constraint"]["capStable"]["stats"]["maximumNodeShift"] \
+        == pytest.approx(9.6)
+    assert report["constraint"]["unsafeCapDoubled"]["stats"]["maximumNodeShift"] \
+        == pytest.approx(9.6)
+    assert report["constraint"]["capStable"]["stats"]["correctedDistance"] \
+        == pytest.approx(12)
+    assert report["constraint"]["unsafeCapDoubled"]["stats"]["correctedDistance"] \
+        == pytest.approx(12)
+    assert report["constraint"]["unsafeCapDoubled"]["stats"]["correctedDistance"] \
+        == pytest.approx(report["constraint"]["capStable"]["stats"]["correctedDistance"])
     assert report["constraint"]["tight"]["afterCom"] == pytest.approx(
         report["constraint"]["tight"]["beforeCom"], abs=1e-12
     )
@@ -1710,10 +1871,10 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
 
 
 @requires_node
-def test_orbital_separation_has_double_strength_and_preserves_local_mass_center() -> None:
+def test_orbital_separation_is_contractive_and_preserves_local_mass_center() -> None:
     report = _run_node(
         """
-        const run = setting => {
+        const run = (setting, strengthOverride = null) => {
           const nodes = [
             { id: 'star', x: 0, y: 0, vx: 0, vy: 0, radius: 3,
               gravity_mass: 4, community_id: 'solar' },
@@ -1726,8 +1887,9 @@ def test_orbital_separation_has_double_strength_and_preserves_local_mass_center(
           const otherBefore = [nodes[2].x, nodes[2].y, nodes[2].vx, nodes[2].vy];
           const padding = I.galaxyOrbitalSeparationPadding(setting);
           const strength = I.galaxyOrbitalSeparationStrength(setting);
-          const stats = I.applyGalaxyCollisions(nodes, {
-            padding, strength, iterations: 1, sameCommunityOnly: true,
+          const stats = I.applyGalaxyOrbitalSeparation(nodes, {
+            padding, strength: strengthOverride === null ? strength : strengthOverride,
+            maxCorrection: 100, maxVelocityCorrection: 100,
           });
           return {
             padding, strength, stats,
@@ -1737,7 +1899,8 @@ def test_orbital_separation_has_double_strength_and_preserves_local_mass_center(
             otherAfter: [nodes[2].x, nodes[2].y, nodes[2].vx, nodes[2].vy],
           };
         };
-        emit({ off: run(0), default: run(48), maximum: run(120) });
+        emit({ off: run(0), default: run(48), preset: run(60), maximum: run(120),
+          priorDefault: run(48, 0.8), priorMaximum: run(120, 1) });
         """
     )
     assert report["off"]["padding"] == 0
@@ -1746,10 +1909,20 @@ def test_orbital_separation_has_double_strength_and_preserves_local_mass_center(
     assert report["default"]["padding"] == pytest.approx(12)
     assert report["default"]["strength"] == pytest.approx(0.8)
     assert report["default"]["distance"] == pytest.approx(16.4)
+    assert report["preset"]["strength"] == pytest.approx(1)
+    assert report["preset"]["distance"] == pytest.approx(21)
     assert report["maximum"]["padding"] == pytest.approx(30)
     assert report["maximum"]["strength"] == pytest.approx(1)
     assert report["maximum"]["distance"] == pytest.approx(36)
-    for item in (report["default"], report["maximum"]):
+    # The release-safe response never exceeds one. It approaches contact monotonically and
+    # retains the pre-speed-up 48-setting calibration instead of crossing the manifold.
+    assert report["default"]["stats"]["correctionDistance"] == pytest.approx(
+        report["priorDefault"]["stats"]["correctionDistance"]
+    )
+    assert report["maximum"]["stats"]["correctionDistance"] == pytest.approx(
+        report["priorMaximum"]["stats"]["correctionDistance"]
+    )
+    for item in (report["default"], report["preset"], report["maximum"]):
         assert item["stats"]["overlaps"] == 1
         assert item["afterCom"] == pytest.approx(item["beforeCom"], abs=1e-12)
         assert item["otherAfter"] == item["otherBefore"]
@@ -2344,7 +2517,8 @@ def test_link_and_orbital_separation_share_one_settling_target_without_jitter() 
           includeOrbitalSeparation: true, orbitalSeparationPadding: 12,
           orbitalSeparationStrength: 0.8, orbitalSeparationMaxCorrection: 4,
           orbitalSeparationMaxVelocityCorrection: 8, localRelativeSpeedLimit: 16,
-          // This is a relation/separation convergence fixture, not a stellar-pressure test.
+          // This unannotated compatibility pair is a relation/separation convergence fixture,
+          // not an explicit community-star stellar-pressure test.
           systemAnchorRepulsionAcceleration: 0,
         };
         const distances = [Math.hypot(nodes[1].x - nodes[0].x,
@@ -2539,6 +2713,252 @@ def test_dense_orbital_contacts_and_hot_members_receive_one_bounded_system_updat
     assert [report["momentumAfter"]["x"], report["momentumAfter"]["y"]] == pytest.approx(
         [report["momentumBefore"]["x"], report["momentumBefore"]["y"]], abs=1e-10
     )
+
+
+@requires_node
+def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extremes() -> None:
+    """The 542-body release shape stays contractive at both ordinary and 120/80 tuning.
+
+    Endpoint displacement did not catch the regression: over-unity cross-system contact could
+    kick a solar-system COM one direction and project it back on the next frame while ending in
+    a plausible place.  Sample every fixed step and require bounded radii/energy, signed phase,
+    painted clearances, and a low per-system COM-step tail for six seconds of solver time.
+    """
+    report = _run_node(
+        """
+        const make = () => {
+          const nodes = [{ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', orbit_tier: 0, gravity_mass: 64, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'core-star', community_id: 'core', system_anchor_id: 'black-hole',
+            orbit_tier: 1, gravity_mass: 6, radius: 5, x: 52, y: 0, vx: 0, vy: 0 }];
+          const links = [{ source: 'black-hole', target: 'core-star', rest_length: 52,
+            spring_strength: 0.08 }];
+          for (let system = 0; system < 60; system++) {
+            const id = system === 0 ? 'aurora' : 'system-' + system;
+            const starId = id + '-star';
+            const phase = 0.31 + system * 2.399963229728653;
+            const galacticRadius = 112 + system * 3.15;
+            const centerX = Math.cos(phase) * galacticRadius;
+            const centerY = Math.sin(phase) * galacticRadius * 0.84;
+            for (let member = 0; member < 9; member++) {
+              const localRadius = member === 0 ? 0 : (member === 1 ? 40 : 18 + member * 5);
+              const localPhase = phase + member * 2.399963229728653;
+              const nodeId = member === 0 ? starId
+                : (member === 1 ? id + '-planet' : id + '-planet-' + member);
+              nodes.push({ id: nodeId, community_id: id,
+                anchor_role: member === 0 ? 'community' : 'none',
+                system_anchor_id: starId, orbit_tier: member,
+                gravity_mass: member === 0 ? 8 + system % 5 : 1 + (member % 3) * 0.25,
+                radius: member === 0 ? 5.5 : 2.5,
+                x: centerX + Math.cos(localPhase) * localRadius,
+                y: centerY + Math.sin(localPhase) * localRadius, vx: 0, vy: 0 });
+              if (member > 0) links.push({ source: starId, target: nodeId,
+                rest_length: localRadius, spring_strength: 0.08 });
+            }
+          }
+          return { nodes, links };
+        };
+        const quantile = (items, portion) => {
+          const values = [...items].sort((a, b) => a - b);
+          return values[Math.floor((values.length - 1) * portion)];
+        };
+        const delta = (next, previous) => Math.atan2(
+          Math.sin(next - previous), Math.cos(next - previous));
+        const run = (repel, link) => {
+          const { nodes, links } = make();
+          I.seedGalaxyOrbits(nodes, 3031, 48, 32, false);
+          // Match galaxyIntegratorOptions(): Repel 60 yields live central softening 48.
+          I.seedGalaxySystemOrbits(nodes, 3031, 48, 48, false);
+          const separationPadding = I.galaxyOrbitalSeparationPadding(repel);
+          const separationStrength = I.galaxyOrbitalSeparationStrength(repel);
+          const options = {
+            gravity: 48, softening: 32, centralSoftening: 48,
+            exactLimit: 64, theta: 0.85,
+            localPairFraction: 0.15, corePairMultiplier: 0.75,
+            includeBridges: false, includeMutualSystems: true,
+            mutualSystemGravityFraction: 0.12, mutualSystemSoftening: 80,
+            includeRelations: true, includeRelationSprings: false,
+            skipSystemAnchorRelations: true, skipOrbitalSystemRelations: true,
+            orbitScale: I.galaxyRelationOrbitScale(link),
+            relationConstraintStrengthMultiplier: 2,
+            relationConstraintResponseMultiplier: 1,
+            relationConstraintRate: 24, relationConstraintMaxCorrection: 12,
+            relationPadding: Math.max(1.5, separationPadding),
+            includeOrbitalSeparation: true,
+            orbitalSeparationPadding: separationPadding,
+            orbitalSeparationStrength: separationStrength,
+            crossCommunitySeparationPadding: 1.5,
+            crossCommunitySeparationStrength: separationStrength * 0.18,
+            orbitalSeparationMaxCorrection: 4,
+            orbitalSeparationMaxVelocityCorrection: 8,
+            preserveLocalTangentialVelocity: true, preserveSystemRadii: true,
+            skipSystemAnchorPairs: true, systemAnchorExclusionPadding: 1.5,
+            systemAnchorRepulsionRange: 6, systemAnchorRepulsionAcceleration: 0.12,
+            includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+            includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
+            farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
+            farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
+            localRelativeSpeedLimit: 48, timestep: 0.032,
+            inwardConvergence: true, wallClockSeconds: 1 / 30,
+            velocityDecay: 0.00005, speedLimit: 48, includeCollisions: false,
+          };
+          const byId = new Map(nodes.map(node => [node.id, node]));
+          const tracked = ['aurora', 'system-11', 'system-23', 'system-35',
+            'system-47', 'system-59'];
+          const local = new Map(tracked.map(id => {
+            const star = byId.get(id + '-star'), planet = byId.get(
+              id === 'aurora' ? 'aurora-planet' : id + '-planet');
+            const dx = planet.x - star.x, dy = planet.y - star.y;
+            const dvx = planet.vx - star.vx, dvy = planet.vy - star.vy;
+            return [id, { star, planet, radius0: Math.hypot(dx, dy),
+              radiusMin: Math.hypot(dx, dy), radiusMax: Math.hypot(dx, dy),
+              angle: Math.atan2(dy, dx), direction: Math.sign(dx * dvy - dy * dvx),
+              reversals: 0, maxPhaseStep: 0, radialReversals: 0,
+              previousRadius: Math.hypot(dx, dy), previousRadial: 0,
+              kinetic0: 0.5 * star.gravity_mass * planet.gravity_mass
+                / (star.gravity_mass + planet.gravity_mass) * (dvx * dvx + dvy * dvy),
+              kineticMin: Infinity, kineticMax: 0 }];
+          }));
+          const centers = () => I.communityCenters(nodes);
+          let previousCenters = centers();
+          const globalTracks = new Map(tracked.map(id => {
+            const center = previousCenters.get(id), radius = Math.hypot(center.x, center.y);
+            const vx = center.nodes.reduce((sum, node) => sum
+              + node.gravity_mass * node.vx, 0) / center.mass;
+            const vy = center.nodes.reduce((sum, node) => sum
+              + node.gravity_mass * node.vy, 0) / center.mass;
+            return [id, { angle: Math.atan2(center.y, center.x),
+              direction: Math.sign(center.x * vy - center.y * vx),
+              radius0: radius, radiusMin: radius, radiusMax: radius,
+              reversals: 0, maxPhaseStep: 0 }];
+          }));
+          const comSteps = [], crossCorrections = [];
+          let speedCaps = 0, localVelocityLimits = 0, maximumSpeed = 0;
+          let minimumBlackHoleClearance = Infinity, minimumStarClearance = Infinity;
+          let minimumOuterClearance = Infinity, maximumOrbitalShift = 0;
+          let alternatingRadialSteps = 0, relationApplications = 0;
+          for (let step = 0; step < 180; step++) {
+            const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+            speedCaps += tick.speedCapped ? 1 : 0;
+            localVelocityLimits += tick.systemVelocity.limitedSystems;
+            maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+            maximumOrbitalShift = Math.max(maximumOrbitalShift,
+              tick.orbitalSeparation.maximumNodeShift || 0);
+            crossCorrections.push(tick.orbitalSeparation.crossCommunityCorrectionDistance || 0);
+            relationApplications += tick.relationConstraint.applied || 0;
+            const nextCenters = centers();
+            nextCenters.forEach((center, id) => {
+              if (id === 'core') return;
+              const previous = previousCenters.get(id);
+              if (previous) comSteps.push(Math.hypot(center.x - previous.x, center.y - previous.y));
+            });
+            tracked.forEach(id => {
+              const item = local.get(id), star = item.star, planet = item.planet;
+              const dx = planet.x - star.x, dy = planet.y - star.y;
+              const radius = Math.hypot(dx, dy), angle = Math.atan2(dy, dx);
+              const phaseStep = delta(angle, item.angle);
+              if (item.direction && Math.sign(phaseStep) === -item.direction
+                && Math.abs(phaseStep) > 0.001) item.reversals++;
+              item.maxPhaseStep = Math.max(item.maxPhaseStep, Math.abs(phaseStep));
+              const radialStep = radius - item.previousRadius;
+              if (item.previousRadial * radialStep < -0.0025) item.radialReversals++;
+              if (item.previousRadial * radialStep < -0.0025) alternatingRadialSteps++;
+              item.previousRadial = radialStep;
+              item.previousRadius = radius;
+              item.radiusMin = Math.min(item.radiusMin, radius);
+              item.radiusMax = Math.max(item.radiusMax, radius);
+              item.angle = angle;
+              const dvx = planet.vx - star.vx, dvy = planet.vy - star.vy;
+              const kinetic = 0.5 * star.gravity_mass * planet.gravity_mass
+                / (star.gravity_mass + planet.gravity_mass) * (dvx * dvx + dvy * dvy);
+              item.kineticMin = Math.min(item.kineticMin, kinetic);
+              item.kineticMax = Math.max(item.kineticMax, kinetic);
+              minimumStarClearance = Math.min(minimumStarClearance,
+                radius - star.radius - planet.radius - 1.5);
+              const center = nextCenters.get(id), global = globalTracks.get(id);
+              const globalRadius = Math.hypot(center.x, center.y);
+              const globalStep = delta(Math.atan2(center.y, center.x), global.angle);
+              if (global.direction && Math.sign(globalStep) === -global.direction
+                && Math.abs(globalStep) > 0.001) global.reversals++;
+              global.maxPhaseStep = Math.max(global.maxPhaseStep, Math.abs(globalStep));
+              global.radiusMin = Math.min(global.radiusMin, globalRadius);
+              global.radiusMax = Math.max(global.radiusMax, globalRadius);
+              global.angle = Math.atan2(center.y, center.x);
+            });
+            const envelope = tick.farFieldConfinement.envelopeRadius;
+            nodes.slice(1).forEach(node => {
+              minimumBlackHoleClearance = Math.min(minimumBlackHoleClearance,
+                Math.hypot(node.x, node.y) - nodes[0].radius - node.radius - 2.5);
+              minimumOuterClearance = Math.min(minimumOuterClearance,
+                envelope - Math.hypot(node.x, node.y) - node.radius);
+            });
+            previousCenters = nextCenters;
+          }
+          return {
+            repel, link, separationStrength,
+            crossStrength: separationStrength * 0.18,
+            local: Object.fromEntries([...local].map(([id, item]) => [id, {
+              radius0: item.radius0, radiusMin: item.radiusMin, radiusMax: item.radiusMax,
+              reversals: item.reversals, radialReversals: item.radialReversals,
+              maxPhaseStep: item.maxPhaseStep, kinetic0: item.kinetic0,
+              kineticMin: item.kineticMin, kineticMax: item.kineticMax }])),
+            global: Object.fromEntries(globalTracks),
+            comStepMedian: quantile(comSteps, 0.5), comStepP95: quantile(comSteps, 0.95),
+            comStepMax: Math.max(...comSteps),
+            crossCorrectionP95: quantile(crossCorrections, 0.95),
+            crossCorrectionMax: Math.max(...crossCorrections),
+            speedCaps, localVelocityLimits, maximumSpeed, maximumOrbitalShift,
+            alternatingRadialSteps, relationApplications,
+            minimumBlackHoleClearance, minimumStarClearance, minimumOuterClearance,
+            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+              .every(Number.isFinite)),
+          };
+        };
+        emit({ ordinary: run(60, 8), maximum: run(120, 80) });
+        """
+    )
+    for trial in report.values():
+        assert trial["finite"] is True
+        assert trial["separationStrength"] == pytest.approx(1)
+        # This is the release bug's exact oracle: pressure 0.36 crossed the contact manifold.
+        assert trial["crossStrength"] == pytest.approx(0.18)
+        assert trial["speedCaps"] == 0
+        assert trial["localVelocityLimits"] == 0
+        assert trial["maximumSpeed"] < 48
+        assert trial["maximumOrbitalShift"] <= 4 + 1e-9
+        assert trial["relationApplications"] == 0
+        assert trial["minimumBlackHoleClearance"] >= -1e-8
+        assert trial["minimumStarClearance"] >= -1e-8
+        assert trial["minimumOuterClearance"] >= -1e-8
+        assert trial["comStepP95"] < 1.25, trial
+        assert trial["comStepMax"] < 3, trial
+        assert trial["crossCorrectionP95"] < 500, trial
+        assert trial["crossCorrectionMax"] < 900, trial
+        # Sparse eccentric perturbations are physical; the regression was frame-to-frame
+        # reversal across many systems. Across 1,080 tracked phase slices allow at most two.
+        assert sum(system["reversals"] for system in trial["local"].values()) <= 2
+        for system in trial["local"].values():
+            assert system["reversals"] <= 2
+            assert system["radialReversals"] <= 12
+            # 0.085 rad is 4.9 degrees per fixed slice. The unstable response reached
+            # 0.10415 here; retain margin for floating-point ordering without admitting it.
+            assert system["maxPhaseStep"] < 0.085
+            assert system["radiusMin"] > system["radius0"] * 0.65
+            assert system["radiusMax"] < system["radius0"] * 1.35
+            assert system["kineticMin"] > system["kinetic0"] * 0.15
+            assert system["kineticMax"] < system["kinetic0"] * 4
+        for system_id, system in trial["global"].items():
+            # A crowded galaxy may receive an occasional genuine near-field perturbation;
+            # four or fewer opposite samples in 180 slices is not the frame-to-frame ping-pong
+            # produced by the former over-unity contact response.
+            assert system["reversals"] <= 4, (system_id, system, {
+                key: trial[key] for key in ("repel", "link", "comStepMedian",
+                                            "comStepP95", "comStepMax")
+            })
+            assert system["maxPhaseStep"] < 0.08
+            assert system["radiusMin"] > system["radius0"] * 0.6
+            assert system["radiusMax"] <= system["radius0"] * 1.01
 
 
 @requires_node
@@ -3089,19 +3509,19 @@ def test_dense_stellar_surface_exclusion_keeps_com_momentum_and_tangential_phase
 
 @requires_node
 def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surface() -> None:
-    """A star pushes a close planet outward without becoming a generic pairwise repeller."""
+    """A star's surface pressure beats its well without becoming generic pair repulsion."""
     report = _run_node(
         """
         const fixture = innerMass => [
           { id: 'star', anchor_role: 'community', community_id: 'solar', gravity_mass: 8,
             radius: 5, x: 0, y: 0, vx: 1, vy: -2 },
-          // 12 lies outside the 9.5 hard painted boundary but inside its 15.5 pressure band.
+          // 9.5 is the exact painted boundary: 5 + 3 radii + 1.5 padding.
           { id: 'inner', community_id: 'solar', orbit_tier: 1, gravity_mass: innerMass,
-            radius: 3, x: 12, y: 0, vx: 1, vy: 2 },
+            radius: 3, x: 9.5, y: 0, vx: 1, vy: 2 },
           { id: 'outer', community_id: 'solar', orbit_tier: 2, gravity_mass: 1,
             radius: 3, x: 100, y: 0, vx: 1, vy: -2 },
         ];
-        const trial = innerMass => {
+        const trial = (innerMass, pressure = 0.12) => {
           const nodes = fixture(innerMass);
           const before = nodes.map(node => [node.vx, node.vy]);
           const momentum = nodes.reduce((total, node) => [
@@ -3110,7 +3530,7 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
           ], [0, 0]);
           const stats = I.applyGalaxySystemAnchorGravity(nodes, {
             gravity: 0, alpha: 1, softening: 12, repulsionPadding: 1.5,
-            repulsionRange: 6, repulsionAcceleration: 0.12, accelerationCap: 100,
+            repulsionRange: 6, repulsionAcceleration: pressure, accelerationCap: 100,
           });
           const afterMomentum = nodes.reduce((total, node) => [
             total[0] + node.gravity_mass * node.vx,
@@ -3118,14 +3538,18 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
           ], [0, 0]);
           return { before, after: nodes.map(node => [node.vx, node.vy]), stats,
             momentumDelta: [afterMomentum[0] - momentum[0], afterMomentum[1] - momentum[1]],
-            tangentialRelative: (nodes[1].vy - nodes[0].vy),
+            radialRelative: nodes[1].vx - nodes[0].vx,
+            outerRadialRelative: nodes[2].vx - nodes[0].vx,
+            tangentialRelative: nodes[1].vy - nodes[0].vy,
           };
         };
-        emit({ light: trial(1), heavy: trial(9) });
+        emit({ light: trial(1), heavy: trial(9),
+          lightControl: trial(1, 0), heavyControl: trial(9, 0) });
         """
     )
     light, heavy = report["light"], report["heavy"]
-    for trial in (light, heavy):
+    controls = (report["lightControl"], report["heavyControl"])
+    for trial, control in zip((light, heavy), controls):
         stats = trial["stats"]
         assert stats["systems"] == stats["anchors"] == 1
         assert stats["satellites"] == 2
@@ -3133,24 +3557,35 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
         assert stats["repulsionPadding"] == pytest.approx(1.5)
         assert stats["repulsionRange"] == pytest.approx(6)
         assert stats["repulsionAcceleration"] == pytest.approx(0.12)
-        assert 0 < stats["maximumRepulsion"] <= 0.12
-        # The planet moves outward (+x); the star recoils inward, preserving free-system
-        # momentum. The radial pressure cannot bleed the planet's relative tangential phase.
-        assert trial["after"][1][0] > trial["before"][1][0]
-        assert trial["after"][0][0] < trial["before"][0][0]
+        assert stats["gravitySetting"] == 0
+        assert stats["stellarGravityFloorSetting"] == 48
+        assert stats["stellarGravity"] == pytest.approx(750)
+        assert stats["eligibleStellarAnchors"] == 1
+        assert stats["fallbackAnchors"] == 0
+        assert stats["globalAnchors"] == 0
+        assert stats["stellarFloorActive"] is True
+        assert stats["surfaceRepulsions"] == 1
+        assert stats["maximumRepulsion"] > stats["maximumSampledAttraction"] > 0
+        assert stats["maximumNetRepulsion"] == pytest.approx(0.12)
+        assert stats["minimumSurfaceNetRepulsion"] == pytest.approx(0.12)
+        # The live Gravity-zero stellar floor still attracts; pressure exceeds that sampled
+        # attraction by the requested bounded margin at the painted surface.  Comparing with
+        # pressure disabled isolates the radial correction from the shared gravity field.
+        assert trial["radialRelative"] == pytest.approx(stats["maximumNetRepulsion"])
+        assert trial["radialRelative"] - control["radialRelative"] == pytest.approx(
+            stats["maximumRepulsion"]
+        )
         assert trial["momentumDelta"] == pytest.approx([0, 0], abs=1e-12)
         assert trial["tangentialRelative"] == pytest.approx(4)
-    # Changing a non-anchor planet's mass alters the common barycentric recoil only; it cannot
-    # turn that planet into a second gravity/repulsion source. The remote satellite shares the
-    # star's translation exactly, so its star-relative velocity remains unchanged.
-    for trial in (light, heavy):
-        star_delta = [after - before for after, before in zip(
-            trial["after"][0], trial["before"][0]
-        )]
-        outer_delta = [after - before for after, before in zip(
-            trial["after"][2], trial["before"][2]
-        )]
-        assert outer_delta == pytest.approx(star_delta, abs=1e-12)
+        # The inner planet is not promoted into a second pressure source: enabling its surface
+        # correction leaves the remote planet's star-relative radial response unchanged.
+        assert trial["outerRadialRelative"] == pytest.approx(
+            control["outerRadialRelative"], abs=1e-12
+        )
+    # Surface strength depends on the star field and geometry, not satellite evidence mass.
+    assert light["stats"]["maximumRepulsion"] == pytest.approx(
+        heavy["stats"]["maximumRepulsion"], abs=1e-12
+    )
 
 
 @requires_node
@@ -3329,7 +3764,7 @@ def test_galaxy_leapfrog_is_fixed_step_deterministic_and_does_not_depend_on_alph
           const kinetic = nodes.reduce((sum, node) => sum + 0.5 * node.gravity_mass
             * (node.vx * node.vx + node.vy * node.vy), 0);
           const dx = nodes[1].x - nodes[0].x, dy = nodes[1].y - nodes[0].y;
-          return kinetic - (I.galaxyGravityConstant(12) * 8)
+          return kinetic - (I.galaxyFallbackStellarGravityConstant(12) * 8)
             / Math.sqrt(dx * dx + dy * dy + 64);
         };
         const angularMomentum = nodes => nodes.reduce((sum, node) => sum + node.gravity_mass
@@ -4084,7 +4519,9 @@ def test_unequal_mass_local_seed_remains_a_bound_two_body_orbit() -> None:
     assert report["centered"] is True
     assert report["finite"] is True
     assert report["minimum"] >= 23.9
-    assert report["maximum"] <= 24.2
+    # Exact-2x gravity raises the integrator's dimensionless step at this deliberately coarse
+    # 0.525 fixture timestep; the orbit remains within 1.7% of its seeded radius.
+    assert report["maximum"] <= 24.4
 
 
 @requires_node
@@ -4341,7 +4778,7 @@ def test_many_massive_satellites_each_keep_a_star_only_circular_seed_and_visible
             orbit_tier: index + 2, gravity_mass: 3, radius: 2,
             x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, vx: 0, vy: 0 });
         }
-        const star = nodes[0], localG = I.galaxyLocalGravityConstant(48), softening = 32;
+        const star = nodes[0], localG = I.galaxyStellarGravityConstant(48), softening = 32;
         I.seedGalaxyOrbits(nodes, 763, 48, softening, false);
         const seeded = nodes.slice(1).map(node => {
           const dx = node.x - star.x, dy = node.y - star.y, radius = Math.hypot(dx, dy);
@@ -4482,8 +4919,8 @@ def test_system_orbital_seed_preserves_barycentre_and_hierarchical_motion() -> N
 
 
 @requires_node
-def test_global_system_seed_uses_the_18_unit_visible_speed_cap_without_breaking_momentum() -> None:
-    """High-field systems are visibly faster than the retired 10-unit global seed ceiling."""
+def test_global_system_seed_uses_release_stable_speed_cap_without_breaking_momentum() -> None:
+    """High-field systems use the release-stable visible cap without injecting momentum."""
     report = _run_node(
         """
         const nodes = [
@@ -4511,10 +4948,12 @@ def test_global_system_seed_uses_the_18_unit_visible_speed_cap_without_breaking_
         });
         """
     )
-    assert min(report["fieldSpeeds"]) > 18
-    # The deterministic settling kick trims the 18-unit cap slightly, but it can no longer
-    # collapse every high-field orbit onto the former 10-unit ceiling.
-    assert all(16 < item["speed"] <= 19 for item in report["relative"]), report
+    seed_limit = 18
+    assert min(report["fieldSpeeds"]) > seed_limit
+    # The deterministic settling kick and barycentric correction may trim the absolute
+    # star-relative speed slightly. It remains calibrated to the release-stable 18-unit cap.
+    assert all(seed_limit * 0.9 < item["speed"] <= seed_limit * 1.01
+               for item in report["relative"]), report
     assert all(abs(item["angular"]) > 1e-8 for item in report["relative"])
     assert report["momentum"] == pytest.approx([0, 0], abs=1e-10)
     assert report["anchor"][:2] == pytest.approx([0, 0], abs=1e-12)
@@ -4627,13 +5066,14 @@ def test_reduced_motion_keeps_eight_independent_solar_systems_orbiting() -> None
         I.seedGalaxyOrbits(nodes,91,48,32,true); I.seedGalaxySystemOrbits(nodes,91,48,40,true);
         const cs=()=>I.communityCenters(nodes),d=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b)),systems=[...Array(8).keys()].map(i=>`s${i}`),planets=nodes.filter(n=>n.orbit_tier>0);
         const pg=new Map(systems.map(k=>{const c=cs().get(k);return[k,Math.atan2(c.y,c.x)]})),pl=new Map(planets.map(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id);return[n.id,Math.atan2(n.y-a.y,n.x-a.x)]})),gt=new Map(systems.map(k=>[k,0])),lt=new Map(planets.map(n=>[n.id,0]));
-        let clear=Infinity,max=0,envelope=0;for(let i=0;i<240;i++){const t=I.integrateGalaxyLeapfrog(nodes,links,[],o);max=Math.max(max,t.maximumSpeed);envelope=t.farFieldConfinement.envelopeRadius;systems.forEach(k=>{const c=cs().get(k),a=Math.atan2(c.y,c.x);gt.set(k,gt.get(k)+d(a,pg.get(k)));pg.set(k,a)});planets.forEach(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id),q=Math.atan2(n.y-a.y,n.x-a.x);lt.set(n.id,lt.get(n.id)+d(q,pl.get(n.id)));pl.set(n.id,q);clear=Math.min(clear,Math.hypot(n.x-a.x,n.y-a.y)-n.radius-a.radius-1.5)});}
-        emit({global:[...gt.values()],local:[...lt.values()],clear,max,envelope,bounded:nodes.slice(1).every(n=>Math.hypot(n.x,n.y)+n.radius<=envelope+1e-8),finite:nodes.every(n=>[n.x,n.y,n.vx,n.vy].every(Number.isFinite))});
+        let clear=Infinity,max=0,envelope=0,speedCaps=0;for(let i=0;i<240;i++){const t=I.integrateGalaxyLeapfrog(nodes,links,[],o);max=Math.max(max,t.maximumSpeed);speedCaps+=t.speedCapped?1:0;envelope=t.farFieldConfinement.envelopeRadius;systems.forEach(k=>{const c=cs().get(k),a=Math.atan2(c.y,c.x);gt.set(k,gt.get(k)+d(a,pg.get(k)));pg.set(k,a)});planets.forEach(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id),q=Math.atan2(n.y-a.y,n.x-a.x);lt.set(n.id,lt.get(n.id)+d(q,pl.get(n.id)));pl.set(n.id,q);clear=Math.min(clear,Math.hypot(n.x-a.x,n.y-a.y)-n.radius-a.radius-1.5)});}
+        emit({global:[...gt.values()],local:[...lt.values()],clear,max,speedCaps,envelope,bounded:nodes.slice(1).every(n=>Math.hypot(n.x,n.y)+n.radius<=envelope+1e-8),finite:nodes.every(n=>[n.x,n.y,n.vx,n.vy].every(Number.isFinite))});
         """
     )
     assert report["finite"] is report["bounded"] is True
     assert report["clear"] >= -1e-9
     assert report["max"] <= 48
+    assert report["speedCaps"] == 0
     # At 30 Hz this is eight seconds of real solver time: every solar-system COM advances a
     # clearly visible 26° and every planet advances 40° about its dominant star. These
     # thresholds reject the previous slow, technically-nonzero drift while leaving bounded
@@ -4785,6 +5225,11 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         const exported = api.exportData();
         emit({
           mode: api.state().settings.mode,
+          settings: {
+            repel: api.state().settings.repel,
+            link: api.state().settings.link,
+            gravity: api.state().settings.gravity,
+          },
           sizeBy: api.state().sizeBy,
           forces: {
             charge: store.d3Forces.charge === null,
@@ -4810,6 +5255,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         """
     )
     assert report["mode"] == "galaxy"
+    assert report["settings"] == {"repel": 60, "link": 8, "gravity": 48}
     assert report["sizeBy"] == "mass"
     assert report["forces"] == {
         "charge": True,
@@ -4830,6 +5276,16 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
+    assert report["diagnostics"]["gravitySetting"] == 48
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(240)
+    assert report["diagnostics"]["localGravity"] == pytest.approx(120)
+    assert report["diagnostics"]["linkSetting"] == 8
+    assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
+    assert report["diagnostics"]["orbitalSeparationSetting"] == 60
+    assert report["diagnostics"]["orbitalSeparationPadding"] == pytest.approx(15)
+    assert report["diagnostics"]["orbitalSeparationStrength"] == pytest.approx(1)
+    assert report["diagnostics"]["crossSystemRepulsionStrength"] == pytest.approx(0.18)
+    assert report["diagnostics"]["systemOrbitSeedSpeedLimit"] == pytest.approx(18)
     assert report["diagnostics"]["systemAnchorExclusionPadding"] == pytest.approx(1.5)
     assert report["diagnostics"]["systemAnchorRepulsionRange"] == pytest.approx(6)
     assert report["diagnostics"]["systemAnchorRepulsionAcceleration"] == pytest.approx(0.12)
@@ -6287,9 +6743,9 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
         const expectedNodes = actualNodes.map(node => ({ ...node }));
         I.integrateGalaxyLeapfrog(expectedNodes, store.graphData.links, [], {
           gravity: 48,
-          softening: 32,
-          centralSoftening: 38.4,
-          bridgeSoftening: 30.72,
+          softening: 38.4,
+          centralSoftening: 48,
+          bridgeSoftening: 38.4,
           exactLimit: 64,
           theta: 0.85,
           localPairFraction: 0.15,
@@ -6298,22 +6754,33 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
               includeRelations: true,
               includeRelationSprings: false,
               skipSystemAnchorRelations: true,
+              skipOrbitalSystemRelations: true,
               orbitScale: 0.25,
               relationStrengthMultiplier: 2,
               relationForceCap: 1.6,
               relationAccelerationCap: 3.2,
+              relationConstraintStrengthMultiplier: 2,
+              relationConstraintResponseMultiplier: 1,
               relationConstraintRate: 24,
               relationConstraintMaxCorrection: 12,
-              relationPadding: 12,
+              relationPadding: 15,
               includeOrbitalSeparation: true,
-              orbitalSeparationPadding: 12,
-              orbitalSeparationStrength: 0.8,
+              orbitalSeparationPadding: 15,
+              orbitalSeparationStrength: 1,
+              crossCommunitySeparationPadding: 1.5,
+              crossCommunitySeparationStrength: 0.18,
               orbitalSeparationMaxCorrection: 4,
               orbitalSeparationMaxVelocityCorrection: 8,
               preserveLocalTangentialVelocity: true,
+              preserveSystemRadii: true,
               skipSystemAnchorPairs: true,
               systemAnchorExclusionPadding: 1.5,
-              localRelativeSpeedLimit: 16,
+              systemAnchorRepulsionRange: 6,
+              systemAnchorRepulsionAcceleration: 0.12,
+              includeMutualSystems: true,
+              mutualSystemGravityFraction: 0.12,
+              mutualSystemSoftening: 80,
+              localRelativeSpeedLimit: 48,
           timestep: 0.032,
           inwardConvergence: true,
           wallClockSeconds: 1 / 30,
@@ -6458,7 +6925,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
 
 
 @requires_node
-def test_explicit_galaxy_reheat_runs_a_bounded_physical_relaxation_burst() -> None:
+def test_explicit_galaxy_reheat_never_adds_bonus_physical_slices() -> None:
     report = _run_engine(
         """
         let nextFrame = 1;
@@ -6513,16 +6980,20 @@ def test_explicit_galaxy_reheat_runs_a_bounded_physical_relaxation_burst() -> No
         """
     )
     assert report["queued"]["reheatActivations"] == 1
-    assert report["queued"]["reheatStepsRemaining"] == 30
+    assert report["queued"]["reheatStepsRemaining"] == 0
     assert report["queued"]["reheatStepsApplied"] == 0
-    assert report["after"]["diagnostics"]["reheatStepsApplied"] == 10
-    assert report["after"]["diagnostics"]["reheatStepsRemaining"] == 20
-    assert report["after"]["diagnostics"]["lastReheatSubsteps"] == 2
+    assert report["after"]["diagnostics"]["reheatStepsApplied"] == 0
+    assert report["after"]["diagnostics"]["reheatStepsRemaining"] == 0
+    assert report["after"]["diagnostics"]["lastReheatSubsteps"] == 0
     assert report["after"]["diagnostics"]["steps"] \
-        == report["before"]["diagnostics"]["steps"] + 15
+        == report["before"]["diagnostics"]["steps"] + 5
+    assert report["after"]["diagnostics"]["frames"] \
+        == report["before"]["diagnostics"]["frames"] + 5
+    assert report["after"]["diagnostics"]["lastSubsteps"] == 1
     assert report["after"]["phase"] != pytest.approx(report["before"]["phase"])
     assert report["recoalesced"]["reheatActivations"] == 2
-    assert report["recoalesced"]["reheatStepsRemaining"] == 30
+    assert report["recoalesced"]["reheatStepsRemaining"] == 0
+    assert report["recoalesced"]["reheatStepsApplied"] == 0
     assert report["frozen"]["reheatStepsRemaining"] == 0
     assert report["d3"] == {"alpha": 0, "resets": 0, "reheats": 0}
 
@@ -6674,14 +7145,22 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     styles = PRIMARY_CSS.read_text(encoding="utf-8")
     for asset in ("d3.min.js", "force-graph.min.js", "engraphis-graph.js"):
         assert asset not in markup
+    assert 'id="graph-repel" type="range" min="0" max="120" value="60"' in markup
+    assert 'id="graph-link" type="range" min="4" max="80" value="8"' in markup
+    assert 'id="graph-gravity" type="range" min="0" max="400" value="48"' in markup
+    assert "{ id: 'graph-repel', key: 'repel', fallback: 60 }" in source
+    assert "{ id: 'graph-link', key: 'link', fallback: 8 }" in source
+    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 48 }" in source
 
     loader = source[source.index("function ensureGraphAssets()"):
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-galaxy-gravity-400'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-galaxy-release-stable-1'")
     assert d3 < force_graph < renderer
-    assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
+    assert '/v2-assets/ledger.js?v=20260811-galaxy-release-stable-1' in markup
+    assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
+    assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles
     assert ".force-graph-container .grabbable:active {" in styles

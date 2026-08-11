@@ -9,8 +9,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 - The dashboard Galaxy graph now caches its outer safety radius at 1.75× the initial painted
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
-- The Galaxy gravity slider now spans `0..400`, doubling its available movement range again while
-  retaining the existing default at `48`.
+- The Galaxy gravity slider now spans `0..400` while retaining the release-stable default
+  black-hole field of `240` and local field of `120`. Independent community stars run on a 2.5×
+  orbital clock and retain the calibrated default stellar well when Gravity is zero, while the
+  global black-hole well remains a true zero.
+- The Galaxy default orbital separation is now `60`, a 25% increase from `48`. Link and contact
+  projections remain contractive and correction-capped so dense layouts cannot overshoot or
+  ping-pong. Same-system contacts project along each declared stellar orbit so they preserve
+  radius, relative velocity, and system momentum instead of inflating the solar system.
 - Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
   the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
@@ -19,6 +25,16 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Historical graph views now keep at least one ghost relation's endpoints together under
   undersized node caps, and ghost evidence drilldowns resolve invalidated supporting memories
   instead of a colliding live canonical alias.
+
+### Fixed
+
+- Galaxy Reheat now wakes the persistent fixed-step clock without injecting bonus physics slices,
+  and cross-system separation is bounded so it cannot kick entire solar systems into a visible
+  fast-forward, ping-pong, or speed-cap pulse.
+- Ledger graph reloads now retire and cache-bust a renderer that fetched successfully but failed
+  to register, instead of replaying the same broken asset response.
+- Existing Galaxy preferences migrate only the retired `48` orbital-separation default to `60`;
+  deliberate custom values, including Gravity `0`, remain unchanged.
 
 ## [1.6] - 2026-08-08
 
