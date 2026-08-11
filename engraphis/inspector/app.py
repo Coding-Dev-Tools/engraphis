@@ -338,8 +338,14 @@ def create_app(
         # already applied its optional bearer boundary, so bypass the retired local
         # entitlement gate and let the owner recover their complete workspace.
         data = svc().export_workspace(workspace=workspace, recovery=True)
-        # Sanitize workspace name for filename to prevent header injection
-        safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in workspace)
+        # Sanitize workspace name for filename. Restrict to ASCII to prevent
+        # UnicodeEncodeError in Starlette's Latin-1 header encoding when workspace
+        # names contain non-Latin-1 characters (e.g., CJK). isascii()+isalnum()
+        # filters out anything that would crash the response construction.
+        safe_ws = "".join(
+            c if c.isascii() and (c.isalnum() or c in "-_.") else "_"
+            for c in workspace
+        ) or "workspace"
         filename = "engraphis-export-%s-%s.json" % (
             safe_ws,
             time.strftime("%Y%m%d"),
