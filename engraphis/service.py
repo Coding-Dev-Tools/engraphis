@@ -7746,10 +7746,10 @@ class MemoryService:
         if lower_time is not None and upper_time is not None and lower_time > upper_time:
             raise ValidationError("time_from must be less than or equal to time_to")
 
-        # Classify physical entity visibility across the complete workspace history
-        # before applying the entity candidate cap. The same set-wise result is reused
-        # below for canonical endpoint pruning so the edge index is scanned only once.
-        visibility_rows = self.store.conn.execute(
+        # Classify public endpoint visibility before applying the entity candidate cap.
+        # A repository filter scopes the expensive support join; the endpoint-only scan
+        # below still preserves workspace-wide private-edge classification.
+        visibility_sql = (
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
             "WHEN visibility_support.edge_id IS NULL THEN 1 "
@@ -7762,15 +7762,20 @@ class MemoryService:
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
+        )
+        visibility_params: list[Any] = [wid]
+        if repo_id:
+            visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
+            visibility_params.append(repo_id)
+        visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst",
-            (wid,),
+            "visibility_edge.src, visibility_edge.dst"
+        )
+        visibility_rows = self.store.conn.execute(
+            visibility_sql, visibility_params,
         ).fetchall()
-        # The joined visibility scan is intentionally repository-scoped, but the
-        # entity-pruning pass must still know which workspace entities participate
-        # in any unrelated historical/private edge. Fetch only endpoints for that
-        # workspace-wide set so those edges cannot promote private entities without
-        # materializing their support rows.
+        # Workspace-wide endpoints still prevent an unrelated private edge from
+        # promoting a workspace-scoped entity into the selected repository.
         touching_rows = self.store.conn.execute(
             "SELECT src, dst FROM edges WHERE workspace_id=?", (wid,)
         ).fetchall()
