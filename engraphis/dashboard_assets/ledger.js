@@ -432,7 +432,8 @@
 
   function showNotice(message) {
     const text = String(message || '');
-    byId('notice-text').textContent = text;
+    const textEl = byId('notice-text');
+    if (textEl) textEl.textContent = text;
     const banner = byId('notice-banner');
     if (!banner) return;
     banner.textContent = text;
@@ -683,9 +684,10 @@
   }
 
   function setConnection(message, healthy = true) {
-    byId('connection-status').textContent = message;
+    const status = byId('connection-status');
+    if (status) status.textContent = message;
     const dot = document.querySelector('.status-dot');
-    dot.classList.toggle('unhealthy', !healthy);
+    if (dot) dot.classList.toggle('unhealthy', !healthy);
   }
 
   function memoryType(memory) {
@@ -1106,8 +1108,10 @@
   }
 
   function filteredMemories() {
-    const filter = byId('library-filter').value.trim().toLowerCase();
-    const type = byId('library-type').value;
+    const filterEl = byId('library-filter');
+    const typeEl = byId('library-type');
+    const filter = filterEl ? filterEl.value.trim().toLowerCase() : '';
+    const type = typeEl ? typeEl.value : '';
     return state.memories.filter(memory => {
       const matchesText = !filter || `${memory.title || ''} ${memory.content || ''} ${memory.summary || ''}`
         .toLowerCase().includes(filter);
