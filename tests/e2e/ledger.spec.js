@@ -391,6 +391,109 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
+test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
+  await mockApi(page);
+  const rendererRequests = [];
+  await page.route('**/v2-assets/engraphis-graph.js*', async route => {
+    rendererRequests.push(route.request().url());
+    if (rendererRequests.length === 1) {
+      // A valid 200 response that never defines EngraphisGraph models a stale cached asset that
+      // fetched successfully but failed while executing. `onerror` cannot detect this case.
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/javascript',
+        body: 'window.__nonRegisteringGraphAsset = true;',
+      });
+    }
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
+  expect(rendererRequests).toHaveLength(1);
+  const first = new URL(rendererRequests[0]);
+  expect(first.searchParams.get('v')).toBe('20260811-galaxy-release-stable-1');
+  expect(first.searchParams.has('retry')).toBe(false);
+
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  expect(rendererRequests).toHaveLength(2);
+  const second = new URL(rendererRequests[1]);
+  expect(second.searchParams.get('v')).toBe('20260811-galaxy-release-stable-1');
+  expect(second.searchParams.get('retry')).toBe('1');
+});
+
+test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
+  const key = 'engraphis-ledger-graph-preferences-v1';
+  const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
+    localStorage.setItem(storageKey, JSON.stringify(value));
+  }, { storageKey: key, value: preferences });
+  const readPreferences = () => page.evaluate(storageKey => {
+    const value = localStorage.getItem(storageKey);
+    return value === null ? null : JSON.parse(value);
+  }, key);
+
+  await mockApi(page);
+  await page.goto('/');
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  // A first-time dashboard may use the new HTML default without manufacturing preferences.
+  expect(await readPreferences()).toBeNull();
+
+  await page.evaluate(() => {
+    [['graph-repel', '120'], ['graph-link', '80'], ['graph-gravity', '400']]
+      .forEach(([id, value]) => {
+        const control = document.getElementById(id);
+        control.value = value;
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    document.getElementById('graph-reset-tuning').click();
+  });
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+
+  await writePreferences({
+    preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
+    layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-gravity')).toHaveValue('0');
+  const migrated = await readPreferences();
+  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.preset).toBe('galaxy');
+  expect(migrated.style).toBe('solar');
+  expect(migrated.tuning.repel).toBe(60);
+  expect(migrated.tuning.link).toBe(8);
+  expect(migrated.tuning.gravity).toBe(0);
+  expect(migrated.layers).toEqual({
+    temporal: false, entity: true, causal: false, semantic: true, code: false,
+  });
+
+  await writePreferences({
+    preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('73');
+  await expect(page.locator('#graph-link')).toHaveValue('21');
+  await expect(page.locator('#graph-gravity')).toHaveValue('0');
+  const custom = await readPreferences();
+  expect(custom.physicsVersion).toBe(2);
+  expect(custom.tuning.repel).toBe(73);
+  expect(custom.tuning.link).toBe(21);
+  expect(custom.tuning.gravity).toBe(0);
+
+  // Once versioned, 48 is a deliberate user selection rather than the retired default.
+  await writePreferences({
+    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('48');
+  expect((await readPreferences()).tuning.repel).toBe(48);
+});
+
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
@@ -1022,9 +1125,11 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
   await expect(page.getByLabel('Size by')).toBeDisabled();
   await expect(page.locator('#graph-repel-label')).toHaveText('Orbital separation');
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Gravity strength · loose ↔ tight');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
