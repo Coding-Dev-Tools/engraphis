@@ -2391,11 +2391,12 @@ def build_graph_scene(
             node_id for node_id in selected if nodes[node_id].get("ghost")
         }
         reserved_history_edges: list[dict] = []
+        sorted_ghost = sorted(ghost_relations, key=lambda item: (
+            -float(item.get("strength") or 0.0), item["id"]
+        ))
         if edge_cap and historical_node_ids:
             uncovered = set(historical_node_ids)
-            for edge in sorted(ghost_relations, key=lambda item: (
-                -float(item.get("strength") or 0.0), item["id"]
-            )):
+            for edge in sorted_ghost:
                 touched = {
                     endpoint for endpoint in (edge["source"], edge["target"])
                     if endpoint in historical_node_ids
@@ -2411,10 +2412,10 @@ def build_graph_scene(
             graph, selected, level, remaining_capacity,
         )
         scene_edges.extend(reserved_history_edges)
+        reserved_set = {edge["id"] for edge in reserved_history_edges}
         scene_edges.extend(
-            edge for edge in sorted(ghost_relations, key=lambda item: (
-                -float(item.get("strength") or 0.0), item["id"]
-            )) if edge not in reserved_history_edges
+            edge for edge in sorted_ghost
+            if edge["id"] not in reserved_set
         )
         scene_edges = scene_edges[:edge_cap]
     communities = _community_summaries(graph, chosen_communities, selected)
