@@ -393,9 +393,12 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
-    window.setTimeout = (callback, delay, ...args) => nativeSetTimeout(
-      callback, delay === 12_000 ? 80 : delay, ...args,
-    );
+    let shortenedGraphDeadline = false;
+    window.setTimeout = (callback, delay, ...args) => {
+      const firstGraphDeadline = delay === 12_000 && !shortenedGraphDeadline;
+      if (firstGraphDeadline) shortenedGraphDeadline = true;
+      return nativeSetTimeout(callback, firstGraphDeadline ? 80 : delay, ...args);
+    };
   });
   await mockApi(page);
   let releaseStalledAsset;
