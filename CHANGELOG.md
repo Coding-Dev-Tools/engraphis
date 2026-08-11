@@ -11,6 +11,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
 - The Galaxy gravity slider now spans `0..200`, doubling the available movement range while
   retaining the existing default at `48`.
+- Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
+  2,000 relations; larger Galaxy scenes and non-Galaxy full views retain the deterministic
+  fallback.
 
 ## [1.6] - 2026-08-08
 
