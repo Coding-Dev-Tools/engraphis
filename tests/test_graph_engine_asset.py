@@ -767,9 +767,11 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
             I.galaxyGravityConstant(200)],
           split: {
             blackHole: [I.galaxyBlackHoleGravityConstant(48),
-              I.galaxyBlackHoleGravityConstant(100)],
+              I.galaxyBlackHoleGravityConstant(100),
+              I.galaxyBlackHoleGravityConstant(200)],
             local: [I.galaxyLocalGravityConstant(48),
-              I.galaxyLocalGravityConstant(100)],
+              I.galaxyLocalGravityConstant(100),
+              I.galaxyLocalGravityConstant(200)],
           },
           clamps: [I.galaxyGravityConstant(-1), I.galaxyGravityConstant(201),
             I.galaxyGravityConstant(Infinity), I.galaxyGravityConstant(NaN)],
@@ -793,8 +795,8 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     )
     assert report["endpoints"][:2] == [120, 432]
     assert report["endpoints"][2] == pytest.approx(1371.6923076923076)
-    assert report["split"]["blackHole"] == [240, 864]
-    assert report["split"]["local"] == [120, 432]
+    assert report["split"]["blackHole"] == pytest.approx([240, 864, 2743.3846153846152])
+    assert report["split"]["local"] == pytest.approx([120, 432, 1371.6923076923076])
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
@@ -1077,7 +1079,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) <= 45
+    assert max(report["capped"]) == pytest.approx(142.8846153846154)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -4015,6 +4017,67 @@ def test_system_orbital_seed_preserves_barycentre_and_hierarchical_motion() -> N
 
 
 @requires_node
+def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
+    """The complete public overview remains expanded and physical; larger scenes stay bounded."""
+    report = _run_engine(
+        """
+        const within = [
+          I.galaxySceneWithinLiveLimit({ nodes: Array(1000), links: Array(2000) }),
+          I.galaxySceneWithinLiveLimit({ nodes: Array(1001), links: [] }),
+          I.galaxySceneWithinLiveLimit({ nodes: [], links: Array(2001) }),
+        ];
+        const scene = count => ({
+          meta: { layout_seed: 91 },
+          nodes: Array.from({ length: count }, (_, index) => ({
+            id: index === 0 ? 'black-hole' : `node-${index}`,
+            community_id: 'core',
+            system_anchor_id: 'black-hole',
+            anchor_role: index === 0 ? 'global' : 'none',
+            orbit_tier: index,
+            gravity_mass: index === 0 ? 16 : 1,
+            visual_radius: index === 0 ? 8 : 2,
+            x: index === 0 ? 0 : 45 + index,
+            y: index % 7,
+            vx: 0,
+            vy: 0,
+          })),
+          edges: [],
+        });
+
+        const galaxy = G.create(el, { reducedMotion: () => true });
+        galaxy.setData(scene(601));
+        galaxy.setCollapse('auto');
+        store.onZoom({ k: 0.1 });
+        const live = galaxy.physicsDiagnostics();
+        const autoCollapsed = galaxy.state().collapsed;
+        galaxy.setCollapse(true);
+        const explicitCollapsed = galaxy.state().collapsed;
+        galaxy.destroy();
+
+        const full = G.create(el, {
+          reducedMotion: () => true,
+          renderMode: 'full',
+        });
+        full.setPreset('original');
+        full.setData(scene(601));
+        const classicFull = full.physicsDiagnostics();
+        emit({ within, live, autoCollapsed, explicitCollapsed, classicFull });
+        """
+    )
+    assert report["within"] == [True, False, False]
+    assert report["live"]["renderedNodes"] == 601
+    assert report["live"]["galaxyLiveNodeLimit"] == 1000
+    assert report["live"]["galaxyLiveLinkLimit"] == 2000
+    assert report["live"]["withinGalaxyLiveLimit"] is True
+    assert report["live"]["largeRenderTier"] is True
+    assert report["live"]["staticLayout"] is False
+    assert report["autoCollapsed"] is False
+    assert report["explicitCollapsed"] is True
+    assert report["classicFull"]["mode"] == "original"
+    assert report["classicFull"]["staticLayout"] is True
+
+
+@requires_node
 def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     report = _run_engine(
         """
@@ -5266,10 +5329,13 @@ def test_node_labels_are_capped_at_the_configured_density() -> None:
         store.graphData.nodes.forEach((node, index) => {
           node.x = index * 10; node.y = 0; store.nodeCanvasObject(node, ctx, 1);
         });
+        const beforePost = labels.slice();
+        store.onRenderFramePost(ctx, 1);
         const names = labels.filter(value => value.startsWith('n'));
-        emit({ names, distinct: [...new Set(names)] });
+        emit({ beforePost, names, distinct: [...new Set(names)] });
         """
     )
+    assert report["beforePost"] == [], "node labels must wait until every node body is painted"
     assert len(report["distinct"]) == 3
     assert len(report["names"]) == 6  # shadow + foreground per selected node
 
@@ -5302,6 +5368,7 @@ def test_node_labels_use_the_active_theme_text_colour() -> None:
           createLinearGradient() { return { addColorStop() {} }; },
         };
         store.nodeCanvasObject(data.nodes[0], ctx, 1);
+        store.onRenderFramePost(ctx, 1);
         emit({ styles });
         """
     )
@@ -5936,7 +6003,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-bounded-galaxy'")
     assert d3 < force_graph < renderer
     assert "if (graphAssetsPromise === attempt) graphAssetsPromise = null" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

@@ -78,6 +78,16 @@
      makes the gravity control compact/expand the layout, and leaves the UI responsive. */
   const FULL_FORCE_NODE_LIMIT = LARGE_NODE_LIMIT;
   const FULL_FORCE_LINK_LIMIT = LARGE_LINK_LIMIT;
+  /* The v2 overview scene is bounded at 1,000 nodes / 2,000 edges. Galaxy keeps that
+     complete overview physical even after the canvas enters its cheaper 600-node material
+     tier. Non-Galaxy complete snapshots retain the older FULL_FORCE_* fallback. */
+  const GALAXY_LIVE_NODE_LIMIT = 1000;
+  const GALAXY_LIVE_LINK_LIMIT = 2000;
+  function galaxySceneWithinLiveLimit(data) {
+    const scene = data || {};
+    return (scene.nodes || []).length <= GALAXY_LIVE_NODE_LIMIT
+      && (scene.links || []).length <= GALAXY_LIVE_LINK_LIMIT;
+  }
   const GALAXY_EXACT_LIMIT = 64;
   const GALAXY_BARNES_HUT_THETA = 0.85;
   const GALAXY_GRAVITY_MAXIMUM = 200;
@@ -4986,6 +4996,15 @@
       return !!(visibilityDocument && visibilityDocument.hidden === true);
     }
 
+    function autoCollapseEligible() {
+      if (raw.nodes.length <= 500) return false;
+      /* Keep a bounded Galaxy overview expanded after auto-fit. Explicit Collapse=true still
+         works; oversized Galaxy and every non-Galaxy layout retain automatic collapse. */
+      return state.settings.mode !== 'galaxy' || !galaxySceneWithinLiveLimit({
+        nodes: raw.nodes, links: raw.links,
+      });
+    }
+
     function galaxyDynamicsEligible() {
       if (!hasBrowserFrameClock || destroyed || !running || pageHidden()) return false;
       if (state.settings.mode !== 'galaxy' || state.settings.frozen || reduced()
@@ -5168,6 +5187,14 @@
         running,
         frozen: state.settings.frozen === true,
         staticLayout: staticFullLayout,
+        renderedNodes: (data.nodes || []).length,
+        renderedLinks: (data.links || []).length,
+        galaxyLiveNodeLimit: GALAXY_LIVE_NODE_LIMIT,
+        galaxyLiveLinkLimit: GALAXY_LIVE_LINK_LIMIT,
+        withinGalaxyLiveLimit: galaxySceneWithinLiveLimit(data),
+        /* Large paint omits decorative material work while the bounded physical solver can
+           remain live when motion is enabled. */
+        largeRenderTier: materialLow,
         collapsed,
         reducedMotion: reduced(),
         hidden: pageHidden(),
@@ -5473,9 +5500,12 @@
       const fullGraph = state.renderMode === 'full';
       const galaxyMode = state.settings.mode === 'galaxy';
       const wasStatic = staticFullLayout;
-      const overLiveLimit = data.nodes.length > FULL_FORCE_NODE_LIMIT
+      const overGalaxyLiveLimit = !galaxySceneWithinLiveLimit(data);
+      const overFullForceLimit = data.nodes.length > FULL_FORCE_NODE_LIMIT
         || data.links.length > FULL_FORCE_LINK_LIMIT;
-      staticFullLayout = overLiveLimit && (galaxyMode || fullGraph);
+      staticFullLayout = galaxyMode
+        ? overGalaxyLiveLimit
+        : fullGraph && overFullForceLimit;
       materialLow = data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
       large = fullGraph || data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
       dense = data.links.length > DENSE_LINK_LIMIT;
@@ -5861,7 +5891,7 @@
            Keep auto-collapse for true zoom-out, but do not hide a freshly selected arrangement
            merely because its fit scale is below the old, overly eager threshold. */
         const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
-        const canAutoCollapse = raw.nodes.length > 500;
+        const canAutoCollapse = autoCollapseEligible();
         const next = canAutoCollapse && zoom < collapseThreshold;
         if (next !== collapsed) {
           collapsed = next;
@@ -6466,7 +6496,7 @@
     api.setCollapse = mode => {
       state.collapse = state.renderMode === 'full' ? false : mode;
       const collapseThreshold = state.settings.mode === 'communities' ? 0.22 : 0.42;
-      const canAutoCollapse = raw.nodes.length > 500;
+      const canAutoCollapse = autoCollapseEligible();
       const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && canAutoCollapse && zoom < collapseThreshold));
       collapsed = next;
       render(true, true);
@@ -6571,7 +6601,7 @@
       esc, hexRgb, alpha, contrastOn, communities, betweenness, findBridges, maxOf,
       graphNodeRadius, evidenceNodeRadius, sanitizeEvidenceMetrics, fallbackGravityMass,
       radiusFromGravityMass, galaxyGravityConstant, galaxyGravityMaximum: GALAXY_GRAVITY_MAXIMUM,
-      galaxyBlackHoleGravityConstant, galaxyLocalGravityConstant,
+      galaxyBlackHoleGravityConstant, galaxyLocalGravityConstant, galaxySceneWithinLiveLimit,
       galaxyRelationOrbitScale,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, ensureGalaxyPositions,
