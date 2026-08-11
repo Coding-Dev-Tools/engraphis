@@ -122,12 +122,12 @@
   }
   /* A fit-to-view galaxy compresses stellar and galactic distances onto one canvas, so using
      one physical clock made a valid planet orbit visually disappear under its system's
-     black-hole sweep. Give independent community stars a 2.5x angular clock by multiplying
+     black-hole sweep. Give independent community stars a 1.5x angular clock by multiplying
      their gravitational parameter by clock^2. Both the circular seed and every live
      inverse-square sample consume this same constant: the result is a faster bound central
      orbit, not a per-frame carousel or an unbalanced tangential kick. The global anchor keeps
      the original local scale because its surrounding bulge belongs to the black-hole well. */
-  const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;
+  const GALAXY_STELLAR_ORBIT_CLOCK = 1.5;
   function galaxyStellarGravityConstant(setting) {
     return galaxyLocalGravityConstant(setting)
       * GALAXY_STELLAR_ORBIT_CLOCK * GALAXY_STELLAR_ORBIT_CLOCK;
@@ -2146,7 +2146,6 @@
       crossCommunityPairs: 0, crossCommunityOverlaps: 0,
       correctionDistance: 0, crossCommunityCorrectionDistance: 0,
       maximumNodeShift: 0, aggregateLimited: false,
-      radialPreservedContacts: 0, radiusPreservedNodes: 0,
     };
     if (bodies.length < 2 || Math.max(strength, crossCommunityStrength) <= 0) return stats;
     const bodyRadius = node => finitePositive(
@@ -2256,68 +2255,6 @@
         }
       }
     }));
-    /* Generic planet/planet pressure should change orbital phase, not silently inflate the
-       orbit. For a free server-authored system, map each accumulated local correction onto the
-       circular manifold about its declared dominant star. Expressing the tangent displacement
-       as an arc (rather than adding the tangent vector as a chord) preserves radius exactly.
-       The common mass-weighted shift is then removed from every member, including the star, so
-       the free system retains its barycentre. A pointer-owned dominant star is an external
-       reservoir and stays exact while its planets still move along their circles; a pointer-
-       owned satellite and compatibility systems keep the legacy Cartesian projection. Cross-
-       system pressure remains a rigid group translation. */
-    const preservedGroups = [];
-    if (opts.preserveSystemRadii === true) groups.forEach(group => {
-      const anchor = group.anchor;
-      const anchorId = anchor && anchor.id !== undefined && anchor.id !== null
-        ? String(anchor.id) : '';
-      const explicitlyAnchored = anchorId && group.nodes.some(node =>
-        node.system_anchor_id !== undefined && node.system_anchor_id !== null
-        && String(node.system_anchor_id) === anchorId);
-      const fixedMember = opts.fixedNodeId === undefined || opts.fixedNodeId === null
-        ? null : group.nodes.find(node => node.id === opts.fixedNodeId) || null;
-      const externallyFixedAnchor = fixedMember === anchor;
-      if (!anchor || anchor.anchor_role === 'global'
-        || (group.fixed && !externallyFixedAnchor) || !explicitlyAnchored) return;
-      const entries = group.nodes.map(node => {
-        const mass = finitePositive(node.gravity_mass, 1, 1000);
-        if (node === anchor) return { node, mass, radius: 0, angle: 0, arc: 0 };
-        const dx = node.x - anchor.x, dy = node.y - anchor.y;
-        const radius = Math.hypot(dx, dy);
-        if (!(radius > 1e-9)) return { node, mass, radius: 0, angle: 0, arc: 0 };
-        const shift = shifts.get(node);
-        const tangentX = -dy / radius, tangentY = dx / radius;
-        return {
-          node, mass, radius, angle: Math.atan2(dy, dx),
-          arc: shift.x * tangentX + shift.y * tangentY,
-        };
-      });
-      const totalMass = entries.reduce((sum, entry) => sum + entry.mass, 0);
-      const contactCount = contacts.reduce((count, contact) =>
-        count + (groupForNode.get(contact.left) === group ? 1 : 0), 0);
-      if (!(totalMass > 0) || !contactCount) return;
-      stats.radialPreservedContacts += contactCount;
-      stats.radiusPreservedNodes += entries.filter(entry =>
-        entry.radius > 0 && Math.abs(entry.arc) > 1e-12).length;
-      preservedGroups.push({ group, anchor, entries, totalMass, externallyFixedAnchor });
-      const rotations = entries.map(entry => {
-        if (!(entry.radius > 0)) return { entry, x: 0, y: 0 };
-        entry.appliedAngle = entry.arc / entry.radius;
-        const angle = entry.angle + entry.appliedAngle;
-        return { entry,
-          x: Math.cos(angle) * entry.radius - (entry.node.x - anchor.x),
-          y: Math.sin(angle) * entry.radius - (entry.node.y - anchor.y),
-        };
-      });
-      const driftX = externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.x, 0) / totalMass;
-      const driftY = externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.y, 0) / totalMass;
-      rotations.forEach(item => {
-        const shift = shifts.get(item.entry.node);
-        shift.x = item.x - driftX;
-        shift.y = item.y - driftY;
-      });
-    });
     groups.forEach(group => group.nodes.forEach(node => {
       const shift = shifts.get(node);
       shift.x += group.shift.x;
@@ -2329,94 +2266,31 @@
     });
     const positionScale = maximumCorrection > 0 && maximumNodeShift > maximumCorrection
       ? maximumCorrection / maximumNodeShift : 1;
-    const preservedNodes = new Set();
-    if (positionScale < 1) preservedGroups.forEach(info => {
-      const rotations = info.entries.map(entry => {
-        preservedNodes.add(entry.node);
-        if (!(entry.radius > 0)) return { entry, x: 0, y: 0 };
-        entry.appliedAngle = entry.arc * positionScale / entry.radius;
-        const angle = entry.angle + entry.appliedAngle;
-        return { entry,
-          x: Math.cos(angle) * entry.radius - (entry.node.x - info.anchor.x),
-          y: Math.sin(angle) * entry.radius - (entry.node.y - info.anchor.y),
-        };
-      });
-      const driftX = info.externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.x, 0) / info.totalMass;
-      const driftY = info.externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.y, 0) / info.totalMass;
-      rotations.forEach(item => {
-        const shift = shifts.get(item.entry.node);
-        shift.x = item.x - driftX + info.group.shift.x * positionScale;
-        shift.y = item.y - driftY + info.group.shift.y * positionScale;
-      });
-    });
     shifts.forEach((shift, node) => {
-      const scale = preservedNodes.has(node) ? 1 : positionScale;
-      node.x += shift.x * scale;
-      node.y += shift.y * scale;
+      node.x += shift.x * positionScale;
+      node.y += shift.y * positionScale;
     });
     stats.correctionDistance *= positionScale;
     stats.crossCommunityCorrectionDistance *= positionScale;
     stats.maximumNodeShift = maximumNodeShift * positionScale;
     stats.aggregateLimited = positionScale < 1;
 
-    /* The radius vector and its star-relative velocity are one phase-space state. Rotating only
-       the position turns a circular tangent partly radial and manufactures eccentricity on the
-       next kick. Apply the identical signed angle to each relative velocity, then subtract one
-       mass-weighted common velocity from every free member. That common term cancels from every
-       planet-minus-star velocity while preserving total system momentum. A fixed star remains
-       the external frame and absorbs the corresponding momentum. */
-    preservedGroups.forEach(info => {
-      const anchorVx = Number.isFinite(info.anchor.vx) ? info.anchor.vx : 0;
-      const anchorVy = Number.isFinite(info.anchor.vy) ? info.anchor.vy : 0;
-      const rotations = info.entries.map(entry => {
-        if (!(entry.radius > 0) || !Number.isFinite(entry.appliedAngle)) {
-          return { entry, x: 0, y: 0 };
-        }
-        const nodeVx = Number.isFinite(entry.node.vx) ? entry.node.vx : 0;
-        const nodeVy = Number.isFinite(entry.node.vy) ? entry.node.vy : 0;
-        const relativeVx = nodeVx - anchorVx, relativeVy = nodeVy - anchorVy;
-        const cosine = Math.cos(entry.appliedAngle), sine = Math.sin(entry.appliedAngle);
-        return { entry,
-          x: relativeVx * cosine - relativeVy * sine - relativeVx,
-          y: relativeVx * sine + relativeVy * cosine - relativeVy,
-        };
-      });
-      const driftX = info.externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.x, 0) / info.totalMass;
-      const driftY = info.externallyFixedAnchor ? 0 : rotations.reduce(
-        (sum, item) => sum + item.entry.mass * item.y, 0) / info.totalMass;
-      rotations.forEach(item => {
-        const shift = velocityShifts.get(item.entry.node);
-        shift.x += item.x - driftX;
-        shift.y += item.y - driftY;
-      });
-    });
-
     /* Recompute same-system normals after the simultaneous projection, then remove only the
        local contact's relative radial motion and the angular momentum manufactured by its
        enlarged lever arm. Cross-system geometry never reaches this velocity pass, so dense
        contacts cannot drain the solar-system COM orbits around the black hole. Velocity
        deltas are accumulated from the unchanged phase and share one cap. */
-    const preservedGroupSet = new Set(preservedGroups.map(info => info.group));
     contacts.forEach(contact => {
-      /* The circular-manifold solve already resolved this contact without changing orbital
-         energy. A Cartesian pair-normal impulse here would reintroduce a star-relative radial
-         velocity immediately after the phase-space rotation. */
-      if (preservedGroupSet.has(groupForNode.get(contact.left))) return;
       const dx = contact.right.x - contact.left.x;
       const dy = contact.right.y - contact.left.y;
       const distance = Math.hypot(dx, dy);
       if (!(distance > 1e-9)) return;
       const unitX = dx / distance, unitY = dy / distance;
       const tangentX = -unitY, tangentY = unitX;
-      const leftDelta = velocityShifts.get(contact.left);
-      const rightDelta = velocityShifts.get(contact.right);
-      const leftVx = (Number.isFinite(contact.left.vx) ? contact.left.vx : 0) + leftDelta.x;
-      const leftVy = (Number.isFinite(contact.left.vy) ? contact.left.vy : 0) + leftDelta.y;
-      const rightVx = (Number.isFinite(contact.right.vx) ? contact.right.vx : 0) + rightDelta.x;
-      const rightVy = (Number.isFinite(contact.right.vy) ? contact.right.vy : 0) + rightDelta.y;
+      const leftVx = Number.isFinite(contact.left.vx) ? contact.left.vx : 0;
+      const leftVy = Number.isFinite(contact.left.vy) ? contact.left.vy : 0;
+      const rightVx = Number.isFinite(contact.right.vx) ? contact.right.vx : 0;
+      const rightVy = Number.isFinite(contact.right.vy) ? contact.right.vy : 0;
       const relativeVx = rightVx - leftVx, relativeVy = rightVy - leftVy;
       const normalSpeed = relativeVx * unitX + relativeVy * unitY;
       const tangentSpeed = relativeVx * tangentX + relativeVy * tangentY;
@@ -2427,6 +2301,8 @@
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentX;
       const deltaVy = (targetNormalSpeed - normalSpeed) * unitY
         + (tangentSpeed * tangentScale - tangentSpeed) * tangentY;
+      const leftDelta = velocityShifts.get(contact.left);
+      const rightDelta = velocityShifts.get(contact.right);
       leftDelta.x -= deltaVx * contact.leftInverseMass / contact.inverseMass;
       leftDelta.y -= deltaVy * contact.leftInverseMass / contact.inverseMass;
       rightDelta.x += deltaVx * contact.rightInverseMass / contact.inverseMass;
@@ -3434,7 +3310,6 @@
         maxCorrection: opts.orbitalSeparationMaxCorrection,
         maxVelocityCorrection: opts.orbitalSeparationMaxVelocityCorrection,
         preserveTangentialVelocity: opts.preserveLocalTangentialVelocity === true,
-        preserveSystemRadii: opts.preserveSystemRadii === true,
         skipSystemAnchorPairs: opts.skipSystemAnchorPairs === true,
         fixedNodeId: opts.fixedNodeId,
       })
@@ -3501,7 +3376,7 @@
       padding: opts.systemAnchorExclusionPadding,
     });
     let boundaryIterations = 0;
-    for (let iteration = 0; iteration < 48; iteration++) {
+    for (let iteration = 0; iteration < 24; iteration++) {
       stellarPasses.push(applyGalaxySystemAnchorExclusion(bodies, {
         padding: opts.systemAnchorExclusionPadding,
         fixedNodeId: opts.fixedNodeId,
@@ -5601,10 +5476,6 @@
         /* Contacts must not erase a planet's tangential phase. The dominant-star surface
            handles that hard minimum; generic pressure remains active for non-anchor pairs. */
         preserveLocalTangentialVelocity: true,
-        /* Dense planet/planet contacts resolve along each declared stellar orbit instead of
-           pumping the system radially outward. The manifold projection is mass-balanced and
-           keeps a pointer-owned dominant star as its external fixed frame. */
-        preserveSystemRadii: true,
         skipSystemAnchorPairs: true,
         systemAnchorExclusionPadding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
         systemAnchorRepulsionRange: GALAXY_SYSTEM_ANCHOR_REPULSION_RANGE,
