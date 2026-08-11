@@ -1738,6 +1738,343 @@ def test_cross_system_repulsion_is_weak_bounded_and_only_cancels_closing_motion(
 
 
 @requires_node
+def test_cross_system_repulsion_translates_whole_systems_without_warping_orbits() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'left-star', community_id: 'left-system', x: 0, y: 0,
+            vx: 1, vy: 0, radius: 1, gravity_mass: 3 },
+          { id: 'left-moon', community_id: 'left-system', x: 2, y: 1,
+            vx: 1, vy: 2, radius: 1, gravity_mass: 1 },
+          { id: 'right-star', community_id: 'right-system', x: 5, y: 0,
+            vx: -1, vy: 0, radius: 1, gravity_mass: 2 },
+          { id: 'right-moon', community_id: 'right-system', x: 7, y: -1,
+            vx: -1, vy: -3, radius: 1, gravity_mass: 1 },
+        ];
+        const options = {
+          padding: 12, strength: 0,
+          crossCommunityPadding: 1.5, crossCommunityStrength: 0.16,
+          maxCorrection: 4, maxVelocityCorrection: 8,
+        };
+        const relativeState = nodes => [
+          nodes[1].x - nodes[0].x, nodes[1].y - nodes[0].y,
+          nodes[1].vx - nodes[0].vx, nodes[1].vy - nodes[0].vy,
+          nodes[3].x - nodes[2].x, nodes[3].y - nodes[2].y,
+          nodes[3].vx - nodes[2].vx, nodes[3].vy - nodes[2].vy,
+        ];
+        const totals = nodes => {
+          const mass = nodes.reduce((sum, node) => sum + node.gravity_mass, 0);
+          return {
+            center: [
+              nodes.reduce((sum, node) => sum + node.x * node.gravity_mass, 0) / mass,
+              nodes.reduce((sum, node) => sum + node.y * node.gravity_mass, 0) / mass,
+            ],
+            momentum: [
+              nodes.reduce((sum, node) => sum + node.vx * node.gravity_mass, 0),
+              nodes.reduce((sum, node) => sum + node.vy * node.gravity_mass, 0),
+            ],
+          };
+        };
+        const nodes = fixture();
+        const beforeRelative = relativeState(nodes);
+        const beforeTotals = totals(nodes);
+        const stats = I.applyGalaxyOrbitalSeparation(nodes, options);
+        const fixed = fixture();
+        const fixedLeftBefore = fixed.slice(0, 2).map(node =>
+          [node.x, node.y, node.vx, node.vy]);
+        I.applyGalaxyOrbitalSeparation(fixed, { ...options, fixedNodeId: 'left-star' });
+        emit({
+          stats,
+          beforeRelative,
+          afterRelative: relativeState(nodes),
+          beforeTotals,
+          afterTotals: totals(nodes),
+          fixedLeftBefore,
+          fixedLeftAfter: fixed.slice(0, 2).map(node =>
+            [node.x, node.y, node.vx, node.vy]),
+          fixedRightMoved: fixed[2].x !== 5 || fixed[2].y !== 0,
+          finite: nodes.concat(fixed).every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["stats"]["crossCommunityOverlaps"] == 1
+    assert report["afterRelative"] == pytest.approx(
+        report["beforeRelative"], abs=1e-12
+    )
+    assert report["afterTotals"]["center"] == pytest.approx(
+        report["beforeTotals"]["center"], abs=1e-12
+    )
+    assert report["afterTotals"]["momentum"] == pytest.approx(
+        report["beforeTotals"]["momentum"], abs=1e-12
+    )
+    assert report["fixedLeftAfter"] == report["fixedLeftBefore"]
+    assert report["fixedRightMoved"] is True
+
+
+@requires_node
+def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -> None:
+    """The outer guard is a physical boundary, not a centre-only convergence hint.
+
+    In particular, a satellite in the anchor community and the outer member of a
+    multi-node external system must both be contained.  The external system moves
+    rigidly, while the core satellite keeps its angular motion.
+    """
+    report = _run_node(
+        """
+        const options = {
+          /* Deliberately use the live/default envelope scale. */
+          farFieldMinimumRadius: 120,
+          farFieldSoftFraction: 0.55, farFieldAcceleration: 0.2,
+          farFieldMaxAcceleration: 0.2,
+        };
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'core-satellite', community_id: 'core', gravity_mass: 1,
+            radius: 3, x: 900, y: 0, vx: 0, vy: 8 },
+          { id: 'outer-star', community_id: 'outer', gravity_mass: 4,
+            radius: 5, x: 600, y: 0, vx: 0, vy: 3 },
+          { id: 'outer-moon', community_id: 'outer', gravity_mass: 1,
+            radius: 3, x: 760, y: 0, vx: 0, vy: 5 },
+          /* A dragged/fixed system is intentionally excluded from the guard. */
+          { id: 'fixed-star', community_id: 'fixed', gravity_mass: 2,
+            radius: 3, x: 300, y: -40, vx: 2, vy: 1 },
+          { id: 'fixed-moon', community_id: 'fixed', gravity_mass: 1,
+            radius: 2, x: 320, y: -40, vx: 2, vy: 4 },
+        ];
+        const fixedPhase = nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]);
+        const bootstrap = I.applyGalaxyFarFieldConfinement(nodes, {
+          ...options, fixedNodeId: 'fixed-star',
+        });
+        const envelope = bootstrap.envelopeRadius;
+        const core = nodes[1], star = nodes[2], moon = nodes[3];
+
+        /* The smooth far-field must act before the exact cap. Put the external system in
+           its soft band, but leave the core satellite for the strict member-level case. */
+        core.x = envelope - 10; core.y = 0; core.vx = 0; core.vy = 8;
+        star.x = envelope - 80; star.y = 0; star.vx = 0; star.vy = 3;
+        moon.x = envelope + 80; moon.y = 0; moon.vx = 0; moon.vy = 5;
+        const gravity = I.applyGalaxyFarFieldGravity(nodes, options);
+        const inwardAcceleration = (star.vx * 4 + moon.vx) / 5;
+        const coreInwardAcceleration = core.vx;
+
+        /* Escape the core member outright, and put only the outer painted member of the
+           external system past the cached envelope. Its COM is still within it. */
+        core.x = envelope + 90; core.y = 0; core.vx = 12; core.vy = 8;
+        star.x = envelope - 180; star.y = 0; star.vx = 12; star.vy = 3;
+        moon.x = envelope + 40; moon.y = 0; moon.vx = 12; moon.vy = 5;
+        const externalRelativeBefore = [
+          moon.x - star.x, moon.y - star.y, moon.vx - star.vx, moon.vy - star.vy,
+        ];
+        const coreAngularBefore = core.x * core.vy - core.y * core.vx;
+        const constrained = I.applyGalaxyFarFieldConfinement(nodes, {
+          ...options, fixedNodeId: 'fixed-star',
+        });
+        const externalRelativeAfterConstraint = [
+          moon.x - star.x, moon.y - star.y, moon.vx - star.vx, moon.vy - star.vy,
+        ];
+        const coreAngularAfterConstraint = core.x * core.vy - core.y * core.vx;
+        /* A pointer-owned system is allowed outside while held; release re-admits the whole
+           system without a NaN or speed-cap burst. */
+        const fixedStar = nodes[4], fixedMoon = nodes[5];
+        fixedStar.x = envelope + 240; fixedStar.y = -40; fixedStar.vx = 12; fixedStar.vy = 1;
+        fixedMoon.x = envelope + 260; fixedMoon.y = -40; fixedMoon.vx = 12; fixedMoon.vy = 4;
+        const fixedHeldBefore = nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]);
+        const fixedHeld = I.applyGalaxyFarFieldConfinement(nodes, {
+          ...options, fixedNodeId: 'fixed-star',
+        });
+        const fixedHeldAfter = nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]);
+        const released = I.applyGalaxyFarFieldConfinement(nodes, options);
+        const clearance = node => envelope - (Math.hypot(node.x, node.y) + node.radius);
+        const nonFixed = nodes.slice(1, 4);
+        let maximumRadius = Math.max(...nonFixed.map(node => Math.hypot(node.x, node.y) + node.radius));
+        let minimumClearance = Math.min(...nonFixed.map(clearance));
+        let finalStep;
+        for (let step = 0; step < 240; step++) {
+          finalStep = I.integrateGalaxyLeapfrog(nodes, [], [], {
+            ...options, gravity: 0, central: true, fixedNodeId: 'fixed-star',
+            includeFarFieldConfinement: true, includeBlackHoleExclusion: true,
+            includeCollisions: false, includeRelations: false,
+            includeOrbitalSeparation: false, inwardConvergence: false,
+            timestep: 0.021328125, wallClockSeconds: 1 / 30,
+            velocityDecay: 0, speedLimit: 24,
+          });
+          const currentEnvelope = finalStep.farFieldConfinement.envelopeRadius;
+          nonFixed.forEach(node => {
+            maximumRadius = Math.max(maximumRadius, Math.hypot(node.x, node.y) + node.radius);
+            minimumClearance = Math.min(minimumClearance,
+              currentEnvelope - (Math.hypot(node.x, node.y) + node.radius));
+          });
+        }
+        emit({
+          bootstrap, gravity, constrained, envelope, inwardAcceleration,
+          coreInwardAcceleration,
+          externalRelativeBefore,
+          externalRelativeAfterConstraint,
+          coreAngularBefore,
+          coreAngularAfterConstraint,
+          coreTangentAfterConstraint: core.vy,
+          coreAngularAfter: core.x * core.vy - core.y * core.vx,
+          fixedPhase,
+          fixedHeld, fixedHeldBefore, fixedHeldAfter, released,
+          fixedAfterRelease: nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]),
+          minimumClearance, maximumRadius,
+          finalEnvelope: finalStep.farFieldConfinement.envelopeRadius,
+          maximumSpeed: finalStep.maximumSpeed,
+          horizonClearance: Math.hypot(core.x, core.y) - nodes[0].radius - core.radius - 2.5,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["bootstrap"]["envelopeRadius"] > 0
+    assert report["gravity"]["acceleratedSystems"] >= 1
+    assert report["gravity"]["acceleratedCoreNodes"] >= 1
+    assert report["inwardAcceleration"] < 0
+    assert report["coreInwardAcceleration"] < 0
+    assert report["constrained"]["boundedCoreNodes"] >= 1
+    assert report["constrained"]["boundedSystems"] >= 1
+    assert report["externalRelativeAfterConstraint"] == pytest.approx(
+        report["externalRelativeBefore"], abs=1e-10
+    )
+    # The exact inward cap must retain the tangential direction instead of stopping or
+    # reversing the satellite. It intentionally does not speed it up to manufacture L.
+    assert 0 < report["coreAngularAfterConstraint"] <= report["coreAngularBefore"]
+    assert report["coreTangentAfterConstraint"] > 0
+    assert report["coreAngularAfter"] > 0
+    assert report["fixedHeldAfter"] == report["fixedHeldBefore"]
+    assert report["released"]["boundedSystems"] >= 1
+    assert all(
+        math.hypot(phase[0], phase[1]) + radius <= report["finalEnvelope"] + 1e-8
+        for phase, radius in zip(report["fixedAfterRelease"], [3, 2])
+    )
+    assert report["minimumClearance"] >= -1e-8
+    assert report["maximumRadius"] <= report["finalEnvelope"] + 1e-8
+    assert report["horizonClearance"] >= -1e-8
+    assert report["maximumSpeed"] <= 24
+
+
+@requires_node
+def test_far_field_envelope_cache_survives_frozen_anchor() -> None:
+    """Object.defineProperty silently fails on frozen nodes; the WeakMap cache must still pin
+    the envelope so a late outward escape cannot make the permitted radius chase it."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'inner', community_id: 'core', gravity_mass: 2,
+            radius: 3, x: 40, y: 0, vx: 0, vy: 4 },
+          { id: 'outer-star', community_id: 'outer', gravity_mass: 4,
+            radius: 5, x: 90, y: 0, vx: 0, vy: 3 },
+          { id: 'outer-moon', community_id: 'outer', gravity_mass: 1,
+            radius: 3, x: 102, y: 6, vx: 0, vy: 5 },
+        ];
+        const anchor = nodes[0];
+        const first = I.galaxyFarFieldEnvelope(nodes, {
+          farFieldMinimumRadius: 96, farFieldEnvelopeScale: 1.25,
+          farFieldSoftFraction: 0.82,
+        });
+        Object.freeze(anchor);
+        const whileFrozen = I.galaxyFarFieldEnvelope(nodes, {
+          farFieldMinimumRadius: 96, farFieldEnvelopeScale: 1.25,
+          farFieldSoftFraction: 0.82,
+        });
+        nodes[2].x = first.envelopeRadius + 400;
+        nodes[2].y = 0;
+        nodes[3].x = first.envelopeRadius + 420;
+        nodes[3].y = 0;
+        const afterEscape = I.galaxyFarFieldEnvelope(nodes, {
+          farFieldMinimumRadius: 96, farFieldEnvelopeScale: 1.25,
+          farFieldSoftFraction: 0.82,
+        });
+        emit({
+          initial: first.envelopeRadius,
+          whileFrozen: whileFrozen.envelopeRadius,
+          afterEscape: afterEscape.envelopeRadius,
+          anchorFrozen: Object.isFrozen(anchor),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["anchorFrozen"] is True
+    assert report["initial"] > 0
+    assert report["whileFrozen"] == pytest.approx(report["initial"], abs=1e-12)
+    assert report["afterEscape"] == pytest.approx(report["initial"], abs=1e-12)
+
+@requires_node
+def test_pathological_oversized_system_stays_inside_the_black_hole_annulus() -> None:
+    """The final annular pass must solve both edges after an impossible rigid outer fit."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          /* A heavy near member makes the external COM stay near the horizon while its light
+             partner stretches far beyond the cached envelope. The rigid outer correction
+             therefore carries this member through the black hole unless the final annulus
+             alternates the two strict boundaries member-by-member. */
+          { id: 'heavy-near', community_id: 'pathological', gravity_mass: 100,
+            radius: 4, x: 40, y: 0, vx: 2, vy: 3 },
+          { id: 'light-far', community_id: 'pathological', gravity_mass: 1,
+            radius: 4, x: 80, y: 0, vx: 2, vy: -2 },
+        ];
+        const options = {
+          gravity: 0, central: true, includeFarFieldConfinement: true,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeCollisions: false, includeRelations: false,
+          includeOrbitalSeparation: false, inwardConvergence: false,
+          timestep: 0.021328125, wallClockSeconds: 1 / 30,
+          velocityDecay: 0, speedLimit: 24, farFieldMinimumRadius: 80,
+        };
+        /* Cache a normal painted extent first; this emulates a late pathological deformation
+           rather than allowing the anomalous member to enlarge the initial envelope. */
+        const bootstrap = I.applyGalaxyFarFieldConfinement(nodes, options);
+        const envelope = bootstrap.envelopeRadius;
+        nodes[1].x = 20; nodes[1].y = 0; nodes[1].vx = 4; nodes[1].vy = 3;
+        nodes[2].x = envelope + 300; nodes[2].y = 0; nodes[2].vx = 4; nodes[2].vy = -2;
+        let minimumInner = Infinity, minimumOuter = Infinity;
+        let oversized = 0, horizonContacts = 0, annulusInner = 0, annulusOuter = 0;
+        let finalStep;
+        for (let step = 0; step < 8; step++) {
+          finalStep = I.integrateGalaxyLeapfrog(nodes, [], [], options);
+          const far = finalStep.farFieldConfinement;
+          oversized += far.boundedOversizedNodes;
+          horizonContacts += finalStep.blackHoleExclusion.contacts;
+          annulusInner += far.annulus.innerCorrectedNodes;
+          annulusOuter += far.annulus.outerCorrectedNodes;
+          nodes.slice(1).forEach(node => {
+            const distance = Math.hypot(node.x - nodes[0].x, node.y - nodes[0].y);
+            minimumInner = Math.min(minimumInner,
+              distance - nodes[0].radius - node.radius - options.blackHoleExclusionPadding);
+            minimumOuter = Math.min(minimumOuter,
+              far.envelopeRadius - (distance + node.radius));
+          });
+        }
+        emit({
+          bootstrap, finalStep, envelope, oversized, horizonContacts, annulusInner, annulusOuter,
+          minimumInner, minimumOuter,
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          maximumSpeed: finalStep.maximumSpeed,
+        });
+        """
+    )
+    assert report["bootstrap"]["envelopeRadius"] > 0
+    assert report["finite"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert report["oversized"] > 0
+    assert report["horizonContacts"] > 0
+    assert report["minimumInner"] >= -1e-8
+    assert report["minimumOuter"] >= -1e-8
+    assert report["maximumSpeed"] <= 24
+
+
+@requires_node
 def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> None:
     report = _run_node(
         """
@@ -2068,6 +2405,306 @@ def test_live_drag_force_is_fixed_step_acceleration_not_pointer_displacement() -
 
 
 @requires_node
+def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -> None:
+    """A cursor-owned source stays exact without turning connected bodies into projectiles."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'dragged', community_id: 'cursor', gravity_mass: 8, radius: 4,
+            x: 100, y: 0, vx: 0, vy: 0 },
+          { id: 'follower-a', community_id: 'follower-a', gravity_mass: 2, radius: 3,
+            x: 132, y: 0, vx: 0, vy: 2 },
+          { id: 'follower-b', community_id: 'follower-b', gravity_mass: 2, radius: 3,
+            x: 112, y: 30, vx: -1, vy: 1 },
+          { id: 'remote-star', community_id: 'remote', gravity_mass: 5, radius: 4,
+            x: -130, y: 30, vx: 0, vy: -2 },
+          { id: 'remote-moon', community_id: 'remote', gravity_mass: 1, radius: 2,
+            x: -112, y: 36, vx: 1, vy: -1 },
+        ];
+        const links = [
+          { source: 'dragged', target: 'follower-a', rest_length: 30, spring_strength: 0.1 },
+          { source: 'dragged', target: 'follower-b', rest_length: 30, spring_strength: 0.1 },
+        ];
+        const common = {
+          gravity: 48, central: true, includeFarFieldConfinement: true,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+          mutualSystemSoftening: 80, includeCollisions: false,
+          includeRelations: true, includeRelationSprings: true,
+          orbitScale: 0.25, relationStrengthMultiplier: 2,
+          relationConstraintRate: 24, relationConstraintMaxCorrection: 12,
+          relationPadding: 12, includeOrbitalSeparation: true,
+          orbitalSeparationPadding: 12, orbitalSeparationStrength: 0.8,
+          crossCommunitySeparationPadding: 1.5, crossCommunitySeparationStrength: 0.144,
+          orbitalSeparationMaxCorrection: 4, orbitalSeparationMaxVelocityCorrection: 8,
+          localRelativeSpeedLimit: 16, timestep: 0.021328125,
+          wallClockSeconds: 1 / 30, velocityDecay: 0.00005, speedLimit: 24,
+        };
+        /* Establish the cached envelope, then make a gradual cursor path that crosses it. */
+        I.applyGalaxyFarFieldConfinement(nodes, common);
+        const envelope = I.galaxyFarFieldEnvelope(nodes, common).envelopeRadius;
+        const dragged = nodes[1], followerA = nodes[2], followerB = nodes[3];
+        dragged.x = envelope - 100; dragged.y = 0;
+        followerA.x = envelope - 68; followerA.y = 0;
+        followerB.x = envelope - 88; followerB.y = 30;
+        const targets = [
+          [envelope - 70, 0], [envelope - 35, 15], [envelope + 5, 20],
+          [envelope + 45, 10], [envelope + 80, -5],
+        ];
+        const followers = [
+          { node: followerA, link: links[0] }, { node: followerB, link: links[1] },
+        ];
+        let exactPointer = true, finite = true, maximumSpeed = 0, maximumFollowerStep = 0;
+        let maximumLinkDistance = 0, maximumRemoteRadius = 0, maximumRemoteStep = 0;
+        let dragAcceleration = 0, dragPull = 0;
+        for (const [x, y] of targets) {
+          const beforeFollowers = [followerA, followerB].map(node => [node.x, node.y]);
+          const beforeRemote = nodes.slice(4).map(node => [node.x, node.y]);
+          dragged.x = x; dragged.y = y; dragged.vx = 0; dragged.vy = 0;
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
+            ...common, fixedNodeId: 'dragged', dragSource: dragged, dragFollowers: followers,
+          });
+          exactPointer = exactPointer && dragged.x === x && dragged.y === y
+            && dragged.vx === 0 && dragged.vy === 0;
+          dragAcceleration = Math.max(dragAcceleration, tick.dragGravity.maximumAcceleration);
+          dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
+          maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+          [followerA, followerB].forEach((node, index) => {
+            maximumFollowerStep = Math.max(maximumFollowerStep,
+              Math.hypot(node.x - beforeFollowers[index][0], node.y - beforeFollowers[index][1]));
+          });
+          links.forEach(link => {
+            const source = nodes.find(node => node.id === link.source);
+            const target = nodes.find(node => node.id === link.target);
+            maximumLinkDistance = Math.max(maximumLinkDistance,
+              Math.hypot(source.x - target.x, source.y - target.y));
+          });
+          nodes.slice(4).forEach((node, index) => {
+            maximumRemoteRadius = Math.max(maximumRemoteRadius,
+              Math.hypot(node.x, node.y) + node.radius);
+            maximumRemoteStep = Math.max(maximumRemoteStep,
+              Math.hypot(node.x - beforeRemote[index][0], node.y - beforeRemote[index][1]));
+          });
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        const held = [dragged.x, dragged.y];
+        let releaseSpeed = 0;
+        for (let step = 0; step < 20; step++) {
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], common);
+          releaseSpeed = Math.max(releaseSpeed, tick.maximumSpeed);
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        emit({
+          envelope, exactPointer, finite, maximumSpeed, releaseSpeed,
+          maximumFollowerStep, maximumLinkDistance, maximumRemoteRadius, maximumRemoteStep,
+          dragAcceleration, dragPull, held, released: [dragged.x, dragged.y],
+        });
+        """
+    )
+    assert report["exactPointer"] is True
+    assert report["finite"] is True
+    assert report["dragAcceleration"] > 0
+    assert report["dragPull"] > 0
+    assert report["maximumSpeed"] <= 24
+    assert report["releaseSpeed"] <= 24
+    # Fixed geometry and the relation cap limit every cursor sample; neither link may run away.
+    assert report["maximumFollowerStep"] <= 48
+    assert report["maximumLinkDistance"] <= 180
+    assert report["maximumRemoteRadius"] <= report["envelope"] + 1e-8
+    assert report["maximumRemoteStep"] <= 32
+    # Removing fixedNodeId/dragSource lets the former cursor point resume normal physics.
+    assert math.dist(report["held"], report["released"]) > 1e-4
+
+
+@requires_node
+@pytest.mark.parametrize(
+    ("drag_community", "expect_fixed_system_nodes"),
+    [("core", False), ("drag-system", True)],
+)
+def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
+    drag_community: str, expect_fixed_system_nodes: bool,
+) -> None:
+    """The pointer may target the hole centre, but its painted body cannot cover it."""
+    report = _run_node(
+        "const dragCommunity = " + repr(drag_community)
+        + ";\nconst externalSystem = " + ("true" if expect_fixed_system_nodes else "false")
+        + ";\n" + """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'dragged', community_id: dragCommunity, gravity_mass: 8, radius: 4,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'core-follower-a', community_id: dragCommunity, gravity_mass: 2, radius: 3,
+            x: 26, y: 0, vx: 0, vy: 2 },
+          { id: 'core-follower-b', community_id: dragCommunity, gravity_mass: 2, radius: 3,
+            x: 0, y: 28, vx: -2, vy: 0 },
+          { id: 'remote-star', community_id: 'remote', gravity_mass: 5, radius: 4,
+            x: -100, y: 25, vx: 0, vy: -2 },
+          { id: 'remote-moon', community_id: 'remote', gravity_mass: 1, radius: 2,
+            x: -84, y: 31, vx: 1, vy: -1 },
+        ];
+        const links = [
+          { source: 'dragged', target: 'core-follower-a', rest_length: 24, spring_strength: 0.1 },
+          { source: 'dragged', target: 'core-follower-b', rest_length: 24, spring_strength: 0.1 },
+        ];
+        const dragged = nodes[1], followers = [
+          { node: nodes[2], link: links[0] }, { node: nodes[3], link: links[1] },
+        ];
+        const options = {
+          gravity: 48, central: true, fixedNodeId: 'dragged', dragSource: dragged,
+          dragFollowers: followers, includeFarFieldConfinement: true,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+          mutualSystemSoftening: 80, includeCollisions: false,
+          includeRelations: true, includeRelationSprings: true, orbitScale: 0.25,
+          relationStrengthMultiplier: 2, relationConstraintRate: 24,
+          relationConstraintMaxCorrection: 12, relationPadding: 12,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 12,
+          orbitalSeparationStrength: 0.8, crossCommunitySeparationPadding: 1.5,
+          crossCommunitySeparationStrength: 0.144, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8, localRelativeSpeedLimit: 16,
+          timestep: 0.021328125, wallClockSeconds: 1 / 30,
+          velocityDecay: 0.00005, speedLimit: 24,
+        };
+        I.applyGalaxyFarFieldConfinement(nodes, options);
+        const envelope = I.galaxyFarFieldEnvelope(nodes, options).envelopeRadius;
+        let minimumClearance = Infinity, maximumFollowerStep = 0, maximumLinkDistance = 0;
+        let maximumRemoteRadius = 0, maximumSpeed = 0, dragPull = 0, finite = true;
+        let fixedSystemNodes = 0, skippedFixedEndpoint = 0;
+        let outerFollowerClearance = Infinity, minimumSourceOuterClearance = Infinity;
+        let maximumOuterFollowerStep = 0, requestedBeyondEnvelope = false, sourceEdgeContact = false;
+        for (let step = 0; step < 48; step++) {
+          const before = nodes.slice(2, 4).map(node => [node.x, node.y]);
+          const remoteBefore = nodes.slice(4).map(node => [node.x, node.y]);
+          /* This is the adversarial pointer target. The final horizon owns the paint phase. */
+          dragged.x = 0; dragged.y = 0; dragged.vx = 0; dragged.vy = 0;
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+          dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
+          fixedSystemNodes += tick.blackHoleExclusion.fixedSystemNodes;
+          skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
+          nodes.slice(1).forEach(node => {
+            minimumClearance = Math.min(minimumClearance,
+              Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+                - options.blackHoleExclusionPadding);
+          });
+          nodes.slice(2, 4).forEach((node, index) => {
+            maximumFollowerStep = Math.max(maximumFollowerStep,
+              Math.hypot(node.x - before[index][0], node.y - before[index][1]));
+          });
+          links.forEach(link => {
+            const target = nodes.find(node => node.id === link.target);
+            maximumLinkDistance = Math.max(maximumLinkDistance,
+              Math.hypot(dragged.x - target.x, dragged.y - target.y));
+          });
+          nodes.slice(4).forEach((node, index) => {
+            maximumRemoteRadius = Math.max(maximumRemoteRadius,
+              Math.hypot(node.x, node.y) + node.radius);
+            maximumFollowerStep = Math.max(maximumFollowerStep,
+              Math.hypot(node.x - remoteBefore[index][0], node.y - remoteBefore[index][1]));
+          });
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        const centreHeld = [dragged.x, dragged.y];
+        /* An external pointer-owned system may put its source outside the envelope, but its
+           nonfixed followers must remain inside it throughout a long, gradual outward drag.
+           This is the former 400-slice runaway: a skipped fixed system let followers drift
+           hundreds of units out, then snap back only after release. */
+        if (externalSystem) {
+          const startRadius = nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding;
+          const endRadius = envelope + 320;
+          for (let step = 0; step < 400; step++) {
+            const before = nodes.slice(2, 4).map(node => [node.x, node.y]);
+            const targetX = startRadius + (endRadius - startRadius) * (step + 1) / 400;
+            dragged.x = targetX; dragged.y = 0; dragged.vx = 0; dragged.vy = 0;
+            const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+            requestedBeyondEnvelope = requestedBeyondEnvelope
+              || targetX + dragged.radius > envelope + 1e-8;
+            const sourceClearance = envelope - (Math.hypot(dragged.x, dragged.y) + dragged.radius);
+            minimumSourceOuterClearance = Math.min(minimumSourceOuterClearance, sourceClearance);
+            sourceEdgeContact = sourceEdgeContact || Math.abs(sourceClearance) <= 1e-8;
+            maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
+            dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
+            fixedSystemNodes += tick.blackHoleExclusion.fixedSystemNodes;
+            skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
+            nodes.slice(1).forEach(node => {
+              minimumClearance = Math.min(minimumClearance,
+                Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+                  - options.blackHoleExclusionPadding);
+            });
+            nodes.slice(2, 4).forEach((node, index) => {
+              outerFollowerClearance = Math.min(outerFollowerClearance,
+                envelope - (Math.hypot(node.x, node.y) + node.radius));
+              maximumOuterFollowerStep = Math.max(maximumOuterFollowerStep,
+                Math.hypot(node.x - before[index][0], node.y - before[index][1]));
+            });
+            finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+              .every(Number.isFinite));
+          }
+        }
+        const held = [dragged.x, dragged.y];
+        let releaseSpeed = 0, maximumReleaseFollowerStep = 0;
+        for (let step = 0; step < 20; step++) {
+          const before = nodes.slice(2, 4).map(node => [node.x, node.y]);
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], {
+            ...options, fixedNodeId: null, dragSource: null, dragFollowers: [],
+          });
+          releaseSpeed = Math.max(releaseSpeed, tick.maximumSpeed);
+          nodes.slice(2, 4).forEach((node, index) => {
+            maximumReleaseFollowerStep = Math.max(maximumReleaseFollowerStep,
+              Math.hypot(node.x - before[index][0], node.y - before[index][1]));
+          });
+          finite = finite && nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite));
+        }
+        emit({
+          envelope, minimumClearance, maximumFollowerStep, maximumLinkDistance,
+          maximumRemoteRadius, maximumSpeed, releaseSpeed, dragPull, finite,
+          fixedSystemNodes, skippedFixedEndpoint, requestedBeyondEnvelope, sourceEdgeContact,
+          outerFollowerClearance, minimumSourceOuterClearance, maximumOuterFollowerStep,
+          maximumReleaseFollowerStep,
+          centreHeld, held, released: [dragged.x, dragged.y],
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          draggedRadius: Math.hypot(centreHeld[0], centreHeld[1]),
+          paintedHorizon: nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding,
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    # The fixed source is projected to the event horizon, not allowed to paint at the centre.
+    assert report["draggedRadius"] == pytest.approx(report["paintedHorizon"], abs=1e-8)
+    assert report["minimumClearance"] >= -1e-8
+    assert report["dragPull"] > 0
+    # The dragged cluster may be the anchor community or a pointer-owned external system. The
+    # latter must use its dedicated horizon path, while both skip direct spring correction.
+    if expect_fixed_system_nodes:
+        assert report["fixedSystemNodes"] > 0
+        # Pointer targets beyond the cached envelope are requests, not paint positions: the
+        # source must meet the same finite outer boundary as every follower while held.
+        assert report["requestedBeyondEnvelope"] is True
+        assert report["minimumSourceOuterClearance"] >= -1e-8
+        assert report["sourceEdgeContact"] is True
+        assert report["outerFollowerClearance"] >= -1e-8
+        assert report["maximumOuterFollowerStep"] <= 48
+        assert report["maximumReleaseFollowerStep"] <= 48
+    else:
+        assert report["fixedSystemNodes"] == 0
+    assert report["skippedFixedEndpoint"] > 0
+    assert report["maximumSpeed"] <= 24
+    assert report["releaseSpeed"] <= 24
+    assert report["maximumFollowerStep"] <= 48
+    assert report["maximumLinkDistance"] <= 96
+    assert report["maximumRemoteRadius"] <= report["envelope"] + 1e-8
+    assert math.dist(report["held"], report["released"]) > 1e-4
+
+
+@requires_node
 def test_galaxy_collision_uses_evidence_mass_without_injecting_system_momentum() -> None:
     report = _run_node(
         """
@@ -2348,6 +2985,60 @@ def test_render_enforces_horizon_before_paint_for_oversized_static_galaxy() -> N
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
     assert report["pinned"] == pytest.approx(report["position"], abs=1e-12)
     assert report["initialBeforeAcceleration"] is True
+
+
+@requires_node
+def test_render_reapplies_far_field_envelope_before_static_repaint() -> None:
+    """A reused oversized/static payload must not bypass the cached outer boundary."""
+    report = _run_engine(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, visual_radius: 8, degree: 1,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'intruder', community_id: 'outer', gravity_mass: 1,
+            visual_radius: 3, degree: 1, x: 300, y: 0, vx: 0, vy: 4 },
+        ];
+        for (let index = 0; index < 599; index++) nodes.push({
+          id: 'filler-' + index, community_id: 'filler-' + index,
+          gravity_mass: 1, visual_radius: 3, degree: 1,
+          x: 160 + index * 2, y: 140 + (index % 17) * 3, vx: 0, vy: 0,
+        });
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({ nodes, links: [], communities: [], community_bridges: [],
+          meta: { layout_seed: 19 } });
+        const initial = api.physicsDiagnostics();
+        const rendered = fg.graphData().nodes;
+        const anchor = rendered.find(node => node.id === 'black-hole');
+        const intruder = rendered.find(node => node.id === 'intruder');
+        intruder.x = initial.farFieldConfinement.envelopeRadius + 400;
+        intruder.y = 0;
+        intruder.fx = intruder.x;
+        intruder.fy = intruder.y;
+        /* A cosmetic setting keeps the same static arrays; it must still project before
+           force-graph's next paint rather than relying on the disabled live integrator. */
+        api.setSettings({ font: 13 });
+        const diagnostics = api.physicsDiagnostics();
+        const clearance = diagnostics.farFieldConfinement.envelopeRadius
+          - (Math.hypot(intruder.x - anchor.x, intruder.y - anchor.y) + intruder.radius);
+        emit({
+          staticLayout: diagnostics.staticLayout,
+          initialEnvelope: initial.farFieldConfinement.envelopeRadius,
+          confinement: diagnostics.farFieldConfinement,
+          clearance,
+          pinned: [intruder.fx, intruder.fy],
+          position: [intruder.x, intruder.y],
+          finite: rendered.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["staticLayout"] is True
+    assert report["initialEnvelope"] > 0
+    assert report["confinement"]["boundedSystems"] >= 1
+    assert report["clearance"] >= -1e-8
+    assert report["pinned"] == pytest.approx(report["position"], abs=1e-12)
+    assert report["finite"] is True
 
 
 @requires_node

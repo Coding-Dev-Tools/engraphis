@@ -1166,34 +1166,41 @@ test('Compact to Galaxy restores phase while live drag never wakes D3', async ({
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   await page.evaluate(scene => {
-    window.__engraphisGraph.setPreset('compact');
-    window.__engraphisGraph.setData(scene);
-    window.__engraphisGraph.setScope({ showUnlinked: true, minDegree: 0 });
+    const api = window.__engraphisGraph;
+    api.freeze(true);
+    api.setPreset('galaxy');
+    api.setData(scene);
+    api.setScope({ showUnlinked: true, minDegree: 0 });
   }, blackHoleGalaxyScene);
   await page.waitForFunction(() => window.__fg.graphData().nodes.length === 8
     && window.__fg.graphData().nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
+  const galaxyPhase = await galaxySystemSnapshot(page);
+  await page.evaluate(() => {
+    window.__engraphisGraph.setPreset('compact');
+    window.__engraphisGraph.freeze(false);
+  });
   await page.waitForTimeout(900);
-  const compactDeviation = await page.evaluate(scene => {
-    const server = new Map(scene.nodes.map(node => [node.id, node]));
-    return Math.max(...window.__fg.graphData().nodes.map(node => Math.hypot(
-      node.x - server.get(node.id).x, node.y - server.get(node.id).y,
-    )));
-  }, blackHoleGalaxyScene);
+  const compactDeviation = await page.evaluate(expectedNodes => Math.max(
+    ...window.__fg.graphData().nodes.map(node => {
+      const expected = expectedNodes[node.id];
+      return Math.hypot(node.x - expected.x, node.y - expected.y);
+    }),
+  ), galaxyPhase.nodes);
   expect(compactDeviation).toBeGreaterThan(1);
 
   // Enter and freeze in one browser task. The custom clock cannot take a step between phase
-  // restoration and this snapshot, so every coordinate must be the canonical server phase.
+  // restoration and this snapshot, so every coordinate must match the saved contact-safe phase.
   await page.evaluate(() => {
     window.__engraphisGraph.setPreset('galaxy');
     window.__engraphisGraph.freeze(true);
   });
   const restored = await galaxySystemSnapshot(page);
-  for (const expected of blackHoleGalaxyScene.nodes) {
-    expect(restored.nodes[expected.id].x).toBe(expected.x);
-    expect(restored.nodes[expected.id].y).toBe(expected.y);
+  for (const [id, expected] of Object.entries(galaxyPhase.nodes)) {
+    expect(restored.nodes[id].x).toBe(expected.x);
+    expect(restored.nodes[id].y).toBe(expected.y);
   }
-  expect(restored.anchor.x).toBe(0);
-  expect(restored.anchor.y).toBe(0);
+  expect(restored.anchor.x).toBe(galaxyPhase.anchor.x);
+  expect(restored.anchor.y).toBe(galaxyPhase.anchor.y);
 
   await page.evaluate(() => {
     const graph = window.__fg;
@@ -1669,9 +1676,24 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
   const report = await page.evaluate(scene => {
     const api = window.__engraphisGraph;
     const I = window.EngraphisGraph._internals;
+    const anchors = new Map(scene.nodes
+      .filter(node => node.anchor_role === 'community')
+      .map(node => [node.community_id, node]));
+    // Start each external system farther out without changing its local orbit geometry. The
+    // gravity response can then contract freely instead of immediately hitting the painted
+    // black-hole boundary, which is tested independently.
+    const contactSafeScene = {
+      ...scene,
+      nodes: scene.nodes.map(node => {
+        const anchor = anchors.get(node.community_id);
+        return anchor
+          ? { ...node, x: node.x + anchor.x * 1.5, y: node.y + anchor.y * 1.5 }
+          : { ...node };
+      }),
+    };
     api.freeze(true);
     api.setPreset('galaxy');
-    api.setData(scene);
+    api.setData(contactSafeScene);
     api.setScope({ showUnlinked: true, minDegree: 0 });
     const nodes = window.__fg.graphData().nodes;
     const radii = () => Object.fromEntries([...I.communityCenters(nodes).entries()]
