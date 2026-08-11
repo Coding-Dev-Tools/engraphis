@@ -537,7 +537,12 @@
         node.vy = 0;
         return;
       }
-      if (reducedMotion || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+      /* Reduced motion suppresses cosmetic particles and animated camera travel; it does not
+         switch the persistent Galaxy solver to a different, radial-only physical model. The
+         clock remains active under that preference, so omitting this one-shot angular seed
+         made every system fall straight into its dominant star and permanently marked the
+         node as already seeded. Freeze/static layout are the explicit no-physics controls. */
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const key = communityKey(node);
       if (!freshlySeeded.has(key)) freshlySeeded.set(key, []);
       freshlySeeded.get(key).push(node);
@@ -611,7 +616,10 @@
        Scope/filter changes reuse node objects; sweeping only newly revealed systems would add
        momentum without counter-motion from the already seeded galaxy. Mark late arrivals but
        let ordinary gravity settle them instead of injecting a partial second initial condition. */
-    if (hadSeededSystem || reducedMotion || gravitationalConstant <= 0 || centers.length < 2) {
+    /* As with local orbital seeding, reduced motion is a paint/camera preference. The live
+       solver still advances, so it must receive the same barycentric initial condition or the
+       solar systems contract radially without rotating around the black hole. */
+    if (hadSeededSystem || gravitationalConstant <= 0 || centers.length < 2) {
       return nodes;
     }
 
