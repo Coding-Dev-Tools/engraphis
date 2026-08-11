@@ -1710,7 +1710,7 @@ def test_galaxy_link_distance_has_double_sensitivity_and_double_spring_response(
 
 
 @requires_node
-def test_default_orbital_spacing_and_repulsion_are_exactly_twenty_five_percent_higher() -> None:
+def test_orbital_separation_has_double_strength_and_preserves_local_mass_center() -> None:
     report = _run_node(
         """
         const run = setting => {
@@ -1737,33 +1737,19 @@ def test_default_orbital_spacing_and_repulsion_are_exactly_twenty_five_percent_h
             otherAfter: [nodes[2].x, nodes[2].y, nodes[2].vx, nodes[2].vy],
           };
         };
-        emit({
-          presetRepel: G.PRESETS.galaxy.repel,
-          off: run(0), formerDefault: run(48),
-          default: run(G.PRESETS.galaxy.repel), maximum: run(120),
-        });
+        emit({ off: run(0), default: run(48), maximum: run(120) });
         """
     )
-    assert report["presetRepel"] == 60
     assert report["off"]["padding"] == 0
     assert report["off"]["strength"] == 0
     assert report["off"]["distance"] == pytest.approx(10)
-    assert report["formerDefault"]["padding"] == pytest.approx(12)
-    assert report["formerDefault"]["strength"] == pytest.approx(0.8)
-    assert report["formerDefault"]["distance"] == pytest.approx(16.4)
-    assert report["default"]["padding"] == pytest.approx(15)
-    assert report["default"]["strength"] == pytest.approx(1)
-    assert report["default"]["distance"] == pytest.approx(21)
-    # Raising the shipped preset from 48 to 60 increases both physical response axes by an
-    # exact 25%; the helper curve itself and its maximum endpoint remain stable.
-    assert report["default"]["padding"] / report["formerDefault"]["padding"] \
-        == pytest.approx(1.25)
-    assert report["default"]["strength"] / report["formerDefault"]["strength"] \
-        == pytest.approx(1.25)
+    assert report["default"]["padding"] == pytest.approx(12)
+    assert report["default"]["strength"] == pytest.approx(0.8)
+    assert report["default"]["distance"] == pytest.approx(16.4)
     assert report["maximum"]["padding"] == pytest.approx(30)
     assert report["maximum"]["strength"] == pytest.approx(1)
     assert report["maximum"]["distance"] == pytest.approx(36)
-    for item in (report["formerDefault"], report["default"], report["maximum"]):
+    for item in (report["default"], report["maximum"]):
         assert item["stats"]["overlaps"] == 1
         assert item["afterCom"] == pytest.approx(item["beforeCom"], abs=1e-12)
         assert item["otherAfter"] == item["otherBefore"]
@@ -4637,7 +4623,7 @@ def test_reduced_motion_keeps_eight_independent_solar_systems_orbiting() -> None
           for(let m=0;m<3;m++){const id=`s${s}-${m}`,q=m?14+m*5:0;
             nodes.push({id,community_id:`s${s}`,system_anchor_id:`s${s}-0`,anchor_role:m?'none':'community',orbit_tier:m,gravity_mass:m?1:7,radius:m?3:5,x:cx+Math.cos(p+m*1.5)*q,y:cy+Math.sin(p+m*1.5)*q,vx:0,vy:0});
             if(m)links.push({source:`s${s}-0`,target:id,rest_length:q,spring_strength:.08});}}
-        const o={gravity:48,softening:32,centralSoftening:40,includeMutualSystems:true,mutualSystemGravityFraction:.12,mutualSystemSoftening:80,includeRelations:true,includeRelationSprings:false,skipSystemAnchorRelations:true,skipOrbitalSystemRelations:true,orbitScale:.25,relationConstraintRate:24,relationConstraintMaxCorrection:12,relationPadding:15,includeOrbitalSeparation:true,orbitalSeparationPadding:15,orbitalSeparationStrength:1,crossCommunitySeparationPadding:1.5,crossCommunitySeparationStrength:.18,orbitalSeparationMaxCorrection:4,orbitalSeparationMaxVelocityCorrection:8,preserveLocalTangentialVelocity:true,skipSystemAnchorPairs:true,systemAnchorExclusionPadding:1.5,includeBlackHoleExclusion:true,blackHoleExclusionPadding:2.5,includeFarFieldConfinement:true,farFieldEnvelopeScale:1.75,farFieldMinimumRadius:96,farFieldSoftFraction:.82,farFieldAcceleration:12,farFieldMaxAcceleration:16,localRelativeSpeedLimit:48,timestep:.032,wallClockSeconds:1/30,inwardConvergence:true,velocityDecay:.00005,speedLimit:48,includeCollisions:false};
+        const o={gravity:48,softening:32,centralSoftening:40,includeMutualSystems:true,mutualSystemGravityFraction:.12,mutualSystemSoftening:80,includeRelations:true,includeRelationSprings:false,skipSystemAnchorRelations:true,orbitScale:.25,relationConstraintRate:24,relationConstraintMaxCorrection:12,relationPadding:12,includeOrbitalSeparation:true,orbitalSeparationPadding:12,orbitalSeparationStrength:.8,crossCommunitySeparationPadding:1.5,crossCommunitySeparationStrength:.144,orbitalSeparationMaxCorrection:4,orbitalSeparationMaxVelocityCorrection:8,preserveLocalTangentialVelocity:true,skipSystemAnchorPairs:true,systemAnchorExclusionPadding:1.5,includeBlackHoleExclusion:true,blackHoleExclusionPadding:2.5,includeFarFieldConfinement:true,farFieldEnvelopeScale:1.75,farFieldMinimumRadius:96,farFieldSoftFraction:.82,farFieldAcceleration:12,farFieldMaxAcceleration:16,localRelativeSpeedLimit:48,timestep:.032,wallClockSeconds:1/30,inwardConvergence:true,velocityDecay:.00005,speedLimit:48,includeCollisions:false};
         I.seedGalaxyOrbits(nodes,91,48,32,true); I.seedGalaxySystemOrbits(nodes,91,48,40,true);
         const cs=()=>I.communityCenters(nodes),d=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b)),systems=[...Array(8).keys()].map(i=>`s${i}`),planets=nodes.filter(n=>n.orbit_tier>0);
         const pg=new Map(systems.map(k=>{const c=cs().get(k);return[k,Math.atan2(c.y,c.x)]})),pl=new Map(planets.map(n=>{const a=nodes.find(x=>x.id===n.system_anchor_id);return[n.id,Math.atan2(n.y-a.y,n.x-a.x)]})),gt=new Map(systems.map(k=>[k,0])),lt=new Map(planets.map(n=>[n.id,0]));
@@ -4654,190 +4640,6 @@ def test_reduced_motion_keeps_eight_independent_solar_systems_orbiting() -> None
     # eccentric motion rather than requiring a rigid carousel.
     assert min(abs(value) for value in report["global"]) > 0.45, report
     assert min(abs(value) for value in report["local"]) > 0.70, report
-
-
-@requires_node
-def test_actual_shaped_live_galaxy_has_visible_two_scale_motion_within_eight_seconds() -> None:
-    """Nearly every painted solar system must visibly advance at both orbital scales.
-
-    This uses the shipped Galaxy defaults, ten independently phased systems, and five
-    different-radius planets per star. Angular travel rejects radial-only contraction while
-    star-relative chord displacement rejects technically nonzero but visually inert rotation.
-    """
-    report = _run_node(
-        """
-        const make = () => {
-          const nodes = [{ id: 'bh', anchor_role: 'global', community_id: 'core',
-            system_anchor_id: 'bh', orbit_tier: 0, gravity_mass: 20, radius: 10,
-            x: 0, y: 0, vx: 0, vy: 0 }], links = [];
-          for (let system = 0; system < 10; system += 1) {
-            const id = `s${system}`, starId = `${id}-star`;
-            const phase = 0.31 + system * 2.3999632297;
-            const galacticRadius = 100 + system * 18;
-            const centerX = Math.cos(phase) * galacticRadius;
-            const centerY = Math.sin(phase) * galacticRadius * 0.84;
-            for (let member = 0; member < 6; member += 1) {
-              const localRadius = member === 0 ? 0 : 15 + member * 5;
-              const localPhase = phase + member * 2.3999632297;
-              const nodeId = member === 0 ? starId : `${id}-p${member}`;
-              nodes.push({
-                id: nodeId, community_id: id, system_anchor_id: starId,
-                anchor_role: member === 0 ? 'community' : 'none', orbit_tier: member,
-                orbit_radius: localRadius, galactic_radius: galacticRadius,
-                galactic_target_radius: galacticRadius,
-                gravity_mass: member === 0 ? 8 + system % 4 : 1 + (member % 2) * 0.25,
-                radius: member === 0 ? 5.5 : 2.5 + (member % 2) * 0.5,
-                x: centerX + Math.cos(localPhase) * localRadius,
-                y: centerY + Math.sin(localPhase) * localRadius,
-                vx: 0, vy: 0,
-              });
-              if (member > 0) links.push({ source: starId, target: nodeId,
-                rest_length: localRadius, spring_strength: 0.08 });
-            }
-          }
-          return { nodes, links };
-        };
-        // These are the live values returned by galaxyIntegratorOptions at the Galaxy preset:
-        // Gravity 48, Repel 60, Link 8, a 30 Hz clock, and the 0.032 physical timestep.
-        const options = {
-          gravity: 48, softening: 32, centralSoftening: 40,
-          includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
-          mutualSystemSoftening: 80, includeRelations: true,
-          includeRelationSprings: false, skipSystemAnchorRelations: true,
-          skipOrbitalSystemRelations: true, orbitScale: 0.25,
-          relationStrengthMultiplier: 2, relationConstraintRate: 24,
-          relationConstraintMaxCorrection: 12, relationPadding: 15,
-          includeOrbitalSeparation: true, orbitalSeparationPadding: 15,
-          orbitalSeparationStrength: 1, crossCommunitySeparationPadding: 1.5,
-          crossCommunitySeparationStrength: 0.18, orbitalSeparationMaxCorrection: 4,
-          orbitalSeparationMaxVelocityCorrection: 8,
-          preserveLocalTangentialVelocity: true, skipSystemAnchorPairs: true,
-          systemAnchorExclusionPadding: 1.5, systemAnchorRepulsionRange: 6,
-          systemAnchorRepulsionAcceleration: 0.12,
-          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
-          includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
-          farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
-          farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
-          localRelativeSpeedLimit: 48, timestep: 0.032, wallClockSeconds: 1 / 30,
-          inwardConvergence: true, velocityDecay: 0.00005, speedLimit: 48,
-          includeCollisions: false,
-        };
-        const delta = (next, previous) => Math.atan2(
-          Math.sin(next - previous), Math.cos(next - previous));
-        const run = reducedMotion => {
-          const { nodes, links } = make();
-          I.seedGalaxyOrbits(nodes, 3031, 48, 32, reducedMotion);
-          I.seedGalaxySystemOrbits(nodes, 3031, 48, 40, reducedMotion);
-          const centers = () => I.communityCenters(nodes);
-          const systemIds = [...Array(10).keys()].map(index => `s${index}`);
-          const planets = nodes.filter(node => node.orbit_tier > 0);
-          const globalInitial = new Map(systemIds.map(id => {
-            const center = centers().get(id);
-            return [id, { x: center.x, y: center.y,
-              angle: Math.atan2(center.y, center.x) }];
-          }));
-          const localInitial = new Map(planets.map(node => {
-            const star = nodes.find(candidate => candidate.id === node.system_anchor_id);
-            const x = node.x - star.x, y = node.y - star.y;
-            return [node.id, { x, y, angle: Math.atan2(y, x) }];
-          }));
-          const globalPrevious = new Map([...globalInitial].map(
-            ([id, value]) => [id, value.angle]));
-          const localPrevious = new Map([...localInitial].map(
-            ([id, value]) => [id, value.angle]));
-          const globalTravel = new Map(systemIds.map(id => [id, 0]));
-          const localTravel = new Map(planets.map(node => [node.id, 0]));
-          let minimumStarClearance = Infinity, minimumBlackHoleClearance = Infinity;
-          let minimumOuterClearance = Infinity, maximumSpeed = 0, speedCaps = 0;
-          let minimumOrbitalRelationSkips = Infinity, envelope = 0;
-          for (let step = 0; step < 240; step += 1) {
-            const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
-            maximumSpeed = Math.max(maximumSpeed, tick.maximumSpeed);
-            if (tick.speedCapped) speedCaps += 1;
-            minimumOrbitalRelationSkips = Math.min(minimumOrbitalRelationSkips,
-              tick.relationConstraint.skippedOrbitalSystem || 0);
-            envelope = tick.farFieldConfinement.envelopeRadius;
-            systemIds.forEach(id => {
-              const center = centers().get(id), angle = Math.atan2(center.y, center.x);
-              globalTravel.set(id, globalTravel.get(id)
-                + delta(angle, globalPrevious.get(id)));
-              globalPrevious.set(id, angle);
-            });
-            planets.forEach(node => {
-              const star = nodes.find(candidate => candidate.id === node.system_anchor_id);
-              const x = node.x - star.x, y = node.y - star.y;
-              const angle = Math.atan2(y, x);
-              localTravel.set(node.id, localTravel.get(node.id)
-                + delta(angle, localPrevious.get(node.id)));
-              localPrevious.set(node.id, angle);
-              minimumStarClearance = Math.min(minimumStarClearance,
-                Math.hypot(x, y) - node.radius - star.radius
-                  - options.systemAnchorExclusionPadding);
-            });
-            nodes.slice(1).forEach(node => {
-              minimumBlackHoleClearance = Math.min(minimumBlackHoleClearance,
-                Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
-                  - options.blackHoleExclusionPadding);
-              minimumOuterClearance = Math.min(minimumOuterClearance,
-                envelope - Math.hypot(node.x, node.y) - node.radius);
-            });
-          }
-          const globalAngles = systemIds.map(id => Math.abs(globalTravel.get(id)));
-          const localAngles = planets.map(node => Math.abs(localTravel.get(node.id)));
-          const globalDisplacements = systemIds.map(id => {
-            const center = centers().get(id), initial = globalInitial.get(id);
-            return Math.hypot(center.x - initial.x, center.y - initial.y);
-          });
-          const localDisplacements = planets.map(node => {
-            const star = nodes.find(candidate => candidate.id === node.system_anchor_id);
-            const initial = localInitial.get(node.id);
-            return Math.hypot(node.x - star.x - initial.x, node.y - star.y - initial.y);
-          });
-          const visiblePlanets = planets.filter((node, index) =>
-            localAngles[index] > 0.55 && localDisplacements[index] > 15).length;
-          const visibleSystems = systemIds.filter((id, systemIndex) => {
-            const localStart = systemIndex * 5;
-            const visibleLocals = localAngles.slice(localStart, localStart + 5)
-              .filter((angle, localIndex) => angle > 0.55
-                && localDisplacements[localStart + localIndex] > 15).length;
-            return globalAngles[systemIndex] > 0.4
-              && globalDisplacements[systemIndex] > 60 && visibleLocals >= 4;
-          }).length;
-          return {
-            globalAngles, localAngles, globalDisplacements, localDisplacements,
-            visiblePlanets, visibleSystems, minimumStarClearance,
-            minimumBlackHoleClearance, minimumOuterClearance,
-            maximumSpeed, speedCaps, minimumOrbitalRelationSkips,
-            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
-              .every(Number.isFinite)),
-            final: nodes.map(node => [node.x, node.y, node.vx, node.vy]),
-          };
-        };
-        const ordinary = run(false), reduced = run(true);
-        const parity = ordinary.final.every((phase, nodeIndex) => phase.every(
-          (value, fieldIndex) => value === reduced.final[nodeIndex][fieldIndex]));
-        delete ordinary.final;
-        delete reduced.final;
-        emit({ ordinary, reduced, parity });
-        """
-    )
-    ordinary, reduced = report["ordinary"], report["reduced"]
-    assert report["parity"] is True
-    assert ordinary == reduced
-    assert ordinary["finite"] is True
-    assert ordinary["speedCaps"] == 0
-    assert ordinary["maximumSpeed"] <= 48
-    assert ordinary["minimumOrbitalRelationSkips"] == 50
-    assert ordinary["minimumStarClearance"] >= -1e-9
-    assert ordinary["minimumBlackHoleClearance"] >= -1e-9
-    assert ordinary["minimumOuterClearance"] >= -1e-9
-    # Eight seconds of live-default motion must be visible, not merely mathematically nonzero.
-    # Nine of ten complete systems and at least 90% of their planets cross both an angular and
-    # a painted-displacement threshold. The outermost eccentric system may rotate more slowly.
-    assert ordinary["visibleSystems"] >= 9, ordinary
-    assert ordinary["visiblePlanets"] >= 45, ordinary
-    assert min(ordinary["localAngles"]) > 0.55
-    assert min(ordinary["localDisplacements"]) > 15
 
 
 @requires_node
