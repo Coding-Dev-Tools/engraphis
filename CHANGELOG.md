@@ -9,8 +9,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 - The dashboard Galaxy graph now caches its outer safety radius at 1.75× the initial painted
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
-- The Galaxy gravity slider now spans `0..200`, doubling the available movement range while
+- The Galaxy gravity slider now spans `0..400`, doubling its available movement range again while
   retaining the existing default at `48`.
+- Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
+  the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
   2,000 relations; larger Galaxy scenes and non-Galaxy full views retain the deterministic
   fallback.

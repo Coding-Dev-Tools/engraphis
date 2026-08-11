@@ -404,7 +404,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-bounded-galaxy'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-galaxy-gravity-400'),
         'EngraphisGraph', controller.signal,
       ));
       graphAssetsPromise = attempt;
@@ -2043,8 +2043,11 @@
       const otherId = source === item.id ? target : source;
       const other = nodes.get(otherId);
       if (!other || other.id === item.id) return;
-      const entry = connections.get(other.id) || { item: other, relations: new Set() };
+      const entry = connections.get(other.id) || {
+        item: other, relations: new Set(), includeHistory: false,
+      };
       if (link.label) entry.relations.add(link.label);
+      entry.includeHistory = entry.includeHistory || link.ghost === true;
       connections.set(other.id, entry);
     });
     return [...connections.values()].sort((left, right) => {
@@ -2053,16 +2056,16 @@
     });
   }
 
-  async function showGraphConnectionMemories(item) {
+  async function showGraphConnectionMemories(item, includeHistory = false) {
     if (!item || !item.id || !state.workspace) return;
     cancelGraphConnectionMemoryLoad();
     const request = ++state.graphConnectionsRequest;
     const workspace = state.workspace;
     const title = item.name || item.label || item.id;
-    const historicalMemberId = item.ghost && Array.isArray(item.member_ids)
+    const historicalMemberId = includeHistory && item.ghost && Array.isArray(item.member_ids)
       ? item.member_ids.find(value => typeof value === 'string' && value) || ''
       : '';
-    const historyQuery = item.ghost
+    const historyQuery = includeHistory
       ? `&include_history=true${historicalMemberId ? `&member_id=${encodeURIComponent(historicalMemberId)}` : ''}`
       : '';
     byId('graph-connection-memory-title').textContent = `Memories for ${title}`;
@@ -2120,7 +2123,9 @@
         closeGraphConnections();
         revealGraphNode(item.id, item.name);
       }),
-      button('Memories', 'secondary-button', () => showGraphConnectionMemories(item)),
+      button('Memories', 'secondary-button', () => (
+        showGraphConnectionMemories(item, entry.includeHistory)
+      )),
     );
     row.append(details, actions);
     return row;
