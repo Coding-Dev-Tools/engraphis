@@ -75,7 +75,10 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
 def test_ci_audits_the_stripped_image_without_mutating_it():
     workflow = _text(".github/workflows/ci.yml")
 
-    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in workflow
+    # The audit copies the installed site-packages out of a created (not running) container.
+    # The path is resolved dynamically via sysconfig so it survives base-image Python bumps.
+    assert "sysconfig.get_path('purelib')" in workflow or 'sysconfig.get_path("purelib")' in workflow
+    assert 'docker cp "$container:$site_packages/."' in workflow
     assert 'python -m pip_audit --path "$audit_dir"' in workflow
     assert 'python -m pip install --disable-pip-version-check --no-cache-dir' in workflow
     assert 'pip-audit==2.10.1' in workflow
