@@ -330,6 +330,63 @@ def test_secure_erase_reports_partial_external_cleanup_as_limited():
     assert engine.store.get_memory(successor_id) is None
 
 
+def test_secure_erase_reports_limitation_when_successor_external_delete_fails():
+    """A successor appearing after the first external scan whose vector delete fails
+    must still surface the external_index_limitation warning (cleanup="partial"),
+    while the authoritative local erase completes."""
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+
+    # The index succeeds on the first delete (original targets) but fails on the
+    # second delete (successors discovered during the final scan under the lock).
+    class PartialExternalIndex:
+        def __init__(self):
+            self.deleted = []
+            self.call_count = 0
+
+        def delete(self, memory_ids, *, commit=True):
+            self.call_count += 1
+            self.deleted.append((tuple(memory_ids), commit))
+            if self.call_count >= 2:
+                raise RuntimeError("external index unavailable for successors")
+
+    index = PartialExternalIndex()
+    engine.index = index
+
+    # Inject a successor *after* the initial target scan but before the final scan.
+    # We do this by monkey-patching secure_erase_target_ids to return the successor
+    # on its second call (the refreshed scan inside the transaction).
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    original_target_ids = engine.store.secure_erase_target_ids
+    call_counter = {"n": 0}
+
+    def patched_target_ids(mid):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return original_target_ids(mid)
+        # Second call: simulate a successor having been written between scans.
+        engine.store.add_memory(MemoryRecord(
+            id=successor_id,
+            content="Successor secret copy.",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+            metadata={"sync_conflict": {"memory_id": mid}},
+            provenance={"conflict_of": mid, "trusted": False},
+        ))
+        return original_target_ids(mid)
+
+    engine.store.secure_erase_target_ids = patched_target_ids
+    try:
+        result = engine.secure_erase(original_id)
+    finally:
+        engine.store.secure_erase_target_ids = original_target_ids
+
+    assert result["vector_index_cleanup"] == "partial"
+    assert "external_index_limitation" in result
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
 def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")
