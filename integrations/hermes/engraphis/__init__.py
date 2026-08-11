@@ -248,4 +248,10 @@ class EngraphisMemoryProvider(MemoryProvider):
             return []
 
     def shutdown(self) -> None:
+        svc = self._service
         self._service = None
+        if svc is not None:
+            try:
+                svc.close()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
