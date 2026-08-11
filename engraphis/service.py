@@ -1385,7 +1385,12 @@ class MemoryService:
         # arrived together.  The Store helper serializes the insert and re-reads the
         # winner, so retries converge on one workspace instead of surfacing a UNIQUE
         # constraint error to the caller.
-        return self.store.get_or_create_workspace(ws, settings=workspace_settings)
+        workspace_id = self.store.get_or_create_workspace(ws, settings=workspace_settings)
+        # The insert may have raced with another authenticated creator.  Re-run the
+        # ownership check against the durable winner before any caller can use its id;
+        # otherwise the loser could write into the winner's personal workspace.
+        self._enforce_personal_access(ws)
+        return workspace_id
 
     def _enforce_personal_access(self, ws: str) -> None:
         """Block access to another user's personal folder. No current user (single-tenant,
