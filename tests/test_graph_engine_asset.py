@@ -70,6 +70,7 @@ const fs = require('fs');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const window = {};
 globalThis.requestAnimationFrame = () => {};
+globalThis.cancelAnimationFrame = () => {};
 const store = {}, calls = {}, invocations = {};
 const fg = new Proxy({}, {
   get: (_target, prop) => prop === 'screen2GraphCoords' && typeof store.screen2GraphCoords === 'function'
@@ -6474,8 +6475,8 @@ def test_node_labels_are_capped_at_the_configured_density() -> None:
 
 def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
     source = ASSET.read_text(encoding="utf-8")
-    cluster_paint = source[source.index("if (node.cluster)"):source.index("if (state.bridges", source.index("if (node.cluster)"))]
-    assert "state.themeColors.label || '#e7e9ee'" in cluster_paint
+    cluster_label = source[source.index("if (label.cluster)"):source.index("} else {", source.index("if (label.cluster)"))]
+    assert "state.themeColors.label || '#e7e9ee'" in cluster_label
 
 
 @requires_node

@@ -1391,9 +1391,9 @@
       });
       state.selectedMemory = '';
       byId('memory-detail').replaceChildren(empty('Memory securely erased from this local store. Review the reported backup limitations and rotate the credential.'));
-      showNotice(result.vector_index_cleanup === 'failed'
-        ? 'Memory removed locally; configured vector index needs separate remediation.'
-        : 'Memory securely erased from local persistence.');
+      showNotice(result.vector_index_cleanup === 'deleted'
+        ? 'Memory securely erased from local persistence.'
+        : 'Memory removed locally; configured vector index needs separate remediation.');
       await selectWorkspace(state.workspace);
     } catch (error) {
       showNotice(`Could not securely erase memory: ${error.message}`);
@@ -3830,7 +3830,7 @@
   }
 
   async function refreshBootstrap(preferred = '') {
-    const bootstrap = await api('/bootstrap');
+    const bootstrap = (await api('/bootstrap')) || {};
     renderUpdateBanner(bootstrap.update);
     if (typeof bootstrap.version === 'string' && bootstrap.version.trim()) {
       state.releaseVersion = bootstrap.version.trim();

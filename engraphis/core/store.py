@@ -8139,12 +8139,13 @@ class Store:
             for scope_id in verification_ids
         ]
         verification = {
-            "valid": all(item["valid"] for item in verifications),
+            "valid": bool(verifications) and all(item["valid"] for item in verifications),
             "errors": [
                 {**error, "workspace_id": scope_id}
                 for scope_id, item in zip(verification_ids, verifications)
                 for error in item["errors"]
             ],
+            "checked_count": len(verifications),
         }
         totals = {
             "receipt_count": 0,

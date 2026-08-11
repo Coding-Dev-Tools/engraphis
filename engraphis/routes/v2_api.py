@@ -1615,7 +1615,7 @@ def receipts_export(workspace: Optional[str] = None):
     safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
     fname = "engraphis-receipts-%s-%s.json" % (
         safe_ws,
-        __import__("time").strftime("%Y%m%d"),
+        time.strftime("%Y%m%d"),
     )
     return JSONResponse(body, headers={
         "Content-Disposition": 'attachment; filename="%s"' % fname,
