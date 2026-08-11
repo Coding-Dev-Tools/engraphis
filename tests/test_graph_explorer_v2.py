@@ -2761,7 +2761,7 @@ def test_workspace_copy_remaps_canonical_and_support_ids():
         assert provenance["memory_id"] in copied_memory_ids
 
 
-def test_graph_entity_evidence_resolves_nested_ghost_to_historical_member():
+def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoint():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
     archived_memory = service.store.add_memory(MemoryRecord(
@@ -2833,6 +2833,20 @@ def test_graph_entity_evidence_resolves_nested_ghost_to_historical_member():
     detail = response.json()
     assert detail["canonical_id"] == "canon"
     assert [item["excerpt"] for item in detail["evidence"]] == [
+        "Archived relation evidence.",
+    ]
+
+    live_response = TestClient(app).get(
+        "/api/graph/entities/canon/memories",
+        params={
+            "workspace": "acme",
+            "valid_at": closed_at + 1.0,
+            "known_at": closed_at + 1.0,
+            "include_history": True,
+        },
+    )
+    assert live_response.status_code == 200
+    assert [item["excerpt"] for item in live_response.json()["evidence"]] == [
         "Archived relation evidence.",
     ]
 

@@ -1164,12 +1164,12 @@ test('graph node connections expose linked memory evidence without leaving the g
   await expect(page.getByRole('button', { name: 'Open in Library' })).toBeVisible();
 });
 
-test('ghost connections request their historical physical member evidence', async ({ page }) => {
+test('historical connections request ghost-edge evidence for live and ghost endpoints', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
         {
-          id: 'live-node', label: 'Live Node', member_ids: ['live-member'],
+          id: 'live-node', label: 'Origin Node', member_ids: ['live-member'],
           gravity_mass: 4, visual_radius: 8, community_id: 'graph', x: -20, y: 0,
         },
         {
@@ -1177,11 +1177,22 @@ test('ghost connections request their historical physical member evidence', asyn
           member_ids: ['archived-member'], gravity_mass: 0, visual_radius: 0,
           community_id: 'history', x: 20, y: 0,
         },
+        {
+          id: 'historical-live', label: 'Historical Live Node',
+          member_ids: ['historical-live-member'], gravity_mass: 2, visual_radius: 6,
+          community_id: 'graph', x: 0, y: 20,
+        },
       ],
-      edges: [{
-        id: 'historical-edge', source: 'live-node', target: 'canon:ghost:ghost',
-        relation: 'used', ghost: true, rest_length: 18, spring_strength: 0,
-      }],
+      edges: [
+        {
+          id: 'historical-ghost-edge', source: 'live-node', target: 'canon:ghost:ghost',
+          relation: 'used', ghost: true, rest_length: 18, spring_strength: 0,
+        },
+        {
+          id: 'historical-live-edge', source: 'live-node', target: 'historical-live',
+          relation: 'superseded', ghost: true, rest_length: 18, spring_strength: 0,
+        },
+      ],
       communities: [{ id: 'graph', mass: 4 }],
       community_bridges: [],
       meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
@@ -1190,8 +1201,9 @@ test('ghost connections request their historical physical member evidence', asyn
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await page.getByRole('tab', { name: 'Analyse' }).click();
-  await page.locator('#graph-top button').filter({ hasText: 'Live Node' }).click();
+  await page.locator('#graph-top button').filter({ hasText: 'Origin Node' }).click();
   await expect(page.locator('#graph-connections-list')).toContainText('Archived Node');
+  await expect(page.locator('#graph-connections-list')).toContainText('Historical Live Node');
 
   const evidenceRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
@@ -1199,9 +1211,20 @@ test('ghost connections request their historical physical member evidence', asyn
       && url.searchParams.get('member_id') === 'archived-member'
       && url.searchParams.get('include_history') === 'true';
   });
-  await page.locator('#graph-connections-list').getByRole('button', { name: 'Memories' }).click();
+  await page.locator('.graph-connection-row').filter({ hasText: 'Archived Node' })
+    .getByRole('button', { name: 'Memories' }).click();
   await evidenceRequest;
   await expect(page.locator('#graph-connection-memory-list')).toContainText('Database choice');
+
+  const liveEndpointRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.includes('/graph/entities/historical-live/memories')
+      && url.searchParams.get('include_history') === 'true'
+      && !url.searchParams.has('member_id');
+  });
+  await page.locator('.graph-connection-row').filter({ hasText: 'Historical Live Node' })
+    .getByRole('button', { name: 'Memories' }).click();
+  await liveEndpointRequest;
 });
 
 test('changing the time anchor replaces a pending graph request', async ({ page }) => {
