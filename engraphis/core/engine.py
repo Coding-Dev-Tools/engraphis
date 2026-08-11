@@ -2589,7 +2589,7 @@ class MemoryEngine:
                     self.store.conn.rollback()
                 raise
         result["vector_index_cleanup"] = index_cleanup
-        if index_cleanup == "failed":
+        if index_cleanup in {"failed", "partial"}:
             result["external_index_limitation"] = (
                 "The configured vector index did not confirm deletion; remediate that backend "
                 "separately before treating the secret as fully erased."

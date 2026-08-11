@@ -8026,8 +8026,21 @@ class Store:
         ids = list(dict.fromkeys(str(value) for value in workspace_ids))
         if not ids:
             return "1=0", [], ids
-        placeholders = ",".join("?" for _ in ids)
-        return f"workspace_id IN ({placeholders})", ids, ids
+        # SQLite limits the total number of bound variables in a statement, not
+        # just the size of one IN clause. For a very large authorization set,
+        # fetch only non-null workspace receipts and apply the exact set below
+        # after the query; this keeps the SQL statement below the limit without
+        # weakening the aggregate's scope.
+        if len(ids) > IN_CLAUSE_CHUNK:
+            return "workspace_id IS NOT NULL", [], ids
+        clauses: list[str] = []
+        params: list[str] = []
+        for start in range(0, len(ids), IN_CLAUSE_CHUNK):
+            chunk = ids[start:start + IN_CLAUSE_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            clauses.append(f"workspace_id IN ({placeholders})")
+            params.extend(chunk)
+        return "(" + " OR ".join(clauses) + ")", params, ids
 
     def context_savings(
         self,
@@ -8079,6 +8092,12 @@ class Store:
             "FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
+        if scoped_workspace_ids is not None and len(scoped_workspace_ids) > IN_CLAUSE_CHUNK:
+            allowed_workspace_ids = set(scoped_workspace_ids)
+            rows = [
+                row for row in rows
+                if str(row["workspace_id"] or "") in allowed_workspace_ids
+            ]
         has_active_filters = repo_id is not None or from_ts is not None or to_ts is not None
         if has_active_filters and rows:
             verification_ids = sorted({str(r["workspace_id"]) for r in rows if r["workspace_id"]})
@@ -8399,7 +8418,7 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        workspace_where, workspace_params, _ = self._receipt_workspace_scope(
+        workspace_where, workspace_params, scoped_workspace_ids = self._receipt_workspace_scope(
             workspace_id=workspace_id, workspace_ids=workspace_ids,
         )
         where = workspace_where
@@ -8417,6 +8436,12 @@ class Store:
             "SELECT id, workspace_id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
+        if scoped_workspace_ids is not None and len(scoped_workspace_ids) > IN_CLAUSE_CHUNK:
+            allowed_workspace_ids = set(scoped_workspace_ids)
+            rows = [
+                row for row in rows
+                if str(row["workspace_id"] or "") in allowed_workspace_ids
+            ]
         groups: dict[tuple[str, str], dict] = {}
 
         def _bucket() -> dict:

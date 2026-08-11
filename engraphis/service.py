@@ -33,6 +33,8 @@ from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 from engraphis import __version__
 from engraphis.backends.extractor import ChunkingExtractor
@@ -73,6 +75,30 @@ from engraphis.core.store import (
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 logger = logging.getLogger("engraphis.service")
+
+
+def _is_memory_database_path(db_path: str) -> bool:
+    return db_path == ":memory:" or db_path.startswith("file::memory:")
+
+
+def _physical_database_path(db_path: str) -> str:
+    """Convert a SQLite file URI to the filesystem path used by Store.
+
+    Store opens paths with ``uri=False``, so passing a ``file:`` URI through to
+    pathlib or sqlite would treat the URI text as a literal filename.  Strip
+    URI-only query options here and decode the path before migration locking and
+    database opening both see it.
+    """
+    text = str(db_path)
+    if _is_memory_database_path(text) or not text.startswith("file:"):
+        return text
+    parsed = urlsplit(text)
+    if parsed.scheme != "file" or not parsed.path:
+        raise ValueError("file database URI must include a path")
+    uri_path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        uri_path = f"//{parsed.netloc}{uri_path}"
+    return str(Path(url2pathname(uri_path)).expanduser())
 
 
 def _annotate_context_usage(
@@ -966,8 +992,11 @@ def _auto_migrate_v1_if_needed(db_path: str) -> None:
     """Serialize legacy-database recovery and migration across processes."""
     from engraphis.config import _migration_lock
 
-    with _migration_lock(Path(db_path).expanduser()):
-        _auto_migrate_v1_if_needed_unlocked(db_path)
+    physical_path = _physical_database_path(db_path)
+    if _is_memory_database_path(physical_path):
+        return
+    with _migration_lock(Path(physical_path).expanduser()):
+        _auto_migrate_v1_if_needed_unlocked(physical_path)
 
 
 def _auto_migrate_v1_if_needed_unlocked(db_path: str) -> None:
@@ -1217,6 +1246,7 @@ class MemoryService:
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
                query_planner=None, read_only: bool = False) -> "MemoryService":
+        db_path = _physical_database_path(db_path)
         # extractor / graph_extractor default to the configured backends
         # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
         # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
@@ -1236,7 +1266,7 @@ class MemoryService:
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
-        if db_path != ":memory:" and not read_only:
+        if not _is_memory_database_path(db_path) and not read_only:
             _auto_migrate_v1_if_needed(db_path)
         # Optional encryption at rest: if ENGRAPHIS_DB_KEY[_FILE] is set, memories are
         # stored in a SQLCipher-encrypted database. Off by default (returns None).
@@ -1253,7 +1283,7 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
         )
-        if db_path != ":memory:" and not read_only:
+        if not _is_memory_database_path(db_path) and not read_only:
             try:
                 _warn_if_db_empty_with_populated_sibling(db_path)
             except Exception:  # noqa: BLE001 — diagnostics never block startup

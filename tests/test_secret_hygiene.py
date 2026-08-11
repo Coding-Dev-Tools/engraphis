@@ -288,6 +288,45 @@ def test_secure_erase_reports_external_failure_after_erasing_all_successors():
     assert engine.store.get_memory(successor_id) is None
 
 
+def test_secure_erase_reports_partial_external_cleanup_as_limited():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+
+    class PartialExternalIndex:
+        def __init__(self):
+            self.deleted = []
+            self.injected = False
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+            if not self.injected:
+                self.injected = True
+                engine.store.add_memory(MemoryRecord(
+                    id=successor_id,
+                    content="Losing secret copy.",
+                    workspace_id=workspace,
+                    scope=Scope.WORKSPACE,
+                    metadata={"sync_conflict": {"memory_id": original_id}},
+                    provenance={"conflict_of": original_id, "trusted": False},
+                ))
+                return
+            raise RuntimeError("successor vector unavailable")
+
+    index = PartialExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "partial"
+    assert "external_index_limitation" in result
+    assert len(index.deleted) == 2
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
+
+
 def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")
