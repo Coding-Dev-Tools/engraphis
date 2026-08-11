@@ -111,11 +111,12 @@
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
+  const GRAPH_PHYSICS_VERSION = 2;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
-    { id: 'graph-repel', key: 'repel', fallback: 48 },
+    { id: 'graph-repel', key: 'repel', fallback: 60 },
     { id: 'graph-link', key: 'link', fallback: 8 },
     { id: 'graph-gravity', key: 'gravity', fallback: 48 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
@@ -127,7 +128,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 48, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 60, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -404,14 +405,16 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-galaxy-gravity-400'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-galaxy-release-stable-1'),
         'EngraphisGraph', controller.signal,
       ));
       graphAssetsPromise = attempt;
       graphAssetsController = controller;
       attempt.catch(() => {
-        if (graphAssetsPromise === attempt) graphAssetsPromise = null;
-        if (graphAssetsPromise === null) graphAssetsController = null;
+        /* A fetched script can load successfully while failing to execute (for example, a
+           stale cached parse error). Retire that URL immediately so the next explicit Reload
+           advances the retry query instead of replaying the same broken response forever. */
+        if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt);
       });
     }
     return graphAssetsPromise;
@@ -2388,6 +2391,7 @@
 
   function graphPreferenceSnapshot() {
     return {
+      physicsVersion: GRAPH_PHYSICS_VERSION,
       preset: byId('graph-preset').value,
       style: byId('graph-style').value,
       color: byId('graph-color').value,
@@ -2417,6 +2421,8 @@
   }
 
   function restoreGraphPreferences() {
+    let hasSavedPreferences = false;
+    try { hasSavedPreferences = localStorage.getItem(GRAPH_PREFERENCES_KEY) !== null; } catch (_) {}
     const preset = graphPreference('preset', byId('graph-preset').value,
       ['original', 'compact', 'communities', 'radial', 'constellation', 'galaxy']);
     const style = graphPreference('style', byId('graph-style').value,
@@ -2431,9 +2437,20 @@
     byId('graph-palette').value = palette;
 
     const savedTuning = graphPreference('tuning', {});
+    const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
+    const legacyPhysics = hasSavedPreferences
+      && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < GRAPH_PHYSICS_VERSION);
+    const effectiveTuning = savedTuning && typeof savedTuning === 'object'
+      ? { ...savedTuning } : {};
+    /* Version-one preferences persisted the retired Galaxy default as if it were a custom
+       choice. Migrate only that exact old default; a deliberate Gravity 0 or any custom
+       spacing/style/layer remains untouched. Once versioned, a later user-selected 48 stays 48. */
+    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.repel) === 48) {
+      effectiveTuning.repel = 60;
+    }
     syncGraphTuning({
       ...graphPresetTuning(preset),
-      ...(savedTuning && typeof savedTuning === 'object' ? savedTuning : {}),
+      ...effectiveTuning,
     });
 
     const savedMin = Number(graphPreference('minDegree', number(byId('graph-min-degree').value)));
@@ -2465,6 +2482,7 @@
     state.graphIncludeCode = graphPreference('includeCode', false) === true;
     state.graphSavedView = graphPreference('savedView', 'schema', ['', ...Object.keys(GRAPH_SAVED_VIEWS)]);
     syncGraphSavedViews();
+    if (legacyPhysics) saveGraphPreferences();
   }
 
   function savedGraphView(id) {
