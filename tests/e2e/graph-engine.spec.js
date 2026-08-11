@@ -1085,6 +1085,7 @@ test('Galaxy motion is another 30 percent slower while core perturbation stays b
     for (let step = 0; step < 450; step += 1) {
       const tick = I.integrateGalaxyLeapfrog(coreOrbit, [], [], {
         ...options(0.021328125), central: false,
+        includeBlackHoleExclusion: false,
       });
       const radius = Math.hypot(
         coreOrbit[1].x - coreOrbit[0].x, coreOrbit[1].y - coreOrbit[0].y,

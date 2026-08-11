@@ -1703,6 +1703,11 @@ def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> N
           relativeVelocity: [nodes[3].vx - nodes[2].vx, nodes[3].vy - nodes[2].vy],
           coreTangent: nodes[1].vy,
           outerTangent: (nodes[2].vy * 4 + nodes[3].vy) / 5,
+          coreAngular: nodes[1].x * nodes[1].vy - nodes[1].y * nodes[1].vx,
+          outerAngular: ((nodes[2].x * 4 + nodes[3].x) / 5)
+            * ((nodes[2].vy * 4 + nodes[3].vy) / 5)
+            - ((nodes[2].y * 4 + nodes[3].y) / 5)
+              * ((nodes[2].vx * 4 + nodes[3].vx) / 5),
         };
         const stats = I.applyGalaxyBlackHoleExclusion(nodes, { padding: 2.5 });
         const anchor = nodes[0];
@@ -1717,6 +1722,11 @@ def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> N
           diameter: Math.hypot(nodes[3].x - nodes[2].x, nodes[3].y - nodes[2].y),
           relativeVelocity: [nodes[3].vx - nodes[2].vx, nodes[3].vy - nodes[2].vy],
           outerTangent: (nodes[2].vy * 4 + nodes[3].vy) / 5,
+          coreAngular: nodes[1].x * nodes[1].vy - nodes[1].y * nodes[1].vx,
+          outerAngular: ((nodes[2].x * 4 + nodes[3].x) / 5)
+            * ((nodes[2].vy * 4 + nodes[3].vy) / 5)
+            - ((nodes[2].y * 4 + nodes[3].y) / 5)
+              * ((nodes[2].vx * 4 + nodes[3].vx) / 5),
           finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
           before,
         });
@@ -1731,14 +1741,17 @@ def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> N
     assert report["stats"]["repelledNodes"] == 3
     assert report["stats"]["minimumClearance"] == pytest.approx(0, abs=1e-10)
     assert report["stats"]["inwardVelocityRemoved"] == pytest.approx(7, abs=1e-12)
+    assert report["stats"]["tangentialVelocityRemoved"] > 0
     assert report["core"][2] == pytest.approx(0, abs=1e-12)
-    assert report["core"][3] == pytest.approx(report["before"]["coreTangent"], abs=1e-12)
+    assert 0 < report["core"][3] < report["before"]["coreTangent"]
+    assert report["coreAngular"] == pytest.approx(report["before"]["coreAngular"], abs=1e-12)
     assert report["diameter"] == pytest.approx(report["before"]["diameter"], abs=1e-12)
     assert report["relativeVelocity"] == pytest.approx(
         report["before"]["relativeVelocity"], abs=1e-12
     )
-    assert report["outerTangent"] == pytest.approx(
-        report["before"]["outerTangent"], abs=1e-12
+    assert 0 < report["outerTangent"] < report["before"]["outerTangent"]
+    assert report["outerAngular"] == pytest.approx(
+        report["before"]["outerAngular"], abs=1e-12
     )
 
 
@@ -2236,6 +2249,52 @@ def test_integrator_keeps_rotating_nodes_outside_black_hole_and_clamps_drag() ->
     assert report["maximumSpeed"] <= 48
     assert report["draggedClearance"] >= -1e-9
     assert report["dragContacts"] > 0
+
+
+@requires_node
+def test_render_enforces_horizon_before_paint_for_oversized_static_galaxy() -> None:
+    report = _run_engine(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, visual_radius: 8, degree: 1,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'intruder', community_id: 'intruder', gravity_mass: 1,
+            visual_radius: 3, degree: 1, x: 0, y: 0, vx: 0, vy: 5 },
+        ];
+        for (let index = 0; index < 599; index++) nodes.push({
+          id: 'filler-' + index, community_id: 'filler-' + index,
+          gravity_mass: 1, visual_radius: 3, degree: 1,
+          x: 240 + index * 2, y: 180 + (index % 17) * 3, vx: 0, vy: 0,
+        });
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({ nodes, links: [], communities: [], community_bridges: [],
+          meta: { layout_seed: 7 } });
+        const rendered = fg.graphData().nodes;
+        const anchor = rendered.find(node => node.id === 'black-hole');
+        const intruder = rendered.find(node => node.id === 'intruder');
+        const diagnostics = api.physicsDiagnostics();
+        const integrator = source.slice(source.indexOf('function integrateGalaxyLeapfrog'),
+          source.indexOf('function galaxyMotionDiagnostics'));
+        emit({
+          staticLayout: diagnostics.staticLayout,
+          exclusion: diagnostics.blackHoleExclusion,
+          clearance: Math.hypot(intruder.x - anchor.x, intruder.y - anchor.y)
+            - anchor.radius - intruder.radius - diagnostics.blackHoleExclusionPadding,
+          anchor: [anchor.x, anchor.y, anchor.vx, anchor.vy],
+          pinned: [intruder.fx, intruder.fy],
+          position: [intruder.x, intruder.y],
+          initialBeforeAcceleration: integrator.indexOf('const initialHorizon')
+            < integrator.indexOf('const start = galaxyAccelerations'),
+        });
+        """
+    )
+    assert report["staticLayout"] is True
+    assert report["exclusion"]["contacts"] > 0
+    assert report["clearance"] >= -1e-9
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert report["pinned"] == pytest.approx(report["position"], abs=1e-12)
+    assert report["initialBeforeAcceleration"] is True
 
 
 @requires_node
