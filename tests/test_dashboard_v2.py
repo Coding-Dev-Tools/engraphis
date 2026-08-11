@@ -828,6 +828,7 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             'data-graph-saved-view="schema"', 'data-graph-saved-view="people"',
             'data-graph-saved-view="code"', 'id="graph-save-view"',
             'id="graph-repel"', 'id="graph-depth"', 'id="graph-reset-tuning"',
+            'id="graph-gravity" type="range" min="0" max="200"',
             'data-graph-layer="code"',
         ):
             assert control in page.text
