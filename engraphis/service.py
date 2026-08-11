@@ -8129,11 +8129,10 @@ class MemoryService:
                     )
                     code_edge_params.extend((t, known_t, known_t, known_t))
                 code_edge_params.append(remaining_edges + 1)
-                code_edges = self.store.conn.execute(
+                code_edges = [dict(row) for row in self.store.conn.execute(
                     code_edge_sql + "ORDER BY id LIMIT ?", code_edge_params,
-                ).fetchall()
+                ).fetchall()]
                 if include_history:
-                    code_edges = [dict(row) for row in code_edges]
                     for code_edge in code_edges:
                         valid_to_value = code_edge.get("valid_to")
                         recorded_at = code_edge.get("valid_to_recorded_at")
@@ -9363,7 +9362,7 @@ class MemoryService:
         clean_canonical_id = _clean_text(
             canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
         )
-        if clean_canonical_id.endswith(":ghost"):
+        if member_id is not None and clean_canonical_id.endswith(":ghost"):
             clean_canonical_id = clean_canonical_id[:-6]
         clean_member_id = (
             _clean_text(member_id, field="member_id", max_chars=MAX_NAME_CHARS)

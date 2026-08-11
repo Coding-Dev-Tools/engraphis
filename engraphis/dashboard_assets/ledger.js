@@ -2826,12 +2826,15 @@
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
         const sceneMeta = scene.meta || payload.meta || {};
-        if (sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter') {
+        if (sceneMeta.degraded && sceneMeta.requested_include_code
+          && sceneMeta.include_code === false) {
           state.graphIncludeCode = false;
           state.graphDataIncludeCode = false;
           setGraphLayers({ ...graphLayerState(), code: false });
           saveGraphPreferences();
-          showNotice('Code overlay skipped for this workspace. Choose a repository filter to include code relationships.');
+          showNotice(sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter'
+            ? 'Code overlay skipped for this workspace. Choose a repository filter to include code relationships.'
+            : 'Code overlay was unavailable for this request. Showing the entity graph.');
         }
         state.graphMeta = {
           ...sceneMeta,
