@@ -1002,7 +1002,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('level') === 'overview'
-      && url.searchParams.get('node_limit') === '300'
+      && url.searchParams.get('node_limit') === '500'
       && url.searchParams.get('edge_limit') === '900'
       && !url.searchParams.has('connected_only');
   });

@@ -2253,7 +2253,7 @@ def build_graph_scene(
         "path": (100, 250),
     }
     default_node_cap, default_edge_cap = caps[level]
-    node_cap = min(300, max(1, int(node_limit or default_node_cap)))
+    node_cap = min(500, max(1, int(node_limit or default_node_cap)))
     edge_cap = min(900, max(0, int(edge_limit if edge_limit is not None else default_edge_cap)))
     nodes = graph["nodes"]
     ranked_nodes = sorted(nodes, key=lambda node_id: (-nodes[node_id]["scene_rank"], node_id))

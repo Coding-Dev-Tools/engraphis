@@ -794,7 +794,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-unlinked"' not in page.text
         assert 'id="graph-tune-unlinked"' not in page.text
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
-        assert "const GRAPH_INITIAL_NODE_LIMIT = 300;" in script.text
+        assert "const GRAPH_INITIAL_NODE_LIMIT = 500;" in script.text
         assert "const GRAPH_INITIAL_EDGE_LIMIT = 900;" in script.text
         assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
