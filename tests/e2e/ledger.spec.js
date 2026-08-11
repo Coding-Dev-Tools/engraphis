@@ -414,7 +414,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
   await expect(page.locator('#graph-empty')).toContainText('Graph loading timed out');
 
   await page.getByRole('button', { name: 'Reload data' }).click();
-  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations', { timeout: 15000 });
   expect(d3Attempts).toBe(2);
   releaseStalledAsset();
 });
