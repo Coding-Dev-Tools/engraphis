@@ -339,7 +339,7 @@ function signedAngleDelta(from, to) {
   return Math.atan2(Math.sin(to - from), Math.cos(to - from));
 }
 
-async function reducedGravityTrial(page, gravity, stepCount = 8) {
+async function gravityTrial(page, gravity, stepCount = 8) {
   await page.evaluate(({ scene, setting }) => {
     const api = window.__engraphisGraph;
     api.freeze(true);
@@ -356,9 +356,9 @@ async function reducedGravityTrial(page, gravity, stepCount = 8) {
   const curve = await page.evaluate(() => ({
     setting: window.__engraphisGraph.state().settings.gravity,
     baseline: window.EngraphisGraph._internals.galaxyBlackHoleGravityConstant(48),
-    maximum: window.EngraphisGraph._internals.galaxyBlackHoleGravityConstant(100),
+    maximum: window.EngraphisGraph._internals.galaxyBlackHoleGravityConstant(200),
     localBaseline: window.EngraphisGraph._internals.galaxyLocalGravityConstant(48),
-    localMaximum: window.EngraphisGraph._internals.galaxyLocalGravityConstant(100),
+    localMaximum: window.EngraphisGraph._internals.galaxyLocalGravityConstant(200),
   }));
   await page.evaluate(() => window.__engraphisGraph.freeze(false));
   const samples = [before];
@@ -377,7 +377,7 @@ async function reducedGravityTrial(page, gravity, stepCount = 8) {
   };
 }
 
-async function reducedOrbitalSeparationTrial(page, separation, stepCount = 8) {
+async function orbitalSeparationTrial(page, separation, stepCount = 8) {
   await page.evaluate(({ scene, setting }) => {
     const api = window.__engraphisGraph;
     /* Dominant star↔planet pairs use the stellar-surface exclusion rather than generic
@@ -1514,16 +1514,16 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(resumed.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
 });
 
-test('Galaxy sliders span density plus doubled Link and Orbital separation', async ({ page }) => {
+test('Galaxy sliders span doubled Gravity, Link, and Orbital separation', async ({ page }) => {
   // This test exercises the live fixed-step solver; reduced motion intentionally disables it.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
-  const baseline = await reducedGravityTrial(page, 48);
-  const strong = await reducedGravityTrial(page, 100);
-  const compactOrbits = await reducedOrbitalSeparationTrial(page, 0);
-  const separatedOrbits = await reducedOrbitalSeparationTrial(page, 120, 16);
+  const baseline = await gravityTrial(page, 48);
+  const strong = await gravityTrial(page, 200);
+  const compactOrbits = await orbitalSeparationTrial(page, 0);
+  const separatedOrbits = await orbitalSeparationTrial(page, 120, 16);
   const immediate = await page.evaluate(scene => {
     const api = window.__engraphisGraph;
     const I = window.EngraphisGraph._internals;
@@ -1543,13 +1543,13 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
     const velocities = () => nodes.map(node => [node.id, node.vx, node.vy]);
     const before = { radii: radii(), diameter: diameter(), velocities: velocities() };
     api.freeze(false);
-    api.setSettings({ gravity: 100, size: 1 });
+    api.setSettings({ gravity: 200, size: 1 });
     const after = { radii: radii(), diameter: diameter(), velocities: velocities(),
       diagnostics: api.physicsDiagnostics() };
     api.freeze(true);
     return {
       before, after,
-      expectedRatio: I.galaxyImmediateGravityRadiusScale(100)
+      expectedRatio: I.galaxyImmediateGravityRadiusScale(200)
         / I.galaxyImmediateGravityRadiusScale(48),
     };
   }, blackHoleGalaxyScene);
@@ -1566,12 +1566,12 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
         Math.hypot(system.ax, system.ay)]));
     };
     const baseline = measure(48);
-    const maximum = measure(100);
+    const maximum = measure(200);
     return {
       baseline, maximum,
       ratios: Object.fromEntries(Object.keys(baseline).map(id => [id,
         maximum[id] / baseline[id]])),
-      densityFactors: [0, 48, 100].map(gravity =>
+      densityFactors: [0, 48, 200].map(gravity =>
         window.EngraphisGraph._internals.galaxyInwardConvergenceFactor(60, gravity)),
       linkScales: [4, 8, 80].map(setting =>
         window.EngraphisGraph._internals.galaxyRelationOrbitScale(setting)),
@@ -1579,22 +1579,24 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
   }, blackHoleGalaxyScene);
 
   expect(baseline.curve.setting).toBe(48);
-  expect(strong.curve.setting).toBe(100);
+  expect(strong.curve.setting).toBe(200);
   expect(baseline.curve.baseline).toBe(240);
-  expect(baseline.curve.maximum).toBe(864);
+  expect(baseline.curve.maximum).toBeCloseTo(2743.3846153846152, 12);
   expect(baseline.curve.localBaseline).toBe(120);
-  expect(baseline.curve.localMaximum).toBe(432);
+  expect(baseline.curve.localMaximum).toBeCloseTo(1371.6923076923076, 12);
   expect(baseline.curve.localBaseline).toBe(baseline.curve.baseline * 0.5);
   expect(baseline.curve.localMaximum).toBe(baseline.curve.maximum * 0.5);
-  expect(baseline.curve.maximum / baseline.curve.baseline).toBe(3.6);
+  expect(baseline.curve.maximum / baseline.curve.baseline).toBeCloseTo(
+    11.430769230769231, 12,
+  );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
   expect(baseline.before.diagnostics.effectiveGravity).toBe(240);
   expect(baseline.before.diagnostics.blackHoleGravity).toBe(240);
   expect(baseline.before.diagnostics.localGravity).toBe(120);
-  expect(strong.before.diagnostics.gravitySetting).toBe(100);
-  expect(strong.before.diagnostics.effectiveGravity).toBe(864);
-  expect(strong.before.diagnostics.blackHoleGravity).toBe(864);
-  expect(strong.before.diagnostics.localGravity).toBe(432);
+  expect(strong.before.diagnostics.gravitySetting).toBe(200);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(2743.3846153846152, 12);
+  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(2743.3846153846152, 12);
+  expect(strong.before.diagnostics.localGravity).toBeCloseTo(1371.6923076923076, 12);
   expect(compactOrbits.before.diagnostics.orbitalSeparationSetting).toBe(0);
   expect(compactOrbits.before.diagnostics.orbitalSeparationPadding).toBe(0);
   expect(compactOrbits.before.diagnostics.orbitalSeparationStrength).toBe(0);
@@ -1616,7 +1618,9 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
   expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
   expect(physicalField.densityFactors[1]).toBeCloseTo(0.75 ** 0.455, 12);
-  expect(physicalField.densityFactors[2]).toBeCloseTo(0.75 ** (3.6 * 0.455), 12);
+  expect(physicalField.densityFactors[2]).toBeCloseTo(
+    0.75 ** (11.430769230769231 * 0.455), 12,
+  );
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   expect(immediate.after.diagnostics.immediateGravityResponse.systems).toBe(3);
   expect(immediate.after.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
@@ -1634,7 +1638,7 @@ test('Galaxy sliders span density plus doubled Link and Orbital separation', asy
   for (const [id, ratio] of Object.entries(physicalField.ratios)) {
     expect(physicalField.baseline[id], id).toBeGreaterThan(0);
     expect(physicalField.maximum[id], id).toBeGreaterThan(0);
-    expect(ratio, id).toBeCloseTo(3.6, 10);
+    expect(ratio, id).toBeCloseTo(11.430769230769231, 10);
   }
 
   for (const trial of [baseline, strong]) {
@@ -1756,7 +1760,7 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     const before = radii();
     api.freeze(false);
     const control = document.querySelector('#graph-gravity');
-    control.value = '100';
+    control.value = '200';
     control.dispatchEvent(new Event('input', { bubbles: true }));
     const after = radii();
     const diagnostics = api.physicsDiagnostics();
@@ -1764,14 +1768,14 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     api.freeze(true);
     return {
       before, after,
-      expectedRatio: I.galaxyImmediateGravityRadiusScale(100)
+      expectedRatio: I.galaxyImmediateGravityRadiusScale(200)
         / I.galaxyImmediateGravityRadiusScale(48),
       diagnostics, output,
     };
   }, blackHoleGalaxyScene);
 
-  expect(report.output).toBe('100');
-  expect(report.diagnostics.gravitySetting).toBe(100);
+  expect(report.output).toBe('200');
+  expect(report.diagnostics.gravitySetting).toBe(200);
   expect(report.diagnostics.immediateGravityResponse.systems).toBe(3);
   expect(report.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
   for (const [id, radius] of Object.entries(report.before)) {
