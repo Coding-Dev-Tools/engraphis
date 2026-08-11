@@ -353,7 +353,13 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         if ws is None:
             ws = _default_workspace()
         body = run(svc.export_receipts, workspace=ws)
-        safe_ws = "".join(c if c.isalnum() or c in "-_." else "_" for c in (ws or "workspace"))
+        # Restrict filename to ASCII to avoid Latin-1 encoding crashes in response
+        # headers when workspace names contain non-Latin-1 characters (e.g., CJK).
+        # isascii() + isalnum() filters out any character that would crash Starlette.
+        safe_ws = "".join(
+            c if c.isascii() and (c.isalnum() or c in "-_.") else "_"
+            for c in (ws or "workspace")
+        ) or "workspace"
         import time
         fname = "engraphis-receipts-%s-%s.json" % (
             safe_ws,
