@@ -2711,3 +2711,53 @@ def test_graph_entity_evidence_resolves_synthetic_ghost_node_id():
     assert detail["canonical_id"] == alpha
     assert detail["evidence"]
     assert detail["evidence"][0]["excerpt"] == "Alpha uses Beta."
+
+
+def test_graph_scene_history_visibility_scopes_to_requested_repo():
+    """Regression: visibility preclassification must apply the same repo scope
+    as the subsequent edge/entity queries so unrelated-repo edges cannot
+    promote private entities into the candidate set."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="", content="Alpha evidence.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    entity_shared = service.store.upsert_entity(Node(
+        id="ent_shared", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    entity_shared2 = service.store.upsert_entity(Node(
+        id="ent_shared2", name="Shared2", ntype="concept", workspace_id=workspace_id,
+    ))
+    entity_b_only = service.store.upsert_entity(Node(
+        id="ent_b_only", name="BetaOnly", ntype="concept",
+        workspace_id=workspace_id, repo_id=repo_b,
+    ))
+    # Edge in repo_b touching a shared entity — should be invisible when
+    # filtering to repo_a.
+    service.store.upsert_edge(Edge(
+        id="edge_b", src=entity_b_only, dst=entity_shared, relation="uses",
+        workspace_id=workspace_id, repo_id=repo_b,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+    # Repo-less shared edge between two shared entities — must remain visible.
+    service.store.upsert_edge(Edge(
+        id="edge_shared", src=entity_shared, dst=entity_shared2, relation="relates",
+        workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", repo="alpha", include_history=True,
+        valid_at=time.time() + 10.0, known_at=time.time() + 10.0,
+    )
+    node_ids = {node["id"] for node in scene["nodes"]}
+    edge_ids = {edge["id"] for edge in scene["edges"]}
+
+    assert entity_shared in node_ids
+    assert entity_shared2 in node_ids
+    assert "edge_shared" in edge_ids
+    assert entity_b_only not in node_ids
+    assert "edge_b" not in edge_ids
