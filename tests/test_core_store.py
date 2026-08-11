@@ -2619,6 +2619,27 @@ def test_secure_erase_classifies_content_free_tombstone_export(
     }
 
 
+def test_secure_erase_rescans_successors_instead_of_trusting_stale_targets(store):
+    wid = store.get_or_create_workspace("erase-successor-race")
+    parent_id = store.add_memory(MemoryRecord(
+        id="mem_erase_parent", content="parent secret", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    successor_id = store.add_memory(MemoryRecord(
+        id="mem_erase_successor", content="successor secret", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        provenance={"conflict_of": parent_id},
+    ))
+
+    store.secure_erase_memory(parent_id, _target_ids=[parent_id])
+
+    assert store.get_memory(parent_id) is None
+    assert store.get_memory(successor_id) is None
+    assert {row["id"] for row in store.list_memory_tombstones()} >= {
+        parent_id, successor_id,
+    }
+
+
 def test_tombstone_export_class_is_strict_and_monotonic(store):
     with pytest.raises(ValueError, match="export_class must be"):
         store.add_memory_tombstone(
