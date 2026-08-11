@@ -814,6 +814,8 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "&include_memory_nodes=false" in script.text
         assert "&include_history=true" in script.text
         assert "&connected_only=true" in script.text
+        assert "const repo = (byId('graph-repo-filter').value || '').trim();" in script.text
+        assert "repo ? `&repo=${encodeURIComponent(repo)}`" in script.text
         assert "item.degree != null ? item.degree : item.weighted_degree" in script.text
         assert "style: 'cyber'" in script.text
         assert "renderMode: targetMode" in script.text
