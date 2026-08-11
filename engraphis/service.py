@@ -1232,8 +1232,12 @@ class MemoryService:
         return (int(self.store.conn.total_changes), data_version,
                 int(self.store.schema_version))
 
-    def _graph_scene_valid_until(self, workspace_id: str, at: float) -> float:
-        """Earliest future world-time boundary that can change a current graph scene."""
+    def _graph_scene_valid_until(
+        self, workspace_id: str, at: float, *, known_at: Optional[float] = None,
+        world_time_floating: bool = True, system_time_floating: bool = True,
+    ) -> float:
+        """Earliest future boundary on either unanchored graph-scene time axis."""
+        known = at if known_at is None else known_at
         sources = [
             ("edges edge", "edge.workspace_id=?", (workspace_id,), "edge"),
             (
@@ -1278,36 +1282,40 @@ class MemoryService:
         boundary_sql: list[str] = []
         boundary_params: list[Any] = []
         for source, scope, source_params, alias in sources:
-            for column in (
-                "valid_from", "valid_to", "valid_to_recorded_at", "ingested_at",
-                "expired_at",
-            ):
+            columns = []
+            if world_time_floating:
+                columns.extend(("valid_from", "valid_to"))
+            if system_time_floating:
+                columns.extend(("valid_to_recorded_at", "ingested_at", "expired_at"))
+            for column in columns:
                 # For start-boundary columns (valid_from, ingested_at), include rows
                 # whose expired_at is still in the future — they become visible when
                 # the start boundary passes and remain so until expiration. End-boundary
                 # columns only matter on currently-active (non-expired) rows.
                 extra_params: list[Any] = []
+                reference = at if column in ("valid_from", "valid_to") else known
                 if column in ("valid_from", "ingested_at"):
                     active = f" AND ({alias}.expired_at IS NULL OR {alias}.expired_at>?)"
-                    extra_params = [at]
+                    extra_params = [known]
                 elif column == "expired_at":
                     active = ""
                 else:
                     active = f" AND ({alias}.expired_at IS NULL OR {alias}.expired_at>?)"
-                    extra_params = [at]
+                    extra_params = [known]
                 boundary_sql.append(
                     f"SELECT {alias}.{column} AS boundary FROM {source} "
                     f"WHERE {scope} AND {alias}.{column}>?{active}"
                 )
-                boundary_params.extend((*source_params, at, *extra_params))
+                boundary_params.extend((*source_params, reference, *extra_params))
         # Entity rows use ``created_at`` as their temporal visibility boundary;
         # a clock-skewed sync can make an otherwise isolated entity appear later
         # without changing the graph revision.
-        boundary_sql.append(
-            "SELECT entity.created_at AS boundary FROM entities entity "
-            "WHERE entity.workspace_id=? AND entity.created_at>?"
-        )
-        boundary_params.extend((workspace_id, at))
+        if system_time_floating:
+            boundary_sql.append(
+                "SELECT entity.created_at AS boundary FROM entities entity "
+                "WHERE entity.workspace_id=? AND entity.created_at>?"
+            )
+            boundary_params.extend((workspace_id, known))
         row = self.store.conn.execute(
             "SELECT MIN(boundary) FROM (" + " UNION ALL ".join(boundary_sql) + ")",
             boundary_params,
@@ -8860,7 +8868,11 @@ class MemoryService:
             math.inf if (
                 clean_valid_at is not None and clean_known_at is not None
             ) or not _wid
-            else self._graph_scene_valid_until(_wid, query_at)
+            else self._graph_scene_valid_until(
+                _wid, query_at, known_at=query_known_at,
+                world_time_floating=clean_valid_at is None,
+                system_time_floating=clean_known_at is None,
+            )
         )
         # One complete scene can be many megabytes.  Keep at most one in the shared
         # LRU while retaining the normal 16-entry budget for compact analytical views.
