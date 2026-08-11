@@ -403,9 +403,19 @@ def _migration_lock(target: Path):
             raise
     else:
         try:
-            os.chmod(target.parent, 0o700)
+            # Use fd-based chmod to avoid TOCTOU symlink race: open the directory
+            # we just created with O_NOFOLLOW and fchmod the descriptor.
+            parent_fd = os.open(
+                str(target.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
         except OSError:
             pass
+        else:
+            try:
+                os.fchmod(parent_fd, 0o700)
+            finally:
+                os.close(parent_fd)
     lock_path = target.with_name(".%s.migration.lock" % target.name)
     expected = private_file_stat(lock_path, allow_missing=True)
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
