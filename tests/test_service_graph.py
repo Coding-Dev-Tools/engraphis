@@ -256,6 +256,19 @@ def test_graph_scene_cache_deadline_tracks_memory_and_connector_boundaries():
     connector_workspace_id = connector_svc.store.get_or_create_workspace("acme")
     assert connector_svc._graph_scene_valid_until(connector_workspace_id, 100.0) == 200.0
 
+    ingestion_svc = MemoryService.create(":memory:", graph_extractor="none")
+    ingested_memory = _approve(ingestion_svc, ingestion_svc.remember(
+        "System-time cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    ingestion_svc.store.conn.execute(
+        "UPDATE memories SET ingested_at=? WHERE id=?",
+        (175.0, ingested_memory["id"]),
+    )
+    ingestion_svc.store.conn.commit()
+    ingestion_workspace_id = ingestion_svc.store.get_or_create_workspace("acme")
+    assert ingestion_svc._graph_scene_valid_until(ingestion_workspace_id, 100.0) == 175.0
+
 
 def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
     svc = MemoryService.create(":memory:", graph_extractor="none")
