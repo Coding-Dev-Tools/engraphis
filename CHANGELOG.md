@@ -11,8 +11,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
 - The Galaxy gravity slider now spans `0..400` while retaining the release-stable default
   black-hole field of `240` and local field of `120`. Independent community stars run on a 2.5×
-  orbital clock and retain the calibrated default stellar well when Gravity is zero, while the
-  global black-hole well remains a true zero.
+  orbital clock and retain the calibrated default stellar well when Gravity is zero. An explicit
+  black hole now retains a smaller `24`-setting floor at the loose endpoint, so neither solar
+  systems nor their planets silently stop while the displayed control remains at zero.
 - The Galaxy default orbital separation is now `60`, a 25% increase from `48`. Link and contact
   projections remain contractive and correction-capped so dense layouts cannot overshoot or
   ping-pong. Same-system contacts project along each declared stellar orbit so they preserve
@@ -28,6 +29,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- Galaxy systems revealed after the initial render, restored with zeroed velocity, or shown as
+  singletons now receive their own black-hole-frame tangential admission instead of being marked
+  seeded while stationary. Oversized Complete views use a bounded node-only hierarchical orbit
+  clock, and visible historical ghosts move as massless test particles without entering gravity,
+  contacts, or momentum.
+- Galaxy members that appear before their eventual star, arrive through a later reveal, change
+  parent systems, or return with a zeroed local phase now receive one momentum-balanced circular
+  seed around the selected dominant node. Existing healthy stellar orbits remain untouched.
 - Galaxy Reheat now wakes the persistent fixed-step clock without injecting bonus physics slices,
   and cross-system separation is bounded so it cannot kick entire solar systems into a visible
   fast-forward, ping-pong, or speed-cap pulse.
