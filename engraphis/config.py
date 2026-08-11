@@ -580,11 +580,22 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
             # A relative file URI such as file:data/engraphis.db must be anchored to
             # the trusted config directory. Otherwise SQLite resolves it against the
             # process CWD and different entry points can open different databases.
-            relative = configured[len("file:"):]
-            if relative.startswith("/") or relative.startswith("\\"):
+            # Split query parameters before path resolution so Path does not treat
+            # ? as a literal filename character.
+            remainder = configured[len("file:"):]
+            if remainder.startswith(":memory:"):
                 return configured
-            anchor = str((_CONFIG_ENV_PATH.parent / relative).resolve())
-            return f"file:{anchor}"
+            path_part, sep, query_part = remainder.partition("?")
+            if not path_part or path_part.startswith("/") or path_part.startswith("\\"):
+                return configured
+            anchor = str((_CONFIG_ENV_PATH.parent / path_part).resolve())
+            return f"file:{anchor}" + (sep + query_part if sep else "")
+        configured_path = Path(configured).expanduser()
+        # Drive-relative Windows paths (e.g. C:data/foo.db) are neither absolute
+        # nor relative to the config directory; they resolve against the drive's
+        # current working directory, which is the expected behaviour.
+        if PureWindowsPath(configured).anchor and not PureWindowsPath(configured).is_absolute():
+            return configured
         configured_path = Path(configured).expanduser()
         if (configured_path.is_absolute()
                 or PurePosixPath(configured).is_absolute()
@@ -797,7 +808,7 @@ class Settings:
     )
     embed_dim: Optional[int] = field(
         default_factory=lambda: (
-            _env_int("ENGRAPHIS_EMBED_DIM", 384) or None
+            None if _env("ENGRAPHIS_EMBED_DIM", "") == "0" else _env_int("ENGRAPHIS_EMBED_DIM", 384)
         )
     )
 
