@@ -404,7 +404,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-bounded-galaxy'),
         'EngraphisGraph', controller.signal,
       ));
       graphAssetsPromise = attempt;
