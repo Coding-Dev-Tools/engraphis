@@ -12,6 +12,7 @@ jobs:
   test:
     name: test + lint (full offline stack)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +52,7 @@ jobs:
   typecheck:
     name: core + backends typecheck (Python 3.11)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -68,6 +70,7 @@ jobs:
   encryption:
     name: encryption driver gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +97,7 @@ jobs:
   core-py39:
     name: core floor (numpy-only, Python 3.9)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -161,6 +165,7 @@ jobs:
   coverage:
     name: coverage gate (Python 3.11)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -178,6 +183,7 @@ jobs:
   hygiene:
     name: repo hygiene gate (no stray DBs/logs)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Reject stray runtime artifacts at repo root
@@ -192,6 +198,7 @@ jobs:
   pi-extension:
     name: Pi extension (${{ matrix.os }}, Python ${{ matrix.python-version }}, Node ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -229,6 +236,7 @@ jobs:
   browser-accessibility:
     name: browser accessibility smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -312,7 +320,8 @@ jobs:
           trap cleanup EXIT
           python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
           docker create --name "$container" engraphis:ci >/dev/null
-          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          site_packages=$(docker run --rm engraphis:ci python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          docker cp "$container:$site_packages/." "$audit_dir"
           python -m pip_audit --path "$audit_dir"
       - name: Run container (offline deterministic embedder — no model downloads)
         run: |
