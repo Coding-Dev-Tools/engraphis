@@ -1735,6 +1735,48 @@ def test_graph_scene_history_collision_uses_consistent_ghost_node_id():
     assert len(nodes_by_id) == len(scene["nodes"])
     assert nodes_by_id["canon"].get("ghost") is not True
     assert nodes_by_id["canon:ghost"]["ghost"] is True
+    assert nodes_by_id["canon:ghost"]["id"] == "canon:ghost"
+    ghost_edge = next(edge for edge in scene["edges"] if edge["id"] == "ghost-edge")
+    assert ghost_edge["source"] == "canon:ghost"
+
+
+def test_live_graph_excludes_edges_supported_only_by_session_memories():
+    service, alpha, beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    session = service.start_session("acme", repo="web", goal="private graph")
+    private_id = service.store.add_memory(MemoryRecord(
+        id="mem_session_only", content="private graph relation",
+        workspace_id=workspace_id, repo_id=repo_id,
+        session_id=session["session_id"], scope=Scope.SESSION,
+    ))
+    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edge_ab'")
+    service.store.conn.execute(
+        "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
+        "VALUES ('edge_ab', ?, 'manual', 1.0)", (private_id,),
+    )
+    service.store.conn.commit()
+
+    live = service.graph_scene(workspace="acme")
+
+    assert {edge["id"] for edge in live["edges"]} == {"edge_bg"}
+    assert alpha not in {edge["source"] for edge in live["edges"]}
+    assert beta in {edge["source"] for edge in live["edges"]}
+
+
+def test_history_edge_metadata_counts_appended_ghost_relations():
+    service, _alpha, _beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge_ab", at=closed_at)
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert history["meta"]["total_edges"] == 2
+    assert history["meta"]["shown_edges"] == 2
+    assert history["meta"]["truncated"] is False
 
 
 def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
