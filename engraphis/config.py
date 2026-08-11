@@ -574,8 +574,17 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
         # A relative path in the owner-private config must not follow whichever CWD
         # happened to launch the dashboard, MCP server, or a desktop shortcut. Anchor
         # it to the trusted config directory so every entrypoint opens the same file.
-        if configured in {":memory:", ""} or configured.startswith("file:"):
+        if configured in {":memory:", ""}:
             return configured
+        if configured.startswith("file:"):
+            # A relative file URI such as file:data/engraphis.db must be anchored to
+            # the trusted config directory. Otherwise SQLite resolves it against the
+            # process CWD and different entry points can open different databases.
+            relative = configured[len("file:"):]
+            if relative.startswith("/") or relative.startswith("\\"):
+                return configured
+            anchor = str((_CONFIG_ENV_PATH.parent / relative).resolve())
+            return f"file:{anchor}"
         configured_path = Path(configured).expanduser()
         if (configured_path.is_absolute()
                 or PurePosixPath(configured).is_absolute()
