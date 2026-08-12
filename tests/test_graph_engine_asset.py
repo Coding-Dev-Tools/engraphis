@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1061,6 +1061,40 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
     assert report["ratio"] == pytest.approx(3, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "connected"]
     assert report["fast"]["grouped"] == ["black-hole", "connected"]
+
+
+@requires_node
+def test_carrier_support_adopts_post_contact_phase_without_snapback() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'child', community_id: 'core', system_anchor_id: 'black-hole',
+            gravity_mass: 2, radius: 3, x: 50 * Math.cos(.4), y: 50 * Math.sin(.4),
+            vx: 0, vy: 0 },
+        ];
+        Object.defineProperty(nodes[1], '__galaxyCoreLaneRadius', {
+          value: 50, writable: true, configurable: true, enumerable: false,
+        });
+        Object.defineProperty(nodes[1], '__galaxyCoreLaneAngle', {
+          value: 0, writable: true, configurable: true, enumerable: false,
+        });
+        const before = Math.atan2(nodes[1].y, nodes[1].x);
+        I.supportGalaxyCarrierOrbits(nodes, {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          orbitalSpeed: 60, layoutSeed: 11, timestep: .032,
+        });
+        const after = Math.atan2(nodes[1].y, nodes[1].x);
+        emit({ before, after, step: after - before,
+          laneAngle: nodes[1].__galaxyCoreLaneAngle });
+        """
+    )
+    assert report["before"] == pytest.approx(0.4, abs=1e-12)
+    assert report["after"] == pytest.approx(report["before"], abs=0.1)
+    assert report["after"] > 0.3
+    assert abs(report["step"]) < 0.1
+    assert report["laneAngle"] == pytest.approx(report["after"], abs=1e-12)
 
 
 @requires_node
@@ -8922,7 +8956,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader

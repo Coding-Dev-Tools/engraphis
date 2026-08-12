@@ -294,6 +294,9 @@
   const GALAXY_SYSTEM_PACKING_GAP = 8;
   const GALAXY_SYSTEM_PACKING_STRENGTH = 0.45;
   const GALAXY_SYSTEM_PACKING_MAX_CORRECTION = 6;
+  /* Tiny solver drift should keep the deterministic lane phase shared across a ring. A larger
+     displacement is an actual contact/boundary correction and is allowed to become phase. */
+  const GALAXY_LANE_PHASE_CORRECTION_DISTANCE = 0.5;
   const GALAXY_BRIDGE_SCALE = 0.35;
   const GALAXY_CENTER_ACCELERATION_CAP = 2.5;
   /* The visible black hole is a contact boundary as well as a gravity source. Its skin must
@@ -4432,9 +4435,29 @@
       if (Number.isFinite(laneRadius) && laneRadius > 0) {
         radius = laneRadius;
         targetSpeed = core ? coreCircularSpeedAt(radius) : circularSpeedAt(radius);
-        let angle = Number(carrier[laneAngleKey]);
-        if (!Number.isFinite(angle)) angle = Math.atan2(dy, dx);
-        angle += direction * targetSpeed / radius * timestep;
+        /* Contact and boundary projections run before carrier support.  Their positional
+           correction is a legitimate phase change; restarting from the cached pre-contact
+           angle would snap the body backward, then repeat that snap on every frame.  Reconcile
+           from the carrier's current post-correction angle and retain the cache only for the
+           degenerate coincident fallback. */
+        const currentAngle = Math.atan2(dy, dx);
+        const cachedAngle = Number(carrier[laneAngleKey]);
+        const advance = direction * targetSpeed / radius * timestep;
+        let angle;
+        if (Number.isFinite(cachedAngle) && Number.isFinite(currentAngle)) {
+          const expectedAngle = cachedAngle + advance;
+          const phaseError = Math.atan2(
+            Math.sin(currentAngle - expectedAngle), Math.cos(currentAngle - expectedAngle));
+          const correctionDistance = 2 * radius * Math.abs(Math.sin(phaseError * 0.5));
+          /* Normal leapfrog drift is expected to land near the next cached phase. Only a
+             materially displaced carrier represents an impact/boundary correction; adopt that
+             phase once and do not add a second orbital step on top of it. */
+          angle = correctionDistance > GALAXY_LANE_PHASE_CORRECTION_DISTANCE
+            ? currentAngle : expectedAngle;
+        } else {
+          angle = Number.isFinite(currentAngle) ? currentAngle + advance : cachedAngle;
+        }
+        if (!Number.isFinite(angle)) angle = 0;
         carrier[laneAngleKey] = angle;
         const targetX = anchor.x + Math.cos(angle) * radius;
         const targetY = anchor.y + Math.sin(angle) * radius;

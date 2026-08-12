@@ -33,6 +33,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Direct black-hole graph connections now classify their non-anchor nodes as black-hole
   satellites, including legacy payloads without `system_anchor_id`, so those nodes rotate with
   the same Orbital speed phase.
+- Carrier orbit support now adopts a node's post-contact phase before advancing it, preventing
+  collision or boundary corrections from snapping nodes back to a stale lane angle and producing
+  visible jitter.
 - Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
   the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
