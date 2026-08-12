@@ -1133,7 +1133,9 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     for left_index, left in enumerate(communities):
         for right in communities[left_index + 1:]:
             distance = math.dist(positions[left["id"]], positions[right["id"]])
-            if distance < 1.15 * (left["radius"] + right["radius"]) - 1e-8:
+            if distance < graph_scene_module.GALAXY_ENVELOPE_CLEARANCE_FACTOR * (
+                left["radius"] + right["radius"]
+            ) - 1e-8:
                 overlap_pairs += 1
     assert overlap_pairs == 0
     assert not any(hint["galactic_overlap"] for hint in outer_hints)
