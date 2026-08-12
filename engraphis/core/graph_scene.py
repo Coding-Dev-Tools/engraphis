@@ -2219,7 +2219,11 @@ def build_graph_scene(
             min_confidence=min_confidence,
         )
 
-    if connected_only:
+    # Complete scenes construct memory and code-memory connectors below. Pruning their
+    # entity projection here would discard symbol endpoints before those connectors exist;
+    # _build_complete_scene performs the authoritative connected-only pass after assembling
+    # every enabled connector kind.
+    if connected_only and level != "complete":
         connected_canonical_ids = {
             str(edge[endpoint])
             for edge in graph["edges"]
