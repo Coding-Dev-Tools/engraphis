@@ -2519,7 +2519,7 @@ def code_path(req: _CodePathReq):
 class _CodeImpactReq(BaseModel):
     workspace: str
     repo: str
-    changed_files: list[str] = Field(default_factory=list, max_length=2_000)
+    changed_files: list[str] = Field(..., min_length=1, max_length=2_000)
     capacity: int = Field(
         default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
     )

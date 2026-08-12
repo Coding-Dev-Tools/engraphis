@@ -82,6 +82,16 @@ def test_chunk_text_preserves_overlap_when_source_chunk_fills_budget():
     assert all(len(chunk) <= 20 for chunk in chunks)
 
 
+def test_chunk_text_preserves_source_when_overlap_requires_rechunking():
+    from engraphis.engines.embedder import chunk_text
+
+    source = " ".join(f"w{index:02d}" for index in range(24))
+    chunks = chunk_text(source, chunk_size=20, overlap=8)
+
+    assert all(token in " ".join(chunks) for token in source.split())
+    assert all(len(chunk) <= 20 for chunk in chunks)
+
+
 def test_warmup_returns_false_on_failure():
     """warmup() returns False (never raises) when model loading fails."""
     import engraphis.engines.embedder as emb_mod
