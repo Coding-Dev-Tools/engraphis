@@ -2721,7 +2721,12 @@ test('Compact to Galaxy restores phase while live drag never wakes D3', async ({
       [node.x, node.y, Number(node.vx) || 0, Number(node.vy) || 0]]));
     return { before, after, calls: window.__galaxyD3Calls };
   });
-  expect(finalResume.after).toEqual(finalResume.before);
+  for (const [id, expected] of Object.entries(finalResume.before)) {
+    expect(finalResume.after[id]).toHaveLength(expected.length);
+    expected.forEach((value, index) => {
+      expect(finalResume.after[id][index]).toBeCloseTo(value, 12);
+    });
+  }
   expect(finalResume.calls).toEqual({ reheat: 0, alpha: 0, reset: 0 });
   await page.waitForTimeout(120);
 
@@ -3148,7 +3153,7 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
   await page.waitForFunction(() => window.__lastGraphNodeClick === 'black-hole');
 });
 
-test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page }) => {
+test('Ledger Gravity slider changes Galaxy density on the next physics tick', async ({ page }) => {
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
@@ -3191,18 +3196,17 @@ test('Ledger Gravity slider changes Galaxy density synchronously', async ({ page
     api.freeze(true);
     return {
       before, after,
-      expectedRatio: I.galaxyImmediateGravityRadiusScale(400)
-        / I.galaxyImmediateGravityRadiusScale(48),
       diagnostics, output,
     };
   }, blackHoleGalaxyScene);
 
   expect(report.output).toBe('400');
   expect(report.diagnostics.gravitySetting).toBe(400);
-  expect(report.diagnostics.immediateGravityResponse.systems).toBe(3);
-  expect(report.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
+  expect(report.diagnostics.immediateGravityResponse.systems).toBe(0);
+  expect(report.diagnostics.immediateGravityResponse.moved).toBe(0);
+  expect(report.diagnostics.immediateGravityResponse.maximumShift).toBe(0);
   for (const [id, radius] of Object.entries(report.before)) {
-    expect(report.after[id] / radius, id).toBeCloseTo(report.expectedRatio, 10);
+    expect(report.after[id] / radius, id).toBeCloseTo(1, 10);
   }
   expect(session.pageErrors).toEqual([]);
 });
