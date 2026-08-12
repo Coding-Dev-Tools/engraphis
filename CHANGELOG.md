@@ -30,6 +30,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   around the central galaxy anchor in both live and oversized kinematic layouts. Its faster
   endpoint also gives planets a modest 6% larger local orbital radius while the midpoint remains
   unchanged; saved views continue using `repel`.
+- Direct black-hole graph connections now classify their non-anchor nodes as black-hole
+  satellites, including legacy payloads without `system_anchor_id`, so those nodes rotate with
+  the same Orbital speed phase.
 - Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
   the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
