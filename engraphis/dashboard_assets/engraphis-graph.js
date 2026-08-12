@@ -265,11 +265,15 @@
      the exact no-overlap fallback for pathological payloads and pointer teleports. */
   const GALAXY_SYSTEM_ANCHOR_REPULSION_RANGE = 6;
   const GALAXY_SYSTEM_ANCHOR_REPULSION_ACCELERATION = 0.12;
-  /* Different solar systems still need a small visual contact pressure when their painted
-     nodes touch. Keep it far weaker than local orbital separation so systems can pass close
-     without the cross-system slingshots caused by the generic collision force. */
-  const GALAXY_CROSS_SYSTEM_REPULSION_FRACTION = 0.18;
+  /* Legacy telemetry retains this padding name, but cross-system clearance now belongs to the
+     complete rigid envelope below—not arbitrary node-pair pressure. */
   const GALAXY_CROSS_SYSTEM_REPULSION_PADDING = 1.5;
+  /* Solar systems are packed by their complete painted envelopes, never by pushing arbitrary
+     cross-community node pairs.  Eight world units stays visible between two outer planets;
+     the bounded response lets live systems keep orbiting while their carrier frames separate. */
+  const GALAXY_SYSTEM_PACKING_GAP = 8;
+  const GALAXY_SYSTEM_PACKING_STRENGTH = 0.45;
+  const GALAXY_SYSTEM_PACKING_MAX_CORRECTION = 6;
   const GALAXY_BRIDGE_SCALE = 0.35;
   const GALAXY_CENTER_ACCELERATION_CAP = 2.5;
   /* The visible black hole is a contact boundary as well as a gravity source. Its skin must
@@ -281,7 +285,10 @@
      dormant outer safety field. It starts well outside the seeded scene, adds a smooth
      inward acceleration only near that edge, then applies an exact last-resort boundary if a
      body still escapes. The cached radius never follows an escaped body outward. */
-  const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.75;
+  /* The finite disk must reserve painted-envelope capacity, not merely the furthest seeded
+     carrier. The 2x bound clears the complete 542-node / 36-system overview while explicit
+     caller radii remain exact for embedded and boundary-test scenes. */
+  const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 2;
   const GALAXY_FAR_FIELD_MIN_RADIUS = 96;
   const GALAXY_FAR_FIELD_SOFT_FRACTION = 0.82;
   const GALAXY_FAR_FIELD_ACCELERATION = 12;
@@ -2158,6 +2165,8 @@
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const empty = { bodies: bodies.length, systems: 0, satellites: 0,
+      systemPacking: { systems: 0, overlaps: 0, adjustedSystems: 0,
+        remainingOverlaps: 0, infeasiblePairs: 0, gap: 0 },
       ghostOrbit: { ghosts: 0, advanced: 0 } };
     if (!bodies.length) return empty;
     const centralSoftening = Math.max(0.1,
@@ -2317,7 +2326,17 @@
           / Math.max(1e-9, satelliteOuter - satelliteContact)))));
       satellites++;
     });
-    return { bodies: bodies.length, systems, satellites,
+    const systemPacking = opts.includeSystemPacking === true
+      ? applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
+        gap: opts.systemPackingGap,
+        strength: opts.systemPackingStrength,
+        maxCorrection: opts.systemPackingMaxCorrection,
+        fixedNodeId: opts.fixedNodeId,
+        updateKinematicPhase: true,
+      }))
+      : { systems: 0, overlaps: 0, adjustedSystems: 0, remainingOverlaps: 0,
+        infeasiblePairs: 0, gap: 0 };
+    return { bodies: bodies.length, systems, satellites, systemPacking,
       ghostOrbit: integrateGalaxyGhostOrbits(nodes, opts) };
   }
 
@@ -3276,6 +3295,254 @@
     return stats;
   }
 
+  /* Build one conservative painted circle per independent solar system.  The dominant star is
+     the circle centre and every member contributes its complete painted edge.  Using the star
+     rather than the evidence-mass COM is load-bearing: a lopsided planetary system may have a
+     displaced COM, but translating this envelope still leaves every local radius and phase
+     exactly unchanged. */
+  function galaxySystemEnvelopes(nodes, options) {
+    const opts = options || {};
+    const envelopePadding = Math.max(0, Number(opts.envelopePadding) || 0);
+    const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
+      ? null : String(opts.fixedNodeId);
+    const bodyRadius = node => finitePositive(
+      node.radius, finitePositive(node.visual_radius,
+        radiusFromGravityMass(node.gravity_mass), 80), 160
+    );
+    return [...communityCenters(nodes).values()].map(center => {
+      const members = center.nodes.slice();
+      const anchor = galaxySystemAnchor(members);
+      if (!anchor) return null;
+      const radius = members.reduce((outer, node) => Math.max(outer,
+        Math.hypot(node.x - anchor.x, node.y - anchor.y) + bodyRadius(node)
+      ), bodyRadius(anchor)) + envelopePadding;
+      const mass = members.reduce((sum, node) => sum
+        + finitePositive(node.gravity_mass, 1, 1000), 0);
+      const fixed = anchor.anchor_role === 'global' || members.some(node =>
+        (fixedNodeId !== null && String(node.id) === fixedNodeId)
+        || (opts.respectFixedCoordinates !== false
+          && Number.isFinite(node.fx) && Number.isFinite(node.fy)));
+      return {
+        id: center.id, nodes: members, anchor,
+        x: anchor.x, y: anchor.y, radius, mass, fixed,
+      };
+    }).filter(Boolean).sort((left, right) =>
+      Number(right.fixed) - Number(left.fixed)
+      || Number(right.anchor.anchor_role === 'global')
+        - Number(left.anchor.anchor_role === 'global')
+      || right.radius - left.radius
+      || String(left.id).localeCompare(String(right.id))
+    );
+  }
+
+  /* Deterministic rigid carrier-frame packing.  A sequential golden-angle search finds a clear
+     target for each complete system envelope; the live response moves only a bounded fraction
+     toward that target.  No member velocity is changed, so packing cannot inject heat or alter
+     total momentum, and a star-relative planet vector survives bit-for-bit apart from ordinary
+     floating-point translation.  Direct/bootstrap callers may pass strength=1 and an infinite
+     maxCorrection to complete the same solve in one call. */
+  function applyGalaxySystemPacking(nodes, options) {
+    const opts = options || {};
+    const gap = Math.max(0, Number.isFinite(Number(opts.gap))
+      ? Number(opts.gap) : GALAXY_SYSTEM_PACKING_GAP);
+    const strength = Math.max(0, Math.min(1, Number.isFinite(Number(opts.strength))
+      ? Number(opts.strength) : GALAXY_SYSTEM_PACKING_STRENGTH));
+    const requestedMaximum = Number(opts.maxCorrection);
+    const maximumCorrection = Number.isFinite(requestedMaximum)
+      ? Math.max(0, requestedMaximum) : (opts.maxCorrection === Infinity
+        ? Infinity : GALAXY_SYSTEM_PACKING_MAX_CORRECTION);
+    const maximumAttempts = Math.max(32, Math.min(16384,
+      Number.isFinite(Number(opts.maximumAttempts)) ? Number(opts.maximumAttempts) : 4096));
+    const envelopes = galaxySystemEnvelopes(nodes, opts);
+    /* Standalone bootstrap packing intentionally has open space. The finite annulus belongs to
+       the live/kinematic solver and is opt-in here through its explicit confinement option. */
+    const boundaryField = opts.includeFarFieldConfinement === true
+      ? galaxyFarFieldEnvelope(nodes, opts) : null;
+    const boundaryAnchor = boundaryField && boundaryField.anchor
+      && boundaryField.anchor.anchor_role === 'global' ? boundaryField.anchor : null;
+    const boundaryAnchorRadius = boundaryAnchor && boundaryField
+      ? boundaryField.bodyRadius(boundaryAnchor) : 0;
+    const boundaryPadding = Math.max(0,
+      Number.isFinite(Number(opts.blackHoleExclusionPadding))
+        ? Number(opts.blackHoleExclusionPadding) : GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+    const stats = {
+      systems: envelopes.length, pairs: 0, overlaps: 0, adjustedSystems: 0,
+      correctionDistance: 0, maximumShift: 0, remainingOverlaps: 0,
+      infeasiblePairs: 0, boundaryViolations: 0,
+      minimumBlackHoleClearance: null, minimumOuterClearance: null,
+      envelopeRadius: boundaryField ? boundaryField.envelopeRadius : 0, gap,
+    };
+    if (envelopes.length < 2 || !(strength > 0) || !(maximumCorrection > 0)) return stats;
+    const occupied = [];
+    const maximumEnvelopeRadius = envelopes.reduce((maximum, system) =>
+      Math.max(maximum, system.radius), 0);
+    const cellSize = Math.max(1, maximumEnvelopeRadius * 2 + gap);
+    const occupiedGrid = new Map();
+    const targets = new Map();
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const boundaryRange = system => {
+      if (!boundaryAnchor || system.nodes.includes(boundaryAnchor)) return null;
+      return {
+        minimum: boundaryAnchorRadius + system.radius + boundaryPadding,
+        maximum: Math.max(0, boundaryField.envelopeRadius - system.radius),
+      };
+    };
+    const projectIntoBoundary = (system, x, y, salt) => {
+      const range = boundaryRange(system);
+      if (!range || !(range.maximum >= range.minimum)) return { x, y, feasible: !range };
+      const dx = x - boundaryAnchor.x, dy = y - boundaryAnchor.y;
+      const distance = Math.hypot(dx, dy);
+      let unitX, unitY;
+      if (distance > 1e-9) {
+        unitX = dx / distance;
+        unitY = dy / distance;
+      } else {
+        const angle = seededHash(0, 'system-pack-boundary:' + String(system.id)
+          + ':' + String(salt || 0)) / 0x100000000 * Math.PI * 2;
+        unitX = Math.cos(angle);
+        unitY = Math.sin(angle);
+      }
+      const boundedDistance = Math.max(range.minimum, Math.min(range.maximum, distance));
+      return {
+        x: boundaryAnchor.x + unitX * boundedDistance,
+        y: boundaryAnchor.y + unitY * boundedDistance,
+        feasible: true,
+      };
+    };
+    const insideBoundary = (system, x, y) => {
+      const range = boundaryRange(system);
+      if (!range) return true;
+      if (!(range.maximum >= range.minimum)) return false;
+      const distance = Math.hypot(x - boundaryAnchor.x, y - boundaryAnchor.y);
+      return distance >= range.minimum - 1e-9 && distance <= range.maximum + 1e-9;
+    };
+    const clearAt = (system, x, y) => {
+      if (!insideBoundary(system, x, y)) return false;
+      const cellX = Math.floor(x / cellSize), cellY = Math.floor(y / cellSize);
+      const reach = Math.max(1, Math.ceil(
+        (system.radius + maximumEnvelopeRadius + gap) / cellSize));
+      for (let offsetX = -reach; offsetX <= reach; offsetX++) {
+        for (let offsetY = -reach; offsetY <= reach; offsetY++) {
+          const bucket = occupiedGrid.get(
+            (cellX + offsetX) + ',' + (cellY + offsetY)) || [];
+          for (const other of bucket) {
+            stats.pairs++;
+            if (Math.hypot(x - other.x, y - other.y)
+              < system.radius + other.radius + gap - 1e-9) return false;
+          }
+        }
+      }
+      return true;
+    };
+    envelopes.forEach(system => {
+      const initialTarget = system.fixed
+        ? { x: system.x, y: system.y, feasible: insideBoundary(system, system.x, system.y) }
+        : projectIntoBoundary(system, system.x, system.y, 0);
+      let targetX = initialTarget.x, targetY = initialTarget.y;
+      const initiallyClear = clearAt(system, targetX, targetY);
+      if (!initiallyClear && !system.fixed) {
+        stats.overlaps++;
+        const seedAngle = seededHash(0, 'system-pack:' + String(system.id))
+          / 0x100000000 * Math.PI * 2;
+        const radialStep = Math.max(4, system.radius + gap * 0.5);
+        let found = false;
+        for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
+          const reach = radialStep * Math.sqrt(attempt);
+          const angle = seedAngle + goldenAngle * attempt;
+          const projected = projectIntoBoundary(system,
+            system.x + Math.cos(angle) * reach,
+            system.y + Math.sin(angle) * reach, attempt);
+          if (!projected.feasible) continue;
+          const candidateX = projected.x, candidateY = projected.y;
+          if (!clearAt(system, candidateX, candidateY)) continue;
+          targetX = candidateX;
+          targetY = candidateY;
+          found = true;
+          break;
+        }
+        if (!found) stats.infeasiblePairs++;
+      } else if (!initiallyClear && system.fixed) {
+        /* Multiple fixed/pointer-owned systems cannot be separated without violating explicit
+           ownership.  Keep them exact and report the unresolved geometry to diagnostics. */
+        stats.overlaps++;
+        stats.infeasiblePairs++;
+      }
+      targets.set(system, { x: targetX, y: targetY });
+      const occupiedSystem = { x: targetX, y: targetY, radius: system.radius, system };
+      occupied.push(occupiedSystem);
+      const cellKey = Math.floor(targetX / cellSize) + ',' + Math.floor(targetY / cellSize);
+      if (!occupiedGrid.has(cellKey)) occupiedGrid.set(cellKey, []);
+      occupiedGrid.get(cellKey).push(occupiedSystem);
+    });
+    envelopes.forEach(system => {
+      if (system.fixed) return;
+      const target = targets.get(system);
+      let shiftX = (target.x - system.x) * strength;
+      let shiftY = (target.y - system.y) * strength;
+      const requested = Math.hypot(shiftX, shiftY);
+      if (!(requested > 1e-12)) return;
+      const scale = requested > maximumCorrection ? maximumCorrection / requested : 1;
+      shiftX *= scale;
+      shiftY *= scale;
+      system.nodes.forEach(node => {
+        node.x += shiftX;
+        node.y += shiftY;
+      });
+      if (opts.updateKinematicPhase === true && system.anchor.__galaxyKinematicGlobalOrbit) {
+        const globalAnchor = galaxyGlobalAnchor(nodes);
+        if (globalAnchor && globalAnchor !== system.anchor) {
+          const dx = system.anchor.x - globalAnchor.x;
+          const dy = system.anchor.y - globalAnchor.y;
+          system.anchor.__galaxyKinematicGlobalOrbit.radius = Math.hypot(dx, dy);
+          system.anchor.__galaxyKinematicGlobalOrbit.angle = Math.atan2(dy, dx);
+        }
+      }
+      const applied = Math.hypot(shiftX, shiftY);
+      stats.adjustedSystems++;
+      stats.correctionDistance += applied;
+      stats.maximumShift = Math.max(stats.maximumShift, applied);
+    });
+    const finalEnvelopes = galaxySystemEnvelopes(nodes, opts);
+    const finalGrid = new Map();
+    finalEnvelopes.forEach((system, index) => {
+      const range = boundaryRange(system);
+      if (range) {
+        const distance = Math.hypot(system.x - boundaryAnchor.x,
+          system.y - boundaryAnchor.y);
+        const rawBlackHoleClearance = distance - range.minimum;
+        const rawOuterClearance = range.maximum - distance;
+        const blackHoleClearance = Math.abs(rawBlackHoleClearance) <= 1e-10
+          ? 0 : rawBlackHoleClearance;
+        const outerClearance = Math.abs(rawOuterClearance) <= 1e-10
+          ? 0 : rawOuterClearance;
+        stats.minimumBlackHoleClearance = stats.minimumBlackHoleClearance === null
+          ? blackHoleClearance : Math.min(stats.minimumBlackHoleClearance, blackHoleClearance);
+        stats.minimumOuterClearance = stats.minimumOuterClearance === null
+          ? outerClearance : Math.min(stats.minimumOuterClearance, outerClearance);
+        if (blackHoleClearance < -1e-7 || outerClearance < -1e-7) {
+          stats.boundaryViolations++;
+        }
+      }
+      const cellX = Math.floor(system.x / cellSize), cellY = Math.floor(system.y / cellSize);
+      for (let offsetX = -1; offsetX <= 1; offsetX++) {
+        for (let offsetY = -1; offsetY <= 1; offsetY++) {
+          const bucket = finalGrid.get(
+            (cellX + offsetX) + ',' + (cellY + offsetY)) || [];
+          bucket.forEach(other => {
+            if (Math.hypot(system.x - other.system.x, system.y - other.system.y)
+              < system.radius + other.system.radius + gap - 1e-7) {
+              stats.remainingOverlaps++;
+            }
+          });
+        }
+      }
+      const key = cellX + ',' + cellY;
+      if (!finalGrid.has(key)) finalGrid.set(key, []);
+      finalGrid.get(key).push({ system, index });
+    });
+    return stats;
+  }
+
   /* The black hole is an impenetrable visual boundary, not a generic collision partner.
      External solar systems cross that boundary as one rigid translation so their local
      geometry and relative velocities survive the contact. Members of the black-hole system
@@ -3516,7 +3783,32 @@
         }
       });
       maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
-      if (!(scale < 1 - 1e-12)) return;
+      /* A fast galactic carrier can exceed the absolute budget even when every planet's local
+         tangent is healthy. Translate the whole velocity frame inward before touching local
+         motion. This preserves every star-relative velocity exactly and prevents the later
+         scene-wide emergency scale from erasing orbital phase in unrelated systems. */
+      let carrierAdjusted = false;
+      if (anchor && Number.isFinite(absoluteLimit)) {
+        const retainedRelative = systemMaximum * scale;
+        const carrierAllowance = Math.max(0, absoluteLimit - retainedRelative);
+        const carrierSpeed = Math.hypot(referenceVx, referenceVy);
+        if (carrierSpeed > carrierAllowance + 1e-12) {
+          const carrierScale = carrierSpeed > 1e-12 ? carrierAllowance / carrierSpeed : 0;
+          const targetVx = referenceVx * carrierScale;
+          const targetVy = referenceVy * carrierScale;
+          const shiftX = targetVx - referenceVx;
+          const shiftY = targetVy - referenceVy;
+          members.forEach(node => {
+            node.vx += shiftX;
+            node.vy += shiftY;
+          });
+          referenceVx = targetVx;
+          referenceVy = targetVy;
+          carrierAdjusted = true;
+          minimumScale = Math.min(minimumScale, carrierScale);
+        }
+      }
+      if (!(scale < 1 - 1e-12) && !carrierAdjusted) return;
       members.forEach(node => {
         if (node === anchor) {
           node.vx = referenceVx;
@@ -3827,8 +4119,9 @@
     const cachedRadius = Number(
       Number.isFinite(Number(weakCached)) && Number(weakCached) > 0 ? weakCached : propCached
     );
-    const seedExtent = Math.max(minimumRadius,
-      hasHint ? hintedExtent : observedExtent);
+    /* Hints describe preferred carrier radii, not the capacity required after exact admission
+       packing. Never let a stale compact hint hide the collision-free observed extent. */
+    const seedExtent = Math.max(minimumRadius, hintedExtent, observedExtent);
     const envelopeRadius = Number.isFinite(explicitRadius) && explicitRadius > 0
       ? Math.max(minimumRadius, explicitRadius)
       : Number.isFinite(cachedRadius) && cachedRadius > 0 ? cachedRadius
@@ -3929,6 +4222,28 @@
      moves inward, tangential speed is retained rather than increased (a cap must not inject
      angular energy). An oversized system has a rare per-member fallback, since no rigid
      translation can fit a radius larger than the finite envelope. */
+  /* Boundary projections are deliberately bounded per integration slice. A just-released
+     pointer can leave a stretched system outside the cached annulus; completing that correction
+     in one member-wise teleport makes the first release frame visibly jump even though velocity
+     is capped. Track the budget across the alternating outer-boundary passes so the next fixed
+     slice can finish the projection without exceeding the 48-unit positional contract. */
+  function reserveGalaxyBoundaryCorrection(options, members, requested, scope) {
+    const budget = options && options.__positionCorrectionBudget;
+    /* A direct annulus projection is the authoritative hard closure for pathological scenes;
+       only a feasible rigid carrier correction is deliberately spread across later slices when
+       no pointer owns the system. Fixed-node follower projections remain bounded during drag. */
+    if (!budget || !Array.isArray(members)
+      || (scope !== 'rigid' && options.fixedNodeId == null)
+      || members.some(node => node && node.id === options.fixedNodeId)) return requested;
+    const limit = Number.isFinite(Number(budget.limit)) ? Math.max(0, Number(budget.limit)) : 48;
+    const used = budget.used || (budget.used = new Map());
+    const remaining = members.reduce((available, node) => Math.min(available,
+      Math.max(0, limit - (used.get(node) || 0))), limit);
+    const applied = Math.min(Math.max(0, requested), remaining);
+    members.forEach(node => used.set(node, (used.get(node) || 0) + applied));
+    return applied;
+  }
+
   function applyGalaxyFarFieldConfinement(nodes, options) {
     const opts = options || {};
     const field = galaxyFarFieldEnvelope(nodes, opts);
@@ -3992,8 +4307,11 @@
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = unit.distance - targetDistance;
           if (!(correction > 0)) return;
-          node.x = anchorX + unit.x * targetDistance;
-          node.y = anchorY + unit.y * targetDistance;
+          const appliedCorrection = reserveGalaxyBoundaryCorrection(opts, [node], correction);
+          if (!(appliedCorrection > 0)) return;
+          const boundedTargetDistance = unit.distance - appliedCorrection;
+          node.x = anchorX + unit.x * boundedTargetDistance;
+          node.y = anchorY + unit.y * boundedTargetDistance;
           if (Number.isFinite(node.fx)) node.fx = node.x;
           if (Number.isFinite(node.fy)) node.fy = node.y;
           const velocity = stabilizeVelocity([node], unit.x, unit.y,
@@ -4016,8 +4334,11 @@
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = unit.distance - targetDistance;
           if (!(correction > 0)) return;
-          node.x = anchorX + unit.x * targetDistance;
-          node.y = anchorY + unit.y * targetDistance;
+          const appliedCorrection = reserveGalaxyBoundaryCorrection(opts, [node], correction);
+          if (!(appliedCorrection > 0)) return;
+          const boundedTargetDistance = unit.distance - appliedCorrection;
+          node.x = anchorX + unit.x * boundedTargetDistance;
+          node.y = anchorY + unit.y * boundedTargetDistance;
           if (Number.isFinite(node.fx)) node.fx = node.x;
           if (Number.isFinite(node.fy)) node.fy = node.y;
           const velocity = stabilizeVelocity([node], unit.x, unit.y,
@@ -4044,8 +4365,11 @@
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = memberUnit.distance - targetDistance;
           if (!(correction > 1e-9)) return;
-          node.x = anchorX + memberUnit.x * targetDistance;
-          node.y = anchorY + memberUnit.y * targetDistance;
+          const appliedCorrection = reserveGalaxyBoundaryCorrection(opts, [node], correction);
+          if (!(appliedCorrection > 0)) return;
+          const boundedTargetDistance = memberUnit.distance - appliedCorrection;
+          node.x = anchorX + memberUnit.x * boundedTargetDistance;
+          node.y = anchorY + memberUnit.y * boundedTargetDistance;
           if (Number.isFinite(node.fx)) node.fx = node.x;
           if (Number.isFinite(node.fy)) node.fy = node.y;
           const velocity = stabilizeVelocity([node], memberUnit.x, memberUnit.y,
@@ -4063,7 +4387,11 @@
       const targetDistance = Math.max(0, field.envelopeRadius - radius);
       const correction = unit.distance - targetDistance;
       if (!(correction > 0)) return;
-      const shiftX = -unit.x * correction, shiftY = -unit.y * correction;
+      const appliedCorrection = reserveGalaxyBoundaryCorrection(
+        opts, center.nodes, correction, 'rigid'
+      );
+      if (!(appliedCorrection > 0)) return;
+      const shiftX = -unit.x * appliedCorrection, shiftY = -unit.y * appliedCorrection;
       center.nodes.forEach(node => {
         node.x += shiftX;
         node.y += shiftY;
@@ -4089,8 +4417,11 @@
         const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
         const correction = unit.distance - targetDistance;
         if (!(correction > 1e-9)) return;
-        node.x = anchorX + unit.x * targetDistance;
-        node.y = anchorY + unit.y * targetDistance;
+        const appliedCorrection = reserveGalaxyBoundaryCorrection(opts, [node], correction);
+        if (!(appliedCorrection > 0)) return;
+        const boundedTargetDistance = unit.distance - appliedCorrection;
+        node.x = anchorX + unit.x * boundedTargetDistance;
+        node.y = anchorY + unit.y * boundedTargetDistance;
         if (Number.isFinite(node.fx)) node.fx = node.x;
         if (Number.isFinite(node.fy)) node.fy = node.y;
         const velocity = stabilizeVelocity([node], unit.x, unit.y,
@@ -4146,8 +4477,15 @@
         unitX = Math.cos(angle);
         unitY = Math.sin(angle);
       }
-      node.x = anchorX + unitX * target;
-      node.y = anchorY + unitY * target;
+      const requestedCorrection = Math.abs(target - distance);
+      const appliedCorrection = reserveGalaxyBoundaryCorrection(
+        opts, [node], requestedCorrection
+      );
+      if (!(appliedCorrection > 0)) return;
+      const boundedTarget = target > distance
+        ? distance + appliedCorrection : distance - appliedCorrection;
+      node.x = anchorX + unitX * boundedTarget;
+      node.y = anchorY + unitY * boundedTarget;
       if (Number.isFinite(node.fx)) node.fx = node.x;
       if (Number.isFinite(node.fy)) node.fy = node.y;
       const vx = (Number.isFinite(node.vx) ? node.vx : 0)
@@ -4157,8 +4495,9 @@
       const tangentX = -unitY, tangentY = unitX;
       const radialSpeed = vx * unitX + vy * unitY;
       const tangentSpeed = vx * tangentX + vy * tangentY;
-      const tangentScale = target > 1e-9 ? Math.max(0, Math.min(1, distance / target)) : 0;
-      const targetRadial = target > distance ? Math.max(0, radialSpeed)
+      const tangentScale = boundedTarget > 1e-9
+        ? Math.max(0, Math.min(1, distance / boundedTarget)) : 0;
+      const targetRadial = boundedTarget > distance ? Math.max(0, radialSpeed)
         : Math.min(0, radialSpeed);
       node.vx = (Number.isFinite(field.anchor.vx) ? field.anchor.vx : 0)
         + targetRadial * unitX + tangentSpeed * tangentScale * tangentX;
@@ -4178,7 +4517,12 @@
      of this integrator, not a side effect of D3's simulation. */
   function integrateGalaxyLeapfrog(nodes, links, bridges, options) {
     // kick-drift-kick: sample at x(t), drift from the half kick, then close at x(t + dt).
-    const opts = options || {};
+    /* Boundary projections are allowed to converge over several fixed slices, but one slice
+       must not visibly teleport a released cluster. Keep the budget private to this call so
+       every alternating inner/outer projection shares the same positional limit. */
+    const opts = Object.assign({}, options || {}, {
+      __positionCorrectionBudget: { limit: 48, used: new Map() },
+    });
     /* Pointer coordinates are already expressed in the currently rendered chart frame. Do
        not translate that frame underneath an active drag: it remains the source target while
        every other body integrates around it. The final inner/outer annulus may clamp the
@@ -4226,7 +4570,12 @@
        phase before either acceleration sample or the convergence track observes it. */
     const initialHorizon = projectBlackHoleHorizon();
     const precomputedCenters = communityCenters(bodies);
-    const convergenceAnchor = opts.inwardConvergence === true ? galaxyGlobalAnchor(bodies) : null;
+    /* System-envelope packing supersedes the legacy monotone inward projection.  Running both
+       constraints in one slice makes them exact opponents: packing clears two systems, then
+       convergence contracts them back through one another.  Black-hole gravity still owns the
+       radial orbit; this disables only the artificial per-slice carrier teleport. */
+    const convergenceAnchor = opts.inwardConvergence === true
+      && opts.includeSystemPacking !== true ? galaxyGlobalAnchor(bodies) : null;
     const initialRadii = convergenceAnchor ? new Map(
       [...precomputedCenters.entries()].map(([id, center]) => [id, {
         radius: Math.hypot(center.x - convergenceAnchor.x,
@@ -4352,6 +4701,18 @@
     const convergence = convergenceAnchor
       ? applyGalaxyInwardConvergence(bodies, convergenceAnchor, initialRadii, opts)
       : { applied: 0, outwardCandidates: 0, overrides: 0, factor: 1 };
+    /* Resolve at the carrier-frame level after local/link/convergence corrections.  One
+       conservative circle represents the complete painted solar system, so a correction is a
+       rigid translation and can never stretch a planet away from its star. */
+    const systemPackingPasses = [];
+    if (opts.includeSystemPacking === true) {
+      systemPackingPasses.push(applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
+        gap: opts.systemPackingGap,
+        strength: opts.systemPackingStrength,
+        maxCorrection: opts.systemPackingMaxCorrection,
+        fixedNodeId: opts.fixedNodeId,
+      })));
+    }
     /* Relations, cross-system contact and drag can all add a finite late displacement. Alternate
        the strict inner and outer contacts, then verify their annulus member-by-member only for
        a pathological oversized system that no rigid translation can satisfy. */
@@ -4411,6 +4772,14 @@
       ? applyGalaxyInwardConvergence(bodies, convergenceAnchor, initialRadii, opts)
       : { applied: 0, outwardCandidates: 0, overrides: 0, factor: 1 };
     convergence.closureApplied = closureConvergence.applied;
+    if (opts.includeSystemPacking === true) {
+      systemPackingPasses.push(applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
+        gap: opts.systemPackingGap,
+        strength: opts.systemPackingStrength,
+        maxCorrection: opts.systemPackingMaxCorrection,
+        fixedNodeId: opts.fixedNodeId,
+      })));
+    }
     if (opts.includeFarFieldConfinement !== false) {
       closureConfinements.push(applyGalaxyFarFieldConfinement(bodies, opts));
     }
@@ -4419,7 +4788,56 @@
       ? { anchorId: null, innerCorrectedNodes: 0, outerCorrectedNodes: 0,
         infeasibleNodes: 0 }
       : applyGalaxyAnnularBounds(bodies, opts));
+    /* The strict BH/outer closures above can translate a carrier after the previous packing
+       pass. Close once more at system-envelope level, then reassert only the global boundaries.
+       This alternating projection is bounded and keeps local geometry rigid throughout. */
+    if (opts.includeSystemPacking === true) {
+      /* Earlier response passes stay bounded. The final painted phase must satisfy its hard
+         envelope invariant in this same slice: leaving one deep penetration to future frames
+         makes the systems visibly stacked and repeats the collision work indefinitely. This
+         exact carrier translation changes no member-relative position or velocity, so it adds
+         no kinetic energy; pointer-owned systems remain fixed and any genuinely infeasible
+         fixed/boundary conflict is reported rather than moved. */
+      const packingClosureLimit = Math.max(1,
+        Math.min(256, galaxySystemEnvelopes(bodies, opts).length + 1));
+      for (let passIndex = 0; passIndex < packingClosureLimit; passIndex++) {
+        const packingPass = applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
+          gap: opts.systemPackingGap,
+          strength: 1,
+          maxCorrection: Infinity,
+          fixedNodeId: opts.fixedNodeId,
+        }));
+        systemPackingPasses.push(packingPass);
+        if (!packingPass.remainingOverlaps || packingPass.infeasiblePairs) break;
+      }
+    }
     const combinedSystemAnchorExclusion = combineGalaxySystemAnchorExclusions(stellarPasses);
+    const systemPacking = {
+      systems: systemPackingPasses.reduce((maximum, pass) => Math.max(maximum,
+        pass.systems || 0), 0),
+      pairs: systemPackingPasses.reduce((sum, pass) => sum + (pass.pairs || 0), 0),
+      overlaps: systemPackingPasses.reduce((sum, pass) => sum + (pass.overlaps || 0), 0),
+      adjustedSystems: systemPackingPasses.reduce((sum, pass) =>
+        sum + (pass.adjustedSystems || 0), 0),
+      correctionDistance: systemPackingPasses.reduce((sum, pass) =>
+        sum + (pass.correctionDistance || 0), 0),
+      maximumShift: systemPackingPasses.reduce((maximum, pass) => Math.max(maximum,
+        pass.maximumShift || 0), 0),
+      remainingOverlaps: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].remainingOverlaps || 0 : 0,
+      infeasiblePairs: systemPackingPasses.reduce((sum, pass) =>
+        sum + (pass.infeasiblePairs || 0), 0),
+      boundaryViolations: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].boundaryViolations || 0 : 0,
+      minimumBlackHoleClearance: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].minimumBlackHoleClearance : null,
+      minimumOuterClearance: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].minimumOuterClearance : null,
+      envelopeRadius: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].envelopeRadius || 0 : 0,
+      gap: systemPackingPasses.length
+        ? systemPackingPasses[systemPackingPasses.length - 1].gap || 0 : 0,
+    };
     const rawFinalStellarClearance = stellarAudit.minimumClearance;
     const systemAnchorExclusion = Object.assign(combinedSystemAnchorExclusion, {
       boundaryIterations,
@@ -4550,6 +4968,7 @@
       convergence,
       relationConstraint,
       orbitalSeparation,
+      systemPacking,
       systemAnchorExclusion,
       blackHoleExclusion,
       farFieldConfinement,
@@ -5487,6 +5906,11 @@
     let galaxyLastRelationDistance = 0, galaxyLastOrbitalRelationSkips = 0;
     let galaxyLastOrbitalSeparations = 0;
     let galaxyLastCrossSystemSeparations = 0;
+    let galaxyLastSystemPacking = {
+      systems: 0, overlaps: 0, adjustedSystems: 0, remainingOverlaps: 0,
+      infeasiblePairs: 0, correctionDistance: 0, maximumShift: 0,
+      gap: GALAXY_SYSTEM_PACKING_GAP,
+    };
     let galaxyLastOrbitalCorrection = 0, galaxyLastLocalVelocityLimits = 0;
     let galaxySpeedCaps = 0;
     let galaxyLastBlackHoleExclusion = {
@@ -6421,6 +6845,11 @@
       galaxyLastOrbitalRelationSkips = 0;
       galaxyLastOrbitalSeparations = 0;
       galaxyLastCrossSystemSeparations = 0;
+      galaxyLastSystemPacking = {
+        systems: 0, overlaps: 0, adjustedSystems: 0, remainingOverlaps: 0,
+        infeasiblePairs: 0, correctionDistance: 0, maximumShift: 0,
+        gap: GALAXY_SYSTEM_PACKING_GAP,
+      };
       galaxyLastOrbitalCorrection = 0;
       galaxyLastLocalVelocityLimits = 0;
       galaxySpeedCaps = 0;
@@ -6569,8 +6998,14 @@
         orbitalSeparationPadding,
         orbitalSeparationStrength,
         crossCommunitySeparationPadding: GALAXY_CROSS_SYSTEM_REPULSION_PADDING,
-        crossCommunitySeparationStrength: orbitalSeparationStrength
-          * GALAXY_CROSS_SYSTEM_REPULSION_FRACTION,
+        /* Complete system envelopes own cross-community clearance below.  Leaving node-pair
+           pressure active at the same time double-corrects dense contacts and produces the
+           visible jitter/reheating that rigid carrier translation is meant to eliminate. */
+        crossCommunitySeparationStrength: 0,
+        includeSystemPacking: true,
+        systemPackingGap: GALAXY_SYSTEM_PACKING_GAP,
+        systemPackingStrength: GALAXY_SYSTEM_PACKING_STRENGTH,
+        systemPackingMaxCorrection: GALAXY_SYSTEM_PACKING_MAX_CORRECTION,
         /* Dense hubs sample one immutable phase and receive at most one bounded correction
            per frame, irrespective of how many members touch them. */
         orbitalSeparationMaxCorrection: 4,
@@ -6603,7 +7038,9 @@
         /* The render loop consumes one fixed 30 Hz physical slice per substep. Passing that
            wall-clock slice explicitly keeps convergence identical after a throttled render
            frame is split into several steps. */
-        inwardConvergence: true,
+        /* Black-hole gravity advances the carrier orbit continuously. The retired monotone
+           inward teleport conflicts with complete-envelope packing and re-stacks the disk. */
+        inwardConvergence: false,
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
         velocityDecay: GALAXY_VELOCITY_DECAY
           * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
@@ -6712,8 +7149,8 @@
         orbitalSeparationPadding: galaxyOrbitalSeparationPadding(state.settings.repel),
         orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
         crossSystemRepulsionPadding: GALAXY_CROSS_SYSTEM_REPULSION_PADDING,
-        crossSystemRepulsionStrength: galaxyOrbitalSeparationStrength(state.settings.repel)
-          * GALAXY_CROSS_SYSTEM_REPULSION_FRACTION,
+        crossSystemRepulsionStrength: 0,
+        systemPacking: { ...galaxyLastSystemPacking },
         systemAnchorExclusionPadding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
         systemAnchorRepulsionRange: GALAXY_SYSTEM_ANCHOR_REPULSION_RANGE,
         systemAnchorRepulsionAcceleration: GALAXY_SYSTEM_ANCHOR_REPULSION_ACCELERATION,
@@ -6811,6 +7248,7 @@
             galaxyLastOrbitalRelationSkips = 0;
             galaxyLastOrbitalSeparations = 0;
             galaxyLastCrossSystemSeparations = 0;
+            galaxyLastSystemPacking = report.systemPacking || galaxyLastSystemPacking;
             galaxyLastOrbitalCorrection = 0;
             galaxyLastLocalVelocityLimits = 0;
           } else {
@@ -6822,6 +7260,7 @@
             galaxyLastOrbitalSeparations = report.orbitalSeparation.overlaps;
             galaxyLastCrossSystemSeparations =
               report.orbitalSeparation.crossCommunityOverlaps || 0;
+            galaxyLastSystemPacking = report.systemPacking || galaxyLastSystemPacking;
             galaxyLastOrbitalCorrection = report.orbitalSeparation.correctionDistance;
             galaxyLastSystemAnchorExclusion = report.systemAnchorExclusion;
             galaxyLastBlackHoleExclusion = report.blackHoleExclusion;
@@ -7066,6 +7505,22 @@
              server coordinates are preserved byte-for-byte by ensureGalaxyPositions(). */
           ensureGalaxyPositions(data.nodes, raw.meta && raw.meta.layout_seed);
           releasePinnedPositions(data);
+          /* Fresh server coordinates may contain dozens of mutually intersecting complete
+             systems. Pack them once in open space before any carrier velocity or finite outer
+             envelope is cached; the later field is then sized from the already-clear scene. */
+          const authoredGalaxy = data.nodes.some(node => node.anchor_role === 'global')
+            && data.nodes.filter(node => node.anchor_role === 'community').length > 1;
+          if (authoredGalaxy) {
+            for (let admissionPass = 0; admissionPass < 128; admissionPass++) {
+              galaxyLastSystemPacking = applyGalaxySystemPacking(data.nodes, {
+                gap: GALAXY_SYSTEM_PACKING_GAP,
+                strength: 1,
+                maxCorrection: Infinity,
+                respectFixedCoordinates: false,
+              });
+              if (!galaxyLastSystemPacking.remainingOverlaps) break;
+            }
+          }
           seedGalaxyOrbits(
             data.nodes, raw.meta && raw.meta.layout_seed,
             state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
@@ -8320,6 +8775,7 @@
       applyGalaxyRelationSprings, applyGalaxyRelationDistanceConstraints,
       applyDraggedNodeGravity, applyDraggedNodeAcceleration,
       applyGalaxyCollisions, applyGalaxyOrbitalSeparation,
+      galaxySystemEnvelopes, applyGalaxySystemPacking,
       applyGalaxyBlackHoleExclusion,
       galaxyFarFieldEnvelope, applyGalaxyFarFieldGravity, applyGalaxyFarFieldConfinement,
       applyGalaxyAnnularBounds,

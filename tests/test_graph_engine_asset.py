@@ -873,7 +873,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     assert report["fullRangeMonotone"] is True
     assert all(value == pytest.approx(3.6, rel=1e-12) for value in report["ratios"].values())
     source = ASSET.read_text(encoding="utf-8")
-    assert "const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 1.75;" in source
+    assert "const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 2;" in source
     assert "const GALAXY_GRAVITY_MAXIMUM = 400;" in source
 
 
@@ -2668,6 +2668,313 @@ def test_cross_system_repulsion_translates_whole_systems_without_warping_orbits(
     )
     assert report["fixedLeftAfter"] == report["fixedLeftBefore"]
     assert report["fixedRightMoved"] is True
+
+
+@requires_node
+def test_dense_system_packing_separates_painted_solar_envelopes_without_warping_local_frames() -> None:
+    """505 bodies begin as stacked solar systems; packing moves whole painted envelopes only."""
+    report = _run_node(
+        """
+        const SYSTEMS = 84, PLANETS = 5, GAP = 8;
+        const nodes = [{ id: 'custom-central-mass', anchor_role: 'global', community_id: 'core',
+          gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }];
+        for (let system = 0; system < SYSTEMS; system++) {
+          const id = 'packed-' + system, starId = id + '-star';
+          nodes.push({ id: starId, anchor_role: 'community', community_id: id,
+            system_anchor_id: starId, orbit_tier: 0, gravity_mass: 9, radius: 5,
+            x: 120, y: 0, vx: 1.5, vy: -2 });
+          for (let planet = 1; planet <= PLANETS; planet++) {
+            const radius = 18 + planet * 4, angle = planet * Math.PI * 2 / PLANETS;
+            nodes.push({ id: `${id}-p${planet}`, community_id: id, system_anchor_id: starId,
+              orbit_tier: planet, gravity_mass: 1, radius: 2.5,
+              x: 120 + Math.cos(angle) * radius, y: Math.sin(angle) * radius,
+              vx: 1.5 - Math.sin(angle), vy: -2 + Math.cos(angle) });
+          }
+        }
+        const byId = id => nodes.find(node => node.id === id);
+        const localFrames = () => Array.from({ length: SYSTEMS }, (_, system) => {
+          const id = 'packed-' + system, star = byId(id + '-star');
+          return Array.from({ length: PLANETS }, (_, index) => {
+            const planet = byId(`${id}-p${index + 1}`);
+            return [planet.x - star.x, planet.y - star.y, planet.vx - star.vx, planet.vy - star.vy];
+          });
+        });
+        const envelopes = () => I.galaxySystemEnvelopes(nodes, {
+          blackHoleExclusionPadding: 2.5,
+        }).filter(envelope => envelope.anchor.anchor_role === 'community');
+        const metrics = () => {
+          const systems = envelopes(); let minimumClearance = Infinity, overlaps = 0;
+          for (let left = 0; left < systems.length; left++) for (let right = 0;
+            right < left; right++) {
+            const a = systems[left], b = systems[right];
+            const clearance = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
+            minimumClearance = Math.min(minimumClearance, clearance);
+            if (clearance < GAP - 1e-8) overlaps++;
+          }
+          const blackHole = nodes[0];
+          const horizonClearance = Math.min(...systems.map(system =>
+            Math.hypot(system.x - blackHole.x, system.y - blackHole.y)
+              - system.radius - blackHole.radius - 2.5));
+          return { count: systems.length, minimumClearance, overlaps, horizonClearance };
+        };
+        const before = localFrames(), initial = metrics();
+        const fixedBefore = nodes.filter(node => node.community_id === 'packed-0')
+          .map(node => [node.x, node.y, node.vx, node.vy]);
+        const packingStart = performance.now(); let stats;
+        for (let pass = 0; pass < 96; pass++) {
+          stats = I.applyGalaxySystemPacking(nodes, {
+            blackHoleExclusionPadding: 2.5, gap: GAP,
+            strength: .4, maxCorrection: 12,
+            fixedNodeId: 'packed-0-star', layoutSeed: 7103,
+          });
+        }
+        const packingMilliseconds = performance.now() - packingStart;
+        const after = localFrames(), final = metrics(), fixed = nodes.filter(node =>
+          node.community_id === 'packed-0').map(node => [node.x, node.y, node.vx, node.vy]);
+        const maximumLocalFrameError = Math.max(...after.flat(2).map((value, index) =>
+          Math.abs(value - before.flat(2)[index])));
+        const maximumFixedError = Math.max(...fixed.flatMap((row, rowIndex) => row.map(
+          (value, columnIndex) => Math.abs(value - fixedBefore[rowIndex][columnIndex]))));
+        emit({ nodes: nodes.length, initial, final, stats, packingMilliseconds,
+          maximumLocalFrameError, maximumFixedError,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["nodes"] == 505
+    assert report["finite"] is True
+    assert report["initial"]["overlaps"] == 84 * 83 // 2
+    assert report["final"]["count"] == 84
+    assert report["final"]["overlaps"] == 0
+    assert report["final"]["minimumClearance"] >= 8 - 1e-6
+    assert report["final"]["horizonClearance"] >= -1e-9
+    # Translation/velocity adjustments may move a system's carrier, never its planets in the
+    # carrier frame.  The fixed drag-owned system is a fully rigid exception to packing.
+    assert report["maximumLocalFrameError"] < 1e-10
+    assert report["maximumFixedError"] < 1e-10
+
+
+@requires_node
+def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_physics() -> None:
+    """A pre-packed 505-body galaxy must not re-stack as its two orbit levels advance."""
+    report = _run_node(
+        """
+        const SYSTEMS = 84, PLANETS = 5;
+        const make = gap => {
+          const nodes = [{ id: 'bh', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }], links = [];
+          for (let system = 0; system < SYSTEMS; system++) {
+            const id = 'orbit-' + system, starId = id + '-star';
+            nodes.push({ id: starId, anchor_role: 'community', community_id: id,
+              system_anchor_id: starId, orbit_tier: 0, gravity_mass: 9, radius: 5,
+              x: 150, y: 0, vx: 0, vy: 0 });
+            for (let planet = 1; planet <= PLANETS; planet++) {
+              const radius = 18 + planet * 4, angle = planet * Math.PI * 2 / PLANETS;
+              const planetId = `${id}-p${planet}`;
+              nodes.push({ id: planetId, community_id: id, system_anchor_id: starId,
+                orbit_tier: planet, gravity_mass: 1, radius: 2.5,
+                x: 150 + Math.cos(angle) * radius, y: Math.sin(angle) * radius, vx: 0, vy: 0 });
+              links.push({ source: starId, target: planetId, relation: 'orbits',
+                rest_length: radius, spring_strength: .08 });
+            }
+          }
+          I.seedGalaxyOrbits(nodes, 8831, 48, 32, false);
+          I.seedGalaxySystemOrbits(nodes, 8831, 48, 40, false);
+          for (let pass = 0; pass < 96; pass++) I.applyGalaxySystemPacking(nodes, {
+            gap, strength: .4, maxCorrection: 12, layoutSeed: 8831,
+          });
+          // Packing deliberately translates a system without injecting velocity. Re-seed the
+          // BH carrier at its packed radius before timing live motion; otherwise this synthetic
+          // all-at-one-point bootstrap retains circular velocity for radius 150 after stars
+          // have been distributed hundreds of units away, which measures an avoidable launch
+          // mismatch rather than packing heat.
+          nodes.forEach(node => {
+            delete node.__galaxyOrbitSeeded;
+            delete node.__galaxySystemOrbitSeeded;
+          });
+          I.seedGalaxyOrbits(nodes, 8831, 48, 32, false);
+          I.seedGalaxySystemOrbits(nodes, 8831, 48, 40, false);
+          return { nodes, links };
+        };
+        const run = (gap, strength, reducedMotion) => {
+          const { nodes, links } = make(gap);
+          const byId = id => nodes.find(node => node.id === id);
+          const initialRadius = new Map(nodes.filter(node => node.orbit_tier > 0).map(node => {
+            const star = byId(node.system_anchor_id);
+            return [node.id, Math.hypot(node.x - star.x, node.y - star.y)];
+          }));
+          const options = {
+            gravity: 48, gravitationalConstant: 1, localGravitationalConstant: 1,
+            blackHoleMass: 1, softening: 32, centralSoftening: 40,
+            timestep: .032, wallClockSeconds: 1 / 30, velocityDecay: .00005,
+            speedLimit: 48, localRelativeSpeedLimit: 48,
+            includeMutualSystems: true, mutualSystemGravityFraction: .12,
+            mutualSystemSoftening: 80, exactLimit: 64, theta: .85,
+            includeRelations: true, includeRelationSprings: false,
+            skipSystemAnchorRelations: true, skipOrbitalSystemRelations: true,
+            includeOrbitalSeparation: true, orbitalSeparationPadding: 8,
+            orbitalSeparationStrength: .5, orbitalSeparationMaxCorrection: 4,
+            orbitalSeparationMaxVelocityCorrection: 8, preserveLocalTangentialVelocity: true,
+            preserveSystemRadii: true, skipSystemAnchorPairs: true,
+            systemAnchorExclusionPadding: 1.5, includeBlackHoleExclusion: true,
+            blackHoleExclusionPadding: 2.5, includeFarFieldConfinement: true,
+                farFieldEnvelopeScale: 2, farFieldMinimumRadius: 96, farFieldSoftFraction: .82,
+            farFieldAcceleration: 12, farFieldMaxAcceleration: 16, includeSpacetime: true,
+            frameDraggingFraction: .018, frameDraggingMaxAcceleration: .22,
+            eventHorizonDecayRate: .12, eventHorizonInwardAcceleration: .28,
+            includeCollisions: false, includeSystemPacking: true, systemPackingGap: gap,
+            systemPackingStrength: strength, systemPackingMaxCorrection: 12, reducedMotion,
+          };
+          const clearance = () => {
+            const systems = I.galaxySystemEnvelopes(nodes).filter(system =>
+              system.anchor.anchor_role === 'community');
+            let minimum = Infinity, overlaps = 0;
+            for (let left = 0; left < systems.length; left++) for (let right = 0;
+              right < left; right++) {
+              const a = systems[left], b = systems[right];
+              const value = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
+              minimum = Math.min(minimum, value);
+              if (value < gap - 1e-8) overlaps++;
+            }
+            return { count: systems.length, minimum, overlaps };
+          };
+          const initial = clearance(); let speedCaps = 0, maximumRadiusDrift = 0;
+          let totalPackingAdjustments = 0, maximumRemainingOverlaps = 0;
+          const liveStart = performance.now();
+          for (let step = 0; step < 120; step++) {
+            const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+            speedCaps += tick.speedCapped ? 1 : 0;
+            totalPackingAdjustments += tick.systemPacking.adjustedSystems;
+            maximumRemainingOverlaps = Math.max(maximumRemainingOverlaps,
+              tick.systemPacking.remainingOverlaps);
+            initialRadius.forEach((radius, id) => {
+              const node = byId(id), star = byId(node.system_anchor_id);
+              maximumRadiusDrift = Math.max(maximumRadiusDrift,
+                Math.abs(Math.hypot(node.x - star.x, node.y - star.y) - radius));
+            });
+          }
+          const liveMilliseconds = performance.now() - liveStart;
+          return { initial, final: clearance(), speedCaps, maximumRadiusDrift,
+            totalPackingAdjustments, maximumRemainingOverlaps, liveMilliseconds,
+            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) };
+        };
+        emit({ normal: run(8, .4, false), reduced: run(8, .4, true), high: run(12, .8, false) });
+        """
+    )
+    for mode, gap in (("normal", 8), ("reduced", 8), ("high", 12)):
+        sample = report[mode]
+        assert sample["finite"] is True
+        assert sample["initial"]["count"] == sample["final"]["count"] == 84
+        assert sample["initial"]["overlaps"] == 0
+        assert sample["final"]["overlaps"] == 0
+        assert sample["final"]["minimum"] >= gap - 1e-6
+        assert sample["speedCaps"] == 0
+        # Carrier packing is exactly rigid; this allows only the small bounded Verlet orbit
+        # drift accrued across 120 real local-gravity steps (well below a painted pixel).
+        assert sample["maximumRadiusDrift"] < .01
+        assert sample["maximumRemainingOverlaps"] == 0
+    assert report["normal"]["totalPackingAdjustments"] > 0
+    assert report["reduced"]["totalPackingAdjustments"] > 0
+
+
+@requires_node
+def test_annulus_aware_packing_keeps_two_large_solar_systems_clear_and_rigid() -> None:
+    """The finite galaxy annulus must not trade envelope overlap for an outer-bound escape."""
+    report = _run_node(
+        """
+        const OUTER = 249.375, GAP = 8;
+        const make = () => {
+          const nodes = [{ id: 'bh', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }];
+          ['a', 'b'].forEach(id => {
+            const star = `${id}-star`;
+            nodes.push({ id: star, anchor_role: 'community', community_id: id,
+              system_anchor_id: star, orbit_tier: 0, gravity_mass: 9, radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 });
+            nodes.push({ id: `${id}-planet`, community_id: id, system_anchor_id: star,
+              orbit_tier: 1, gravity_mass: 1, radius: 2.5, x: 159.5, y: 0, vx: 0, vy: 0 });
+          });
+          return nodes;
+        };
+        const options = {
+          gravity: 48, gravitationalConstant: 1, localGravitationalConstant: 1,
+          blackHoleMass: 1, softening: 32, centralSoftening: 40,
+          includeFarFieldConfinement: true, farFieldEnvelopeRadius: OUTER,
+          farFieldMinimumRadius: 96, farFieldSoftFraction: .82,
+          farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeCollisions: false, includeRelations: false, includeOrbitalSeparation: false,
+          includeSystemPacking: true, systemPackingGap: GAP, systemPackingStrength: 1,
+          systemPackingMaxCorrection: Infinity, timestep: .032, wallClockSeconds: 1 / 30,
+          velocityDecay: .00005, speedLimit: 48, localRelativeSpeedLimit: 48,
+        };
+        const local = nodes => ['a', 'b'].map(id => {
+          const star = nodes.find(node => node.id === `${id}-star`);
+          const planet = nodes.find(node => node.id === `${id}-planet`);
+          return [planet.x - star.x, planet.y - star.y, planet.vx - star.vx, planet.vy - star.vy];
+        });
+        const safety = nodes => {
+          const bh = nodes[0];
+          let inner = Infinity, outer = Infinity;
+          nodes.slice(1).forEach(node => {
+            const distance = Math.hypot(node.x - bh.x, node.y - bh.y);
+            inner = Math.min(inner, distance - bh.radius - node.radius - 2.5);
+            outer = Math.min(outer, OUTER - distance - node.radius);
+          });
+          const systems = I.galaxySystemEnvelopes(nodes, options).filter(system =>
+            system.anchor.anchor_role === 'community');
+          return { inner, outer, pairClearance: Math.hypot(systems[0].x - systems[1].x,
+            systems[0].y - systems[1].y) - systems[0].radius - systems[1].radius };
+        };
+        const directNodes = make(), before = local(directNodes);
+        const direct = I.applyGalaxySystemPacking(directNodes, {
+          ...options, gap: GAP, strength: 1, maxCorrection: Infinity,
+        });
+        const directAfter = local(directNodes), directSafety = safety(directNodes);
+        const directLocalFrameError = Math.max(...before.flatMap((frame, index) =>
+          frame.map((value, component) => Math.abs(value - directAfter[index][component]))));
+
+        const liveNodes = make();
+        I.applyGalaxySystemPacking(liveNodes, { ...options, gap: GAP, strength: 1, maxCorrection: Infinity });
+        liveNodes.forEach(node => { delete node.__galaxyOrbitSeeded; delete node.__galaxySystemOrbitSeeded; });
+        I.seedGalaxyOrbits(liveNodes, 442, 48, 32, false);
+        I.seedGalaxySystemOrbits(liveNodes, 442, 48, 40, false);
+        let live = null, liveCaps = 0;
+        for (let step = 0; step < 24; step++) {
+          live = I.integrateGalaxyLeapfrog(liveNodes, [], [], options);
+          liveCaps += live.speedCapped ? 1 : 0;
+        }
+
+        const kinematicNodes = make();
+        I.applyGalaxySystemPacking(kinematicNodes, { ...options, gap: GAP, strength: 1, maxCorrection: Infinity });
+        let kinematic = null;
+        for (let step = 0; step < 24; step++) {
+          kinematic = I.advanceGalaxyKinematicOrbits(kinematicNodes, { ...options, layoutSeed: 442 });
+        }
+        emit({ direct, directLocalFrameError, directSafety, livePacking: live.systemPacking,
+          liveSafety: safety(liveNodes), liveCaps, kinematicPacking: kinematic.systemPacking,
+          kinematicSafety: safety(kinematicNodes),
+          finite: directNodes.concat(liveNodes, kinematicNodes).every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["direct"]["remainingOverlaps"] == 0
+    assert report["direct"]["boundaryViolations"] == 0
+    assert report["direct"]["minimumBlackHoleClearance"] >= 0
+    assert report["direct"]["minimumOuterClearance"] >= 0
+    assert report["directSafety"]["pairClearance"] >= 8 - 1e-8
+    assert report["directSafety"]["inner"] >= 0
+    assert report["directSafety"]["outer"] >= 0
+    assert report["directLocalFrameError"] <= 1e-12
+    for packing, safety in ((report["livePacking"], report["liveSafety"]),
+                            (report["kinematicPacking"], report["kinematicSafety"])):
+        assert packing["remainingOverlaps"] == 0
+        assert packing["boundaryViolations"] == 0
+        assert packing["minimumBlackHoleClearance"] >= 0
+        assert packing["minimumOuterClearance"] >= 0
+        assert safety["pairClearance"] >= 8 - 1e-8
+        assert safety["inner"] >= 0 and safety["outer"] >= 0
+    assert report["liveCaps"] == 0
 
 
 @requires_node
@@ -6427,7 +6734,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["diagnostics"]["orbitalSeparationSetting"] == 60
     assert report["diagnostics"]["orbitalSeparationPadding"] == pytest.approx(15)
     assert report["diagnostics"]["orbitalSeparationStrength"] == pytest.approx(1)
-    assert report["diagnostics"]["crossSystemRepulsionStrength"] == pytest.approx(0.18)
+    assert report["diagnostics"]["crossSystemRepulsionStrength"] == 0
     assert report["diagnostics"]["systemOrbitSeedSpeedLimit"] == pytest.approx(18)
     assert report["diagnostics"]["systemAnchorExclusionPadding"] == pytest.approx(1.5)
     assert report["diagnostics"]["systemAnchorRepulsionRange"] == pytest.approx(6)
@@ -8298,9 +8605,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-structural-orbit-root-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-annulus-aware-packing-3'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260811-structural-orbit-root-1' in markup
+    assert '/v2-assets/ledger.js?v=20260812-annulus-aware-packing-3' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

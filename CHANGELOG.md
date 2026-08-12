@@ -15,7 +15,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   repulsion, and captures sub-escape drag releases into their authored star system while high
   velocity releases escape. A bounded canvas layer renders the central gravity well, lens halo,
   short trails, and up to 24 shallow local-star wells without adding simulation bodies.
-- The dashboard Galaxy graph now caches its outer safety radius at 1.75× the initial painted
+- The dashboard Galaxy graph now caches its outer safety radius at 2× the initial painted
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
 - The Galaxy gravity slider now spans `0..400` while retaining the release-stable default
   black-hole field of `240` and local field of `120`. Independent community stars run on a 2.5×
@@ -37,6 +37,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- Galaxy layout now packs each complete solar-system envelope before orbital seeding and keeps
+  those envelopes separated with rigid carrier translations during live motion. Compact server
+  targets can no longer stack large systems near the black hole, while local planet positions,
+  velocities, event-horizon clearance, and the finite outer boundary remain intact.
 - Galaxy hierarchy authority is now label-independent: an authored `anchor_role="global"`
   selects the central mass regardless of its display name or evidence mass, while unannotated
   compatibility scenes fall back deterministically through mass, rank, degree, and stable ID.
