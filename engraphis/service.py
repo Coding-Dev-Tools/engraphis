@@ -5459,6 +5459,15 @@ class MemoryService:
                 (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), memory_id),
             )
 
+        def _invalidate_import_memory(memory_id: Optional[str]) -> None:
+            """Close a manifest memory that loses a duplicate-path merge race."""
+            if not memory_id:
+                return
+            self.store.close_validity(
+                str(memory_id), actor=actor,
+                reason="source_import_merge_duplicate", commit=False,
+            )
+
         source_vaults = [dict(row) for row in c.execute(
             "SELECT * FROM source_vaults WHERE workspace_id=? ORDER BY id", (wid_src,)
         )]
@@ -5495,6 +5504,10 @@ class MemoryService:
                     (target_vault_id, destination_source_key),
                 ).fetchone()
                 if target_item is None:
+                    _rewrite_import_memory_source(
+                        str(source_item.get("memory_id") or "") or None,
+                        source_id=str(source_item["id"]), vault_id=target_vault_id,
+                    )
                     c.execute(
                         "UPDATE source_imports SET vault_id=?, source_key=? WHERE id=?",
                         (target_vault_id, destination_source_key, source_item["id"]),
@@ -5511,9 +5524,13 @@ class MemoryService:
                 )
                 source_seen = float(source_item.get("last_seen_at") or 0.0)
                 target_seen = float(target_item.get("last_seen_at") or 0.0)
+                source_memory_id = str(source_item.get("memory_id") or "") or None
+                target_memory_id = str(target_item.get("memory_id") or "") or None
                 if source_seen >= target_seen:
+                    if target_memory_id != source_memory_id:
+                        _invalidate_import_memory(target_memory_id)
                     _rewrite_import_memory_source(
-                        str(source_item["memory_id"] or "") or None,
+                        source_memory_id,
                         source_id=str(target_item["id"]), vault_id=target_vault_id,
                     )
                     c.execute(
@@ -5534,6 +5551,8 @@ class MemoryService:
                             source_item["last_error"], target_item["id"],
                         ),
                     )
+                elif source_memory_id != target_memory_id:
+                    _invalidate_import_memory(source_memory_id)
                 c.execute("DELETE FROM source_imports WHERE id=?", (source_item["id"],))
             c.execute("DELETE FROM source_vaults WHERE id=?", (source_vault_id,))
 

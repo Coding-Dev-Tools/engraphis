@@ -724,26 +724,45 @@
     });
     (nodes || []).forEach(node => {
       if (!node || node.ghost || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
-      const parent = node.system_anchor_id === undefined || node.system_anchor_id === null
-        ? '' : String(node.system_anchor_id);
       const declared = communityAnchors.get(communityKey(node));
-      let followsBlackHoleChild = node.__galaxyBlackHoleChild === true;
-      let parentNode = parent ? byId.get(parent) : null;
+      let root = node;
+      let current = node;
       const visited = new Set();
-      while (!followsBlackHoleChild && parentNode && !visited.has(String(parentNode.id))) {
-        visited.add(String(parentNode.id));
-        followsBlackHoleChild = parentNode.__galaxyBlackHoleChild === true;
-        const nextParent = parentNode.system_anchor_id === undefined
-          || parentNode.system_anchor_id === null ? '' : String(parentNode.system_anchor_id);
-        parentNode = nextParent && nextParent !== String(parentNode.id)
-          ? byId.get(nextParent) : null;
+      while (current && current.system_anchor_id !== undefined
+        && current.system_anchor_id !== null) {
+        const parentId = String(current.system_anchor_id);
+        if (!parentId || parentId === String(current.id)
+          || (globalAnchor && parentId === String(globalAnchor.id))
+          || visited.has(parentId)) break;
+        const parentNode = byId.get(parentId);
+        if (!parentNode) break;
+        visited.add(parentId);
+        root = parentNode;
+        current = parentNode;
       }
-      const key = followsBlackHoleChild && globalAnchor
-        ? String(globalAnchor.id)
-        : parent || (node.anchor_role === 'global'
-          || (node.anchor_role === 'community' && !(declared && declared.global))
-          ? String(node.id)
-          : (declared ? declared.id : communityKey(node)));
+      /* Parent metadata can be absent on a filtered member. Infer the local star from its
+         community, then resolve nested planets/moons to the same top-level carrier. */
+      const rootHasNoParent = root.system_anchor_id === undefined
+        || root.system_anchor_id === null || String(root.system_anchor_id) === String(root.id);
+      const rootCanUseCommunityFallback = rootHasNoParent && (
+        (root.anchor_role !== 'global' && root.anchor_role !== 'community')
+        || (declared && declared.global));
+      if (declared && declared.id !== root.id && rootCanUseCommunityFallback) {
+        const declaredNode = byId.get(String(declared.id));
+        if (declaredNode) root = declaredNode;
+      }
+      const rootParentId = root.system_anchor_id === undefined
+        || root.system_anchor_id === null ? '' : String(root.system_anchor_id);
+      const rootIsBlackHoleChild = root.__galaxyBlackHoleChild === true
+        || (globalAnchor && rootParentId === String(globalAnchor.id));
+      const rootIsGlobal = globalAnchor && String(root.id) === String(globalAnchor.id);
+      const hasExplicitSystemAnchor = node.system_anchor_id !== undefined
+        && node.system_anchor_id !== null && String(node.system_anchor_id) !== '';
+      const compatibilityCommunityRoot = root === node && !hasExplicitSystemAnchor && !declared
+        && node.anchor_role !== 'global' && node.anchor_role !== 'community';
+      const rootKey = compatibilityCommunityRoot ? communityKey(node) : String(root.id);
+      const key = globalAnchor && (rootIsGlobal || rootIsBlackHoleChild)
+        ? String(globalAnchor.id) : rootKey;
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       let group = groups.get(key);
       if (!group) {
@@ -777,16 +796,72 @@
         || String(left.id).localeCompare(String(right.id));
     })[0] || null;
   }
+  /* Resolve one local orbital parent for every member. Explicit ancestry wins when the parent
+     is present in this carrier group; filtered/legacy payloads fall back to the system star.
+     The global black hole is a valid parent for direct core satellites. */
+  function galaxyLocalOrbitParent(node, members, carrier, byId) {
+    if (!node || node === carrier) return null;
+    const lookup = byId || new Map((members || []).map(item => [String(item.id), item]));
+    const declaredId = node.system_anchor_id === undefined || node.system_anchor_id === null
+      ? '' : String(node.system_anchor_id);
+    const declared = declaredId ? lookup.get(declaredId) : null;
+    if (declared && declared !== node) return declared;
+    let communityAnchors = lookup.__galaxyCommunityAnchors;
+    if (!communityAnchors) {
+      communityAnchors = new Map();
+      const declaredIds = new Set((members || []).map(item => item && item.system_anchor_id)
+        .filter(value => value !== undefined && value !== null && String(value) !== '')
+        .map(String));
+      (members || []).forEach(candidate => {
+        if (!candidate) return;
+        const key = communityKey(candidate);
+        const priority = candidate.anchor_role === 'global' ? 3
+          : candidate.anchor_role === 'community' ? 2
+          : declaredIds.has(String(candidate.id)) ? 1 : 0;
+        const previous = communityAnchors.get(key);
+        if (!previous || priority > previous.priority
+          || (priority === previous.priority
+            && finitePositive(candidate.gravity_mass, 1, 1000)
+              > finitePositive(previous.node.gravity_mass, 1, 1000))
+          || (priority === previous.priority
+            && finitePositive(candidate.gravity_mass, 1, 1000)
+              === finitePositive(previous.node.gravity_mass, 1, 1000)
+            && String(candidate.id).localeCompare(String(previous.node.id)) < 0)) {
+          communityAnchors.set(key, { node: candidate, priority });
+        }
+      });
+      try { Object.defineProperty(lookup, '__galaxyCommunityAnchors', {
+        value: communityAnchors, configurable: true,
+      }); } catch (error) { lookup.__galaxyCommunityAnchors = communityAnchors; }
+    }
+    const inferred = communityAnchors.get(communityKey(node));
+    if (inferred && inferred.node !== node) return inferred.node;
+    return carrier && carrier !== node ? carrier : null;
+  }
   /* A community anchor can itself be an explicit black-hole satellite. Keep its declared
      stellar children in the same central carrier group so support translates the local system
      together instead of leaving the planet group to orbit its already-detached star. */
   function galaxyBlackHoleCoreSystems(members, globalAnchor) {
     const values = (members || []).filter(node => node && node !== globalAnchor);
     const byId = new Map(values.map(node => [String(node.id), node]));
+    const communityAnchors = new Map();
+    values.forEach(node => {
+      if (!node || node.anchor_role !== 'community') return;
+      const key = communityKey(node);
+      const previous = communityAnchors.get(key);
+      if (!previous || finitePositive(node.gravity_mass, 1, 1000)
+        > finitePositive(previous.gravity_mass, 1, 1000)
+        || (finitePositive(node.gravity_mass, 1, 1000)
+          === finitePositive(previous.gravity_mass, 1, 1000)
+          && String(node.id).localeCompare(String(previous.id)) < 0)) {
+        communityAnchors.set(key, node);
+      }
+    });
     const groups = new Map();
     values.forEach(node => {
       let root = node;
       let current = node;
+      let followedExplicitParent = false;
       const visited = new Set();
       while (current && current.system_anchor_id !== undefined
         && current.system_anchor_id !== null) {
@@ -799,6 +874,14 @@
         if (!parent) break;
         root = parent;
         current = parent;
+        followedExplicitParent = true;
+      }
+      /* Older/filtered payloads often retain the community anchor but omit the per-node
+         system_anchor_id. In a black-hole carrier group, that omission must not turn every
+         planet into an independent BH satellite: infer the local star from its community. */
+      if (!followedExplicitParent) {
+        const communityAnchor = communityAnchors.get(communityKey(node));
+        if (communityAnchor && communityAnchor !== node) root = communityAnchor;
       }
       const key = String(root.id);
       if (!groups.has(key)) groups.set(key, []);
@@ -855,6 +938,64 @@
     Object.defineProperty(node, '__galaxySystemOrbitSpeedMultiplier', {
       value: multiplier, writable: true, configurable: true, enumerable: false,
     });
+  }
+  /* Seed the same immediate-parent hierarchy used by the live force and kinematic clock. The
+     older community pass remains for compatibility payloads, but this final authoritative pass
+     repairs cross-community children and nested descendants that community grouping cannot see. */
+  function seedGalaxyHierarchicalLocalOrbits(nodes, gravity, softening, options) {
+    const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const epsilon = Math.max(0.1, Number(softening) || 8);
+    const centers = galaxyOrbitGroups(nodes);
+    centers.forEach(center => {
+      const members = center.nodes || [];
+      const carrier = galaxySystemAnchor(members);
+      if (!carrier || members.length < 2) return;
+      const byId = new Map(members.map(node => [String(node.id), node]));
+      members.forEach(node => {
+        if (node === carrier || node.ghost || node.id === opts.fixedNodeId
+          || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+        const parent = galaxyLocalOrbitParent(node, members, carrier, byId) || carrier;
+        const dx = node.x - parent.x, dy = node.y - parent.y;
+        const radius = Math.hypot(dx, dy);
+        if (!(radius > 1e-9)) return;
+        const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+        const localGravity = galaxySystemGravityConstant(parent, gravity)
+          * localGravityMultiplier;
+        const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, gravity)
+          * Math.max(0.25, localGravityMultiplier);
+        const denominator = Math.pow(radius * radius + epsilon * epsilon, 1.5);
+        const rawAcceleration = localGravity * finitePositive(parent.gravity_mass, 1, 1000)
+          * radius / Math.max(1e-9, denominator);
+        const acceleration = localAccelerationCap > 0
+          ? Math.min(localAccelerationCap, rawAcceleration) : rawAcceleration;
+        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+          Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
+        const parentVx = Number.isFinite(parent.vx) ? parent.vx : 0;
+        const parentVy = Number.isFinite(parent.vy) ? parent.vy : 0;
+        const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - parentVx;
+        const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0) - parentVy;
+        const tangentX = -dy / radius, tangentY = dx / radius;
+        const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+        const parentId = String(parent.id);
+        const previousParent = typeof node.__galaxyOrbitAnchorId === 'string'
+          ? node.__galaxyOrbitAnchorId : '';
+        const previousSpeed = Number(node.__galaxyOrbitSpeedMultiplier);
+        const speedChanged = !Number.isFinite(previousSpeed)
+          || Math.abs(previousSpeed - orbitalSpeed) > 1e-9;
+        const needsSeed = previousParent !== parentId || Math.abs(currentTangent) < 1e-8;
+        if (needsSeed || speedChanged) {
+          const sign = Math.sign(currentTangent)
+            || ((seededHash(opts.layoutSeed, 'system:' + parentId) & 1) ? 1 : -1);
+          node.vx = parentVx + tangentX * targetTangent * sign;
+          node.vy = parentVy + tangentY * targetTangent * sign;
+        }
+        setGalaxyOrbitAnchor(node, parent);
+        setGalaxyOrbitSpeed(node, orbitalSpeed);
+        setGalaxyOrbitSeeded(node);
+      });
+    });
+    return nodes;
   }
   /* Seed once for each node/central-star pairing. The pairing tag is deliberately
      non-enumerable, so scene export remains portable. More importantly, it makes a
@@ -965,26 +1106,34 @@
         const radialSpeed = relativeVx * unitX + relativeVy * unitY;
         const tangentSpeed = relativeVx * tangentX + relativeVy * tangentY;
         const tangentScale = distance > 1e-9 ? Math.max(0, Math.min(1, distance / minimum)) : 0;
-        const admittedRadius = Math.max(minimum, ring.radius);
+        const cachedLaneRadius = Number(node.__galaxyCoreLaneRadius);
+        const cachedLaneAngle = Number(node.__galaxyCoreLaneAngle);
+        const admittedRadius = Number.isFinite(cachedLaneRadius) && cachedLaneRadius > 0
+          ? Math.max(minimum, cachedLaneRadius) : Math.max(minimum, ring.radius);
+        const admittedAngle = Number.isFinite(cachedLaneAngle) ? cachedLaneAngle : angle;
+        const admittedUnitX = Math.cos(admittedAngle), admittedUnitY = Math.sin(admittedAngle);
         const previousX = node.x, previousY = node.y;
-        node.x = blackHole.x + unitX * admittedRadius;
-        node.y = blackHole.y + unitY * admittedRadius;
+        node.x = blackHole.x + admittedUnitX * admittedRadius;
+        node.y = blackHole.y + admittedUnitY * admittedRadius;
         translateSystemDescendants(node, node.x - previousX, node.y - previousY);
         try {
           Object.defineProperty(node, '__galaxyCoreLaneRadius', {
             value: admittedRadius, writable: true, configurable: true, enumerable: false,
           });
           Object.defineProperty(node, '__galaxyCoreLaneAngle', {
-            value: angle, writable: true, configurable: true, enumerable: false,
+            value: admittedAngle, writable: true, configurable: true, enumerable: false,
           });
         } catch (error) {
           node.__galaxyCoreLaneRadius = admittedRadius;
-          node.__galaxyCoreLaneAngle = angle;
+          node.__galaxyCoreLaneAngle = admittedAngle;
         }
-        node.vx = anchorVx + Math.max(0, radialSpeed) * unitX
-          + tangentSpeed * tangentScale * tangentX;
-        node.vy = anchorVy + Math.max(0, radialSpeed) * unitY
-          + tangentSpeed * tangentScale * tangentY;
+        const admittedTangentX = -admittedUnitY, admittedTangentY = admittedUnitX;
+        const admittedRadialSpeed = relativeVx * admittedUnitX + relativeVy * admittedUnitY;
+        const admittedTangentSpeed = relativeVx * admittedTangentX + relativeVy * admittedTangentY;
+        node.vx = anchorVx + Math.max(0, admittedRadialSpeed) * admittedUnitX
+          + admittedTangentSpeed * tangentScale * admittedTangentX;
+        node.vy = anchorVy + Math.max(0, admittedRadialSpeed) * admittedUnitY
+          + admittedTangentSpeed * tangentScale * admittedTangentY;
         if (Number.isFinite(node.fx)) node.fx = node.x;
         if (Number.isFinite(node.fy)) node.fy = node.y;
         });
@@ -1144,6 +1293,7 @@
         setGalaxyOrbitSeeded(node);
       });
     });
+    seedGalaxyHierarchicalLocalOrbits(nodes, gravity, softening, opts);
     return nodes;
   }
 
@@ -1415,11 +1565,7 @@
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const groups = new Map();
-    bodies.forEach(node => {
-      const key = communityKey(node);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(node);
-    });
+    galaxyOrbitGroups(bodies).forEach(center => groups.set(center.id, center.nodes));
     const gravity = galaxyLocalGravityConstant(opts.gravity);
     const smoothFraction = Math.max(0, Math.min(1,
       Number.isFinite(Number(opts.smoothFraction)) ? Number(opts.smoothFraction) : 0.85));
@@ -1437,7 +1583,10 @@
       if (members.length < 2) return;
       const anchor = galaxySystemAnchor(members);
       const pinnedAnchor = anchor.anchor_role === 'global';
-      const groupSmoothFraction = coreCommunity !== null && key === coreCommunity
+      const isCoreCommunity = coreCommunity !== null
+        && (key === coreCommunity || members.some(node =>
+          String(node.community_id || '') === coreCommunity));
+      const groupSmoothFraction = isCoreCommunity
         ? coreSmoothFraction : smoothFraction;
       const communityMass = members.reduce((sum, node) => sum
         + finitePositive(node.gravity_mass, 1, 1000), 0);
@@ -1502,11 +1651,7 @@
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const groups = new Map();
-    bodies.forEach(node => {
-      const key = communityKey(node);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(node);
-    });
+    galaxyOrbitGroups(bodies).forEach(center => groups.set(center.id, center.nodes));
     const softening = Math.max(0.1, Number(opts.softening) || 8);
     const alphaValue = Number.isFinite(opts.alpha) ? Math.max(0, opts.alpha) : 1;
     const explicitAccelerationCap = Number.isFinite(Number(opts.accelerationCap))
@@ -1553,64 +1698,73 @@
       } else if (anchor.anchor_role === 'global') stats.globalAnchors++;
       else stats.fallbackAnchors++;
       const gravityMultiplier = galaxyLocalGravityMultiplier(anchor, opts);
-      const gravity = galaxySystemGravityConstant(anchor, opts.gravity) * gravityMultiplier;
       const accelerationCap = explicitAccelerationCap !== null
         ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(anchor, opts.gravity)
           * Math.max(0.25, gravityMultiplier);
-      const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
       const accelerations = new Map(members.map(node => [node, { ax: 0, ay: 0 }]));
       let systemMaximumRepulsion = 0, systemMaximumSampledAttraction = 0;
       let systemMaximumNetRepulsion = 0, systemMinimumSurfaceNetRepulsion = null;
-      orderedGalaxySatellites(members, anchor).forEach(item => {
-        const satellite = item.node;
-        let dx = anchor.x - satellite.x, dy = anchor.y - satellite.y;
-        let distance = Math.hypot(dx, dy);
-        if (!(distance > 1e-9)) {
-          const angle = seededHash(0, 'stellar-pressure:' + String(anchor.id)
-            + '|' + String(satellite.id)) / 0x100000000 * Math.PI * 2;
-          /* dx/dy point toward the star. A deterministic opposite normal therefore sends an
-             exactly coincident satellite outward without inventing a random orbital phase. */
-          dx = -Math.cos(angle) * 1e-9;
-          dy = -Math.sin(angle) * 1e-9;
-          distance = 1e-9;
-        }
-        const denominator = Math.pow(dx * dx + dy * dy + softening * softening, 1.5);
-        if (!(denominator > 0) || !Number.isFinite(denominator)) return;
-        const scale = gravity * alphaValue / denominator;
-        const sampledAttraction = distance * scale * anchorMass;
-        const satelliteAcceleration = accelerations.get(satellite);
-        satelliteAcceleration.ax += dx * scale * anchorMass;
-        satelliteAcceleration.ay += dy * scale * anchorMass;
-        /* Only the selected dominant star owns this near-surface pressure. At and inside the
-           painted surface it cancels this exact softened attraction and leaves the configured
-           small net-outward margin. Across the outer six-unit band the whole pressure tapers C1
-           to zero, so there is no discontinuous kick or gravity-400 energy spike. Satellites
-           never become secondary wells; the global anchor retains its separate event horizon. */
-        if (anchor.anchor_role !== 'global' && repulsionAcceleration > 0) {
-          const surfaceDistance = bodyRadius(anchor) + bodyRadius(satellite)
-            + repulsionPadding;
-          const pressureEdge = surfaceDistance + repulsionRange;
-          if (distance < pressureEdge) {
-            const depth = galaxySmoothstep((pressureEdge - distance) / repulsionRange);
-            const outwardAcceleration = (sampledAttraction
-              + repulsionAcceleration * alphaValue) * depth;
-            const netRepulsion = outwardAcceleration - sampledAttraction;
-            const unitX = dx / distance, unitY = dy / distance;
-            satelliteAcceleration.ax -= unitX * outwardAcceleration;
-            satelliteAcceleration.ay -= unitY * outwardAcceleration;
-            stats.repulsions++;
-            systemMaximumRepulsion = Math.max(systemMaximumRepulsion, outwardAcceleration);
-            systemMaximumSampledAttraction = Math.max(
-              systemMaximumSampledAttraction, sampledAttraction);
-            systemMaximumNetRepulsion = Math.max(systemMaximumNetRepulsion, netRepulsion);
-            if (distance <= surfaceDistance + 1e-9) {
-              stats.surfaceRepulsions++;
-              systemMinimumSurfaceNetRepulsion = systemMinimumSurfaceNetRepulsion === null
-                ? netRepulsion : Math.min(systemMinimumSurfaceNetRepulsion, netRepulsion);
+      const byId = new Map(members.map(node => [String(node.id), node]));
+      const childrenByParent = new Map();
+      members.forEach(node => {
+        if (node === anchor) return;
+        const parent = galaxyLocalOrbitParent(node, members, anchor, byId) || anchor;
+        if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+        childrenByParent.get(parent).push(node);
+      });
+      childrenByParent.forEach((satellites, parent) => {
+        const parentMass = finitePositive(parent.gravity_mass, 1, 1000);
+        const parentGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+        const parentGravity = galaxySystemGravityConstant(parent, opts.gravity)
+          * parentGravityMultiplier;
+        satellites.sort((left, right) => Number(left.orbit_tier || 0)
+          - Number(right.orbit_tier || 0) || String(left.id).localeCompare(String(right.id)));
+        satellites.forEach(satellite => {
+          let dx = parent.x - satellite.x, dy = parent.y - satellite.y;
+          let distance = Math.hypot(dx, dy);
+          if (!(distance > 1e-9)) {
+            const angle = seededHash(0, 'stellar-pressure:' + String(parent.id)
+              + '|' + String(satellite.id)) / 0x100000000 * Math.PI * 2;
+            dx = -Math.cos(angle) * 1e-9;
+            dy = -Math.sin(angle) * 1e-9;
+            distance = 1e-9;
+          }
+          const denominator = Math.pow(dx * dx + dy * dy + softening * softening, 1.5);
+          if (!(denominator > 0) || !Number.isFinite(denominator)) return;
+          const scale = parentGravity * alphaValue / denominator;
+          const sampledAttraction = distance * scale * parentMass;
+          const satelliteAcceleration = accelerations.get(satellite);
+          satelliteAcceleration.ax += dx * scale * parentMass;
+          satelliteAcceleration.ay += dy * scale * parentMass;
+          /* Every local parent owns a painted clearance band. This keeps nested moons from
+             colliding with their immediate carrier while preserving the global black-hole
+             boundary as a separate constraint. */
+          if (parent.anchor_role !== 'global' && repulsionAcceleration > 0) {
+            const surfaceDistance = bodyRadius(parent) + bodyRadius(satellite)
+              + repulsionPadding;
+            const pressureEdge = surfaceDistance + repulsionRange;
+            if (distance < pressureEdge) {
+              const depth = galaxySmoothstep((pressureEdge - distance) / repulsionRange);
+              const outwardAcceleration = (sampledAttraction
+                + repulsionAcceleration * alphaValue) * depth;
+              const netRepulsion = outwardAcceleration - sampledAttraction;
+              const unitX = dx / distance, unitY = dy / distance;
+              satelliteAcceleration.ax -= unitX * outwardAcceleration;
+              satelliteAcceleration.ay -= unitY * outwardAcceleration;
+              stats.repulsions++;
+              systemMaximumRepulsion = Math.max(systemMaximumRepulsion, outwardAcceleration);
+              systemMaximumSampledAttraction = Math.max(
+                systemMaximumSampledAttraction, sampledAttraction);
+              systemMaximumNetRepulsion = Math.max(systemMaximumNetRepulsion, netRepulsion);
+              if (distance <= surfaceDistance + 1e-9) {
+                stats.surfaceRepulsions++;
+                systemMinimumSurfaceNetRepulsion = systemMinimumSurfaceNetRepulsion === null
+                  ? netRepulsion : Math.min(systemMinimumSurfaceNetRepulsion, netRepulsion);
+              }
             }
           }
-        }
-        stats.satellites++;
+          stats.satellites++;
+        });
       });
       /* Do not add an equal-and-opposite local kick to the dominant node. The dashboard renders
          that star as the stationary centre of its own solar system; galaxy-wide fields below
@@ -1653,11 +1807,7 @@
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const groups = new Map();
-    bodies.forEach(node => {
-      const key = communityKey(node);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(node);
-    });
+    galaxyOrbitGroups(bodies).forEach(center => groups.set(center.id, center.nodes));
     const padding = Math.max(0, Number.isFinite(Number(opts.padding))
       ? Number(opts.padding) : GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING);
     const maximumIterations = Math.max(1, Math.min(64,
@@ -1679,13 +1829,15 @@
     groups.forEach(members => {
       if (members.length < 2) return;
       const anchor = galaxySystemAnchor(members);
-      if (!anchor || anchor.anchor_role === 'global') return;
+      if (!anchor) return;
       stats.systems++;
-      const anchorRadius = bodyRadius(anchor);
-      /* The dominant star always owns the local reference frame. Pointer ownership continues to
-         fix the dragged member as before; stellar contact moves only the penetrating planet and
-         therefore cannot manufacture star recoil or a repeated drag-feedback correction. */
-      const satellites = orderedGalaxySatellites(members, anchor);
+      const byId = new Map(members.map(node => [String(node.id), node]));
+      /* Resolve every direct parent instead of projecting every body against the top star. This
+         preserves nested moon trajectories and gives each local carrier its own clearance band. */
+      const satellites = members.filter(node => node !== anchor).map(node => ({
+        node, parent: galaxyLocalOrbitParent(node, members, anchor, byId) || anchor,
+      })).sort((left, right) => Number(left.node.orbit_tier || 0)
+        - Number(right.node.orbit_tier || 0) || String(left.node.id).localeCompare(String(right.node.id)));
       /* A bounded solve handles pathological dense payloads with 80+ bodies around one dominant
          node. Ordinary non-contact systems still exit after one O(n) scan; every penetration is
          projected in the stationary star frame and therefore closes in one pass per satellite. */
@@ -1694,15 +1846,16 @@
         let maximumPenetration = 0;
         satellites.forEach(item => {
           const satellite = item.node;
-          const minimumDistance = anchorRadius + bodyRadius(satellite) + padding;
-          let dx = satellite.x - anchor.x, dy = satellite.y - anchor.y;
+          const parent = item.parent;
+          const minimumDistance = bodyRadius(parent) + bodyRadius(satellite) + padding;
+          let dx = satellite.x - parent.x, dy = satellite.y - parent.y;
           let distance = Math.hypot(dx, dy);
           let unitX, unitY;
           if (distance > 1e-9) {
             unitX = dx / distance;
             unitY = dy / distance;
           } else {
-            const angle = seededHash(0, String(anchor.id) + '|' + String(satellite.id))
+            const angle = seededHash(0, String(parent.id) + '|' + String(satellite.id))
               / 0x100000000 * Math.PI * 2;
             unitX = Math.cos(angle);
             unitY = Math.sin(angle);
@@ -1721,19 +1874,19 @@
           const satelliteShift = correction;
           satellite.x += unitX * satelliteShift;
           satellite.y += unitY * satelliteShift;
-          if (Number.isFinite(anchor.fx)) anchor.fx = anchor.x;
-          if (Number.isFinite(anchor.fy)) anchor.fy = anchor.y;
+          if (Number.isFinite(parent.fx)) parent.fx = parent.x;
+          if (Number.isFinite(parent.fy)) parent.fy = parent.y;
           if (Number.isFinite(satellite.fx)) satellite.fx = satellite.x;
           if (Number.isFinite(satellite.fy)) satellite.fy = satellite.y;
           const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0)
-            - (Number.isFinite(anchor.vx) ? anchor.vx : 0);
+            - (Number.isFinite(parent.vx) ? parent.vx : 0);
           const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0)
-            - (Number.isFinite(anchor.vy) ? anchor.vy : 0);
+            - (Number.isFinite(parent.vy) ? parent.vy : 0);
           const inwardSpeed = relativeVx * unitX + relativeVy * unitY;
           if (inwardSpeed < 0) {
             const impulse = -inwardSpeed / inverseMass;
-            anchor.vx -= unitX * impulse * anchorInverseMass;
-            anchor.vy -= unitY * impulse * anchorInverseMass;
+            parent.vx -= unitX * impulse * anchorInverseMass;
+            parent.vy -= unitY * impulse * anchorInverseMass;
             satellite.vx += unitX * impulse * satelliteInverseMass;
             satellite.vy += unitY * impulse * satelliteInverseMass;
             stats.inwardVelocityRemoved += -inwardSpeed;
@@ -1747,8 +1900,9 @@
         if (maximumPenetration <= clearanceEpsilon) break;
       }
       satellites.forEach(item => {
-        const minimumDistance = anchorRadius + bodyRadius(item.node) + padding;
-        const rawClearance = Math.hypot(item.node.x - anchor.x, item.node.y - anchor.y)
+        const minimumDistance = bodyRadius(item.parent) + bodyRadius(item.node) + padding;
+        const rawClearance = Math.hypot(item.node.x - item.parent.x,
+          item.node.y - item.parent.y)
           - minimumDistance;
         /* Avoid reporting harmless binary rounding as an overlap. The actual phase remains
            within the same 1e-9 solver tolerance; larger residuals are never hidden. */
@@ -1773,22 +1927,18 @@
         radiusFromGravityMass(node.gravity_mass), 80), 160
     );
     const groups = new Map();
-    (nodes || []).forEach(node => {
-      if (!node || node.ghost || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
-      const key = communityKey(node);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(node);
-    });
+    galaxyOrbitGroups(nodes || []).forEach(center => groups.set(center.id, center.nodes));
     let systems = 0, satellites = 0, minimumClearance = null;
     groups.forEach(members => {
       if (members.length < 2) return;
       const anchor = galaxySystemAnchor(members);
-      if (!anchor || anchor.anchor_role === 'global') return;
+      if (!anchor) return;
       systems++;
-      const anchorRadius = bodyRadius(anchor);
-      orderedGalaxySatellites(members, anchor).forEach(item => {
-        const clearance = Math.hypot(item.node.x - anchor.x, item.node.y - anchor.y)
-          - anchorRadius - bodyRadius(item.node) - padding;
+      const byId = new Map(members.map(node => [String(node.id), node]));
+      members.filter(node => node !== anchor).forEach(node => {
+        const parent = galaxyLocalOrbitParent(node, members, anchor, byId) || anchor;
+        const clearance = Math.hypot(node.x - parent.x, node.y - parent.y)
+          - bodyRadius(parent) - bodyRadius(node) - padding;
         minimumClearance = minimumClearance === null
           ? clearance : Math.min(minimumClearance, clearance);
         satellites++;
@@ -2510,6 +2660,94 @@
      not as a performance policy. This O(n) clock advances cached hierarchical phases exactly:
      each dominant star sweeps the black hole, then each satellite sweeps that star. It is
      kinematic only—no mass, contact, link, or recoil is introduced into the evidence model. */
+  function advanceGalaxyKinematicLocalMembers(members, carrier, carrierTarget, options) {
+    const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const localSoftening = Math.max(0.1, Number(opts.localSoftening) || opts.softening || 40);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
+    const localOrbitCache = opts.localOrbitCache || '__galaxyKinematicLocalOrbit';
+    const nodeRadius = node => finitePositive(node.radius,
+      finitePositive(node.visual_radius, 3, 160), 160);
+    const byId = new Map((members || []).map(node => [String(node.id), node]));
+    const targets = new Map([[carrier, carrierTarget]]);
+    const visiting = new Set();
+    let satellites = 0;
+    const visit = node => {
+      if (!node || node === carrier) return carrierTarget;
+      const existingTarget = targets.get(node);
+      if (existingTarget) return existingTarget;
+      if (visiting.has(node)) return carrierTarget;
+      visiting.add(node);
+      const parent = galaxyLocalOrbitParent(node, members, carrier, byId) || carrier;
+      const parentTarget = visit(parent);
+      const parentId = String(parent.id);
+      const parentX = Number.isFinite(parent.x) ? parent.x : 0;
+      const parentY = Number.isFinite(parent.y) ? parent.y : 0;
+      const currentRadius = Math.hypot(node.x - parentX, node.y - parentY);
+      const minimumRadius = nodeRadius(parent) + nodeRadius(node)
+        + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING;
+      let local = node[localOrbitCache];
+      if (!local || local.anchorId !== parentId) {
+        local = setGalaxyKinematicPhase(node, localOrbitCache, {
+          anchorId: parentId,
+          radius: Math.max(minimumRadius, currentRadius),
+          angle: currentRadius > 1e-9
+            ? Math.atan2(node.y - parentY, node.x - parentX)
+            : seededHash(opts.layoutSeed, 'kinematic-local:' + String(node.id))
+              / 0x100000000 * Math.PI * 2,
+          direction: (seededHash(opts.layoutSeed, 'system:' + parentId) & 1) ? 1 : -1,
+        });
+      }
+      if (!Number.isFinite(local.angle)) local.angle = seededHash(
+        opts.layoutSeed, 'kinematic-local:' + String(node.id)) / 0x100000000 * Math.PI * 2;
+      const localRadius = Math.max(minimumRadius, Number(local.radius) || currentRadius || 1);
+      local.radius = localRadius;
+      const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+      const localGravity = galaxySystemGravityConstant(parent, opts.gravity)
+        * localGravityMultiplier;
+      const denominator = Math.pow(localRadius * localRadius + localSoftening * localSoftening, 1.5);
+      const rawAcceleration = localGravity * finitePositive(parent.gravity_mass, 1, 1000)
+        * localRadius / Math.max(1e-9, denominator);
+      const acceleration = Math.min(
+        defaultGalaxySystemAccelerationCap(parent, opts.gravity)
+          * Math.max(0.25, localGravityMultiplier), rawAcceleration);
+      const omega = Math.min(
+        Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed,
+        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
+      local.angle += local.direction * omega * timestep;
+      const localSpeed = omega * localRadius;
+      const offsetX = Math.cos(local.angle) * localRadius;
+      const offsetY = Math.sin(local.angle) * localRadius;
+      const target = {
+        x: parentTarget.x + offsetX,
+        y: parentTarget.y + offsetY,
+        vx: parentTarget.vx - Math.sin(local.angle) * localSpeed * local.direction,
+        vy: parentTarget.vy + Math.cos(local.angle) * localSpeed * local.direction,
+      };
+      targets.set(node, target);
+      visiting.delete(node);
+      satellites++;
+      return target;
+    };
+    (members || []).forEach(node => { if (node !== carrier) visit(node); });
+    targets.forEach((target, node) => {
+      if (node === carrier) return;
+      node.x = target.x; node.y = target.y; node.vx = target.vx; node.vy = target.vy;
+      if (Number.isFinite(node.fx)) node.fx = target.x;
+      if (Number.isFinite(node.fy)) node.fy = target.y;
+    });
+    return { targets, satellites };
+  }
+
+  function setGalaxyKinematicPhase(node, name, value) {
+    try {
+      Object.defineProperty(node, name, {
+        value, writable: true, configurable: true, enumerable: false,
+      });
+    } catch (error) { node[name] = value; }
+    return value;
+  }
+
   function advanceGalaxyKinematicOrbits(nodes, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
@@ -2595,50 +2833,11 @@
       const globalSpeed = omega * orbit.radius;
       const globalVx = -Math.sin(orbit.angle) * globalSpeed * direction;
       const globalVy = Math.cos(orbit.angle) * globalSpeed * direction;
-      /* Generate local targets directly in the dominant star's frame. The star follows only its
-         smooth global orbit; each planet independently advances around that moving origin. */
-      const localTargets = [];
-      members.forEach(node => {
-        if (node === star) return;
-        let local = node.__galaxyKinematicLocalOrbit;
-        if (!local || local.anchorId !== String(star.id)) {
-          const radius = Math.max(nodeRadius(star) + nodeRadius(node)
-            + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING, Math.hypot(node.x - star.x, node.y - star.y));
-          local = setPhase(node, '__galaxyKinematicLocalOrbit', {
-            anchorId: String(star.id), radius,
-            angle: Math.atan2(node.y - star.y, node.x - star.x),
-            direction: (seededHash(opts.layoutSeed, 'system:' + item.center.id) & 1) ? 1 : -1,
-          });
-        }
-        if (!Number.isFinite(local.angle)) local.angle = seededHash(
-          opts.layoutSeed, 'kinematic-local:' + node.id) / 0x100000000 * Math.PI * 2;
-        const localGravityMultiplier = galaxyLocalGravityMultiplier(star, opts);
-        const localGravity = galaxySystemGravityConstant(star, opts.gravity)
-          * localGravityMultiplier;
-        const localRadius = Math.max(1e-6, Number(local.radius) || 1);
-        const localDenominator = Math.pow(
-          localRadius * localRadius + localSoftening * localSoftening, 1.5);
-        const rawLocalAcceleration = localGravity * finitePositive(star.gravity_mass, 1, 1000)
-          * localRadius / localDenominator;
-        const localAcceleration = Math.min(
-          defaultGalaxySystemAccelerationCap(star, opts.gravity)
-            * Math.max(0.25, localGravityMultiplier), rawLocalAcceleration);
-        const localOmega = Math.min(
-          Math.sqrt(Math.max(0, localAcceleration / localRadius)) * orbitalSpeed,
-          GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
-        local.angle += local.direction * localOmega * timestep;
-        const localSpeed = localOmega * localRadius;
-        localTargets.push({ node,
-          x: Math.cos(local.angle) * localRadius,
-          y: Math.sin(local.angle) * localRadius,
-          vx: -Math.sin(local.angle) * localSpeed * local.direction,
-          vy: Math.cos(local.angle) * localSpeed * local.direction });
-        satellites++;
-      });
       moveNode(star, targetX, targetY, globalVx, globalVy);
-      localTargets.forEach(target => moveNode(target.node,
-        star.x + target.x, star.y + target.y,
-        star.vx + target.vx, star.vy + target.vy));
+      const localMotion = advanceGalaxyKinematicLocalMembers(members, star, {
+        x: targetX, y: targetY, vx: globalVx, vy: globalVy,
+      }, opts);
+      satellites += localMotion.satellites;
       const carrierContact = nodeRadius(anchor) + nodeRadius(star)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
       const carrierOuter = galaxyEventHorizonOuterRadius(
@@ -2674,56 +2873,19 @@
         GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed
           / Math.max(1e-6, orbit.radius));
       orbit.angle += direction * omega * timestep;
+      setPhase(carrier, '__galaxyCoreLaneRadius', orbit.radius);
+      setPhase(carrier, '__galaxyCoreLaneAngle', orbit.angle);
       const speed = omega * orbit.radius;
-      const carrierX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
-      const carrierY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
-      const carrierVx = -Math.sin(orbit.angle) * speed * direction;
-      const carrierVy = Math.cos(orbit.angle) * speed * direction;
-      const localTargets = [];
-      members.forEach(node => {
-        if (node === carrier) return;
-        let local = node.__galaxyKinematicCoreLocalOrbit;
-        if (!local || local.anchorId !== String(carrier.id)) {
-          const radius = Math.max(nodeRadius(carrier) + nodeRadius(node)
-            + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
-          Math.hypot(node.x - carrier.x, node.y - carrier.y));
-          local = setPhase(node, '__galaxyKinematicCoreLocalOrbit', {
-            anchorId: String(carrier.id), radius,
-            angle: Math.atan2(node.y - carrier.y, node.x - carrier.x),
-            direction: (seededHash(opts.layoutSeed, 'core-system:' + String(carrier.id)) & 1)
-              ? 1 : -1,
-          });
-        }
-        if (!Number.isFinite(local.angle)) local.angle = seededHash(
-          opts.layoutSeed, 'core-local:' + String(node.id)) / 0x100000000 * Math.PI * 2;
-        const localGravityMultiplier = galaxyLocalGravityMultiplier(carrier, opts);
-        const localGravity = galaxySystemGravityConstant(carrier, opts.gravity)
-          * localGravityMultiplier;
-        const localRadius = Math.max(1e-6, Number(local.radius) || 1);
-        const localDenominator = Math.pow(
-          localRadius * localRadius + localSoftening * localSoftening, 1.5);
-        const rawLocalAcceleration = localGravity * finitePositive(carrier.gravity_mass, 1, 1000)
-          * localRadius / localDenominator;
-        const localAcceleration = Math.min(
-          defaultGalaxySystemAccelerationCap(carrier, opts.gravity)
-            * Math.max(0.25, localGravityMultiplier), rawLocalAcceleration);
-        const localOmega = Math.min(
-          Math.sqrt(Math.max(0, localAcceleration / localRadius)) * orbitalSpeed,
-          GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
-        local.angle += local.direction * localOmega * timestep;
-        const localSpeed = localOmega * localRadius;
-        localTargets.push({ node,
-          x: Math.cos(local.angle) * localRadius,
-          y: Math.sin(local.angle) * localRadius,
-          vx: Math.cos(local.angle + Math.PI / 2) * localSpeed * local.direction,
-          vy: Math.sin(local.angle + Math.PI / 2) * localSpeed * local.direction });
-        satellites++;
-      });
-      moveNode(carrier, carrierX, carrierY, carrierVx, carrierVy);
-      localTargets.forEach(target => moveNode(target.node,
-        carrier.x + target.x, carrier.y + target.y,
-        carrier.vx + target.vx, carrier.vy + target.vy));
-      const satelliteContact = nodeRadius(anchor) + nodeRadius(carrier)
+       const carrierX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
+       const carrierY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
+       const carrierVx = -Math.sin(orbit.angle) * speed * direction;
+       const carrierVy = Math.cos(orbit.angle) * speed * direction;
+       moveNode(carrier, carrierX, carrierY, carrierVx, carrierVy);
+       const localMotion = advanceGalaxyKinematicLocalMembers(members, carrier, {
+         x: carrierX, y: carrierY, vx: carrierVx, vy: carrierVy,
+       }, Object.assign({}, opts, { localOrbitCache: '__galaxyKinematicCoreLocalOrbit' }));
+       satellites += localMotion.satellites;
+       const satelliteContact = nodeRadius(anchor) + nodeRadius(carrier)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
       const satelliteOuter = galaxyEventHorizonOuterRadius(
         nodeRadius(anchor), satelliteContact, GALAXY_EVENT_HORIZON_INFLUENCE_SCALE);
@@ -2731,7 +2893,6 @@
         (satelliteOuter - orbit.radius)
           / Math.max(1e-9, satelliteOuter - satelliteContact))));
       members.forEach(node => setGalaxySpacetimeWarp(node, warp));
-      satellites++;
     });
     const systemPacking = opts.includeSystemPacking === true
       ? applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
@@ -5222,24 +5383,28 @@
       });
       stats.systems++;
     };
-    const centers = communityCenters(bodies);
+    const centers = galaxyOrbitGroups(bodies);
+    const coreKey = String(globalAnchor.id);
     centers.forEach(center => {
       const members = center.nodes;
       const carrier = galaxySystemAnchor(members) || members[0];
-      if (center.id !== communityKey(globalAnchor)) supportCarrier(members, carrier);
+      if (center.id !== coreKey) supportCarrier(members, carrier);
       const localAnchor = carrier && carrier.anchor_role === 'global' ? globalAnchor : carrier;
       if (!localAnchor) return;
-      const localGravityMultiplier = galaxyLocalGravityMultiplier(localAnchor, opts);
-      const localGravity = galaxySystemGravityConstant(localAnchor, opts.gravity)
-        * localGravityMultiplier;
-      const localAccelerationCap = defaultGalaxySystemAccelerationCap(localAnchor, opts.gravity)
-        * Math.max(0.25, localGravityMultiplier);
-      const anchorMass = finitePositive(localAnchor.gravity_mass, 1, 1000);
+      const byId = new Map(members.map(node => [String(node.id), node]));
       members.forEach(node => {
         if (node === localAnchor || node.id === opts.fixedNodeId) return;
-        const dx = node.x - localAnchor.x, dy = node.y - localAnchor.y;
+        const parent = galaxyLocalOrbitParent(node, members, localAnchor, byId)
+          || localAnchor;
+        const dx = node.x - parent.x, dy = node.y - parent.y;
         const radius = Math.hypot(dx, dy);
         if (!(radius > 1e-9)) return;
+        const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+        const localGravity = galaxySystemGravityConstant(parent, opts.gravity)
+          * localGravityMultiplier;
+        const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, opts.gravity)
+          * Math.max(0.25, localGravityMultiplier);
+        const anchorMass = finitePositive(parent.gravity_mass, 1, 1000);
         const denominator = Math.pow(radius * radius
           + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
         const rawAcceleration = denominator > 0
@@ -5250,12 +5415,12 @@
         const unitX = dx / radius, unitY = dy / radius;
         const tangentX = -unitY, tangentY = unitX;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
-          - (Number.isFinite(localAnchor.vx) ? localAnchor.vx : 0);
+          - (Number.isFinite(parent.vx) ? parent.vx : 0);
         const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
-          - (Number.isFinite(localAnchor.vy) ? localAnchor.vy : 0);
+          - (Number.isFinite(parent.vy) ? parent.vy : 0);
         const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
         const sign = Math.sign(currentTangent)
-          || ((seededHash(opts.layoutSeed, 'system:' + String(center.id)) & 1) ? 1 : -1);
+          || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
         const delta = baseSpeed * orbitalSpeed * sign - currentTangent;
         node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
         node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
