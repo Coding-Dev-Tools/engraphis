@@ -317,6 +317,7 @@
      lives in a WeakMap keyed by anchor identity. The property-based path stays for ordinary
      mutable nodes; the WeakMap wins when the anchor is frozen. */
   const galaxyFarFieldEnvelopeCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  const galaxyBlackHoleSpinCache = typeof WeakMap === 'function' ? new WeakMap() : null;
   /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
      while a 0.032 leapfrog slice makes both levels of the hierarchy visibly rotate without
      changing their circular initial conditions or force balance. This is a time-scale increase,
@@ -326,6 +327,9 @@
   const GALAXY_FRAME_INTERVAL_MS = 1000 / 30;
   const GALAXY_MOTION_RATE = 0.68;
   const GALAXY_FIXED_TIMESTEP = 0.032;
+  /* The black hole remains the chart's fixed origin, but its visible accretion disk must not
+     read as a frozen node when the central community has no separately painted satellites. */
+  const GALAXY_BLACK_HOLE_SPIN_RATE = 1.2;
   const GALAXY_MAX_SUBSTEPS = 3;
   /* Galaxy's fixed-step solver is persistent, so it has no cold alpha to reheat. Extra fixed
      slices would literally fast-forward physical time (up to 3x at a 60 Hz render cadence),
@@ -1807,6 +1811,43 @@
     return anchor;
   }
 
+  function galaxyBlackHoleSpinAngle(node) {
+    if (!node) return 0;
+    const propertyAngle = Number(node.__galaxyBlackHoleSpinAngle);
+    if (Number.isFinite(propertyAngle)) return propertyAngle;
+    const cachedAngle = galaxyBlackHoleSpinCache ? galaxyBlackHoleSpinCache.get(node) : null;
+    return Number.isFinite(cachedAngle) ? cachedAngle : 0;
+  }
+
+  function setGalaxyBlackHoleSpinAngle(node, angle) {
+    if (!node || !Number.isFinite(angle)) return angle;
+    if (galaxyBlackHoleSpinCache) galaxyBlackHoleSpinCache.set(node, angle);
+    try {
+      Object.defineProperty(node, '__galaxyBlackHoleSpinAngle', {
+        value: angle, writable: true, configurable: true, enumerable: false,
+      });
+    } catch (_) {
+      /* Frozen compatibility payloads still receive the WeakMap-backed visual phase. */
+    }
+    return angle;
+  }
+
+  function advanceGalaxyBlackHoleSpin(nodes, options) {
+    const opts = options || {};
+    const anchor = galaxyGlobalAnchor(nodes);
+    if (!anchor || anchor.anchor_role !== 'global'
+      || opts.frozen === true || opts.orbitPaused === true) {
+      return anchor ? galaxyBlackHoleSpinAngle(anchor) : 0;
+    }
+    const timestep = Math.max(0.001, Math.min(2,
+      Number(opts.timestep) || GALAXY_FIXED_TIMESTEP));
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const direction = (seededHash(opts.layoutSeed, 'black-hole-spin') & 1) ? 1 : -1;
+    return setGalaxyBlackHoleSpinAngle(anchor,
+      galaxyBlackHoleSpinAngle(anchor) + direction
+        * GALAXY_BLACK_HOLE_SPIN_RATE * orbitalSpeed * timestep);
+  }
+
   function linearMedian(values) {
     if (!values.length) return 0;
     const data = values.slice();
@@ -2487,8 +2528,9 @@
       }))
       : { systems: 0, overlaps: 0, adjustedSystems: 0, remainingOverlaps: 0,
         infeasiblePairs: 0, gap: 0 };
+    const blackHoleSpinAngle = advanceGalaxyBlackHoleSpin(nodes, opts);
     return { bodies: bodies.length, systems, satellites, systemPacking,
-      ghostOrbit: integrateGalaxyGhostOrbits(nodes, opts) };
+      blackHoleSpinAngle, ghostOrbit: integrateGalaxyGhostOrbits(nodes, opts) };
   }
 
   function recenterGalaxyOnAnchor(nodes) {
@@ -5400,6 +5442,7 @@
     /* Ghosts are rendered history, not evidence mass. Advance their exact test-particle
        phase only after live constraints and the common speed scale complete, so they cannot
        trigger a contact/reheat or alter any live system's momentum. */
+    const blackHoleSpinAngle = advanceGalaxyBlackHoleSpin(nodes, opts);
     const ghostOrbit = integrateGalaxyGhostOrbits(nodes, opts);
     const dragAcceleration = end.dragGravity || start.dragGravity
       || { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
@@ -5427,6 +5470,7 @@
       bodies: bodies.length,
       collisions: collision.overlaps,
       kinetic,
+      blackHoleSpinAngle,
       ghostOrbit,
       maximumSpeed,
       uncappedMaximumSpeed,
@@ -6305,7 +6349,8 @@
       ctx.lineWidth = 1.15 * inverseScale;
       ctx.beginPath();
       if (typeof ctx.ellipse === 'function') {
-        ctx.ellipse(node.x, node.y, radius * 1.72, radius * 0.62, -0.28, 0, 6.2832);
+        ctx.ellipse(node.x, node.y, radius * 1.72, radius * 0.62,
+          -0.28 + galaxyBlackHoleSpinAngle(node), 0, 6.2832);
       } else ctx.arc(node.x, node.y, radius * 1.45, 0, 6.2832);
       ctx.stroke();
     } else {
@@ -7623,6 +7668,7 @@
           GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         globalAnchorId: diagnosticAnchor ? diagnosticAnchor.id : null,
         globalAnchorLabel: diagnosticAnchor ? nodeName(diagnosticAnchor) : null,
+        blackHoleSpinAngle: diagnosticAnchor ? galaxyBlackHoleSpinAngle(diagnosticAnchor) : 0,
         blackHoleMass: galaxyPhysicsMultiplier(state.settings.blackHoleMass,
           GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
         damping: galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
@@ -9307,6 +9353,7 @@
       graphNodeRadius, evidenceNodeRadius, sanitizeEvidenceMetrics, fallbackGravityMass,
       radiusFromGravityMass, galaxyGravityConstant, galaxyGravityMaximum: GALAXY_GRAVITY_MAXIMUM,
       galaxyBlackHoleGravityConstant, galaxyBlackHoleGravitySetting,
+      galaxyBlackHoleSpinAngle, advanceGalaxyBlackHoleSpin,
       galaxyGlobalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       galaxyLocalGravityConstant,
       galaxyLocalGravityMultiplier,
