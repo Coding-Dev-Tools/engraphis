@@ -5880,6 +5880,9 @@
     let raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
     const galaxyServerPhase = new Map();
     const galaxySavedPhase = new Map();
+    /* Mode restoration is a transactional hand-off: a same-task freeze must still expose the
+       saved phase byte-for-byte after the render's safety projections. */
+    let galaxyPhaseRestorePending = false;
     let adj = Object.create(null), liveAdj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     let legacySizeBy = 'degree';
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
@@ -7232,6 +7235,7 @@
       galaxyLastSubsteps = substeps;
       galaxyLastReheatSubsteps = reheatSubsteps;
       if (substeps > 0) {
+        galaxyPhaseRestorePending = false;
         const data = fg.graphData() || { nodes: [], links: [] };
         for (let index = 0; index < substeps; index++) {
           const kinematicFallback = staticFullLayout || collapsed;
@@ -7354,6 +7358,7 @@
         softAlphaTimer = 0;
         if (hadSoftAlphaTimer && typeof fg.d3AlphaTarget === 'function') fg.d3AlphaTarget(0);
         restoreGalaxyPhase();
+        galaxyPhaseRestorePending = true;
       }
       /* Never hand force-graph the array that the other integrator mutated. A fresh visible()
          projection preserves object identity for nodes but prevents its cached legacy cluster
@@ -8070,6 +8075,7 @@
       resetGalaxyDiagnostics();
       galaxyServerPhase.clear();
       galaxySavedPhase.clear();
+      galaxyPhaseRestorePending = false;
       const inputNodes = Array.isArray(data && data.nodes) ? data.nodes : [];
       const nodes = [], nodeIds = new Set();
       inputNodes.forEach(node => {
@@ -8503,10 +8509,16 @@
       state.settings.frozen = on === true;
       if (state.settings.mode === 'galaxy') {
         if (state.settings.frozen) {
+          const restorePhase = galaxyPhaseRestorePending;
           galaxyReheatStepsRemaining = 0;
           cancelGalaxyDynamics(true);
           setSimulationBudget(false, true);
           render(false, false);
+          if (restorePhase && galaxyPhaseRestorePending) {
+            restoreGalaxyPhase();
+            galaxyPhaseRestorePending = false;
+            invalidate();
+          }
           return;
         }
         if (!staticFullLayout) raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
@@ -8701,6 +8713,7 @@
       raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
       galaxyServerPhase.clear();
       galaxySavedPhase.clear();
+      galaxyPhaseRestorePending = false;
       adj = Object.create(null);
       liveAdj = Object.create(null);
       seeded = null;
