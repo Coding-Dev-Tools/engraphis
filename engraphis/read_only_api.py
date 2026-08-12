@@ -22,6 +22,7 @@ from engraphis.service import (
     MAX_CODE_QUERY_CAPACITY,
     MemoryService,
     ValidationError,
+    WorkspaceBindingError,
 )
 
 
@@ -96,7 +97,6 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
         embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
-        allowed_workspaces=settings.allowed_workspaces,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
@@ -227,6 +227,8 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                 "limit": exc.limit,
                 "recommended_action": "narrow repository, time, type, or relation filters",
             }) from None
+        except WorkspaceBindingError:
+            raise HTTPException(status_code=403, detail="workspace is not permitted by this instance's configuration") from None
         except ValidationError as exc:
             raise HTTPException(status_code=400, detail="invalid request") from exc
         except ValueError as exc:

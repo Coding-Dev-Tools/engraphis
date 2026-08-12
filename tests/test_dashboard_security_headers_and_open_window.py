@@ -151,16 +151,18 @@ def test_dashboard_review_approval_requires_browser_session_and_csrf(monkeypatch
 
 def test_dashboard_review_approval_enforces_source_workspace_binding(monkeypatch, tmp_path):
     token = "deployment-token-with-enough-entropy"
-    with _client(
-        monkeypatch, tmp_path, api_token=token, allowed_workspaces=["allowed"],
-    ) as client:
+    with _client(monkeypatch, tmp_path, api_token=token) as client:
         service = client.app.state.service
+        # Tenant binding is an explicit service concern; the public dashboard no longer
+        # derives it from the legacy process-wide ENGRAPHIS_WORKSPACES setting.
+        service.allowed_workspaces = frozenset({"allowed"})
+        service.store.allowed_workspaces = service.allowed_workspaces
         pending = service.remember(
             "The restricted release switch needs review.", workspace="allowed",
             source="web", trusted=True,
         )
         # Simulate a pre-existing foreign workspace, such as one that predates a later
-        # ENGRAPHIS_WORKSPACES binding. Direct SQL is deliberate: public service writes
+        # explicit service binding. Direct SQL is deliberate: public service writes
         # rightly reject this state, while the route must still fail closed if it exists.
         foreign_workspace = "ws_foreign"
         service.store.conn.execute(

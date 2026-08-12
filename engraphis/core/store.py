@@ -3892,7 +3892,7 @@ class Store:
         """When this Store is bound to a workspace allow-list, refuse to create or
         retrieve a workspace outside it. This is the hard isolation boundary applied
         at the persistence layer so no caller (including a future sync path) can
-        bypass ENGRAPHIS_WORKSPACES by going directly to Store instead of through
+        bypass an explicit service binding by going directly to Store instead of through
         MemoryService."""
         if self.allowed_workspaces is not None and name not in self.allowed_workspaces:
             raise ValueError(f"workspace '{name}' is not permitted on this instance")
@@ -4816,6 +4816,10 @@ class Store:
         norm = float(np.linalg.norm(v.astype(np.float64, copy=False)))
         if norm > 0:
             v = v / norm
+            # Pin back to float32 after division. NumPy 1.24-1.26 value-based promotion
+            # can widen to float64 when the Python float norm is not losslessly
+            # representable in float32, corrupting tobytes() byte count downstream.
+            v = v.astype(np.float32, copy=False)
         self.conn.execute(
             "INSERT OR REPLACE INTO mem_vectors(id, dim, vector, model) VALUES (?,?,?,?)",
             (memory_id, int(v.shape[0]), v.tobytes(), model),

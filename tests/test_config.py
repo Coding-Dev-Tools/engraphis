@@ -56,8 +56,8 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     assert "# ENGRAPHIS_RATE_LIMIT=0" in example
 
     monkeypatch.setenv("ENGRAPHIS_WORKSPACES", "acme,personal")
-    assert Settings().allowed_workspaces == ["acme", "personal"]
-    assert "# ENGRAPHIS_WORKSPACES=acme,personal" in example
+    assert Settings().allowed_workspaces == []
+    assert "ENGRAPHIS_WORKSPACES" not in example
 
     assert "http://127.0.0.1:<ENGRAPHIS_PORT>" in example
     assert "http://localhost:<ENGRAPHIS_PORT>" in example
