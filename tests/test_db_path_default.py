@@ -197,25 +197,25 @@ def test_migration_lock_skips_in_memory_uris(tmp_path, monkeypatch, uri):
 
 def test_service_creation_with_named_shared_memory_uri_creates_no_file(tmp_path, monkeypatch):
     """Named SQLite memory URIs (file:name?mode=memory) must stay in-memory.
-    
+
     Regression: _is_memory_database_path previously missed mode=memory query
     parameters, causing _physical_database_path to strip the URI to a disk
     filename and create an unexpected file.
     """
     from engraphis.service import MemoryService
-    
+
     monkeypatch.chdir(tmp_path)
     uri = "file:test-shared?mode=memory&cache=shared"
-    
+
     # Service creation must succeed without creating any files
     service = MemoryService.create(uri, extractor="none", graph_extractor="none")
     service.remember("Test fact.", workspace="test", repo="demo")
-    
+
     # No database file should exist in the working directory
     assert list(tmp_path.iterdir()) == [], (
         f"Named memory URI created unexpected files: {list(tmp_path.iterdir())}"
     )
-    
+
     # Service must be functional (proves the database opened correctly)
     hits = service.recall("test", workspace="test")
     assert len(hits) >= 1
