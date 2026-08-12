@@ -308,6 +308,24 @@
   const GALAXY_REHEAT_STEPS = 0;
   const GALAXY_REHEAT_LARGE_STEPS = 0;
   const GALAXY_VELOCITY_DECAY = 0.00005;
+  /* Developer-facing spacetime controls are normalized multipliers around the calibrated
+     dashboard physics. Keeping them separate from the established Gravity/Link controls makes
+     the advanced panel reversible and avoids changing saved-layout semantics. */
+  const GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER = 1;
+  const GALAXY_BLACK_HOLE_MASS_MULTIPLIER = 1;
+  const GALAXY_SPRING_STIFFNESS_MULTIPLIER = 1;
+  const GALAXY_FRAME_DRAGGING_FRACTION = 0.018;
+  const GALAXY_FRAME_DRAGGING_MAX_ACCELERATION = 0.22;
+  const GALAXY_EVENT_HORIZON_INFLUENCE_SCALE = 4.5;
+  const GALAXY_EVENT_HORIZON_DECAY_RATE = 0.12;
+  const GALAXY_EVENT_HORIZON_INWARD_ACCELERATION = 0.28;
+  const GALAXY_SLINGSHOT_VELOCITY_SCALE = 0.022;
+  const GALAXY_SLINGSHOT_SPEED_LIMIT = 24;
+  function galaxyPhysicsMultiplier(value, fallback, maximum) {
+    const raw = Number(value);
+    return Number.isFinite(raw)
+      ? Math.max(0, Math.min(maximum, raw)) : fallback;
+  }
   /* This is a deliberate external field in the black-hole frame, rather than an
      equal-and-opposite pair force: it makes the visible galaxy contract at a reliable
      wall-clock rate even while orbital forces and drag-derived energy vary. One minute at
@@ -728,7 +746,9 @@
          later governed by the black-hole frame rather than this repair path. */
       if (!anchor) return;
       setGalaxyOrbitSeeded(anchor);
-      const localGravity = galaxySystemGravityConstant(anchor, gravity);
+      const localGravity = galaxySystemGravityConstant(anchor, gravity)
+        * galaxyPhysicsMultiplier(opts.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
       const localAccelerationCap = defaultGalaxySystemAccelerationCap(anchor, gravity);
       const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
       const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
@@ -796,7 +816,8 @@
      The tag is intentionally not a permanent exemption: a filter/restore can retain the tag
      while supplying a zeroed velocity.  In that case repair the *system COM* once, preserving
      every local star/planet relative orbit rather than leaving a visibly frozen island. */
-  function seedGalaxySystemOrbits(nodes, layoutSeed, gravity, softening, reducedMotion) {
+  function seedGalaxySystemOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
+    const opts = options || {};
     /* Compatibility scenes may omit velocity fields on the selected fallback anchor. Give
        every physical body a finite frame velocity before computing system COM tangents; this
        is deliberately not a seed tag, so normal admission/repair policy remains unchanged. */
@@ -827,6 +848,8 @@
        carousel; inner angular frequency remains higher than outer angular frequency. */
     const field = galaxyBlackHoleField(nodes, {
       gravity, softening,
+      gravitationalConstant: opts.gravitationalConstant,
+      blackHoleMass: opts.blackHoleMass,
     });
     if (!(field.gravitationalConstant > 0)) return nodes;
     field.systems.forEach(item => {
@@ -1181,9 +1204,12 @@
           > galaxyAccelerationCapReference(opts.gravity)) stats.stellarFloorActive = true;
       } else if (anchor.anchor_role === 'global') stats.globalAnchors++;
       else stats.fallbackAnchors++;
-      const gravity = galaxySystemGravityConstant(anchor, opts.gravity);
+      const gravityMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
+        GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+      const gravity = galaxySystemGravityConstant(anchor, opts.gravity) * gravityMultiplier;
       const accelerationCap = explicitAccelerationCap !== null
-        ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(anchor, opts.gravity);
+        ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(anchor, opts.gravity)
+          * Math.max(0.25, gravityMultiplier);
       const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
       const accelerations = new Map(members.map(node => [node, { ax: 0, ay: 0 }]));
       let systemMaximumRepulsion = 0, systemMaximumSampledAttraction = 0;
@@ -1515,7 +1541,10 @@
     const strengthFraction = Math.max(0, Math.min(1,
       Number.isFinite(Number(opts.strengthFraction))
         ? Number(opts.strengthFraction) : GALAXY_MUTUAL_SYSTEM_GRAVITY_FRACTION));
-    const gravitationalConstant = galaxyLocalGravityConstant(opts.gravity) * strengthFraction;
+    const gravityMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
+      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+    const gravitationalConstant = galaxyLocalGravityConstant(opts.gravity) * strengthFraction
+      * gravityMultiplier;
     const softening = Math.max(0.1, Number(opts.softening)
       || GALAXY_MUTUAL_SYSTEM_SOFTENING);
     const alphaValue = Number.isFinite(opts.alpha) ? Math.max(0, opts.alpha) : 1;
@@ -1523,7 +1552,8 @@
     const theta = Math.max(0.1, Number(opts.theta) || GALAXY_BARNES_HUT_THETA);
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
-      : defaultGalaxyAccelerationCap(opts.gravity) * strengthFraction);
+      : defaultGalaxyAccelerationCap(opts.gravity) * strengthFraction
+        * Math.max(0.25, gravityMultiplier));
     const stats = {
       systems: centers.length, interactions: 0, traversals: 0, approximations: 0,
       maximumAcceleration: 0, capScale: 1,
@@ -1626,8 +1656,13 @@
     /* The singular center term is sourced by the actual dominant evidence node. Other stars
        in its community remain part of the smooth bulge/halo instead of inflating black-hole
        mass merely because they share a community label. */
-    const coreMass = finitePositive(anchor.gravity_mass, 1, 1000);
-    const haloMass = Math.max(0, totalMass - coreMass);
+    const blackHoleMassMultiplier = galaxyPhysicsMultiplier(opts.blackHoleMass,
+      GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16);
+    const baseCoreMass = finitePositive(anchor.gravity_mass, 1, 1000);
+    const coreMass = baseCoreMass * blackHoleMassMultiplier;
+    /* Black-hole mass tuning changes only the compact central source. It must not create or
+       consume halo evidence mass; the scene's remaining authored mass stays invariant. */
+    const haloMass = Math.max(0, totalMass - baseCoreMass);
     const external = [...centers.values()].filter(center => center.id !== coreKey).map(center => ({
       center,
       dx: anchor.x - center.x,
@@ -1658,10 +1693,15 @@
       });
     }
     const explicitGlobal = anchor.anchor_role === 'global';
-    const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal);
+    const gravitationalConstantMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
+      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+    const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal)
+      * gravitationalConstantMultiplier;
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
-      : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal));
+      : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
+        * Math.max(0.25, Math.min(8,
+          gravitationalConstantMultiplier * Math.max(1, blackHoleMassMultiplier))));
     const systems = external.map(item => {
       const coreDenominator = Math.pow(
         item.radius * item.radius + coreSoftening * coreSoftening, 1.5
@@ -1688,7 +1728,9 @@
       item.circularSpeed *= Math.sqrt(capScale);
     });
     return {
-      anchor, systems, coreMass, haloMass, haloScale, totalMass, gravitationalConstant,
+      anchor, systems, baseCoreMass, coreMass, haloMass, haloScale, totalMass,
+      gravitationalConstant, gravitationalConstantMultiplier,
+      blackHoleMassMultiplier,
       gravitySetting: galaxyBlackHoleGravitySetting(opts.gravity, explicitGlobal),
       floorActive: explicitGlobal && Number(opts.gravity) < GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       traversals: centers.size,
@@ -1709,6 +1751,169 @@
       haloScale: field.haloScale,
       traversals: field.traversals,
     };
+  }
+
+  function setGalaxySpacetimeWarp(node, value) {
+    if (!node) return;
+    const warp = Math.max(0, Math.min(1, Number(value) || 0));
+    try {
+      if (Object.prototype.hasOwnProperty.call(node, '__galaxySpacetimeWarp')) {
+        node.__galaxySpacetimeWarp = warp;
+      } else {
+        Object.defineProperty(node, '__galaxySpacetimeWarp', {
+          value: warp, writable: true, configurable: true, enumerable: false,
+        });
+      }
+    } catch (error) { /* Frozen compatibility payloads still receive the physical field. */ }
+  }
+
+  /* Bounded weak-field frame dragging plus a smooth near-horizon acceleration band. External
+     solar systems receive one rigid carrier acceleration, so a star's planets keep their local
+     orbit exactly; core-community bodies are sampled independently around the fixed black hole.
+     The strict painted horizon remains an impenetrable numerical boundary, preventing a
+     singular acceleration while the warp value lets paint fade/lens an approaching body. */
+  function applyGalaxySpacetimeAcceleration(nodes, options) {
+    const opts = options || {};
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const field = galaxyBlackHoleField(bodies, opts);
+    const anchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
+    const stats = {
+      anchorId: anchor ? anchor.id : null, systems: 0, coreNodes: 0, warpedNodes: 0,
+      maximumWarp: 0, maximumFrameDragAcceleration: 0,
+      maximumHorizonAcceleration: 0,
+      accelerations: new Map(),
+    };
+    bodies.forEach(node => setGalaxySpacetimeWarp(node, node === anchor ? 1 : 0));
+    if (!anchor) return stats;
+    const anchorRadius = finitePositive(anchor.radius, evidenceNodeRadius(anchor, 3), 160);
+    const padding = Math.max(0, Number.isFinite(Number(opts.blackHoleExclusionPadding))
+      ? Number(opts.blackHoleExclusionPadding) : GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+    const influenceScale = Math.max(1.1,
+      Number.isFinite(Number(opts.eventHorizonInfluenceScale))
+        ? Number(opts.eventHorizonInfluenceScale) : GALAXY_EVENT_HORIZON_INFLUENCE_SCALE);
+    const draggingFraction = Math.max(0, Number.isFinite(Number(opts.frameDraggingFraction))
+      ? Number(opts.frameDraggingFraction) : GALAXY_FRAME_DRAGGING_FRACTION);
+    const draggingCap = Math.max(0, Number.isFinite(Number(opts.frameDraggingMaxAcceleration))
+      ? Number(opts.frameDraggingMaxAcceleration) : GALAXY_FRAME_DRAGGING_MAX_ACCELERATION);
+    const horizonAcceleration = Math.max(0,
+      Number.isFinite(Number(opts.eventHorizonInwardAcceleration))
+        ? Number(opts.eventHorizonInwardAcceleration)
+        : GALAXY_EVENT_HORIZON_INWARD_ACCELERATION);
+    const direction = Number(opts.frameDraggingDirection) < 0 ? -1 : 1;
+    const coreKey = communityKey(anchor);
+    const bodyRadius = node => finitePositive(
+      node.radius, evidenceNodeRadius(node, 3), 160
+    );
+    const accelerate = (members, dx, dy, contactRadius, gravityAcceleration, scope) => {
+      const distance = Math.hypot(dx, dy);
+      if (!(distance > 1e-9)) return;
+      const unitX = dx / distance, unitY = dy / distance;
+      const outerRadius = Math.max(contactRadius + 1, contactRadius * influenceScale);
+      const warp = distance < outerRadius
+        ? galaxySmoothstep((outerRadius - distance) / Math.max(1e-9, outerRadius - contactRadius))
+        : 0;
+      const radialAcceleration = horizonAcceleration * warp * warp;
+      const frameAcceleration = Math.min(draggingCap,
+        Math.max(0, gravityAcceleration) * draggingFraction
+          * warp * Math.pow(contactRadius / Math.max(contactRadius, distance), 2));
+      const tangentX = -unitY * direction, tangentY = unitX * direction;
+      members.forEach(node => {
+        stats.accelerations.set(node, {
+          ax: -unitX * radialAcceleration + tangentX * frameAcceleration,
+          ay: -unitY * radialAcceleration + tangentY * frameAcceleration,
+        });
+        setGalaxySpacetimeWarp(node, warp);
+      });
+      if (warp > 0) stats.warpedNodes += members.length;
+      stats.maximumWarp = Math.max(stats.maximumWarp, warp);
+      stats.maximumFrameDragAcceleration = Math.max(
+        stats.maximumFrameDragAcceleration, frameAcceleration);
+      stats.maximumHorizonAcceleration = Math.max(
+        stats.maximumHorizonAcceleration, radialAcceleration);
+      if (scope === 'core') stats.coreNodes += members.length;
+      else stats.systems++;
+    };
+    const centers = communityCenters(bodies);
+    centers.forEach(center => {
+      if (center.id === coreKey) {
+        center.nodes.forEach(node => {
+          if (node === anchor) return;
+          const dx = node.x - anchor.x, dy = node.y - anchor.y;
+          const distance = Math.hypot(dx, dy);
+          const denominator = Math.pow(distance * distance
+            + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
+          const gravityAcceleration = denominator > 0
+            ? field.gravitationalConstant * field.coreMass * distance / denominator : 0;
+          accelerate([node], dx, dy,
+            anchorRadius + bodyRadius(node) + padding, gravityAcceleration, 'core');
+        });
+        return;
+      }
+      const item = field.systems.find(candidate => candidate.center.id === center.id);
+      if (!item) return;
+      const systemRadius = center.nodes.reduce((maximum, node) => Math.max(maximum,
+        Math.hypot(node.x - center.x, node.y - center.y) + bodyRadius(node)), 0);
+      accelerate(center.nodes, center.x - anchor.x, center.y - anchor.y,
+        anchorRadius + systemRadius + padding, Math.hypot(item.ax, item.ay), 'system');
+    });
+    return stats;
+  }
+
+  /* Dissipate only the black-hole-frame carrier tangent in the event-horizon band. Local
+     planet/star relative velocity is untouched because every external system receives the same
+     delta. This models orbital decay without a singular kick or the violent local reheating that
+     per-node damping would cause. */
+  function applyGalaxyEventHorizonDecay(nodes, options) {
+    const opts = options || {};
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const anchor = galaxyGlobalAnchor(bodies);
+    const rate = Math.max(0, Number.isFinite(Number(opts.eventHorizonDecayRate))
+      ? Number(opts.eventHorizonDecayRate) : GALAXY_EVENT_HORIZON_DECAY_RATE);
+    const timestep = Math.max(0, Number(opts.timestep) || 1);
+    const stats = { anchorId: anchor ? anchor.id : null, systems: 0, nodes: 0,
+      maximumWarp: 0, maximumVelocityRemoved: 0 };
+    if (!anchor || anchor.anchor_role !== 'global' || !(rate > 0) || !(timestep > 0)) return stats;
+    const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
+    const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
+    const coreKey = communityKey(anchor);
+    communityCenters(bodies).forEach(center => {
+      const members = center.id === coreKey
+        ? center.nodes.filter(node => node !== anchor).map(node => [node])
+        : [center.nodes];
+      members.forEach(group => {
+        if (!group.length) return;
+        const warp = group.reduce((maximum, node) => Math.max(maximum,
+          Number(node.__galaxySpacetimeWarp) || 0), 0);
+        if (!(warp > 0)) return;
+        let mass = 0, x = 0, y = 0, vx = 0, vy = 0;
+        group.forEach(node => {
+          const nodeMass = finitePositive(node.gravity_mass, 1, 1000);
+          mass += nodeMass; x += node.x * nodeMass; y += node.y * nodeMass;
+          vx += (Number.isFinite(node.vx) ? node.vx : 0) * nodeMass;
+          vy += (Number.isFinite(node.vy) ? node.vy : 0) * nodeMass;
+        });
+        if (!(mass > 0)) return;
+        x /= mass; y /= mass; vx = vx / mass - anchorVx; vy = vy / mass - anchorVy;
+        const dx = x - anchor.x, dy = y - anchor.y, distance = Math.hypot(dx, dy);
+        if (!(distance > 1e-9)) return;
+        const unitX = dx / distance, unitY = dy / distance;
+        const tangentX = -unitY, tangentY = unitX;
+        const tangentSpeed = vx * tangentX + vy * tangentY;
+        const keep = Math.exp(-rate * warp * warp * timestep);
+        const removed = tangentSpeed * (1 - keep);
+        group.forEach(node => {
+          node.vx -= tangentX * removed;
+          node.vy -= tangentY * removed;
+        });
+        stats.systems++;
+        stats.nodes += group.length;
+        stats.maximumWarp = Math.max(stats.maximumWarp, warp);
+        stats.maximumVelocityRemoved = Math.max(stats.maximumVelocityRemoved, Math.abs(removed));
+      });
+    });
+    return stats;
   }
 
   /* History ghosts are intentionally massless: they never enter community COMs, gravity,
@@ -1879,14 +2084,18 @@
         }
         if (!Number.isFinite(local.angle)) local.angle = seededHash(
           opts.layoutSeed, 'kinematic-local:' + node.id) / 0x100000000 * Math.PI * 2;
-        const localGravity = galaxySystemGravityConstant(star, opts.gravity);
+        const localGravityMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+        const localGravity = galaxySystemGravityConstant(star, opts.gravity)
+          * localGravityMultiplier;
         const localRadius = Math.max(1e-6, Number(local.radius) || 1);
         const localDenominator = Math.pow(
           localRadius * localRadius + localSoftening * localSoftening, 1.5);
         const rawLocalAcceleration = localGravity * finitePositive(star.gravity_mass, 1, 1000)
           * localRadius / localDenominator;
         const localAcceleration = Math.min(
-          defaultGalaxySystemAccelerationCap(star, opts.gravity), rawLocalAcceleration);
+          defaultGalaxySystemAccelerationCap(star, opts.gravity)
+            * Math.max(0.25, localGravityMultiplier), rawLocalAcceleration);
         const localOmega = Math.min(Math.sqrt(Math.max(0, localAcceleration / localRadius)),
           GALAXY_LOCAL_RELATIVE_SPEED_LIMIT / localRadius);
         local.angle += local.direction * localOmega * timestep;
@@ -1902,6 +2111,9 @@
       localTargets.forEach(target => moveNode(target.node,
         star.x + target.x, star.y + target.y,
         star.vx + target.vx, star.vy + target.vy));
+      const systemWarp = Math.max(0, Math.min(1,
+        1 - orbit.radius / Math.max(1, nodeRadius(anchor) * GALAXY_EVENT_HORIZON_INFLUENCE_SCALE)));
+      members.forEach(node => setGalaxySpacetimeWarp(node, galaxySmoothstep(systemWarp)));
       systems++;
     });
     /* Bodies in the black hole's own community are not a separate solar-system COM. They are
@@ -1926,6 +2138,9 @@
         anchor.y + Math.sin(orbit.angle) * orbit.radius,
         -Math.sin(orbit.angle) * speed * direction,
         Math.cos(orbit.angle) * speed * direction);
+      setGalaxySpacetimeWarp(node, galaxySmoothstep(Math.max(0, Math.min(1,
+        1 - orbit.radius / Math.max(1,
+          nodeRadius(anchor) * GALAXY_EVENT_HORIZON_INFLUENCE_SCALE)))));
       satellites++;
     });
     return { bodies: bodies.length, systems, satellites,
@@ -3169,6 +3384,7 @@
     const anchor = galaxyGlobalAnchor(bodies);
     const systemGravity = applyGalaxySystemAnchorGravity(bodies, {
       gravity, softening, alpha: 1,
+      gravitationalConstant: opts.gravitationalConstant,
       accelerationCap: opts.localAccelerationCap,
       fixedNodeId: opts.fixedNodeId,
       repulsionPadding: opts.systemAnchorExclusionPadding,
@@ -3178,6 +3394,8 @@
     if (opts.central !== false) {
       applyGalaxyBlackHoleGravity(bodies, {
         gravity,
+        gravitationalConstant: opts.gravitationalConstant,
+        blackHoleMass: opts.blackHoleMass,
         softening: Math.max(36, Number(opts.centralSoftening) || softening * 5),
         accelerationCap: opts.centralAccelerationCap,
       });
@@ -3185,6 +3403,7 @@
     const mutualGravity = opts.includeMutualSystems === true
       ? applyGalaxyMutualSystemGravity(bodies, {
         gravity,
+        gravitationalConstant: opts.gravitationalConstant,
         strengthFraction: opts.mutualSystemGravityFraction,
         softening: opts.mutualSystemSoftening,
         accelerationCap: opts.mutualSystemAccelerationCap,
@@ -3218,7 +3437,9 @@
         alpha: 1,
         orbitScale: opts.orbitScale,
         forceCap: opts.relationForceCap,
-        strengthMultiplier: opts.relationStrengthMultiplier,
+        strengthMultiplier: (Number(opts.relationStrengthMultiplier) || 1)
+          * galaxyPhysicsMultiplier(opts.springStiffness,
+            GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
         accelerationCap: opts.relationAccelerationCap,
         padding: opts.relationPadding,
         fixedNodeId: opts.fixedNodeId,
@@ -3233,6 +3454,16 @@
         softening: opts.dragSoftening,
       }
     ) : { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
+    const spacetime = opts.includeSpacetime !== true
+      ? { anchorId: null, systems: 0, coreNodes: 0, warpedNodes: 0,
+        maximumWarp: 0, maximumFrameDragAcceleration: 0,
+        maximumHorizonAcceleration: 0, accelerations: new Map() }
+      : applyGalaxySpacetimeAcceleration(bodies, opts);
+    spacetime.accelerations.forEach((acceleration, node) => {
+      node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + acceleration.ax;
+      node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + acceleration.ay;
+    });
+    delete spacetime.accelerations;
     if (anchor && (opts.central !== false || anchor.anchor_role === 'global')) {
       /* The global evidence node is the chart's black-hole potential, not a light particle
          that its own bulge can kick. Satellites still receive the local equal field; fixing
@@ -3254,6 +3485,7 @@
     accelerations.systemGravity = systemGravity;
     accelerations.mutualGravity = mutualGravity;
     accelerations.farFieldGravity = farFieldGravity;
+    accelerations.spacetime = spacetime;
     return accelerations;
   }
 
@@ -3863,6 +4095,10 @@
       node.vx = (Number.isFinite(node.vx) ? node.vx : 0) * dampingFactor;
       node.vy = (Number.isFinite(node.vy) ? node.vy : 0) * dampingFactor;
     });
+    const eventHorizonDecay = opts.includeSpacetime !== true
+      ? { anchorId: null, systems: 0, nodes: 0, maximumWarp: 0,
+        maximumVelocityRemoved: 0 }
+      : applyGalaxyEventHorizonDecay(bodies, opts);
     /* Work in the chart's black-hole frame. Translation by the dominant node's phase changes
        no relative orbit, while guaranteeing the visual/physical anchor is exactly 0/0/0/0. */
     if (recenterFrame) recenterGalaxyOnAnchor(nodes);
@@ -4126,6 +4362,11 @@
       blackHoleExclusion,
       farFieldConfinement,
       farFieldGravity,
+      spacetime: end.spacetime || start.spacetime
+        || { anchorId: null, systems: 0, coreNodes: 0, warpedNodes: 0,
+          maximumWarp: 0, maximumFrameDragAcceleration: 0,
+          maximumHorizonAcceleration: 0 },
+      eventHorizonDecay,
       systemVelocity,
       systemGravity: end.systemGravity || start.systemGravity
         || { systems: 0, anchors: 0, satellites: 0,
@@ -5011,7 +5252,14 @@
       // by the shorter name reads as one. The longer name keeps that gate honest.
       styleName: 'cyber', colorBy: 'community', palette: 'theme',
       overrides: Object.create(null), themeColors: Object.create(null),
-      settings: Object.assign({}, PRESETS.galaxy, { mode: 'galaxy', labels: false, flow: true, frozen: false }),
+      settings: Object.assign({}, PRESETS.galaxy, {
+        mode: 'galaxy', labels: false, flow: true, frozen: false,
+        gravitationalConstant: GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER,
+        blackHoleMass: GALAXY_BLACK_HOLE_MASS_MULTIPLIER,
+        damping: 1,
+        springStiffness: GALAXY_SPRING_STIFFNESS_MULTIPLIER,
+        orbitPaused: false,
+      }),
       minDegree: 1, showUnlinked: true, focusId: null, depth: 2, layers: { temporal: true, entity: true, causal: true, semantic: true, code: false },
       path: null, asOf: null, ghost: true, sizeBy: 'mass', bridges: false, suggestions: false,
       collapse: 'auto', renderMode: opts.renderMode === 'full' ? 'full' : 'overview'
@@ -5091,6 +5339,15 @@
     let galaxyLastGravityResponse = {
       systems: 0, moved: 0, ratio: 1, maximumShift: 0, anchorId: null,
     };
+    let galaxyLastSpacetime = {
+      anchorId: null, systems: 0, coreNodes: 0, warpedNodes: 0,
+      maximumWarp: 0, maximumFrameDragAcceleration: 0,
+      maximumHorizonAcceleration: 0,
+    };
+    let galaxyLastEventHorizonDecay = {
+      anchorId: null, systems: 0, nodes: 0, maximumWarp: 0,
+      maximumVelocityRemoved: 0,
+    };
     let softAlphaTimer = 0, initialFitFrame = 0;
     let suppressNodeClickAfterDrag = false, dragClickFrame = 0;
     const hasBrowserFrameClock = typeof window !== 'undefined'
@@ -5113,6 +5370,8 @@
     let dragFollowers = [];
     let dragFollowerGravityReport = { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
     let dragPreVelocity = null;
+    let dragReleaseVelocity = null;
+    let lastSlingshotRelease = null;
 
     function setActiveDragNode(node) {
       activeDragNode = node || null;
@@ -5756,7 +6015,10 @@
       const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id), dim = focus && !neighbor;
       let r = node.radius;
       const col = node.color;
-      ctx.globalAlpha = node.ghost ? 0.22 : (dim ? 0.12 : 1);
+      const spacetimeFade = state.settings.mode === 'galaxy' && node.anchor_role !== 'global'
+        ? 1 - 0.55 * Math.max(0, Math.min(1, Number(node.__galaxySpacetimeWarp) || 0))
+        : 1;
+      ctx.globalAlpha = (node.ghost ? 0.22 : (dim ? 0.12 : 1)) * spacetimeFade;
       if (node.ghost) {
         ctx.lineWidth = 1.1 / scale;
         ctx.strokeStyle = col;
@@ -5942,7 +6204,8 @@
 
     function galaxyDynamicsEligible() {
       if (!hasBrowserFrameClock || destroyed || !running || pageHidden()) return false;
-      if (state.settings.mode !== 'galaxy' || state.settings.frozen) return false;
+      if (state.settings.mode !== 'galaxy' || state.settings.frozen
+        || state.settings.orbitPaused === true) return false;
       const data = fg.graphData() || {};
       return Array.isArray(data.nodes) && data.nodes.some(node => node && !node.ghost);
     }
@@ -6015,6 +6278,15 @@
       galaxyLastGravityResponse = {
         systems: 0, moved: 0, ratio: 1, maximumShift: 0, anchorId: null,
       };
+      galaxyLastSpacetime = {
+        anchorId: null, systems: 0, coreNodes: 0, warpedNodes: 0,
+        maximumWarp: 0, maximumFrameDragAcceleration: 0,
+        maximumHorizonAcceleration: 0,
+      };
+      galaxyLastEventHorizonDecay = {
+        anchorId: null, systems: 0, nodes: 0, maximumWarp: 0,
+        maximumVelocityRemoved: 0,
+      };
       resetGalaxyClock();
     }
 
@@ -6036,6 +6308,10 @@
         dragSoftening: activeDragNode ? Math.max(GALAXY_DRAG_GRAVITY_SOFTENING,
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
+        gravitationalConstant: galaxyPhysicsMultiplier(
+          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+        blackHoleMass: galaxyPhysicsMultiplier(
+          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
         softening: galaxyLiveSoftening(),
         centralSoftening: Math.max(36, galaxySoftening() * 5),
         bridgeSoftening: Math.max(24, galaxySoftening() * 4),
@@ -6064,10 +6340,11 @@
            those evidence links painted, but let the hierarchy's central potential—not Link
            PBD—own every orbital radius inside that system. */
         skipOrbitalSystemRelations: true,
-        /* The bounded positional relation solver is the live authority. Running the older
-           velocity spring at the same time continuously added energy around the same target
-           and made a few systems look reheated even with a stationary slider. */
-        includeRelationSprings: false,
+        /* Hooke acceleration is the cohesive topology force; its existing force and
+           acceleration caps keep dense hubs bounded. Authored star/planet links remain skipped
+           so stellar gravity owns orbital radii. The later contractive PBD pass is only the
+           finite-distance safety net for a pathological large error. */
+        includeRelationSprings: true,
         orbitScale,
         linkSetting: state.settings.link,
         relationStrengthMultiplier: GALAXY_RELATION_STRENGTH_MULTIPLIER,
@@ -6076,7 +6353,9 @@
         /* PBD uses one contractive exponential response. Scaling the completed displacement
            above one would cross the target and ping-pong on the next frame. */
         relationConstraintStrengthMultiplier:
-          GALAXY_RELATION_CONSTRAINT_STRENGTH_MULTIPLIER,
+          GALAXY_RELATION_CONSTRAINT_STRENGTH_MULTIPLIER * 0.18
+          * galaxyPhysicsMultiplier(state.settings.springStiffness,
+            GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
         relationConstraintResponseMultiplier:
           GALAXY_RELATION_CONSTRAINT_RESPONSE_MULTIPLIER,
         relationConstraintRate: GALAXY_RELATION_CONSTRAINT_RATE,
@@ -6127,7 +6406,14 @@
            frame is split into several steps. */
         inwardConvergence: true,
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
-        velocityDecay: GALAXY_VELOCITY_DECAY,
+        velocityDecay: GALAXY_VELOCITY_DECAY
+          * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
+        includeSpacetime: true,
+        frameDraggingFraction: GALAXY_FRAME_DRAGGING_FRACTION,
+        frameDraggingMaxAcceleration: GALAXY_FRAME_DRAGGING_MAX_ACCELERATION,
+        eventHorizonInfluenceScale: GALAXY_EVENT_HORIZON_INFLUENCE_SCALE,
+        eventHorizonDecayRate: GALAXY_EVENT_HORIZON_DECAY_RATE,
+        eventHorizonInwardAcceleration: GALAXY_EVENT_HORIZON_INWARD_ACCELERATION,
         /* The legacy limit is derived from link distance (14.4 at Galaxy defaults) and can
            clamp an otherwise valid inner orbit. Common-scaling every body then strips angular
            momentum from the entire disk. The physical solver uses only the true emergency cap. */
@@ -6162,6 +6448,7 @@
         oversizedKinematic: staticFullLayout,
         reducedMotion: reduced(),
         hidden: pageHidden(),
+        orbitPaused: state.settings.orbitPaused === true,
         dragging: activeDragNode ? activeDragNode.id : null,
         /* Every live body is admitted to the pointer-owned gravity field. Relation and local
            annotations remain visible here, but topology never gates the physical response. */
@@ -6172,19 +6459,32 @@
         globalGravityFloorActive: state.settings.gravity < GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
         /* Gravity strength is centered on the dominant evidence mass. Local solar-system
            attraction intentionally receives exactly half of this black-hole field. */
-        effectiveGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true),
+        gravitationalConstant: galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+        blackHoleMass: galaxyPhysicsMultiplier(state.settings.blackHoleMass,
+          GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
+        damping: galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
+        springStiffness: galaxyPhysicsMultiplier(state.settings.springStiffness,
+          GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
+        effectiveGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true)
+          * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
+            GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         blackHoleGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true),
         localGravity: galaxyLocalGravityConstant(state.settings.gravity),
         immediateGravityResponse: { ...galaxyLastGravityResponse },
         systemGravity: { ...galaxyLastSystemGravity },
         mutualSystemGravity: { ...galaxyLastMutualGravity },
+        spacetime: { ...galaxyLastSpacetime },
+        eventHorizonDecay: { ...galaxyLastEventHorizonDecay },
         linkSetting: state.settings.link,
         relationOrbitScale: galaxyRelationOrbitScale(state.settings.link),
         relationStrengthMultiplier: GALAXY_RELATION_STRENGTH_MULTIPLIER,
         relationForceCap: GALAXY_RELATION_FORCE_CAP,
         relationAccelerationCap: GALAXY_RELATION_ACCELERATION_CAP,
         relationConstraintStrengthMultiplier:
-          GALAXY_RELATION_CONSTRAINT_STRENGTH_MULTIPLIER,
+          GALAXY_RELATION_CONSTRAINT_STRENGTH_MULTIPLIER * 0.18
+          * galaxyPhysicsMultiplier(state.settings.springStiffness,
+            GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
         relationConstraintResponseMultiplier:
           GALAXY_RELATION_CONSTRAINT_RESPONSE_MULTIPLIER,
         relationConstraintMaxCorrection:
@@ -6217,7 +6517,8 @@
         reheatStepsRemaining: galaxyReheatStepsRemaining,
         reheatStepsApplied: galaxyReheatStepsApplied,
         lastReheatSubsteps: galaxyLastReheatSubsteps,
-        velocityDecay: GALAXY_VELOCITY_DECAY,
+        velocityDecay: GALAXY_VELOCITY_DECAY
+          * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
         frames: galaxyFrames,
         steps: galaxySteps,
         kinematicSteps: galaxyKinematicSteps,
@@ -6310,6 +6611,8 @@
             galaxyLastLocalVelocityLimits = report.systemVelocity.limitedSystems;
             galaxyLastSystemGravity = report.systemGravity;
             galaxyLastMutualGravity = report.mutualGravity;
+            galaxyLastSpacetime = report.spacetime;
+            galaxyLastEventHorizonDecay = report.eventHorizonDecay;
             dragFollowerGravityReport = report.dragGravity;
             if (report.speedCapped) galaxySpeedCaps++;
           }
@@ -6322,6 +6625,7 @@
         galaxyFrames++;
         invalidate();
         if (typeof opts.onPhysics === 'function') opts.onPhysics(physicsDiagnostics());
+        if (typeof opts.onPhysicsFrame === 'function') opts.onPhysicsFrame(api.getPhysicsSnapshot());
       }
       if (galaxyDynamicsEligible()) galaxyFrame = requestFrame(runGalaxyFrame);
     }
@@ -6546,11 +6850,14 @@
           seedGalaxyOrbits(
             data.nodes, raw.meta && raw.meta.layout_seed,
             state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
-            { fixedNodeId: activeDragNode ? activeDragNode.id : null }
+            { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+              gravitationalConstant: state.settings.gravitationalConstant }
           );
           seedGalaxySystemOrbits(
             data.nodes, raw.meta && raw.meta.layout_seed,
-            state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion
+            state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
+            { gravitationalConstant: state.settings.gravitationalConstant,
+              blackHoleMass: state.settings.blackHoleMass }
           );
         } else clearPinnedPositions(data);
         /* graphData() may paint synchronously. Enforce the event horizon after every layout
@@ -6613,11 +6920,14 @@
         seedGalaxyOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
           state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
-          { fixedNodeId: activeDragNode ? activeDragNode.id : null }
+          { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+            gravitationalConstant: state.settings.gravitationalConstant }
         );
         seedGalaxySystemOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
-          state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion
+          state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
+          { gravitationalConstant: state.settings.gravitationalConstant,
+            blackHoleMass: state.settings.blackHoleMass }
         );
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
@@ -6801,6 +7111,7 @@
          it as a fixed moving mass source; no global force is detached and no alpha is changed. */
       cancelSoftAlphaForDrag();
       dragPreVelocity = { vx: Number.isFinite(node.vx) ? node.vx : 0, vy: Number.isFinite(node.vy) ? node.vy : 0 };
+      dragReleaseVelocity = null;
       node.vx = 0;
       node.vy = 0;
       if (state.settings.mode === 'galaxy') scheduleGalaxyDynamics(false);
@@ -6816,7 +7127,16 @@
       }
       setActiveDragNode(null);
       dragFollowers = [];
-      if (state.settings.mode === 'galaxy' && dragPreVelocity) {
+      if (state.settings.mode === 'galaxy' && dragReleaseVelocity) {
+        node.vx = dragReleaseVelocity.vx;
+        node.vy = dragReleaseVelocity.vy;
+        lastSlingshotRelease = {
+          id: node.id, vx: node.vx, vy: node.vy, speed: Math.hypot(node.vx, node.vy),
+        };
+        if (typeof opts.onSlingshotRelease === 'function') {
+          opts.onSlingshotRelease({ ...lastSlingshotRelease });
+        }
+      } else if (state.settings.mode === 'galaxy' && dragPreVelocity) {
         node.vx = dragPreVelocity.vx;
         node.vy = dragPreVelocity.vy;
       } else {
@@ -6824,6 +7144,7 @@
         node.vy = 0;
       }
       dragPreVelocity = null;
+      dragReleaseVelocity = null;
       if (state.settings.mode === 'galaxy') {
         disableD3GalaxyIntegration();
         scheduleGalaxyDynamics(false);
@@ -6958,6 +7279,9 @@
         window.removeEventListener('pointerup', endManualDrag, true);
         window.removeEventListener('pointercancel', endManualDrag, true);
         if (current.dragged) {
+          /* A cancelled gesture is not a physical release. Discard the sampled pointer velocity
+             so finishNodeDrag restores the body's pre-drag orbital phase. */
+          if (event.type === 'pointercancel') dragReleaseVelocity = null;
           finishNodeDrag(current.node);
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
@@ -6990,6 +7314,24 @@
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;
+        const sampleTime = Number.isFinite(event.timeStamp) ? event.timeStamp : Date.now();
+        const previousSample = manualDrag.lastSample;
+        if (previousSample && sampleTime > previousSample.time) {
+          const elapsed = Math.max(1, sampleTime - previousSample.time);
+          const rawVx = (node.x - previousSample.x) / elapsed / GALAXY_SLINGSHOT_VELOCITY_SCALE;
+          const rawVy = (node.y - previousSample.y) / elapsed / GALAXY_SLINGSHOT_VELOCITY_SCALE;
+          const speed = Math.hypot(rawVx, rawVy);
+          const scale = speed > GALAXY_SLINGSHOT_SPEED_LIMIT
+            ? GALAXY_SLINGSHOT_SPEED_LIMIT / speed : 1;
+          /* Low-pass two samples so a noisy final pointer event cannot create a release-only
+             spike. The cap remains below the solver's emergency speed limit. */
+          const sampled = { vx: rawVx * scale, vy: rawVy * scale };
+          dragReleaseVelocity = dragReleaseVelocity ? {
+            vx: dragReleaseVelocity.vx * 0.35 + sampled.vx * 0.65,
+            vy: dragReleaseVelocity.vy * 0.35 + sampled.vy * 0.65,
+          } : sampled;
+        }
+        manualDrag.lastSample = { x: node.x, y: node.y, time: sampleTime };
         followDraggedNode(node);
         invalidate();
         event.preventDefault();
@@ -7013,6 +7355,8 @@
           node: candidate, pointerId: event.pointerId, startClientX: event.clientX,
           startClientY: event.clientY, offsetX: candidate.x - point.x,
           offsetY: candidate.y - point.y, dragged: false,
+          lastSample: { x: candidate.x, y: candidate.y,
+            time: Number.isFinite(event.timeStamp) ? event.timeStamp : Date.now() },
         };
         window.addEventListener('pointermove', moveManualDrag, true);
         window.addEventListener('pointerup', endManualDrag, true);
@@ -7180,10 +7524,24 @@
        settled graph sits at alpha~0, so without the reheat those sliders install a force that
        moves nothing. The paint-only settings must keep the arrangement the user is reading.
        render() applies the reduced-motion exemption (`if(layout&&!prefersReducedMotion())`). */
-    const LAYOUT_KEYS = ['mode', 'repel', 'link', 'gravity', 'size'];
+    const LAYOUT_KEYS = [
+      'mode', 'repel', 'link', 'gravity', 'size',
+      'gravitationalConstant', 'blackHoleMass', 'damping', 'springStiffness',
+    ];
     api.setSettings = patch => {
-      const next = patch && typeof patch === 'object' ? patch : {};
+      const next = patch && typeof patch === 'object' ? { ...patch } : {};
+      if (next.gravitationalConstant !== undefined) next.gravitationalConstant =
+        galaxyPhysicsMultiplier(next.gravitationalConstant,
+          state.settings.gravitationalConstant, 8);
+      if (next.blackHoleMass !== undefined) next.blackHoleMass = galaxyPhysicsMultiplier(
+        next.blackHoleMass, state.settings.blackHoleMass, 16);
+      if (next.damping !== undefined) next.damping = galaxyPhysicsMultiplier(
+        next.damping, state.settings.damping, 100);
+      if (next.springStiffness !== undefined) next.springStiffness = galaxyPhysicsMultiplier(
+        next.springStiffness, state.settings.springStiffness, 8);
+      if (next.orbitPaused !== undefined) next.orbitPaused = next.orbitPaused === true;
       const wasFrozen = state.settings.frozen === true;
+      const wasOrbitPaused = state.settings.orbitPaused === true;
       const isUnfreezing = wasFrozen && next.frozen === false;
       const layoutChanged = LAYOUT_KEYS.some(k => next[k] !== undefined);
       const previousMode = state.settings.mode;
@@ -7193,6 +7551,10 @@
         cancelAutoFit();
       }
       Object.assign(state.settings, next);
+      if (next.orbitPaused !== undefined && previousMode === 'galaxy') {
+        if (state.settings.orbitPaused) cancelGalaxyDynamics(true);
+        else if (wasOrbitPaused) scheduleGalaxyDynamics(true);
+      }
       transitionGalaxyMode(previousMode, state.settings.mode);
       const nextGravity = Number(state.settings.gravity);
       const gravityChanged = next.gravity !== undefined
@@ -7357,6 +7719,37 @@
     };
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.physicsDiagnostics = () => physicsDiagnostics();
+    api.graphToScreen = (x, y) => {
+      if (!fg.graph2ScreenCoords) return { x: Number(x) || 0, y: Number(y) || 0 };
+      const point = fg.graph2ScreenCoords(Number(x) || 0, Number(y) || 0);
+      return { x: point.x, y: point.y };
+    };
+    api.getPhysicsSnapshot = () => {
+      const data = fg.graphData() || {};
+      const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      const center = galaxyGlobalAnchor(nodes);
+      const centerPoint = center ? api.graphToScreen(center.x, center.y) : null;
+      return {
+        center: center ? {
+          id: center.id, x: center.x, y: center.y,
+          screenX: centerPoint.x, screenY: centerPoint.y,
+          radius: finitePositive(center.radius, evidenceNodeRadius(center, 3), 160),
+        } : null,
+        nodes: nodes.filter(node => node && Number.isFinite(node.x)
+          && Number.isFinite(node.y)).map(node => ({
+          id: node.id, x: node.x, y: node.y,
+          vx: Number.isFinite(node.vx) ? node.vx : 0,
+          vy: Number.isFinite(node.vy) ? node.vy : 0,
+          radius: finitePositive(node.radius, evidenceNodeRadius(node, 3), 160),
+          isCentral: node === center,
+          warp: Number(node.__galaxySpacetimeWarp) || 0,
+        })),
+        paused: state.settings.orbitPaused === true || state.settings.frozen === true
+          || !running || pageHidden(),
+        diagnostics: physicsDiagnostics(),
+        slingshot: lastSlingshotRelease ? { ...lastSlingshotRelease } : null,
+      };
+    };
     api.reheat = () => {
       if (destroyed || state.settings.frozen
         || (staticFullLayout && state.settings.mode !== 'galaxy')) return;
@@ -7645,6 +8038,7 @@
       combineGalaxySystemAnchorExclusions,
       applyGalaxyCentralGravity, applyGalaxyMutualSystemGravity, galaxyGlobalAnchor,
       galaxyBlackHoleField, applyGalaxyBlackHoleGravity, integrateGalaxyGhostOrbits,
+      applyGalaxySpacetimeAcceleration, applyGalaxyEventHorizonDecay,
       advanceGalaxyKinematicOrbits,
       recenterGalaxyOnAnchor,
       applyCommunityBridgeGravity,

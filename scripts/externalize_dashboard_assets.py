@@ -25,7 +25,11 @@ JS = STATIC / "dashboard.js"
 #: Vendored bundles under ``static/vendor`` are excluded: they are third-party artefacts we
 #: do not rewrite, and pinning them is the job of the commercial-manifest check.
 V2_ASSETS = ROOT / "engraphis" / "dashboard_assets"
-EXTRA_SCRIPTS = (V2_ASSETS / "engraphis-graph.js",)
+EXTRA_SCRIPTS = (
+    V2_ASSETS / "engraphis-graph.js",
+    V2_ASSETS / "engraphis-spacetime.js",
+)
+LAZY_LOADER_SCRIPTS = (V2_ASSETS / "ledger.js",)
 
 #: Scripts that must never be referenced from a ``<script src>`` in ``index.html``.
 #: ``force-graph.min.js`` applies inline styles at runtime; under the production CSP
@@ -33,12 +37,19 @@ EXTRA_SCRIPTS = (V2_ASSETS / "engraphis-graph.js",)
 #: *every* dashboard page rather than only when the graph is opened floods the console and
 #: fails unrelated e2e assertions on a clean console.  ``dashboard.js`` fetches both on demand
 #: instead (``loadForceGraph`` / ``loadGraphEngine``).
-DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/v2-assets/engraphis-graph.js")
+DEFERRED_SCRIPTS = (
+    "/static/vendor/force-graph.min.js",
+    "/v2-assets/engraphis-graph.js",
+    "/v2-assets/engraphis-spacetime.js",
+)
 
 #: ``script.src = "/static/…"`` inside a first-party script — the lazy loaders.  Deferring a
 #: script moves it out of the parsed ``<script src>`` set, so without this the "referenced
 #: scripts exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
 LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/(?:static|v2-assets)/[^"\']+)["\']')
+LAZY_GRAPH_ASSET_SRC = re.compile(
+    r'graphAssetSource\(\s*["\'](/(?:static|v2-assets)/[^"\']+)["\']'
+)
 # Browsers close raw-text script/style elements even when a malformed end tag carries
 # attributes. ``HTMLParser`` only gained matching behavior in newer Python releases, so
 # canonicalize those end tags for the parser while preserving every source offset.
@@ -276,10 +287,14 @@ def check() -> None:
         failures.append("missing first-party script: " + ", ".join(missing_scripts))
 
     eager_scripts = _eager_scripts(html)
+    lazy_sources = [js, *extra.values(), *(
+        path.read_text(encoding="utf-8") for path in LAZY_LOADER_SCRIPTS if path.is_file()
+    )]
     lazy_scripts = [
         urlsplit(reference).path
-        for source in [js, *extra.values()]
-        for reference in LAZY_SCRIPT_SRC.findall(source)
+        for source in lazy_sources
+        for pattern in (LAZY_SCRIPT_SRC, LAZY_GRAPH_ASSET_SRC)
+        for reference in pattern.findall(source)
     ]
 
     def _script_path(reference: str) -> Path:
@@ -318,7 +333,10 @@ def check() -> None:
             failures.append(f"inline style attribute in {name}")
         if EVENT_ATTR.search(source):
             failures.append(f"inline event attribute in {name}")
-        if re.search(r"\.(?:style|cssText)\b|(?:get|set)Attribute\([\"']style[\"']", source):
+        if re.search(
+            r"\.(?:style|cssText)\s*(?:[.=\[])|(?:get|set)Attribute\([\"']style[\"']",
+            source,
+        ):
             failures.append(f"runtime inline-style mutation in {name}")
         if re.search(r"\[on[a-z]+|(?:get|set)Attribute\([\"']on[a-z]+[\"']", source):
             failures.append(f"legacy inline-handler selector in {name}")
