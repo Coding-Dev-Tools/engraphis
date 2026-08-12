@@ -8112,6 +8112,23 @@ class MemoryService:
         present = time.time()
         t = valid_at if valid_at is not None else present
         known_t = known_at if known_at is not None else present
+
+        def temporal_ghost(row: Any) -> bool:
+            try:
+                valid_to_value = row["valid_to"]
+                recorded_at = row["valid_to_recorded_at"]
+            except (IndexError, KeyError, TypeError):
+                valid_to_value = row.get("valid_to")
+                recorded_at = row.get("valid_to_recorded_at")
+            try:
+                return bool(
+                    valid_to_value is not None
+                    and float(valid_to_value) <= t
+                    and (recorded_at is None or float(recorded_at) <= known_t)
+                )
+            except (TypeError, ValueError):
+                return False
+
         try:
             lower_time = float(time_from) if time_from is not None else None
             upper_time = float(time_to) if time_to is not None else None
@@ -8623,7 +8640,10 @@ class MemoryService:
                     historical_sql, historical_params,
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
+            for support in support_rows:
+                support["ghost"] = temporal_ghost(support)
             for support in historical_supports:
+                support["ghost"] = temporal_ghost(support)
                 key = (
                     str(support.get("edge_id") or ""),
                     str(support.get("memory_id") or ""),
@@ -8648,12 +8668,13 @@ class MemoryService:
             str(row.get("memory_id") or "") for row in support_rows
             if row.get("memory_id")
         })
-        support_memory_meta: dict[str, tuple[str, float]] = {}
+        support_memory_meta: dict[str, dict[str, Any]] = {}
         for start in range(0, len(support_memory_ids), 500):
             chunk = support_memory_ids[start:start + 500]
             marks = ",".join("?" for _ in chunk)
             memory_sql = (
-                "SELECT id, mtype, COALESCE(valid_from, ingested_at, 0) AS support_time "
+                "SELECT id, mtype, COALESCE(valid_from, ingested_at, 0) AS support_time, "
+                "valid_to, valid_to_recorded_at "
                 "FROM memories WHERE workspace_id=? AND id IN (" + marks + ") "
                 "AND (valid_from IS NULL OR valid_from<=?) "
             )
@@ -8692,9 +8713,11 @@ class MemoryService:
                 memory_sql += " AND COALESCE(valid_from, ingested_at, 0)<=?"
                 memory_params.append(upper_time)
             for memory in self.store.conn.execute(memory_sql, memory_params).fetchall():
-                support_memory_meta[str(memory["id"])] = (
-                    str(memory["mtype"] or ""), float(memory["support_time"] or 0.0)
-                )
+                support_memory_meta[str(memory["id"])] = {
+                    "memory_type": str(memory["mtype"] or ""),
+                    "support_time": float(memory["support_time"] or 0.0),
+                    "ghost": temporal_ghost(memory),
+                }
         enriched_supports = []
         for support in support_rows:
             memory_id = str(support.get("memory_id") or "")
@@ -8703,8 +8726,9 @@ class MemoryService:
                 continue
             enriched = dict(support)
             if metadata is not None:
-                enriched["memory_type"] = metadata[0]
-                enriched["support_time"] = metadata[1]
+                enriched["memory_type"] = metadata["memory_type"]
+                enriched["support_time"] = metadata["support_time"]
+                enriched["memory_ghost"] = metadata["ghost"]
             enriched_supports.append(enriched)
         if prune_entities:
             matching_edge_ids = {

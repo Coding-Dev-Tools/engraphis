@@ -1356,6 +1356,7 @@ def _complete_relations(
     relations: Optional[set[str]],
     min_support: int,
     min_confidence: float,
+    memory_ghost_ids: Optional[set[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return every filtered physical relation and its explicit evidence links.
 
@@ -1365,6 +1366,7 @@ def _complete_relations(
     makes evidence selectable without replacing or hiding the factual relation.
     """
     supports_by_edge: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    memory_ghost_ids = memory_ghost_ids or set()
     for raw in support_rows:
         support = _row(raw)
         supports_by_edge[str(support.get("edge_id") or "")].append(support)
@@ -1464,6 +1466,12 @@ def _complete_relations(
             if not memory_id or memory_id not in memory_ids:
                 continue
             source_kind = str(support.get("source_kind") or "legacy_unknown")
+            evidence_ghost = bool(
+                ghost
+                or support.get("ghost")
+                or support.get("memory_ghost")
+                or memory_id in memory_ghost_ids
+            )
             evidence_confidence = _clamp(
                 _finite_float(
                     support.get("confidence")
@@ -1492,7 +1500,7 @@ def _complete_relations(
                     "tier": "evidence",
                     "visible_by_default": True,
                     "connector_kind": "evidence",
-                    "ghost": ghost,
+                    "ghost": evidence_ghost,
                     **_temporal_fields(support),
                     "source_kind": source_kind,
                     "strength": round(evidence_confidence, 6),
@@ -1632,6 +1640,10 @@ def _build_complete_scene(
         include_weak_cooccurrence=include_weak_cooccurrence,
         layers=layers, relations=relations, min_support=min_support,
         min_confidence=min_confidence,
+        memory_ghost_ids={
+            memory_id for memory_id, memory in memory_rows_by_id.items()
+            if memory.get("ghost")
+        },
     )
 
     entity_nodes = {node_id: dict(node) for node_id, node in graph["nodes"].items()}
