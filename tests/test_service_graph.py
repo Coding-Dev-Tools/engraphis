@@ -797,6 +797,31 @@ def test_graph_memory_link_fallback_respects_empty_layer_filter():
     assert graph["edges"] == []
 
 
+def test_graph_connected_only_excludes_unconnected_code_symbols():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Repo memory", workspace="w", repo="app")
+    _workspace_id, repo_id = svc._require_scope("w", "app")
+    symbol_ids = {}
+    for name in ("source", "target", "isolated"):
+        symbol_ids[name] = svc.store.upsert_symbol(
+            repo_id=repo_id, kind="function", name=name, fqname=name,
+            file=f"{name}.py", span="1:1",
+        )
+    svc.store.add_code_edge(
+        repo_id=repo_id, src=symbol_ids["source"], dst=symbol_ids["target"],
+        relation="calls",
+    )
+
+    graph = svc.graph(
+        workspace="w", repo="app", include_code=True,
+        connected_only=True, backfill=False,
+    )
+
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert {f"code:{symbol_ids['source']}", f"code:{symbol_ids['target']}"} <= node_ids
+    assert f"code:{symbol_ids['isolated']}" not in node_ids
+
+
 def test_graph_memory_link_fallback_samples_links_before_unrelated_memories():
     """A small graph limit must still select connected memories."""
     svc = MemoryService.create(":memory:", graph_extractor="none")

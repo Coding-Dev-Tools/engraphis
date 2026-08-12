@@ -10088,27 +10088,37 @@ class MemoryService:
                     valid_at=world_anchor, known_at=system_anchor,
                 )
                 symbols = self.store.list_symbols(
-                    rid, limit=limit, flt=code_filter
+                    rid, limit=edge_cap if connected_only else limit, flt=code_filter
                 )
                 symbol_node: dict[str, str] = {}
                 symbol_id_node: dict[str, str] = {}
+                symbol_rows: dict[str, dict[str, str]] = {}
                 for symbol in symbols:
-                    if len(entity_rows) >= limit:
-                        break
                     node_id = f"code:{symbol['id']}"
                     label = symbol.get("fqname") or symbol.get("name") or node_id
-                    entity_rows.append({
+                    row = {
                         "id": node_id,
                         "name": f"{repo_name}:{label}",
                         "etype": f"code_{symbol.get('kind') or 'symbol'}",
-                    })
-                    symbol_id_node[symbol["id"]] = node_id
-                    for key in (symbol.get("fqname"), symbol.get("name")):
-                        if key:
-                            symbol_node.setdefault(key, node_id)
+                    }
+                    if connected_only:
+                        symbol_id_node[symbol["id"]] = node_id
+                        for key in (symbol.get("fqname"), symbol.get("name")):
+                            if key:
+                                symbol_node.setdefault(key, node_id)
+                        symbol_rows[node_id] = row
+                    elif len(entity_rows) < limit:
+                        symbol_id_node[symbol["id"]] = node_id
+                        for key in (symbol.get("fqname"), symbol.get("name")):
+                            if key:
+                                symbol_node.setdefault(key, node_id)
+                        entity_rows.append(row)
                 file_nodes: dict[str, str] = {}
+                file_rows: dict[str, dict[str, str]] = {}
 
                 def code_endpoint(value: str, file_hint: str = "") -> Optional[str]:
+                    if value in symbol_id_node:
+                        return symbol_id_node[value]
                     if value in symbol_node:
                         return symbol_node[value]
                     if value and (
@@ -10123,13 +10133,19 @@ class MemoryService:
                         file_name = file_hint.replace("\\", "/")
                     else:
                         return None
-                    if file_name not in file_nodes and len(entity_rows) < limit:
-                        file_nodes[file_name] = f"file:{rid}:{file_name}"
-                        entity_rows.append({
-                            "id": file_nodes[file_name],
+                    if file_name not in file_nodes:
+                        node_id = f"file:{rid}:{file_name}"
+                        row = {
+                            "id": node_id,
                             "name": f"{repo_name}:{file_name}",
                             "etype": "code_file",
-                        })
+                        }
+                        if connected_only:
+                            file_nodes[file_name] = node_id
+                            file_rows[node_id] = row
+                        elif len(entity_rows) < limit:
+                            file_nodes[file_name] = node_id
+                            entity_rows.append(row)
                     return file_nodes.get(file_name)
 
                 for edge in self.store.list_code_edges(
@@ -10149,35 +10165,53 @@ class MemoryService:
                             "relation": edge.get("relation") or "",
                             "layer": edge_layer,
                         })
-                linked_memory_ids = set()
+                code_links = []
                 if selected_layers is None or "semantic" in selected_layers:
                     code_links = self.store.list_code_memory_links(
                         rid, limit=edge_cap, flt=code_filter
                     )
-                    for link in code_links:
-                        if len(edgs) >= edge_cap:
-                            break
-                        code_id = symbol_id_node.get(link.get("symbol_id"))
-                        memory_id = link.get("memory_id")
-                        if not code_id or not memory_id:
-                            continue
-                        if memory_id not in linked_memory_ids and len(entity_rows) < limit:
-                            # ``list_code_memory_links`` already applied the exact
-                            # scope/world/system filter to the joined memory. Re-reading
-                            # it through current-only ``get_memories`` would silently
-                            # drop a valid historical bridge.
-                            entity_rows.append({
-                                "id": memory_id,
-                                "name": link.get("title") or memory_id,
-                                "etype": f"memory_{link.get('mtype') or 'semantic'}",
-                            })
-                            linked_memory_ids.add(memory_id)
-                        if memory_id in linked_memory_ids:
-                            edgs.append({
-                                "src": code_id, "dst": memory_id,
-                                "relation": link.get("relation") or "mentions",
-                                "layer": "semantic",
-                            })
+                if connected_only:
+                    connected_code_ids = {
+                        endpoint
+                        for edge in edgs[code_edge_start:]
+                        for endpoint in (edge.get("src"), edge.get("dst"))
+                        if isinstance(endpoint, str)
+                        and endpoint.startswith(("code:", "file:"))
+                    }
+                    connected_code_ids.update(
+                        symbol_id_node[link["symbol_id"]]
+                        for link in code_links
+                        if link.get("symbol_id") in symbol_id_node
+                    )
+                    for row in (*symbol_rows.values(), *file_rows.values()):
+                        if row["id"] in connected_code_ids and len(entity_rows) < limit:
+                            entity_rows.append(row)
+                linked_memory_ids = set()
+                for link in code_links:
+                    if len(edgs) >= edge_cap:
+                        break
+                    code_id = symbol_id_node.get(link.get("symbol_id"))
+                    memory_id = link.get("memory_id")
+                    if not code_id or not memory_id:
+                        continue
+                    if memory_id not in linked_memory_ids and len(entity_rows) < limit:
+                        # ``list_code_memory_links`` already applied the exact
+                        # scope/world/system filter to the joined memory. Re-reading
+                        # it through current-only ``get_memories`` would silently
+                        # drop a valid historical bridge.
+                        entity_rows.append({
+                            "id": memory_id,
+                            "name": link.get("title") or memory_id,
+                            "etype": f"memory_{link.get('mtype') or 'semantic'}",
+                        })
+                        linked_memory_ids.add(memory_id)
+                    if memory_id in linked_memory_ids:
+                        edgs.append({
+                            "src": code_id, "dst": memory_id,
+                            "relation": link.get("relation") or "mentions",
+                            "layer": "semantic",
+                        })
+                if selected_layers is None or "semantic" in selected_layers:
                     for link in self.store.links_among(
                         list(linked_memory_ids),
                         layers=(
