@@ -39,7 +39,6 @@ from engraphis.service import (
     MemoryService,
     MAX_CODE_QUERY_CAPACITY,
     ValidationError,
-    WorkspaceBindingError,
 )
 from engraphis.core.store import _escape_like
 from engraphis.core.textutil import jaccard, tokenize
@@ -128,6 +127,7 @@ def service() -> MemoryService:
                 vector_backend=settings.vector_backend,
                 rerank_model=getattr(settings, "rerank_model", "") or None,
                 rerank_revision=getattr(settings, "rerank_revision", "") or None,
+                allowed_workspaces=settings.allowed_workspaces,
             )
         return _service
 
@@ -184,12 +184,6 @@ def _run(fn, *a, **k):
             "count": exc.count,
             "limit": exc.limit,
             "recommended_action": "narrow repository, time, type, or relation filters",
-        }) from None
-    except WorkspaceBindingError:
-        logger.info("dashboard request rejected by workspace binding")
-        raise HTTPException(status_code=403, detail={
-            "error": "workspace is not permitted by this instance's configuration",
-            "code": "workspace_not_permitted",
         }) from None
     except ValidationError:
         logger.info("dashboard request rejected")
@@ -306,11 +300,6 @@ def _require_ws(workspace: Optional[str] = None) -> str:
     if workspace is not None:
         try:
             return service()._clean_ws(workspace)
-        except WorkspaceBindingError:
-            logger.info("workspace request rejected by binding")
-            raise HTTPException(status_code=403, detail={
-                "error": "workspace is not permitted by this instance's configuration",
-            }) from None
         except (ValidationError, ValueError):
             logger.info("workspace request rejected")
             raise _invalid_request() from None
@@ -1446,11 +1435,6 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
     ws = workspace or _require_ws()
     try:
         out = service().why(q, workspace=ws, k=k)
-    except WorkspaceBindingError:
-        logger.info("dashboard why request rejected by workspace binding")
-        raise HTTPException(status_code=403, detail={
-            "error": "workspace is not permitted by this instance's configuration",
-        }) from None
     except ValidationError:
         logger.info("dashboard why request rejected")
         raise _invalid_request() from None
@@ -1477,11 +1461,6 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
     ws = workspace or _default_ws()
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
-    except WorkspaceBindingError:
-        logger.info("dashboard timeline request rejected by workspace binding")
-        raise HTTPException(status_code=403, detail={
-            "error": "workspace is not permitted by this instance's configuration",
-        }) from None
     except ValidationError:
         logger.info("dashboard timeline request rejected")
         raise _invalid_request() from None
@@ -3692,7 +3671,8 @@ def _sync_all(svc) -> dict:
         if allowed_workspaces is None or row["name"] in allowed_workspaces
     ]
     engine = svc.engine
-    syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index)
+    syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index,
+                        allowed_workspaces=settings.allowed_workspaces or None)
     totals = {"added": 0, "updated": 0, "unchanged": 0, "links_added": 0}
     # Distinct OTHER devices we pulled from, deduped across workspaces: the same peer
     # pushes a bundle per workspace, so summing per-workspace counts would multiply one

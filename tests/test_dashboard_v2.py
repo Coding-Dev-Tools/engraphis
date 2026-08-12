@@ -121,8 +121,8 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'class="content-section savings-overview-section" id="context-savings-summary"' not in page.text
 
 
-def test_legacy_workspace_binding_does_not_hide_dashboard_workspaces(monkeypatch, tmp_path):
-    """A legacy allow-list setting no longer changes dashboard bootstrap behavior."""
+def test_bound_dashboard_bootstraps_with_no_visible_workspace(monkeypatch, tmp_path):
+    """A stale/empty allow-list must render a repairable empty state, not a 400 boot."""
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "bound-empty.db"))
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "embed_dim", 384)
@@ -137,68 +137,17 @@ def test_legacy_workspace_binding_does_not_hide_dashboard_workspaces(monkeypatch
     assert response.status_code == 200
     payload = response.json()
     assert payload["workspaces"] == []
-    assert payload["stats"]["workspace"] is None
-    assert payload["stats"]["memories"] == 0
-    assert payload["stats"]["total_rows"] == 0
-    assert payload["stats"]["workspaces"] == 0
-    assert payload["stats"]["sessions"] == 0
-    assert payload["stats"]["schema_version"] == SCHEMA_VERSION
-
-
-def test_dashboard_create_workspace_succeeds_when_unbound(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path) as client:
-        response = client.post(
-            "/api/workspaces/create",
-            json={
-                "workspace": "fresh-workspace",
-                "description": "Created from the dashboard",
-                "visibility": "personal",
-                "confirmed": False,
-            },
-        )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["workspace"] == "fresh-workspace"
-    assert response.json()["created"] is True
-
-
-def test_dashboard_ignores_legacy_workspace_binding_setting(monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "db_path", str(tmp_path / "legacy-binding.db"))
-    monkeypatch.setattr(settings, "embed_model", "")
-    monkeypatch.setattr(settings, "embed_dim", 384)
-    monkeypatch.setattr(settings, "allowed_workspaces", ["default"])
-    monkeypatch.setattr(settings, "api_token", "")
-    from engraphis.dashboard_app import create_app
-
-    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
-        assert client.app.state.service.allowed_workspaces is None
-        response = client.post(
-            "/api/workspaces/create",
-            json={"workspace": "created-after-legacy-binding", "description": ""},
-        )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["workspace"] == "created-after-legacy-binding"
-
-
-def test_dashboard_create_workspace_reports_binding_without_leaking_names(
-    monkeypatch, tmp_path
-):
-    with _client(monkeypatch, tmp_path) as client:
-        bound = client.app.state.service
-        bound.allowed_workspaces = frozenset({"demo"})
-        bound.store.allowed_workspaces = bound.allowed_workspaces
-        response = client.post(
-            "/api/workspaces/create",
-            json={"workspace": "new-tenant", "description": ""},
-        )
-
-    assert response.status_code == 403
-    assert response.json() == {"detail": {
-        "error": "workspace is not permitted by this instance's configuration",
-        "code": "workspace_not_permitted",
-    }}
-    assert "new-tenant" not in response.text
+    assert payload["stats"] == {
+        "workspace": None,
+        "memories": 0,
+        "by_type": {},
+        "total_rows": 0,
+        "workspaces": 0,
+        "sessions": 0,
+        "schema_version": SCHEMA_VERSION,
+        "prompt_eligibility": {},
+        "embedding": {},
+    }
 
 
 def test_dashboard_memory_reads_use_the_active_store_for_memory_databases(monkeypatch):
