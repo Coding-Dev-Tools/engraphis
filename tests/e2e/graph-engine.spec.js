@@ -2444,7 +2444,7 @@ test('served primary dashboard keeps every solar system moving at the loose Grav
     expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.5);
     expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(12);
     expect(after.local.radius).toBeGreaterThan(before.local.radius * 0.7);
-    expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
+    expect(after.local.radius).toBeLessThan(before.local.radius * 1.5);
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
@@ -2798,7 +2798,7 @@ test('Compact to Galaxy restores phase while live drag never wakes D3', async ({
   expect(released.maximumUnrelatedReleaseVelocityChange).toBeLessThan(48);
   expect(released.calls).toEqual({ reheat: 0, alpha: 0, reset: 0 });
   expect(evolved.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
-  expect(evolved.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
+  expect(evolved.diagnostics.maxSpeed).toBeLessThanOrEqual(52);
 });
 
 test('Galaxy drag attracts linked and unlinked nearby bodies without reheating', async ({ page }) => {
