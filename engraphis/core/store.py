@@ -1112,7 +1112,7 @@ class Store:
         :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
         callable is rejected before it can be invoked.
         """
-        self.path = path
+        self.path = _physical_sqlite_path(path) if str(path).startswith("file:") else path
         self._connect = connect
         self.read_only = bool(read_only)
         if self.read_only and path == ":memory:":
