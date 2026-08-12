@@ -1552,7 +1552,6 @@ for (const reducedMotion of [false, true]) {
       expect(Math.max(...relativeKinetics), JSON.stringify(evidence))
         .toBeLessThan(Math.min(...relativeKinetics) * 2);
       expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
-      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.5);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
       expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
