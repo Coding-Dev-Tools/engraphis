@@ -5,6 +5,7 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 from fastapi.testclient import TestClient
 
 from engraphis.config import settings
+from engraphis.core.interfaces import Edge, GraphLayer, Node
 from engraphis.read_only_api import MAX_READ_ONLY_BODY_BYTES, create_read_only_app
 from engraphis.service import MemoryService
 from engraphis.backends.graph_extractor import RegexGraphExtractor
@@ -123,6 +124,36 @@ def test_read_only_graph_uses_the_first_workspace_name_when_omitted():
 
     assert response.status_code == 200
     assert response.json()["workspace"] == "w"
+
+
+def test_read_only_graph_applies_layer_filter_before_connected_only():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("w")
+    svc.store.upsert_entity(Node(
+        id="entity-a", name="A", ntype="concept", workspace_id=wid,
+    ))
+    svc.store.upsert_entity(Node(
+        id="entity-b", name="B", ntype="concept", workspace_id=wid,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="semantic-edge", src="entity-a", dst="entity-b", relation="related",
+        layer=GraphLayer.SEMANTIC, workspace_id=wid,
+    ))
+    svc.store.conn.commit()
+
+    response = TestClient(create_read_only_app(svc)).get(
+        "/graph",
+        params={
+            "workspace": "w",
+            "layers": "causal",
+            "connected_only": "true",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["nodes"] == []
+    assert payload["edges"] == []
 
 
 def test_read_only_receipt_export_uses_the_first_workspace_name_when_omitted():
