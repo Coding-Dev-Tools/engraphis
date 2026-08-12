@@ -101,6 +101,13 @@ def test_named_shared_memory_env_override_preserves_sqlite_identity(monkeypatch)
         first.close()
 
 
+def test_absolute_windows_file_uri_preserves_path_and_query(monkeypatch):
+    uri = "file:C:/Users/Alice/engraphis.db?mode=rw"
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+
+    assert Settings().db_path == uri
+
+
 def _sqlite(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))

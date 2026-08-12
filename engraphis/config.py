@@ -640,7 +640,12 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
                 # their relative-looking name to the config directory would make separate
                 # connections open different databases and break SQLite's shared cache.
                 return configured
-            if not path_part or path_part.startswith("/") or path_part.startswith("\\"):
+            if (
+                not path_part
+                or path_part.startswith("/")
+                or path_part.startswith("\\")
+                or PureWindowsPath(path_part).is_absolute()
+            ):
                 return configured
             anchor = str((_CONFIG_ENV_PATH.parent / path_part).resolve())
             return f"file:{anchor}" + (sep + query_part if sep else "")
