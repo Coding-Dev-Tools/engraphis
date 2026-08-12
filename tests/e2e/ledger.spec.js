@@ -412,14 +412,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260812-stable-orbit-lanes-6');
+  expect(first.searchParams.get('v')).toBe('20260812-orbital-speed-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260812-stable-orbit-lanes-6');
+  expect(second.searchParams.get('v')).toBe('20260812-orbital-speed-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -1124,7 +1124,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByRole('button', { name: 'Galaxy gravity' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
   await expect(page.getByLabel('Size by')).toBeDisabled();
-  await expect(page.locator('#graph-repel-label')).toHaveText('Orbital separation');
+  await expect(page.locator('#graph-repel-label')).toHaveText('Orbital speed');
   await expect(page.locator('#graph-repel')).toHaveValue('60');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');

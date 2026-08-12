@@ -4891,7 +4891,18 @@
     const field = galaxyBlackHoleField(bodies, opts);
     const globalAnchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
     const stats = { systems: 0, localSatellites: 0, multiplier: orbitalSpeed };
-    if (!globalAnchor || !(field.gravitationalConstant > 0)) return stats;
+    /* The midpoint is the shipped orbit rate. Leave the integrator's native velocity phase
+       untouched there; repeatedly correcting it introduces radial energy in the gravity-floor
+       path even though the user has not selected a speed adjustment. A zeroed compatibility
+       scene still needs the midpoint's ordinary seed velocity, so only bypass a neutral pass
+       after a meaningful phase already exists. */
+    const neutralPhase = Math.abs(orbitalSpeed - 1) <= 1e-9
+      && bodies.some(node => Math.hypot(
+        Number.isFinite(node.vx) ? node.vx : 0,
+        Number.isFinite(node.vy) ? node.vy : 0,
+      ) > 1e-8);
+    if (neutralPhase
+      || !globalAnchor || !(field.gravitationalConstant > 0)) return stats;
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const centralSoftening = Math.max(0.1,
       Number(opts.centralSoftening) || Number(opts.softening) || 40);
