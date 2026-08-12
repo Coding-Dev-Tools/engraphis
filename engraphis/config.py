@@ -1025,8 +1025,9 @@ def deployment_mode() -> str:
     """Return the current deployment mode: ``"local"`` or ``"hosted"``.
 
     Local mode is the default and activates when none of the hosted/cloud env vars
-    are set.  Hosted mode activates when at least one hosted env var is present,
-    or when ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
+    or validated persisted cloud session are present. Hosted mode activates when at
+    least one hosted env var is present, a saved cloud session is configured, or when
+    ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
 
     This function is the single authority for mode detection.  All code that needs
     to distinguish local from hosted installations MUST call this function rather
@@ -1037,6 +1038,18 @@ def deployment_mode() -> str:
         return "hosted"
     if hosted_override in ("0", "false", "no", "off"):
         return "local"
+    # A successful device connect persists the validated cloud session in the owner-only
+    # state directory. That session is intentionally usable without repeating bootstrap
+    # environment secrets, so deployment mode must recognize it on later process starts.
+    # State errors are handled as local mode here; cloud-session consumers surface the
+    # structured retryable error when they actually need the credential.
+    try:
+        from engraphis import cloud_session
+
+        if cloud_session.configured(require_compute=False):
+            return "hosted"
+    except Exception:  # noqa: BLE001 — mode detection must not break local startup
+        pass
     for var in _HOSTED_MODE_ENV_VARS:
         if os.environ.get(var, "").strip():
             return "hosted"

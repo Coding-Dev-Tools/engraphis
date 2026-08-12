@@ -47,9 +47,13 @@ def test_local_invitations_never_contain_hosted_urls(monkeypatch, tmp_path):
     assert "engraphis.com" not in response.text
 
 
-def test_device_connect_refuses_implicit_in_local_mode(monkeypatch):
+def test_device_connect_uses_the_shipped_endpoint_as_explicit_opt_in(monkeypatch):
     from engraphis import device_connect
 
     monkeypatch.setattr(device_connect, "default_control_url", lambda: "https://cloud.test")
-    with pytest.raises(device_connect.DeviceConnectError, match="local mode"):
+    def fail_preflight(**_kwargs):
+        raise device_connect.DeviceConnectError("preflight reached", status=400)
+
+    monkeypatch.setattr(device_connect, "preflight", fail_preflight)
+    with pytest.raises(device_connect.DeviceConnectError, match="preflight reached"):
         device_connect.connect("engr_ct_test_token_value_here_1234")
