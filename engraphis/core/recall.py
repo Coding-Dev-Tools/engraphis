@@ -69,7 +69,12 @@ from engraphis.core.poisoning import (
     inspection_eligible,
     prompt_eligible,
 )
-from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.store import (
+    Store,
+    _is_memory_database_path,
+    memory_matches_filter,
+    now_ts,
+)
 from engraphis.core.textutil import jaccard, tokenize
 
 
@@ -217,10 +222,7 @@ class RecallEngine:
         config = arm_config or profile_config(selected_profile)
         capabilities = embedder_capabilities(self.embedder)
         vector_search_ready = bool(capabilities["semantic_support"])
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if vector_search_ready and persistent_store:
             fingerprint = embedding_space_fingerprint(self.embedder)
             vector_search_ready = bool(

@@ -214,11 +214,7 @@ def _finite_float(value: Any, default: float = 0.0) -> float:
 def _with_retrieval_capabilities(payload: dict, embedder, store=None) -> dict:
     """Add the stable degraded-mode contract to a public recall-shaped payload."""
     capabilities = embedder_capabilities(embedder)
-    persistent_store = (
-        store is not None
-        and store.path != ":memory:"
-        and not str(store.path).startswith("file::memory:")
-    )
+    persistent_store = store is not None and not _is_memory_database_path(store.path)
     if capabilities["semantic_support"] and persistent_store:
         fingerprint = embedding_space_fingerprint(embedder)
         if not fingerprint or not store.embedding_space_ready(fingerprint):
@@ -6021,10 +6017,7 @@ class MemoryService:
                     # such content to a remote embedder while changing unrelated metadata.
                     _reject_secret_capture((("content", row["content"]),))
                     model = self.engine.embedding_space
-                    persistent_store = (
-                        self.store.path != ":memory:"
-                        and not self.store.path.startswith("file::memory:")
-                    )
+                    persistent_store = not _is_memory_database_path(self.store.path)
                     if persistent_store and (
                         not model or not self.store.embedding_space_ready(model)
                     ):
