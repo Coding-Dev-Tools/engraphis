@@ -1562,7 +1562,7 @@ for (const reducedMotion of [false, true]) {
       await page.waitForTimeout(1200);
 
       const samples = [await renderedStellarSnapshot(page)];
-      for (let sample = 0; sample < 10; sample += 1) {
+      for (let sample = 0; sample < 13; sample += 1) {
         await page.waitForTimeout(500);
         samples.push(await renderedStellarSnapshot(page));
       }
@@ -1601,7 +1601,7 @@ for (const reducedMotion of [false, true]) {
       });
       const before = samples[0], after = samples.at(-1);
       const evidence = {
-        preference, elapsedMs: 5000,
+        preference, elapsedMs: 6500,
         assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
         before: { anchor: before.anchor, star: before.star, planet: before.planet, local: before.local,
           screenLocal: before.screenLocal, globalAngle: before.globalAngle,
@@ -1654,9 +1654,10 @@ for (const reducedMotion of [false, true]) {
       expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
-      /* Five seconds is sampled on a real wall-clock server, so OS scheduling changes the
-         exact step count. A 0.35-radian sweep is already >20 degrees and independently visible;
-         the stronger local threshold above proves the nested planet orbit at the same time. */
+      /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
+         the exact step count. A 0.35-radian sweep is already >20 degrees and independently
+         visible; the stronger local threshold above proves the nested planet orbit at the same
+         time. */
       expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.35);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
