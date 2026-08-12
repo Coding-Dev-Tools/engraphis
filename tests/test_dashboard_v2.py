@@ -96,7 +96,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert re.search(
             r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
         )
-        assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
+        assert "graphLimit=GRAPH_FULL?40000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
@@ -848,7 +848,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
         assert "const GRAPH_INITIAL_NODE_LIMIT = 1000;" in script.text
         assert "const GRAPH_INITIAL_EDGE_LIMIT = 2000;" in script.text
-        assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
+        assert "const GRAPH_FULL_NODE_LIMIT = 40_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text

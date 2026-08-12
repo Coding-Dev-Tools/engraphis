@@ -807,7 +807,7 @@ async function loadLegacyGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked,graphLimit=GRAPH_FULL?20000:320,graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true');
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked,graphLimit=GRAPH_FULL?40000:320,graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true');
  try{
    GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+'&limit='+graphLimit+graphScope+(repo?'&repo='+encodeURIComponent(repo):''));
   renderGraphSide();graphRender();
@@ -1199,7 +1199,7 @@ function loadGraphEngine(){
  if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
  GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1';
+  script.src='/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1';
   /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
      resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
   script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};

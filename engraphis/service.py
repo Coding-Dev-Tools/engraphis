@@ -247,16 +247,16 @@ MAX_IMPORT_TOTAL_BYTES = 250_000_000
 # browser scene budget. Keep that server-side candidate set finite as well: graph rows
 # are user/sync writable, and an unbounded Louvain/PageRank request would otherwise be a
 # straightforward authenticated resource-exhaustion path.
-MAX_GRAPH_ANALYSIS_ENTITIES = 20_000
-MAX_GRAPH_ANALYSIS_EDGES = 100_000
-MAX_GRAPH_ANALYSIS_SUPPORTS = 250_000
+MAX_GRAPH_ANALYSIS_ENTITIES = 40_000
+MAX_GRAPH_ANALYSIS_EDGES = 200_000
+MAX_GRAPH_ANALYSIS_SUPPORTS = 500_000
 # Complete scenes are intentionally not representative samples.  These are hard
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
-MAX_GRAPH_COMPLETE_MEMORIES = 50_000
-MAX_GRAPH_COMPLETE_MEMORY_LINKS = 150_000
-MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS = 150_000
-MAX_GRAPH_COMPLETE_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_GRAPH_COMPLETE_MEMORIES = 100_000
+MAX_GRAPH_COMPLETE_MEMORY_LINKS = 300_000
+MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS = 300_000
+MAX_GRAPH_COMPLETE_PAYLOAD_BYTES = 128 * 1024 * 1024
 MAX_GRAPH_INDEX_MEMORIES = 20_000
 MAX_GRAPH_INDEX_WORKERS = 2
 GRAPH_INDEX_BATCH_SIZE = 100

@@ -111,7 +111,7 @@
   };
   const GRAPH_INITIAL_NODE_LIMIT = 1000;
   const GRAPH_INITIAL_EDGE_LIMIT = 2000;
-  const GRAPH_FULL_NODE_LIMIT = 20_000;
+  const GRAPH_FULL_NODE_LIMIT = 40_000;
   const GRAPH_LOAD_TIMEOUT_MS = 12_000;
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
@@ -417,7 +417,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-6'),

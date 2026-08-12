@@ -1466,6 +1466,15 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
     assert meta["evidence_connectors"] == 4
     assert meta["memory_connectors"] == 1
     assert meta["payload_bytes_estimate"] > 0
+    assert meta["safety_limits"] == {
+        "entity_rows": 40_000,
+        "raw_relations": 200_000,
+        "evidence_rows": 500_000,
+        "memory_nodes": 100_000,
+        "memory_connectors": 300_000,
+        "code_memory_connectors": 300_000,
+        "payload_bytes": 128 * 1024 * 1024,
+    }
     assert meta["shown_nodes"] == meta["total_nodes"]
     assert meta["shown_edges"] == meta["total_edges"]
     assert {node["id"] for node in scene["nodes"] if node["node_kind"] == "memory"} \
