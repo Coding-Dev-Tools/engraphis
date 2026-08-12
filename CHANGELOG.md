@@ -7,6 +7,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Direct black-hole children now receive compact, deterministic orbital lanes near the black
+  hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
+  clearance, while community-child planets remain in their local moving frame; oversized Galaxy
+  scenes seed the same lanes before their kinematic clock starts.
 - Complete Galaxy packing now uses a 4% painted-envelope clearance instead of a blanket 15%
   radial allowance, keeping solar-system carriers materially denser around the black-hole
   interior while preserving non-overlap.
