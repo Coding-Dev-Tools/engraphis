@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260812-annulus-aware-packing-3';
+const stellarOrbitAssetVersion = '20260812-stable-orbit-lanes-6';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -198,6 +198,44 @@ function largeServedGalaxyScene() {
 }
 
 const servedLargeGalaxyScene = largeServedGalaxyScene();
+
+/* The black-hole community is not exempt from the hierarchy: several directly connected
+   satellites exercise the same local-orbit contract as an ordinary star system.  Keep this
+   as a clone so older exact-542 smoke fixtures remain useful compatibility sentinels. */
+function servedLargeGalaxySceneWithCoreSatellites() {
+  const scene = JSON.parse(JSON.stringify(servedLargeGalaxyScene));
+  const satellites = [
+    // Deliberately cross the community boundary and share a near-identical orbital band with
+    // the authored core satellite.  `system_anchor_id`, rather than community membership,
+    // is the hierarchy authority for a black-hole child.
+    { id: 'core-star-inner', radius: 51, phase: 2.05, community: 'cross-core' },
+    { id: 'core-star-outer', radius: 74, phase: -1.34, community: 'core' },
+  ];
+  for (const satellite of satellites) {
+    scene.nodes.push({
+      id: satellite.id, label: satellite.id, gravity_mass: 3.5, visual_radius: 4,
+      community_id: satellite.community, anchor_role: 'none', system_anchor_id: 'black-hole', orbit_tier: 1,
+      orbit_radius: satellite.radius, galactic_radius: 0, galactic_target_radius: 0,
+      galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8, galactic_phase: 0,
+      x: Math.cos(satellite.phase) * satellite.radius,
+      y: Math.sin(satellite.phase) * satellite.radius,
+    });
+    scene.edges.push({ id: `${satellite.id}-orbit`, source: 'black-hole', target: satellite.id,
+      relation: 'orbits', rest_length: satellite.radius, spring_strength: 0.08 });
+  }
+  const core = scene.communities.find(community => community.id === 'core');
+  core.mass += satellites.length * 3.5;
+  core.member_count += satellites.length;
+  // A real scene carries metadata for every community even when its member is explicitly
+  // parented to the black hole instead of to that community's star.
+  scene.communities.push({ id: 'cross-core', mass: 3.5, member_count: 1,
+    anchor_id: 'black-hole', galactic_radius: 0, galactic_target_radius: 0,
+    galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8 });
+  scene.meta.total_nodes = scene.nodes.length;
+  return scene;
+}
+
+const servedLargeGalaxyWithCoreSatellites = servedLargeGalaxySceneWithCoreSatellites();
 
 /* Complete view is deliberately much larger than the 1,000-node live-force limit. It must
    take the lightweight hierarchical Galaxy path rather than silently pinning a painted field.
@@ -470,6 +508,8 @@ async function renderedSystemEnvelopeSnapshot(page) {
   return page.evaluate(() => {
     const graph = window.__fg;
     const nodes = graph.graphData().nodes.filter(node => !node.ghost);
+    const canvas = document.querySelector('#graph-canvas canvas, #graph-net canvas');
+    const bounds = canvas && canvas.getBoundingClientRect();
     const byId = new Map(nodes.map(node => [String(node.id), node]));
     const systems = nodes.filter(node => node.anchor_role === 'community').map(star => {
       const members = nodes.filter(node => String(node.system_anchor_id || '') === String(star.id));
@@ -481,12 +521,14 @@ async function renderedSystemEnvelopeSnapshot(page) {
           + Math.hypot(edge.x - member.x, edge.y - member.y);
       }));
       const unit = graph.graph2ScreenCoords(star.x + 1, star.y);
-      return { id: String(star.id), x: point.x, y: point.y, radius,
+      const visible = !bounds || (point.x - radius >= 0 && point.y - radius >= 0
+        && point.x + radius <= bounds.width && point.y + radius <= bounds.height);
+      return { id: String(star.id), x: point.x, y: point.y, radius, visible,
         pixelsPerGraphUnit: Math.hypot(unit.x - point.x, unit.y - point.y), members: members.length };
     });
     let minimumClearance = Infinity, overlaps = 0;
-    for (let left = 0; left < systems.length; left += 1) for (let right = 0;
-      right < left; right += 1) {
+    for (let left = 0; left < systems.length; left += 1) for (let right = left + 1;
+      right < systems.length; right += 1) {
       const a = systems[left], b = systems[right];
       // The runtime gap is eight graph units, converted using the smaller local screen scale.
       const clearance = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
@@ -626,8 +668,11 @@ async function renderedAllLocalOrbitSnapshot(page) {
       const dvx = (Number(node.vx) || 0) - (Number(anchor.vx) || 0);
       const dvy = (Number(node.vy) || 0) - (Number(anchor.vy) || 0);
       return [{
-        id: String(node.id), anchorId, radius: Math.hypot(dx, dy),
+        id: String(node.id), anchorId,
+        communityId: String(node.community_id ?? node.community ?? 'ungrouped'),
+        radius: Math.hypot(dx, dy),
         angle: Math.atan2(dy, dx), tangent: dx * dvy - dy * dvx,
+        paintedRadius: radius(node), anchorPaintedRadius: radius(anchor),
         clearance: Math.hypot(dx, dy) - radius(node) - radius(anchor)
           - Number(engine.physicsDiagnostics().systemAnchorExclusionPadding || 0),
         finite: [node.x, node.y, node.vx, node.vy, anchor.x, anchor.y, anchor.vx, anchor.vy]
@@ -690,6 +735,9 @@ async function renderedAllGlobalOrbitSnapshot(page) {
       return {
         id: String(node.id), communityId: String(node.community_id ?? node.community ?? 'ungrouped'),
         ghost: node.ghost === true,
+        anchorRole: node.anchor_role || 'none',
+        systemAnchorId: node.system_anchor_id == null ? null : String(node.system_anchor_id),
+        carrierLaneRadius: Number(node.__galaxyCarrierLaneRadius) || null,
         ...value,
         finite: [node.x, node.y, node.vx, node.vy].every(Number.isFinite),
       };
@@ -1726,6 +1774,187 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
     }
   });
 
+test('served 500-body Galaxy sustains separated carrier orbits and the black-hole local system',
+  async ({ page }, testInfo) => {
+    test.setTimeout(95_000);
+    const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    const capture = async () => ({
+      global: await renderedAllGlobalOrbitSnapshot(page),
+      local: await renderedAllLocalOrbitSnapshot(page),
+      envelopes: await renderedSystemEnvelopeSnapshot(page),
+    });
+    const run = async reducedMotion => {
+      await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
+      await page.evaluate(scene => {
+        const api = window.__engraphisGraph;
+        api.clearFocus();
+        api.setPreset('galaxy');
+        api.setScope({ asOf: null, ghost: false, minDegree: 0, showUnlinked: true });
+        api.setData(scene);
+      }, servedLargeGalaxyWithCoreSatellites);
+      await page.waitForFunction(() => window.__engraphisGraph && window.__fg,
+        null, { timeout: 20_000 });
+      await page.waitForTimeout(900);
+      const boot = await page.evaluate(() => ({
+        nodes: window.__fg.graphData().nodes.length,
+        state: window.__engraphisGraph.state(),
+        diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+      }));
+      expect(boot.nodes, JSON.stringify(boot)).toBe(544);
+      expect(boot.diagnostics.active, JSON.stringify(boot)).toBe(true);
+      expect(boot.diagnostics.reducedMotion, JSON.stringify(boot)).toBe(reducedMotion);
+      expect(boot.diagnostics.steps, JSON.stringify(boot)).toBeGreaterThanOrEqual(5);
+      const startedAt = Date.now();
+      const samples = [await capture()];
+      const initialSteps = samples[0].global.diagnostics.steps;
+      // Long enough to catch a radial-only carrier or a delayed collision response, but still
+      // bounded: this is the served 542-node release-performance gate.
+      for (let index = 1; index <= 9; index += 1) {
+        const target = initialSteps + index * 48;
+        await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
+          target, { timeout: 30_000 });
+        samples.push(await capture());
+      }
+      const elapsedMs = Date.now() - startedAt;
+      const globalMaps = samples.map(sample => new Map(sample.global.members.map(body => [body.id, body])));
+      const localMaps = samples.map(sample => new Map(sample.local.members.map(body => [body.id, body])));
+      const carriers = [...globalMaps[0].values()].filter(body => body.anchorRole === 'community');
+      const carrierEvidence = carriers.map(carrier => {
+        const phases = globalMaps.map(map => map.get(carrier.id));
+        const steps = phases.slice(1).map((phase, index) => delta(phases[index].angle, phase.angle));
+        const start = phases[0], end = phases.at(-1);
+        return { id: carrier.id, start, end, steps,
+          travel: steps.reduce((sum, value) => sum + value, 0),
+          radiusRatio: end.radius / Math.max(1e-9, start.radius) };
+      });
+      const carrierRings = new Map();
+      for (const carrier of carriers) {
+        const lane = carrier.carrierLaneRadius;
+        expect(lane, `${carrier.id}:carrier lane`).toBeTruthy();
+        const key = Number(lane).toFixed(8);
+        if (!carrierRings.has(key)) carrierRings.set(key, []);
+        carrierRings.get(key).push(carrier.id);
+      }
+      const sameRingPhaseEvidence = [...carrierRings.entries()]
+        .filter(([, ids]) => ids.length > 1).map(([lane, ids]) => {
+          const referenceId = ids[0];
+          const differences = ids.slice(1).map(id => ({ id, samples: globalMaps.map(map =>
+            delta(map.get(referenceId).angle, map.get(id).angle)) }));
+          return { lane: Number(lane), referenceId, ids, differences };
+        });
+      const coreSatellites = [...localMaps[0].values()].filter(member =>
+        member.anchorId === 'black-hole');
+      const coreEvidence = coreSatellites.map(satellite => {
+        const phases = localMaps.map(map => map.get(satellite.id));
+        const steps = phases.slice(1).map((phase, index) => delta(phases[index].angle, phase.angle));
+        const start = phases[0], end = phases.at(-1);
+        return { id: satellite.id, communityId: satellite.communityId, phases, start, end, steps,
+          travel: steps.reduce((sum, value) => sum + value, 0),
+          radiusRatio: end.radius / Math.max(1e-9, start.radius) };
+      });
+      const core = coreEvidence.find(member => member.id === 'core-star');
+      const corePairClearances = [];
+      for (let index = 0; index < samples.length; index += 1) {
+        for (let left = 0; left < coreEvidence.length; left += 1) for (let right = left + 1;
+          right < coreEvidence.length; right += 1) {
+          const a = coreEvidence[left].phases[index], b = coreEvidence[right].phases[index];
+          const distance = Math.sqrt(a.radius ** 2 + b.radius ** 2
+            - 2 * a.radius * b.radius * Math.cos(delta(a.angle, b.angle)));
+          corePairClearances.push({ sample: index, ids: [a.id, b.id],
+            clearance: distance - a.paintedRadius - b.paintedRadius });
+        }
+      }
+      const evidence = { reducedMotion, elapsedMs, initialSteps, samples, carrierEvidence,
+        sameRingPhaseEvidence, coreEvidence, corePairClearances };
+      await testInfo.attach(`sustained-carrier-orbits-${reducedMotion ? 'reduced' : 'normal'}.json`, {
+        body: Buffer.from(JSON.stringify(evidence, null, 2)), contentType: 'application/json',
+      });
+
+      expect(elapsedMs, '542-body sampled carrier integration').toBeLessThan(35_000);
+      expect(samples.at(-1).global.diagnostics.steps - initialSteps).toBeGreaterThanOrEqual(432);
+      expect(samples.every(sample => sample.global.finite && sample.local.finite && sample.envelopes.finite))
+        .toBe(true);
+      expect(samples.every(sample => sample.global.members.length === 543)).toBe(true);
+      const visibilityDebug = samples.map(sample => {
+        const invisible = new Set(sample.envelopes.systems.filter(system => !system.visible)
+          .map(system => system.id));
+        return { steps: sample.global.diagnostics.steps,
+          packing: sample.global.diagnostics.systemPacking,
+          support: sample.global.diagnostics.carrierOrbitSupport,
+          invisible: [...invisible], carriers: sample.global.members.filter(body =>
+            invisible.has(String(body.id))).map(body => ({
+            id: body.id, radius: body.radius, angle: body.angle, tangent: body.tangent,
+            lane: body.carrierLaneRadius,
+          })) };
+      });
+      expect(samples.every(sample => sample.envelopes.systems.length === 60
+        && sample.envelopes.systems.every(system => system.visible)
+        && sample.envelopes.overlaps === 0 && sample.envelopes.minimumClearance >= -.75),
+      JSON.stringify(visibilityDebug))
+        .toBe(true);
+      expect(samples.every(sample => sample.global.diagnostics.speedCapActivations === 0
+        && sample.global.diagnostics.lastCollisions === 0)).toBe(true);
+      // Admission may project a bad initial fixture once; sustained clean lanes must then
+      // require no packing corrections, otherwise the user sees periodic popping.
+      expect(samples.slice(1).every(sample => {
+        const packing = sample.global.diagnostics.systemPacking || {};
+        return Number(packing.adjustedSystems || 0) === 0
+          && Number(packing.correctionDistance || 0) <= 1e-9
+          && Number(packing.remainingOverlaps || 0) === 0;
+      })).toBe(true);
+      expect(carrierEvidence).toHaveLength(60);
+      expect(sameRingPhaseEvidence.length).toBeGreaterThan(0);
+      for (const carrier of carrierEvidence) {
+        expect(Math.abs(carrier.start.tangent), carrier.id).toBeGreaterThan(1e-5);
+        expect(Math.abs(carrier.end.tangent), carrier.id).toBeGreaterThan(1e-5);
+        expect(Math.abs(carrier.travel), carrier.id).toBeGreaterThan(.08);
+        expect(carrier.steps.every(step => Math.abs(step) > 1e-5), carrier.id).toBe(true);
+        expect(carrier.steps.every(step => Math.sign(step) === Math.sign(carrier.steps[0])), carrier.id)
+          .toBe(true);
+        // A carrier's named lane is the authoritative Keplerian orbit.  It cannot silently
+        // spiral inward/outward and rely on later packing to repair its position.
+        expect(carrier.start.radius, carrier.id).toBeCloseTo(carrier.start.carrierLaneRadius, 5);
+        expect(carrier.end.radius, carrier.id).toBeCloseTo(carrier.start.carrierLaneRadius, 5);
+        expect(carrier.radiusRatio, carrier.id).toBeCloseTo(1, 5);
+      }
+      for (const ring of sameRingPhaseEvidence) for (const difference of ring.differences) {
+        expect(difference.samples.every(value => Math.abs(delta(difference.samples[0], value)) < 1e-5),
+          `${ring.lane}:${ring.referenceId}:${difference.id}`).toBe(true);
+      }
+      expect(coreEvidence.map(member => member.id).sort()).toEqual([
+        'core-star', 'core-star-inner', 'core-star-outer',
+      ]);
+      expect(coreEvidence.find(member => member.id === 'core-star-inner').communityId).toBe('cross-core');
+      for (const coreMember of coreEvidence) {
+        expect(Math.abs(coreMember.start.tangent), coreMember.id).toBeGreaterThan(1e-5);
+        expect(Math.abs(coreMember.end.tangent), coreMember.id).toBeGreaterThan(1e-5);
+        expect(Math.abs(coreMember.travel), coreMember.id).toBeGreaterThan(.25);
+        expect(coreMember.steps.every(step => Math.abs(step) > 1e-5
+          && Math.sign(step) === Math.sign(coreMember.steps[0])), coreMember.id).toBe(true);
+        expect(coreMember.radiusRatio, coreMember.id).toBeGreaterThan(.9);
+        expect(coreMember.radiusRatio, coreMember.id).toBeLessThan(1.1);
+      }
+      expect(corePairClearances).toHaveLength(30);
+      expect(corePairClearances.every(pair => pair.clearance >= -1e-7),
+        JSON.stringify(corePairClearances)).toBe(true);
+      return { carrierEvidence, coreEvidence, elapsedMs };
+    };
+
+    await openDashboard(page, { graphScene: servedLargeGalaxyWithCoreSatellites });
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+    const normal = await run(false);
+    const reduced = await run(true);
+    // Motion preference changes paint transitions only. It must not change the carrier set,
+    // rotation direction, or make the black-hole's own satellite frozen.
+    expect(reduced.carrierEvidence.map(value => value.id)).toEqual(normal.carrierEvidence.map(value => value.id));
+    expect(reduced.coreEvidence.map(value => value.id)).toEqual(normal.coreEvidence.map(value => value.id));
+    for (let index = 0; index < normal.coreEvidence.length; index += 1) {
+      expect(Math.sign(reduced.coreEvidence[index].travel)).toBe(Math.sign(normal.coreEvidence[index].travel));
+    }
+  });
+
 test('served Complete Galaxy uses the lightweight all-body orbit path instead of a frozen layout',
   async ({ page }, testInfo) => {
     test.setTimeout(90_000);
@@ -1739,66 +1968,115 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       && window.__engraphisGraph.physicsDiagnostics().steps >= 10
       && window.__engraphisGraph.physicsDiagnostics().active, null, { timeout: 35_000 });
 
-    const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
     const orbitEvidence = async label => {
-      const global = [await renderedAllGlobalOrbitSnapshot(page)];
-      const local = [await renderedAllLocalOrbitSnapshot(page)];
+      /* Keep the 3,335 global and 2,960 local bodies in the page. Serializing six full object
+         arrays dominated this test, but reducing the sample would make a frozen member invisible.
+         The observer scans every body on every phase and returns only counts, extrema, and first
+         failures to Playwright. */
+      const boot = await page.evaluate(() => {
+        const graph = window.__fg, engine = window.__engraphisGraph;
+        const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+        const snapshot = () => {
+          const rendered = graph.graphData().nodes;
+          const nodes = rendered.filter(node => !node.ghost);
+          const byId = new Map(nodes.map(node => [String(node.id), node]));
+          const anchor = nodes.find(node => node.anchor_role === 'global');
+          const global = new Map(), local = new Map();
+          const finite = node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite);
+          if (anchor) for (const node of nodes) if (node !== anchor) {
+            global.set(String(node.id), { angle: Math.atan2(node.y - anchor.y, node.x - anchor.x),
+              finite: finite(node) });
+          }
+          for (const node of nodes) {
+            const parentId = node.system_anchor_id == null ? null : String(node.system_anchor_id);
+            const parent = parentId && byId.get(parentId);
+            if (!parent || parent === node) continue;
+            local.set(String(node.id), { angle: Math.atan2(node.y - parent.y, node.x - parent.x),
+              finite: finite(node) && finite(parent) });
+          }
+          const carriers = anchor ? nodes.filter(node => node.anchor_role === 'community').map(node => {
+            const orbit = node.__galaxyKinematicGlobalOrbit;
+            const valid = orbit && Number.isFinite(orbit.angle) && Number.isFinite(orbit.radius);
+            const expectedX = valid ? anchor.x + Math.cos(orbit.angle) * orbit.radius : NaN;
+            const expectedY = valid ? anchor.y + Math.sin(orbit.angle) * orbit.radius : NaN;
+            return { id: String(node.id), valid, error: valid ? Math.hypot(node.x - expectedX, node.y - expectedY) : Infinity };
+          }) : [];
+          return { global, local, carriers, systems: new Set(nodes.filter(node => node.anchor_role === 'community').map(node => String(node.id))),
+            finite: nodes.every(finite), diagnostics: engine.physicsDiagnostics() };
+        };
+        const initial = snapshot();
+        window.__completeOrbitObserver = { delta, snapshot, initial,
+          global: new Map([...initial.global.keys()].map(id => [id, { travel: 0, frozen: 0 }])),
+          local: new Map([...initial.local.keys()].map(id => [id, { travel: 0, frozen: 0 }])),
+          samples: [] };
+        return { globalCount: initial.global.size, localCount: initial.local.size,
+          anchorCount: initial.carriers.length, systemCount: initial.systems.size,
+          finite: initial.finite, diagnostics: initial.diagnostics };
+      });
       // This deliberately samples short fixed intervals. A production-sized canvas can paint
       // at a modest cadence, so two eight-step intervals prove incremental movement without
       // turning a release gate into a minute-long serialization benchmark.
+      const phases = [];
       for (let index = 1; index <= 2; index += 1) {
-        const target = global[0].diagnostics.steps + index * 8;
+        const target = boot.diagnostics.steps + index * 8;
         await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
           target, { timeout: 25_000 });
-        global.push(await renderedAllGlobalOrbitSnapshot(page));
-        local.push(await renderedAllLocalOrbitSnapshot(page));
+        phases.push(await page.evaluate(() => {
+          const observer = window.__completeOrbitObserver, current = observer.snapshot();
+          const previous = observer.samples.length ? observer.samples.at(-1) : observer.initial;
+          const check = (kind, tracked) => {
+            const before = previous[kind], now = current[kind], totals = observer[kind];
+            let missing = 0, nonFinite = 0, frozen = 0, first = null;
+            for (const [id, state] of totals) {
+              const prior = before.get(id), next = now.get(id);
+              if (!prior || !next) { missing++; if (!first) first = { id, reason: 'missing' }; continue; }
+              if (!next.finite) { nonFinite++; if (!first) first = { id, reason: 'non-finite' }; continue; }
+              const step = observer.delta(prior.angle, next.angle);
+              state.travel += step;
+              if (Math.abs(step) <= 1e-8) { state.frozen++; frozen++; if (!first) first = { id, reason: 'frozen' }; }
+            }
+            let minTravel = Infinity, totalFrozen = 0;
+            for (const state of totals.values()) { minTravel = Math.min(minTravel, Math.abs(state.travel)); totalFrozen += state.frozen; }
+            return { count: now.size, missing, nonFinite, frozen, totalFrozen, minTravel, first };
+          };
+          const global = check('global', observer.global), local = check('local', observer.local);
+          const carrierFailures = current.carriers.filter(carrier => !carrier.valid || carrier.error >= 1e-8);
+          const summary = { global, local, carrierCount: current.carriers.length,
+            carrierMaxError: current.carriers.reduce((max, carrier) => Math.max(max, carrier.error), 0),
+            carrierFailures: carrierFailures.slice(0, 3), systemCount: current.systems.size,
+            finite: current.finite, diagnostics: current.diagnostics };
+          observer.samples.push(current);
+          return summary;
+        }));
       }
-      const globalMaps = global.map(snapshot => new Map(snapshot.members.map(body => [body.id, body])));
-      const localMaps = local.map(snapshot => new Map(snapshot.members.map(body => [body.id, body])));
-      const allBodies = [...globalMaps[0].values()].map(body => {
-        const steps = globalMaps.slice(1).map((map, index) => delta(
-          globalMaps[index].get(body.id).angle, map.get(body.id).angle));
-        return { id: body.id, travel: steps.reduce((sum, value) => sum + value, 0), steps };
-      });
-      const allSatellites = [...localMaps[0].values()].map(body => {
-        const steps = localMaps.slice(1).map((map, index) => delta(
-          localMaps[index].get(body.id).angle, map.get(body.id).angle));
-        return { id: body.id, travel: steps.reduce((sum, value) => sum + value, 0), steps };
-      });
-      const after = global.at(-1);
+      const after = phases.at(-1);
       await testInfo.attach(`complete-galaxy-${label}.json`, {
-        body: Buffer.from(JSON.stringify({ before: global[0], after, allBodies, allSatellites }, null, 2)),
+        body: Buffer.from(JSON.stringify({ boot, phases }, null, 2)),
         contentType: 'application/json',
       });
-      expect(global[0].members).toHaveLength(3335);
-      expect(local[0].members).toHaveLength(2960);
-      expect(local[0].anchors).toHaveLength(375);
-      expect(global[0].systems).toHaveLength(375);
-      expect(global[0].finite && after.finite).toBe(true);
-      expect(after.diagnostics.steps - global[0].diagnostics.steps).toBeGreaterThanOrEqual(16);
-      expect(after.diagnostics.kinematicSteps - global[0].diagnostics.kinematicSteps)
+      expect(boot.globalCount).toBe(3335);
+      expect(boot.localCount).toBe(2960);
+      expect(boot.anchorCount).toBe(375);
+      expect(boot.systemCount).toBe(375);
+      expect(boot.finite && phases.every(phase => phase.finite)).toBe(true);
+      expect(after.diagnostics.steps - boot.diagnostics.steps).toBeGreaterThanOrEqual(16);
+      expect(after.diagnostics.kinematicSteps - boot.diagnostics.kinematicSteps)
         .toBeGreaterThanOrEqual(16);
       expect(after.diagnostics.reheatStepsApplied).toBe(0);
       expect(after.diagnostics.reheatStepsRemaining).toBe(0);
       expect(after.diagnostics.speedCapActivations).toBe(0);
       expect(after.diagnostics.lastCollisions).toBe(0);
       expect(after.diagnostics.lastRelationCorrections).toBe(0);
-      for (const body of allBodies) {
-        expect(Math.abs(body.travel), `${label}:global:${body.id}`).toBeGreaterThan(0.001);
-        expect(body.steps.every(value => Math.abs(value) > 1e-8), `${label}:global:${body.id}`)
-          .toBe(true);
-      }
-      for (const satellite of allSatellites) {
-        expect(Math.abs(satellite.travel), `${label}:local:${satellite.id}`).toBeGreaterThan(0.001);
-        expect(satellite.steps.every(value => Math.abs(value) > 1e-8), `${label}:local:${satellite.id}`)
-          .toBe(true);
-      }
-      for (const snapshot of local) {
-        for (const star of snapshot.anchors) {
-          expect(star.hasCarrier, `${label}:carrier:${star.id}`).toBe(true);
-          expect(star.carrierError, `${label}:carrier:${star.id}`).toBeLessThan(1e-8);
-        }
-      }
+      expect(phases.every(phase => phase.global.count === 3335 && phase.global.missing === 0
+        && phase.global.nonFinite === 0 && phase.global.frozen === 0 && phase.global.totalFrozen === 0
+        && phase.global.minTravel > .001), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
+      expect(phases.every(phase => phase.local.count === 2960 && phase.local.missing === 0
+        && phase.local.nonFinite === 0 && phase.local.frozen === 0 && phase.local.totalFrozen === 0
+        && phase.local.minTravel > .001), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
+      expect(phases.every(phase => phase.carrierCount === 375 && phase.systemCount === 375
+        && phase.carrierFailures.length === 0 && phase.carrierMaxError < 1e-8),
+      JSON.stringify(phases.map(phase => ({ count: phase.carrierCount, error: phase.carrierMaxError,
+        failures: phase.carrierFailures })))).toBe(true);
       return after;
     };
 
@@ -2695,11 +2973,7 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
     const after = { radii: radii(), diameter: diameter(), velocities: velocities(),
       diagnostics: api.physicsDiagnostics() };
     api.freeze(true);
-    return {
-      before, after,
-      expectedRatio: I.galaxyImmediateGravityRadiusScale(200)
-        / I.galaxyImmediateGravityRadiusScale(48),
-    };
+    return { before, after };
   }, blackHoleGalaxyScene);
   const physicalField = await page.evaluate(scene => {
     const measure = gravity => {
@@ -2774,13 +3048,9 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
     0.75 ** (11.430769230769231 * 0.68), 12,
   );
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
-  expect(immediate.after.diagnostics.immediateGravityResponse.systems).toBe(3);
-  expect(immediate.after.diagnostics.immediateGravityResponse.maximumShift).toBeGreaterThan(10);
-  expect(immediate.after.diagnostics.immediateGravityResponse.ratio).toBeCloseTo(
-    immediate.expectedRatio, 12,
-  );
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
-    expect(immediate.after.radii[id] / radius, id).toBeCloseTo(immediate.expectedRatio, 10);
+    // Updating gravity alters carrier support, never teleports a solar system inward.
+    expect(immediate.after.radii[id] / radius, id).toBeCloseTo(1, 10);
   }
   expect(immediate.after.diameter).toBeCloseTo(immediate.before.diameter, 10);
   expect(immediate.after.velocities).toEqual(immediate.before.velocities);
@@ -2811,13 +3081,19 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
       const track = sampleSystems.map(systems => systems.get(systemBefore.id));
       expect(track.every(Boolean), systemBefore.id).toBe(true);
       const radii = track.map(system => system.radius);
-      // Every observed sample is non-increasing: the black-hole boundary cannot let a solar
-      // system fall away. The endpoint remains visibly bounded rather than collapsing it.
-      expect(radii.every((radius, index) => index === 0 || radius <= radii[index - 1] + 1e-6),
-        JSON.stringify({ id: systemBefore.id, radii })).toBe(true);
+      const phaseSteps = track.slice(1).map((system, index) => signedAngleDelta(
+        track[index].angle, system.angle,
+      ));
+      /* Galaxy gravity changes tangential support, not an inward-only layout projector.
+         Each lane must remain bounded and keep advancing around the black hole. */
+      expect(radii.every(radius => radius > systemBefore.radius * .82
+        && radius < systemBefore.radius * 1.18),
+      JSON.stringify({ id: systemBefore.id, radii })).toBe(true);
       const item = track.at(-1);
-      expect(item.radius, systemBefore.id).toBeLessThan(systemBefore.radius);
-      expect(item.radius, systemBefore.id).toBeGreaterThan(systemBefore.radius * 0.6);
+      expect(Math.abs(phaseSteps.reduce((sum, step) => sum + step, 0)), systemBefore.id)
+        .toBeGreaterThan(.002);
+      expect(phaseSteps.every(step => Math.abs(step) > 1e-8
+        && Math.sign(step) === Math.sign(systemBefore.angularVelocity)), systemBefore.id).toBe(true);
       expect(item.internalDiameter, systemBefore.id).toBeGreaterThan(8);
       /* Link's new positional constraint deliberately reaches the selected tight scale
          immediately. Keep a substantial, visible local orbit without restoring the old
@@ -2827,12 +3103,6 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
       );
     }
   }
-
-  const contraction = trial => trial.before.systems.reduce((total, beforeSystem) => {
-    const afterSystem = trial.after.systems.find(system => system.id === beforeSystem.id);
-    return total + (1 - afterSystem.radius / beforeSystem.radius);
-  }, 0) / trial.before.systems.length;
-  expect(contraction(strong)).toBeGreaterThan(contraction(baseline) * 2);
 
   const linkSettings = await page.evaluate(() => {
     const initial = window.__engraphisGraph.state().settings.link;

@@ -1574,6 +1574,10 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
           seededCore[1].vx - seededCore[0].vx,
           seededCore[1].vy - seededCore[0].vy
         );
+        const seededRadius = Math.hypot(
+          seededCore[1].x - seededCore[0].x,
+          seededCore[1].y - seededCore[0].y,
+        );
         const radialAcceleration = -(
           seededAcceleration.get(seededCore[1]).ax
           - seededAcceleration.get(seededCore[0]).ax
@@ -1607,7 +1611,8 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
           haloMomentum,
           combined: [Math.abs(relativeX(regularCombined)),
             Math.abs(relativeX(coreCombined))],
-          seedLaw: [relativeSpeed * relativeSpeed / 30, radialAcceleration],
+          seedLaw: [relativeSpeed * relativeSpeed / seededRadius, radialAcceleration],
+          seededRadius,
           driftRatio: [(halfStep[0].x - 3) / (oldStep[0].x - 3),
             (halfStep[0].y + 2) / (oldStep[0].y + 2)],
           finite: [...finiteAcceleration.values()].every(value =>
@@ -1622,6 +1627,9 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
     assert report["combined"][1] == pytest.approx(report["combined"][0], rel=1e-12)
     assert report["pairMomentum"] == pytest.approx([0, 0], abs=1e-12)
     assert report["haloMomentum"] == pytest.approx([0, 0], abs=1e-12)
+    # Core admission expands an unsafe authored 30-unit position out of the warp band before
+    # seeding. Circular-orbit parity must use that actual post-admission separation.
+    assert report["seededRadius"] > 30
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
     assert report["driftRatio"] == pytest.approx([0.7, 0.7])
     assert report["finite"] is True
@@ -2262,7 +2270,7 @@ def test_black_hole_adornment_is_bounded_and_does_not_change_hit_geometry() -> N
 
 
 @requires_node
-def test_galaxy_black_hole_seeds_inward_epicycles_with_tangential_rotation() -> None:
+def test_galaxy_black_hole_seeds_circular_carriers_with_tangential_rotation() -> None:
     report = _run_node(
         """
         const nodes = [
@@ -2296,8 +2304,9 @@ def test_galaxy_black_hole_seeds_inward_epicycles_with_tangential_rotation() -> 
         });
         """
     )
-    # Every system begins settling toward the black-hole well; neither seed may fly outward.
-    assert all(item["radial"] < 0 for item in report["initial"])
+    # Admitted carrier lanes begin circularly; a compulsory inward seed would make a clean
+    # galaxy collapse into its neighbours and trigger packing pops.
+    assert all(abs(item["radial"]) < 1e-8 for item in report["initial"])
     assert all(
         0.5 * initial["radius"] < final["radius"] < 1.5 * initial["radius"]
         for initial, final in zip(report["initial"], report["final"])
@@ -2671,8 +2680,8 @@ def test_cross_system_repulsion_translates_whole_systems_without_warping_orbits(
 
 
 @requires_node
-def test_dense_system_packing_separates_painted_solar_envelopes_without_warping_local_frames() -> None:
-    """505 bodies begin as stacked solar systems; packing moves whole painted envelopes only."""
+def test_dense_system_admission_assigns_clear_carrier_lanes_without_warping_local_frames() -> None:
+    """505 stacked systems receive one collision-free carrier admission, not live packing."""
     report = _run_node(
         """
         const SYSTEMS = 84, PLANETS = 5, GAP = 8;
@@ -2720,23 +2729,16 @@ def test_dense_system_packing_separates_painted_solar_envelopes_without_warping_
         const before = localFrames(), initial = metrics();
         const fixedBefore = nodes.filter(node => node.community_id === 'packed-0')
           .map(node => [node.x, node.y, node.vx, node.vy]);
-        const packingStart = performance.now(); let stats;
-        for (let pass = 0; pass < 96; pass++) {
-          stats = I.applyGalaxySystemPacking(nodes, {
-            blackHoleExclusionPadding: 2.5, gap: GAP,
-            strength: .4, maxCorrection: 12,
-            fixedNodeId: 'packed-0-star', layoutSeed: 7103,
-          });
-        }
-        const packingMilliseconds = performance.now() - packingStart;
-        const after = localFrames(), final = metrics(), fixed = nodes.filter(node =>
-          node.community_id === 'packed-0').map(node => [node.x, node.y, node.vx, node.vy]);
+        const admissionStart = performance.now();
+        const stats = I.establishGalaxyCarrierLanes(nodes, {
+          blackHoleExclusionPadding: 2.5, gap: GAP, layoutSeed: 7103,
+        });
+        const admissionMilliseconds = performance.now() - admissionStart;
+        const after = localFrames(), final = metrics();
         const maximumLocalFrameError = Math.max(...after.flat(2).map((value, index) =>
           Math.abs(value - before.flat(2)[index])));
-        const maximumFixedError = Math.max(...fixed.flatMap((row, rowIndex) => row.map(
-          (value, columnIndex) => Math.abs(value - fixedBefore[rowIndex][columnIndex]))));
-        emit({ nodes: nodes.length, initial, final, stats, packingMilliseconds,
-          maximumLocalFrameError, maximumFixedError,
+        emit({ nodes: nodes.length, initial, final, stats, admissionMilliseconds,
+          maximumLocalFrameError,
           finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
         """
     )
@@ -2747,15 +2749,16 @@ def test_dense_system_packing_separates_painted_solar_envelopes_without_warping_
     assert report["final"]["overlaps"] == 0
     assert report["final"]["minimumClearance"] >= 8 - 1e-6
     assert report["final"]["horizonClearance"] >= -1e-9
-    # Translation/velocity adjustments may move a system's carrier, never its planets in the
-    # carrier frame.  The fixed drag-owned system is a fully rigid exception to packing.
+    assert report["stats"]["assigned"] == 84
+    assert report["stats"]["moved"] == 84
+    # Admission translates an entire solar system exactly once; no planet is warped in its
+    # carrier frame and live integration no longer needs a packer to repair it.
     assert report["maximumLocalFrameError"] < 1e-10
-    assert report["maximumFixedError"] < 1e-10
 
 
 @requires_node
-def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_physics() -> None:
-    """A pre-packed 505-body galaxy must not re-stack as its two orbit levels advance."""
+def test_live_dense_system_lanes_stay_clear_without_packing_under_default_high_and_reduced_physics() -> None:
+    """A pre-admitted 505-body galaxy remains clear while both orbit levels advance."""
     report = _run_node(
         """
         const SYSTEMS = 84, PLANETS = 5;
@@ -2777,26 +2780,13 @@ def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_ph
                 rest_length: radius, spring_strength: .08 });
             }
           }
+          const admission = I.establishGalaxyCarrierLanes(nodes, { gap, layoutSeed: 8831 });
           I.seedGalaxyOrbits(nodes, 8831, 48, 32, false);
           I.seedGalaxySystemOrbits(nodes, 8831, 48, 40, false);
-          for (let pass = 0; pass < 96; pass++) I.applyGalaxySystemPacking(nodes, {
-            gap, strength: .4, maxCorrection: 12, layoutSeed: 8831,
-          });
-          // Packing deliberately translates a system without injecting velocity. Re-seed the
-          // BH carrier at its packed radius before timing live motion; otherwise this synthetic
-          // all-at-one-point bootstrap retains circular velocity for radius 150 after stars
-          // have been distributed hundreds of units away, which measures an avoidable launch
-          // mismatch rather than packing heat.
-          nodes.forEach(node => {
-            delete node.__galaxyOrbitSeeded;
-            delete node.__galaxySystemOrbitSeeded;
-          });
-          I.seedGalaxyOrbits(nodes, 8831, 48, 32, false);
-          I.seedGalaxySystemOrbits(nodes, 8831, 48, 40, false);
-          return { nodes, links };
+          return { nodes, links, admission };
         };
         const run = (gap, strength, reducedMotion) => {
-          const { nodes, links } = make(gap);
+          const { nodes, links, admission } = make(gap);
           const byId = id => nodes.find(node => node.id === id);
           const initialRadius = new Map(nodes.filter(node => node.orbit_tier > 0).map(node => {
             const star = byId(node.system_anchor_id);
@@ -2821,7 +2811,7 @@ def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_ph
             farFieldAcceleration: 12, farFieldMaxAcceleration: 16, includeSpacetime: true,
             frameDraggingFraction: .018, frameDraggingMaxAcceleration: .22,
             eventHorizonDecayRate: .12, eventHorizonInwardAcceleration: .28,
-            includeCollisions: false, includeSystemPacking: true, systemPackingGap: gap,
+            includeCollisions: false, includeSystemPacking: false, systemPackingGap: gap,
             systemPackingStrength: strength, systemPackingMaxCorrection: 12, reducedMotion,
           };
           const clearance = () => {
@@ -2853,7 +2843,7 @@ def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_ph
             });
           }
           const liveMilliseconds = performance.now() - liveStart;
-          return { initial, final: clearance(), speedCaps, maximumRadiusDrift,
+          return { admission, initial, final: clearance(), speedCaps, maximumRadiusDrift,
             totalPackingAdjustments, maximumRemainingOverlaps, liveMilliseconds,
             finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) };
         };
@@ -2863,6 +2853,8 @@ def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_ph
     for mode, gap in (("normal", 8), ("reduced", 8), ("high", 12)):
         sample = report[mode]
         assert sample["finite"] is True
+        assert sample["admission"]["assigned"] == 84
+        assert sample["admission"]["moved"] == 84
         assert sample["initial"]["count"] == sample["final"]["count"] == 84
         assert sample["initial"]["overlaps"] == 0
         assert sample["final"]["overlaps"] == 0
@@ -2872,8 +2864,7 @@ def test_live_dense_system_packing_stays_clear_under_default_high_and_reduced_ph
         # drift accrued across 120 real local-gravity steps (well below a painted pixel).
         assert sample["maximumRadiusDrift"] < .01
         assert sample["maximumRemainingOverlaps"] == 0
-    assert report["normal"]["totalPackingAdjustments"] > 0
-    assert report["reduced"]["totalPackingAdjustments"] > 0
+        assert sample["totalPackingAdjustments"] == 0
 
 
 @requires_node
@@ -3685,13 +3676,16 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
           Math.sin(next - previous), Math.cos(next - previous));
         const run = (repel, link) => {
           const { nodes, links } = make();
+          // Admission chooses the exact carrier lane first; both global and local seed vectors
+          // are then composed in that final frame, as in layoutSeed 3031 at runtime.
+          I.establishGalaxyCarrierLanes(nodes, { gap: 8, layoutSeed: 3031 });
           I.seedGalaxyOrbits(nodes, 3031, 48, 32, false);
           // Match galaxyIntegratorOptions(): Repel 60 yields live central softening 48.
           I.seedGalaxySystemOrbits(nodes, 3031, 48, 48, false);
           const separationPadding = I.galaxyOrbitalSeparationPadding(repel);
           const separationStrength = I.galaxyOrbitalSeparationStrength(repel);
-          const options = {
-            gravity: 48, softening: 32, centralSoftening: 48,
+              const options = {
+                layoutSeed: 3031, gravity: 48, softening: 32, centralSoftening: 48,
             exactLimit: 64, theta: 0.85,
             localPairFraction: 0.15, corePairMultiplier: 0.75,
             includeBridges: false, includeMutualSystems: true,
@@ -3718,8 +3712,9 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
             farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
             farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
             localRelativeSpeedLimit: 48, timestep: 0.032,
-            inwardConvergence: true, wallClockSeconds: 1 / 30,
+            inwardConvergence: false, wallClockSeconds: 1 / 30,
             velocityDecay: 0.00005, speedLimit: 48, includeCollisions: false,
+            includeSystemPacking: false,
           };
           const byId = new Map(nodes.map(node => [node.id, node]));
           const tracked = ['aurora', 'system-11', 'system-23', 'system-35',
@@ -3738,10 +3733,12 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
                 / (star.gravity_mass + planet.gravity_mass) * (dvx * dvx + dvy * dvy),
               kineticMin: Infinity, kineticMax: 0 }];
           }));
-          const centers = () => I.communityCenters(nodes);
+          const centers = () => new Map(nodes.filter(node => node.anchor_role === 'community')
+            .map(star => [String(star.id), { x: star.x, y: star.y, nodes: nodes.filter(node =>
+              String(node.system_anchor_id || '') === String(star.id)), mass: star.gravity_mass }]));
           let previousCenters = centers();
           const globalTracks = new Map(tracked.map(id => {
-            const center = previousCenters.get(id), radius = Math.hypot(center.x, center.y);
+            const center = previousCenters.get(id + '-star'), radius = Math.hypot(center.x, center.y);
             const vx = center.nodes.reduce((sum, node) => sum
               + node.gravity_mass * node.vx, 0) / center.mass;
             const vy = center.nodes.reduce((sum, node) => sum
@@ -3794,7 +3791,7 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
               item.kineticMax = Math.max(item.kineticMax, kinetic);
               minimumStarClearance = Math.min(minimumStarClearance,
                 radius - star.radius - planet.radius - 1.5);
-              const center = nextCenters.get(id), global = globalTracks.get(id);
+              const center = nextCenters.get(star.id), global = globalTracks.get(id);
               const globalRadius = Math.hypot(center.x, center.y);
               const globalStep = delta(Math.atan2(center.y, center.x), global.angle);
               if (global.direction && Math.sign(globalStep) === -global.direction
@@ -3870,13 +3867,13 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
             # A crowded galaxy may receive an occasional genuine near-field perturbation;
             # four or fewer opposite samples in 180 slices is not the frame-to-frame ping-pong
             # produced by the former over-unity contact response.
-            assert system["reversals"] <= 4, (system_id, system, {
+            assert system["reversals"] == 0, (system_id, system, {
                 key: trial[key] for key in ("repel", "link", "comStepMedian",
                                             "comStepP95", "comStepMax")
             })
             assert system["maxPhaseStep"] < 0.08
-            assert system["radiusMin"] > system["radius0"] * 0.6
-            assert system["radiusMax"] <= system["radius0"] * 1.01
+            assert system["radiusMin"] > system["radius0"] * .99999
+            assert system["radiusMax"] < system["radius0"] * 1.00001
 
 
 @requires_node
@@ -5205,7 +5202,7 @@ def test_render_reapplies_far_field_envelope_before_static_repaint() -> None:
 
 
 @requires_node
-def test_galaxy_inward_convergence_is_monotone_wall_clock_bound_and_keeps_orbits_tangential() -> None:
+def test_opt_in_inward_convergence_helper_is_bounded_and_keeps_local_frames_tangential() -> None:
     report = _run_node(
         """
         const options = {
@@ -5312,9 +5309,9 @@ def test_galaxy_inward_convergence_is_monotone_wall_clock_bound_and_keeps_orbits
         });
         """
     )
-    # Gravity zero is the loosest black-hole setting, not a literal stopped galaxy. The
-    # explicit global anchor receives the calibrated floor, so even an outward body remains
-    # bound and the inward convergence curve stays strictly contractive.
+    # This low-level legacy helper remains bounded when explicitly requested.  Live Galaxy
+    # motion does not opt into it: carriers use circular support and envelope admission instead
+    # of a compulsory inward-only projector.
     assert 0 < report["factors"][0] < 1
     assert report["factors"][1] == pytest.approx(0.75**0.68, abs=1e-12)
     assert report["factors"][2] == pytest.approx(0.75 ** (3.6 * 0.68), abs=1e-12)
@@ -5328,7 +5325,9 @@ def test_galaxy_inward_convergence_is_monotone_wall_clock_bound_and_keeps_orbits
     # its exact amount now follows the same softened floor field as the global orbit seed.
     assert report["escapedRadius"] < 100
     assert report["counteracted"] > report["attemptedOutward"]
-    assert report["outboundVelocity"] < 0
+    # The opt-in helper may remove radial escape velocity entirely; live carrier support is
+    # the ordinary Galaxy path and supplies the prograde component separately.
+    assert report["outboundVelocity"] <= 0
     assert report["tangentAfter"] == pytest.approx(report["tangentBefore"], abs=1e-12)
     assert report["internalAfter"] == pytest.approx(report["internalBefore"], abs=1e-12)
     assert report["relativeVelocityAfter"] == pytest.approx(
@@ -5340,7 +5339,7 @@ def test_galaxy_inward_convergence_is_monotone_wall_clock_bound_and_keeps_orbits
 
 
 @requires_node
-def test_gravity_setting_has_immediate_reversible_system_density_response() -> None:
+def test_gravity_setting_changes_orbital_support_without_teleporting_system_density() -> None:
     report = _run_node(
         """
         const fixture = () => [
@@ -5378,34 +5377,130 @@ def test_gravity_setting_has_immediate_reversible_system_density_response() -> N
           before, tight,
           roundTrip: direct.map(node => [node.x, node.y, node.vx, node.vy]),
           stepped: stepped.map(node => [node.x, node.y, node.vx, node.vy]),
-          expectedRatio: I.galaxyImmediateGravityRadiusScale(100)
-            / I.galaxyImmediateGravityRadiusScale(48),
           tightened, loosened,
         });
         """
     )
     assert report["tightened"]["systems"] == 2
-    assert report["tightened"]["moved"] == 3
-    assert report["tightened"]["maximumShift"] > 5
-    assert report["tight"]["radius"] / report["before"]["radius"] == pytest.approx(
-        report["expectedRatio"], rel=1e-12
-    )
+    assert report["tightened"]["moved"] == 0
+    assert report["tightened"]["maximumShift"] == pytest.approx(0, abs=1e-12)
+    assert report["tight"]["radius"] == pytest.approx(report["before"]["radius"], abs=1e-12)
     assert report["tight"]["diameter"] == pytest.approx(
         report["before"]["diameter"], abs=1e-12
     )
-    # Density changes translate whole systems; the black hole, internal velocities, and
-    # reversible round trip remain exact.
-    assert report["tight"]["phase"][0] == report["before"]["phase"][0]
-    assert [item[2:] for item in report["tight"]["phase"]] == [
-        item[2:] for item in report["before"]["phase"]
-    ]
-    assert report["loosened"]["ratio"] == pytest.approx(
-        1 / report["expectedRatio"], rel=1e-12
-    )
+    # The setting feeds the force/circular-support pass on subsequent fixed steps; it must
+    # not visibly pop a settled lane on input.  The source state remains byte-for-byte exact.
+    assert report["tight"]["phase"] == report["before"]["phase"]
+    assert report["loosened"]["moved"] == 0
+    assert report["loosened"]["maximumShift"] == pytest.approx(0, abs=1e-12)
     for actual, expected in zip(report["roundTrip"], report["before"]["phase"]):
         assert actual == pytest.approx(expected, abs=1e-12)
     for actual, expected in zip(report["stepped"], report["tight"]["phase"]):
         assert actual == pytest.approx(expected, abs=1e-12)
+
+
+@requires_node
+def test_cached_carrier_lanes_support_cross_community_black_hole_children() -> None:
+    """Explicit ``system_anchor_id`` wins over community grouping for BH satellites."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star', gravity_mass: 8, radius: 5,
+            x: 220, y: 0, vx: 0, vy: 12 },
+          { id: 'outer-planet', community_id: 'outer', system_anchor_id: 'outer-star',
+            gravity_mass: 1, radius: 2, x: 248, y: 0, vx: 0, vy: 15 },
+          // This satellite deliberately belongs to a different community while explicitly
+          // orbiting the black hole. A community-only implementation freezes or drops it.
+          { id: 'cross-core-child', community_id: 'cross-core', system_anchor_id: 'black-hole',
+            orbit_tier: 1, gravity_mass: 3, radius: 3, x: 0, y: 54, vx: -8, vy: 0 },
+        ];
+        Object.defineProperty(nodes[1], '__galaxyCarrierLaneRadius',
+          { value: 220, writable: true, configurable: true });
+        Object.defineProperty(nodes[3], '__galaxyCarrierLaneRadius',
+          { value: 54, writable: true, configurable: true });
+        const before = nodes.map(node => [node.id, node.x, node.y, node.vx, node.vy]);
+        const support = I.supportGalaxyCarrierOrbits(nodes, {
+          gravity: 48, centralSoftening: 40, softening: 32, layoutSeed: 7331,
+          blackHoleMass: 1, gravitationalConstant: 1, localGravitationalConstant: 1,
+          includeMutualSystems: false,
+        });
+        const bh = nodes[0], cross = nodes[3];
+        const dx = cross.x - bh.x, dy = cross.y - bh.y;
+        const tangent = dx * (cross.vy - bh.vy) - dy * (cross.vx - bh.vx);
+        emit({ before, support, tangent,
+          coordinates: nodes.map(node => [node.id, node.x, node.y, node.vx, node.vy]),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["support"]["eligible"] >= 2
+    assert report["support"]["coreEligible"] == 1
+    assert report["support"]["coreSupported"] == 1
+    assert abs(report["tangent"]) > 1e-6
+    # The explicit lane is authoritative: the carrier/root may be projected as a rigid group
+    # to its admitted radius, while the cross-community BH child is retained and supported.
+    by_id = {row[0]: row for row in report["coordinates"]}
+    assert math.hypot(by_id["outer-star"][1], by_id["outer-star"][2]) == pytest.approx(220)
+    assert math.hypot(by_id["cross-core-child"][1], by_id["cross-core-child"][2]) == pytest.approx(54)
+
+
+@requires_node
+def test_three_coincident_cross_community_black_hole_children_receive_distinct_clear_lanes() -> None:
+    """Multiple explicit BH children may share authored radius/phase but never remain stacked."""
+    report = _run_node(
+        """
+        const nodes = [{ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }];
+        ['cross-a', 'cross-b', 'cross-c'].forEach((id, index) => {
+          const node = { id, community_id: id, system_anchor_id: 'black-hole', orbit_tier: 1,
+            gravity_mass: 3, radius: 3, x: 70, y: 0, vx: 0, vy: 0 };
+          nodes.push(node);
+        });
+        const options = { gravity: 48, centralSoftening: 40, softening: 32, layoutSeed: 90817,
+          blackHoleMass: 1, gravitationalConstant: 1, localGravitationalConstant: 1,
+          includeMutualSystems: false, includeRelations: false, includeCollisions: false,
+          includeOrbitalSeparation: false, includeSystemPacking: false,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeFarFieldConfinement: true, farFieldEnvelopeScale: 2, farFieldMinimumRadius: 96,
+          timestep: .032, wallClockSeconds: 1 / 30, velocityDecay: .00005, speedLimit: 48 };
+        // Admission owns phase-slotting. Calling support against arbitrary hand-written lane
+        // tags would bypass the product path and falsely manufacture a collision.
+        I.seedGalaxyOrbits(nodes, 90817, 48, 32, false, options);
+        I.supportGalaxyCarrierOrbits(nodes, options);
+        const phase = node => Math.atan2(node.y, node.x);
+        const initial = nodes.slice(1).map(node => ({ id: node.id, phase: phase(node),
+          lane: node.__galaxyCoreLaneRadius, radius: Math.hypot(node.x, node.y) }));
+        let minClearance = Infinity, frozen = 0;
+        let previous = nodes.slice(1).map(phase), travel = [0, 0, 0];
+        for (let step = 0; step < 1000; step++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], options);
+          nodes.slice(1).forEach((node, index) => {
+            const next = phase(node), delta = Math.atan2(Math.sin(next - previous[index]),
+              Math.cos(next - previous[index]));
+            travel[index] += delta;
+            if (Math.abs(delta) < 1e-8) frozen++;
+            previous[index] = next;
+          });
+          for (let left = 1; left < nodes.length; left++) for (let right = left + 1;
+            right < nodes.length; right++) minClearance = Math.min(minClearance,
+            Math.hypot(nodes[left].x - nodes[right].x, nodes[left].y - nodes[right].y)
+              - nodes[left].radius - nodes[right].radius);
+        }
+        emit({ initial, travel, frozen, minClearance,
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert all(item["lane"] is not None for item in report["initial"])
+    assert len({round(item["phase"], 8) for item in report["initial"]}) == 3
+    assert report["minClearance"] >= -1e-8
+    assert report["frozen"] == 0
+    assert all(abs(value) > 0.1 for value in report["travel"])
 
 
 @requires_node
@@ -5877,12 +5972,11 @@ def test_global_system_seed_uses_release_stable_speed_cap_with_an_external_ancho
     )
     seed_limit = 18
     assert min(report["fieldSpeeds"]) > seed_limit
-    # The deterministic settling kick is calibrated to the release-stable 18-unit cap. The
-    # black hole is external, so its counter-momentum is intentionally not injected into it.
+    # Symmetric east/west seeded systems preserve zero net carrier momentum.
     assert all(seed_limit * 0.9 < item["speed"] <= seed_limit * 1.01
                for item in report["relative"]), report
     assert all(abs(item["angular"]) > 1e-8 for item in report["relative"])
-    assert report["momentum"] != pytest.approx([0, 0], abs=1e-10)
+    assert report["momentum"] == pytest.approx([0, 0], abs=1e-10)
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
 
 
@@ -6365,10 +6459,23 @@ def test_every_local_member_gets_a_live_coherent_orbit_about_its_inferred_star()
           includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
           farFieldMinimumRadius: 96, farFieldSoftFraction: .82,
           farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
-          localRelativeSpeedLimit: 48, inwardConvergence: true,
-          wallClockSeconds: 1 / 30, includeCollisions: false,
-        };
-        let speedCaps = 0, minimumClearance = Infinity, maximumSpeed = 0;
+              localRelativeSpeedLimit: 48, inwardConvergence: false,
+              wallClockSeconds: 1 / 30, includeCollisions: false, includeSystemPacking: false,
+            };
+            // The first live tick assigns the deterministic carrier-spin direction. Measure
+            // sustained local motion after that one-time insertion, not against the stale
+            // pre-admission tangent inherited from the authored coordinates.
+            I.integrateGalaxyLeapfrog(nodes, links, [], options);
+            tracks.forEach(track => {
+              const node = map.get(track.id), anchor = map.get(track.anchorId);
+              const dx = node.x - anchor.x, dy = node.y - anchor.y;
+              const dvx = node.vx - anchor.vx, dvy = node.vy - anchor.vy;
+              const radius = Math.hypot(dx, dy);
+              track.angle = Math.atan2(dy, dx); track.direction = Math.sign(dx * dvy - dy * dvx);
+              track.initialRadius = track.minimumRadius = track.maximumRadius = radius;
+              track.minimumTangential = Math.abs(dx * dvy - dy * dvx);
+            });
+            let speedCaps = 0, minimumClearance = Infinity, maximumSpeed = 0;
         for (let step = 0; step < 240; step++) {
           const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
           speedCaps += tick.speedCapped ? 1 : 0;
@@ -8605,9 +8712,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-annulus-aware-packing-3'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-stable-orbit-lanes-6'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260812-annulus-aware-packing-3' in markup
+    assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

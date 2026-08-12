@@ -415,10 +415,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-annulus-aware-packing-3'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-stable-orbit-lanes-6'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-annulus-aware-packing-3'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-6'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
