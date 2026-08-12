@@ -65,6 +65,14 @@ class TestDeploymentModeDetection:
 
         assert deployment_mode() == "local"
 
+    def test_saved_cloud_session_is_hosted_without_bootstrap_env(self, monkeypatch):
+        from engraphis import cloud_session
+        from engraphis.config import deployment_mode
+
+        monkeypatch.setattr(cloud_session, "configured", lambda **_kwargs: True)
+
+        assert deployment_mode() == "hosted"
+
 
 class TestAuthStateEndpoint:
     def test_local_mode_auth_state_suppresses_cloud_url(self, monkeypatch, tmp_path):
@@ -85,11 +93,17 @@ class TestAuthStateEndpoint:
 
 
 class TestDeviceConnectModeGuard:
-    def test_local_mode_refuses_implicit_connect(self):
-        from engraphis.device_connect import DeviceConnectError, connect
+    def test_local_mode_allows_explicit_connect_command(self, monkeypatch):
+        from engraphis import device_connect
 
-        with pytest.raises(DeviceConnectError, match="local mode"):
-            connect("engr_ct_test_token_value_here_1234")
+        monkeypatch.setattr(device_connect, "default_control_url", lambda: "https://cloud.test")
+
+        def fail_preflight(**_kwargs):
+            raise device_connect.DeviceConnectError("preflight reached", status=400)
+
+        monkeypatch.setattr(device_connect, "preflight", fail_preflight)
+        with pytest.raises(device_connect.DeviceConnectError, match="preflight reached"):
+            device_connect.connect("engr_ct_test_token_value_here_1234")
 
     def test_local_mode_allows_explicit_control_url(self, monkeypatch):
         from engraphis import device_connect

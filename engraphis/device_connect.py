@@ -789,8 +789,9 @@ def connect(token: object, *, control_url: Optional[str] = None,
     :class:`DeviceConnectError` for every failure, with copy the customer can act on and
     never containing the token.  Nothing is written unless the exchange succeeded.
 
-    In local mode (no hosted env vars), connecting is refused to prevent accidental
-    org joins from a pure-local installation.
+    Invoking this command is the explicit cloud opt-in.  A pure-local installation may
+    therefore use the shipped control-plane endpoint when no hosted environment variables
+    are present; ``control_url`` remains available for a self-hosted or test endpoint.
     """
 
     # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
@@ -798,19 +799,6 @@ def connect(token: object, *, control_url: Optional[str] = None,
     # the same rejection inside ``post_connect``.
     timeout = _validated_timeout(timeout)
 
-    # Mode boundary guard: a pure-local installation must not accidentally connect
-    # to a hosted org. The operator must explicitly set hosted env vars first.
-    from engraphis.config import is_local_mode
-    if is_local_mode() and control_url is None and compute_url is None:
-        # A missing manifest endpoint should retain the normal configuration error;
-        # otherwise pure-local mode reports the wrong problem before preflight runs.
-        if default_control_url():
-            raise DeviceConnectError(
-                "This installation is in local mode (no hosted cloud configured). "
-                "To connect to Engraphis Cloud, set ENGRAPHIS_CLOUD_CONTROL_URL first, "
-                "or pass --control-url explicitly.",
-                status=409,
-            )
     normalized = normalize_connect_token(token)
     # Last check before the point of no return.  ``client_identity`` may have written its
     # file minutes or months ago, so a writable state directory then is no evidence of one
