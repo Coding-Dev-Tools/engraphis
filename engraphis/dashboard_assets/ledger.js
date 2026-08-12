@@ -39,6 +39,8 @@
     graphConnectionsController: null,
     graphMetrics: {},
     graphFrozen: false,
+    graphOrbitPaused: false,
+    graphSpacetimeOverlay: null,
     graphIncludeCode: false,
     graphSavedView: 'schema',
     consolidationReview: null,
@@ -123,6 +125,12 @@
     { id: 'graph-text-size', key: 'font', fallback: 12 },
     { id: 'graph-line-width', key: 'linkw', fallback: 0.72, precision: 2 },
     { id: 'graph-label-density', key: 'labelDensity', fallback: 24 },
+  ];
+  const GRAPH_SPACETIME_TUNING = [
+    { id: 'graph-gravitational-constant', key: 'gravitationalConstant', fallback: 100 },
+    { id: 'graph-black-hole-mass', key: 'blackHoleMass', fallback: 160 },
+    { id: 'graph-space-damping', key: 'damping', fallback: 1, precision: 1 },
+    { id: 'graph-spring-stiffness', key: 'springStiffness', fallback: 32 },
   ];
   const GRAPH_PRESET_TUNING = {
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
@@ -395,7 +403,7 @@
   }
 
   function ensureGraphAssets() {
-    if (window.ForceGraph && window.EngraphisGraph) return Promise.resolve();
+    if (window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime) return Promise.resolve();
     if (!graphAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
@@ -405,8 +413,11 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-local-star-frame-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-live-spacetime-1'),
         'EngraphisGraph', controller.signal,
+      )).then(() => loadScript(
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260811-live-spacetime-1'),
+        'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
       graphAssetsController = controller;
@@ -1064,6 +1075,10 @@
     resetScopedPanels();
     state.syncStatus = null;
     if (state.graphEngine) {
+      if (state.graphSpacetimeOverlay) {
+        state.graphSpacetimeOverlay.destroy();
+        state.graphSpacetimeOverlay = null;
+      }
       state.graphEngine.destroy();
       state.graphEngine = null;
     }
@@ -2220,6 +2235,7 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
+    byId('graph-spacetime-tuning').hidden = !galaxy;
   }
 
   function setChoicePressed(selector, dataKey, selected) {
@@ -2285,6 +2301,44 @@
       settings[item.key] = number(byId(item.id).value);
       return settings;
     }, { flowSpeed: number(byId('graph-flow-speed').value) });
+  }
+
+  function setGraphSpacetimeControl(item, value) {
+    const control = byId(item.id);
+    const next = graphValueInRange(item.id, value, item.fallback);
+    control.value = String(next);
+    const rendered = item.precision ? next.toFixed(item.precision) : String(Math.round(next));
+    const output = byId(`${item.id}-output`);
+    output.value = rendered;
+    output.textContent = rendered;
+    return next;
+  }
+
+  function graphSpacetimeControlSettings() {
+    return GRAPH_SPACETIME_TUNING.reduce((settings, item) => {
+      settings[item.key] = number(byId(item.id).value);
+      return settings;
+    }, { orbitPaused: state.graphOrbitPaused });
+  }
+
+  function graphSpacetimeSettings() {
+    /* The control surface is expressed in intelligible 0–200 / 20–500 ranges while the
+       integrator uses dimensionless multipliers. These baseline divisors are deliberate:
+       opening the new panel must reproduce the established Galaxy orbit exactly. */
+    const controls = graphSpacetimeControlSettings();
+    return {
+      gravitationalConstant: controls.gravitationalConstant / 100,
+      blackHoleMass: controls.blackHoleMass / 160,
+      damping: controls.damping,
+      springStiffness: controls.springStiffness / 32,
+      orbitPaused: controls.orbitPaused,
+    };
+  }
+
+  function syncGraphSpacetimeTuning(settings) {
+    GRAPH_SPACETIME_TUNING.forEach(item => setGraphSpacetimeControl(item,
+      settings && settings[item.key]));
+    setGraphSwitch('graph-orbits-pause', settings && settings.orbitPaused === true);
   }
 
   function syncGraphTuning(settings) {
@@ -2400,6 +2454,7 @@
       flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
       labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
       tuning: graphTuningSettings(),
+      spacetimeTuning: graphSpacetimeControlSettings(),
       minDegree: number(byId('graph-min-degree').value),
       depth: number(byId('graph-depth').value),
       showUnlinked: state.graphShowUnlinked,
@@ -2453,6 +2508,10 @@
       ...graphPresetTuning(preset),
       ...effectiveTuning,
     });
+    const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
+    state.graphOrbitPaused = savedSpacetimeTuning && savedSpacetimeTuning.orbitPaused === true;
+    syncGraphSpacetimeTuning(savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
+      ? savedSpacetimeTuning : {});
 
     const savedMin = Number(graphPreference('minDegree', number(byId('graph-min-degree').value)));
     const minDegree = Number.isFinite(savedMin) ? Math.max(0, Math.min(12, Math.round(savedMin))) : 1;
@@ -2549,6 +2608,7 @@
         applyGraphPalette(palette);
         graph.setSettings({
           ...graphTuningSettings(),
+          ...graphSpacetimeSettings(),
           flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
           labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
           frozen: state.graphFrozen,
@@ -2589,6 +2649,8 @@
     const previousShowUnlinked = state.graphShowUnlinked;
     state.graphIncludeCode = false;
     syncGraphTuning({ ...graphPresetTuning(preset), flowSpeed: 45 });
+    state.graphOrbitPaused = false;
+    syncGraphSpacetimeTuning({});
     setGraphMinDegree(1, false);
     setGraphDepth(2, false);
     setGraphShowUnlinked(true, false);
@@ -2597,7 +2659,7 @@
     if (state.graphEngine) {
       state.graphEngine.apply(graph => {
         graph.setPreset(preset);
-        graph.setSettings({ ...graphTuningSettings(), frozen: state.graphFrozen });
+        graph.setSettings({ ...graphTuningSettings(), ...graphSpacetimeSettings(), frozen: state.graphFrozen });
         graph.setScope(graphScope());
         graph.setLayers(graphLayerState());
       }, false, !state.graphFrozen);
@@ -2863,6 +2925,10 @@
             ? (sceneMeta.truncated == null ? fullGraph : !sceneMeta.truncated)
             : sceneMeta.nodes_complete,
         };
+        if (state.graphSpacetimeOverlay) {
+          state.graphSpacetimeOverlay.destroy();
+          state.graphSpacetimeOverlay = null;
+        }
         if (state.graphEngine) state.graphEngine.destroy();
         if (typeof window.EngraphisGraph === 'undefined') throw new Error('graph engine asset is unavailable');
         state.graphEngine = window.EngraphisGraph.create(byId('graph-canvas'), {
@@ -2878,6 +2944,12 @@
           onCollapseChange: collapsed => {
             if (targetMode === 'overview') showNotice(collapsed ? 'Clusters collapsed for overview.' : '');
           },
+          onSlingshotRelease: () => {
+            if (state.graphSpacetimeOverlay && state.graphEngine
+              && typeof state.graphEngine.getPhysicsSnapshot === 'function') {
+              state.graphSpacetimeOverlay.setSnapshot(state.graphEngine.getPhysicsSnapshot());
+            }
+          },
         });
         state.graphEngine.apply(graph => {
           graph.setPreset(byId('graph-preset').value);
@@ -2887,6 +2959,7 @@
           applyGraphPalette(byId('graph-palette').value);
           graph.setSettings({
             ...graphTuningSettings(),
+            ...graphSpacetimeSettings(),
             flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
             labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
             frozen: state.graphFrozen,
@@ -2900,6 +2973,12 @@
           graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
+        if (window.EngraphisSpacetime && window.EngraphisSpacetime.create) {
+          state.graphSpacetimeOverlay = window.EngraphisSpacetime.create(
+            byId('graph-canvas'), state.graphEngine
+          );
+          state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+        }
         state.graphEngine.setData(data);
         state.graphEngine.freeze(state.graphFrozen);
         byId('graph-empty').hidden = Boolean(data.nodes.length);
@@ -3803,6 +3882,9 @@
     try {
       localStorage.setItem('engraphis-ledger-view', view);
     } catch (_) {}
+    if (state.graphSpacetimeOverlay) {
+      state.graphSpacetimeOverlay.setEnabled(view === 'relations' && graphIsGalaxy());
+    }
     if (view === 'relations') loadGraph();
     if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
     if (view === 'manage') {
@@ -4052,6 +4134,7 @@
     syncGraphTuning(settings);
     updateGraphModeControls();
     if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
+    if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
     clearGraphSavedView();
     syncGraphChoices();
     saveGraphPreferences();
@@ -4107,6 +4190,19 @@
     clearGraphSavedView();
     saveGraphPreferences();
   }));
+  GRAPH_SPACETIME_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
+    const value = setGraphSpacetimeControl(item, event.target.value);
+    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: value });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  }));
+  byId('graph-orbits-pause').addEventListener('click', event => {
+    state.graphOrbitPaused = event.currentTarget.getAttribute('aria-checked') !== 'true';
+    setGraphSwitch('graph-orbits-pause', state.graphOrbitPaused);
+    if (state.graphEngine) state.graphEngine.setSettings({ orbitPaused: state.graphOrbitPaused });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
   all('[data-graph-layer]').forEach(control => control.addEventListener('click', () => {
     const layers = graphLayerState();
     const layer = control.dataset.graphLayer;

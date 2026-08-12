@@ -31,6 +31,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
+SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
 LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
 CSS = STATIC / "dashboard.css"
@@ -68,7 +69,11 @@ const emit = value => console.log(JSON.stringify(value));
 ENGINE_PRELUDE = """
 const fs = require('fs');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const window = {};
+const engineWindowListeners = {};
+const window = {
+  addEventListener(type, callback) { engineWindowListeners[type] = callback; },
+  removeEventListener(type) { delete engineWindowListeners[type]; },
+};
 globalThis.requestAnimationFrame = () => {};
 globalThis.cancelAnimationFrame = () => {};
 const store = {}, calls = {}, invocations = {};
@@ -91,12 +96,17 @@ const fg = new Proxy({}, {
   },
 });
 globalThis.ForceGraph = () => () => fg;
+const elListeners = {};
+const canvas = { getBoundingClientRect() { return { left: 0, top: 0 }; } };
 const el = {
   attrs: {}, innerHTML: '', clientWidth: 800, clientHeight: 600,
   getAttribute(name) { return this.attrs[name] === undefined ? null : this.attrs[name]; },
   setAttribute(name, value) { this.attrs[name] = value; },
   removeAttribute(name) { delete this.attrs[name]; },
   classList: { toggle() {}, remove() {} },
+  addEventListener(type, callback) { elListeners[type] = callback; },
+  removeEventListener(type) { delete elListeners[type]; },
+  querySelector(selector) { return selector === 'canvas' ? canvas : null; },
 };
 const chain = count => {
   const nodes = [], links = [];
@@ -127,6 +137,24 @@ def _run_node(script: str, prelude: str = PRELUDE) -> object:
 
 def _run_engine(script: str) -> object:
     return _run_node(script, prelude=ENGINE_PRELUDE)
+
+
+def _run_spacetime_node(script: str) -> object:
+    """Execute the independently loaded canvas-only spacetime renderer in a tiny DOM."""
+    prelude = """
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const emit = value => console.log(JSON.stringify(value));
+"""
+    result = subprocess.run(
+        [NODE, "-e", prelude + script, str(SPACETIME_ASSET)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 # ── load order and failure isolation ────────────────────────────────────────────────
@@ -885,6 +913,192 @@ def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> 
     assert report["constants"] == [240, 120]
     assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
     assert report["masses"] == [8, 101, 109]
+
+
+@requires_node
+def test_spacetime_field_tuning_is_softened_precessing_and_preserves_local_frames() -> None:
+    """Advanced black-hole controls alter one softened carrier field, never a planet's frame.
+
+    The near-horizon pass must add a finite Lense--Thirring-like tangent and expose a smooth
+    visual warp.  An external solar system receives that carrier delta as a unit, which is the
+    important physical invariant: its planets keep orbiting their star while the whole system
+    precesses around the black hole.  The decay pass is intentionally tangential-only and must
+    likewise leave the star-relative velocity unchanged.
+    """
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 8, radius: 4,
+            x: 26, y: 0, vx: 0, vy: 3.2 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            gravity_mass: 1, radius: 2, x: 32, y: 0, vx: -1.1, vy: 4.6 },
+        ];
+        const local = () => ({
+          vx: nodes[2].vx - nodes[1].vx,
+          vy: nodes[2].vy - nodes[1].vy,
+        });
+        const baseline = I.galaxyBlackHoleField(nodes, {
+          gravity: 48, softening: 40, gravitationalConstant: 1, blackHoleMass: 1,
+          accelerationCap: 1e9,
+        });
+        const tuned = I.galaxyBlackHoleField(nodes, {
+          gravity: 48, softening: 40, gravitationalConstant: 2, blackHoleMass: 3,
+          accelerationCap: 1e9,
+        });
+        const before = local();
+        const spacetime = I.applyGalaxySpacetimeAcceleration(nodes, {
+          gravity: 48, softening: 40, gravitationalConstant: 2, blackHoleMass: 3,
+          blackHoleExclusionPadding: 2.5, frameDraggingFraction: .04,
+          frameDraggingMaxAcceleration: .5, eventHorizonInwardAcceleration: .35,
+        });
+        const afterDrag = local();
+        const decay = I.applyGalaxyEventHorizonDecay(nodes, {
+          timestep: .032, eventHorizonDecayRate: .25,
+        });
+        const afterDecay = local();
+        emit({ baseline: { core: baseline.coreMass, gravity: baseline.gravitationalConstant },
+          tuned: { core: tuned.coreMass, gravity: tuned.gravitationalConstant },
+          before, afterDrag, afterDecay, spacetime, decay,
+          warp: [nodes[1].__galaxySpacetimeWarp, nodes[2].__galaxySpacetimeWarp],
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["tuned"]["core"] == pytest.approx(report["baseline"]["core"] * 3)
+    assert report["tuned"]["gravity"] == pytest.approx(report["baseline"]["gravity"] * 2)
+    assert report["spacetime"]["systems"] == 1
+    assert report["spacetime"]["warpedNodes"] == 2
+    assert report["spacetime"]["maximumWarp"] > 0
+    assert report["spacetime"]["maximumFrameDragAcceleration"] > 0
+    assert report["spacetime"]["maximumHorizonAcceleration"] > 0
+    assert max(report["warp"]) > 0
+    # Carrier-only perturbations are identical for every body in the system.
+    assert report["afterDrag"] == pytest.approx(report["before"], abs=1e-12)
+    assert report["decay"]["systems"] == 1
+    assert report["decay"]["maximumVelocityRemoved"] > 0
+    assert report["afterDecay"] == pytest.approx(report["before"], abs=1e-12)
+
+
+@requires_node
+def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -> None:
+    """The visual layer is one bounded canvas, not a hidden second graph implementation."""
+    report = _run_spacetime_node(
+        """
+        const calls = { arcs: 0, lines: 0, gradients: 0, linearGradients: 0 };
+        const gradient = { addColorStop() {} };
+        const ctx = {
+          setTransform() {}, clearRect() {}, save() {}, restore() {}, beginPath() {},
+          moveTo() { calls.lines++; }, lineTo() { calls.lines++; }, stroke() {}, fill() {},
+          arc() { calls.arcs++; },
+          createRadialGradient() { calls.gradients++; return gradient; },
+          createLinearGradient() { calls.linearGradients++; return gradient; },
+          set globalCompositeOperation(value) {}, set lineWidth(value) {},
+          set strokeStyle(value) {}, set fillStyle(value) {},
+        };
+        const frames = [];
+        globalThis.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
+        globalThis.cancelAnimationFrame = () => {};
+        globalThis.matchMedia = () => ({ matches: false });
+        globalThis.window = { devicePixelRatio: 1 };
+        globalThis.document = { createElement() { return {
+          width: 0, height: 0, className: '', setAttribute() {}, remove() {},
+          getContext() { return ctx; },
+        }; } };
+        const listeners = {};
+        const container = {
+          clientWidth: 900, clientHeight: 600, children: [],
+          appendChild(node) { this.children.push(node); },
+          addEventListener(type, callback) { listeners[type] = callback; },
+          removeEventListener(type) { delete listeners[type]; },
+        };
+        const snapshot = count => ({
+          center: { x: 0, y: 0, radius: 11 },
+          nodes: Array.from({ length: count }, (_, index) => ({
+            id: 'node-' + index, x: 32 + index, y: index % 19,
+            vx: 1 + index / 10, vy: .5, radius: 2,
+          })),
+          viewport: { x: 450, y: 300, zoom: 1 },
+        });
+        let current = snapshot(180);
+        const engine = {
+          getPhysicsSnapshot: () => current,
+          graphToScreen: (x, y) => ({ x: x + 450, y: y + 300 }),
+        };
+        new Function('window', source)(window);
+        const overlay = window.EngraphisSpacetime.create(container, engine);
+        overlay.setEnabled(true);
+        frames.shift()(40); // samples the 160 fastest bodies
+        frames.shift()(80); // paints their trails
+        const small = { ...calls, canvasCount: container.children.length };
+        current = snapshot(601);
+        frames.shift()(120);
+        const dense = { ...calls };
+        overlay.destroy();
+        emit({ small, dense, childrenAfterDestroy: container.children.length,
+          listenerDetached: !listeners.engraphisgraphphysicschange });
+        """
+    )
+    assert report["small"]["canvasCount"] == 1
+    assert report["small"]["arcs"] > 0 and report["small"]["lines"] > 0
+    # One capped canvas pass renders at most the 160 selected velocity trails; a >600-node
+    # graph clears them rather than paying a linear trail cost in the next paint.
+    assert 0 < report["small"]["linearGradients"] <= 160
+    assert report["dense"]["linearGradients"] == report["small"]["linearGradients"]
+    assert report["listenerDetached"] is True
+
+
+@requires_node
+def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bounded() -> None:
+    """The public controls drive one observable physics state, including slingshot release."""
+    report = _run_engine(
+        """
+        let released = null;
+        const api = G.create(el, { onSlingshotRelease: value => { released = value; } });
+        api.setData({ nodes: [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
+            radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'dragged', community_id: 'outer', gravity_mass: 2,
+            radius: 4, x: 60, y: 0, vx: 0, vy: 0 },
+        ], edges: [] });
+        api.setSettings({ gravitationalConstant: 1.75, blackHoleMass: 3.5,
+          damping: .4, springStiffness: 2.25, orbitPaused: true });
+        const paused = { state: JSON.parse(JSON.stringify(api.state().settings)), diagnostics: api.physicsDiagnostics(),
+          snapshot: api.getPhysicsSnapshot() };
+        api.setSettings({ orbitPaused: false });
+        const node = store.graphData.nodes.find(item => item.id === 'dragged');
+        store.screen2GraphCoords = (x, y) => ({ x, y });
+        const event = (x, y, time) => ({ button: 0, isPrimary: true, pointerId: 7,
+          clientX: x, clientY: y, timeStamp: time,
+          preventDefault() {}, stopPropagation() {} });
+        elListeners.pointerdown(event(node.x, node.y, 1));
+        engineWindowListeners.pointermove(event(node.x + 6, node.y, 10));
+        engineWindowListeners.pointermove(event(node.x + 18, node.y, 34));
+        engineWindowListeners.pointerup(event(node.x + 18, node.y, 35));
+        emit({ paused, live: api.physicsDiagnostics(), released,
+          snapshot: api.getPhysicsSnapshot(), node: { vx: node.vx, vy: node.vy, fx: node.fx, fy: node.fy } });
+        """
+    )
+    state = report["paused"]["state"]
+    diagnostics = report["paused"]["diagnostics"]
+    assert state["gravitationalConstant"] == pytest.approx(1.75)
+    assert state["blackHoleMass"] == pytest.approx(3.5)
+    assert state["damping"] == pytest.approx(0.4)
+    assert state["springStiffness"] == pytest.approx(2.25)
+    assert state["orbitPaused"] is True
+    assert diagnostics["orbitPaused"] is True and diagnostics["active"] is False
+    assert report["paused"]["snapshot"]["paused"] is True
+    assert report["live"]["orbitPaused"] is False
+    assert report["released"]["id"] == "dragged"
+    assert 0 < report["released"]["speed"] <= 24
+    assert report["node"].get("fx") is report["node"].get("fy") is None
+    assert [report["node"]["vx"], report["node"]["vy"]] == pytest.approx(
+        [report["released"]["vx"], report["released"]["vy"]]
+    )
+    assert report["snapshot"]["slingshot"] == report["released"]
 
 
 @requires_node
@@ -1687,6 +1901,97 @@ def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track
     assert report["ratioMin"] > maximum_track * 0.75
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
     assert report["finite"] is True
+
+
+@requires_node
+def test_501_active_bodies_keep_bounded_dual_scale_orbits_with_spacetime_enabled() -> None:
+    """The live force path remains stable at the requested 500+ active-body scale.
+
+    This deliberately stays below the 1,000-body live ceiling and above the Barnes--Hut exact
+    threshold.  It rejects a quiet fallback, per-node local-frame corruption, or an unstable
+    near-horizon field without embedding a machine-dependent wall-clock assertion in CI.
+    """
+    report = _run_node(
+        """
+        const nodes = [{ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }], links = [];
+        for (let system = 0; system < 100; system++) {
+          const id = 's' + system, starId = id + '-star';
+          const globalAngle = system * 2.399963229728653;
+          const globalRadius = 112 + (system % 25) * 10;
+          const cx = Math.cos(globalAngle) * globalRadius;
+          const cy = Math.sin(globalAngle) * globalRadius * .82;
+          nodes.push({ id: starId, anchor_role: 'community', community_id: id,
+            system_anchor_id: starId, orbit_tier: 0, gravity_mass: 8, radius: 5,
+            x: cx, y: cy, vx: 0, vy: 0 });
+          for (let planet = 1; planet <= 4; planet++) {
+            const radius = 14 + planet * 5, phase = globalAngle + planet * 1.57079632679;
+            const planetId = id + '-p' + planet;
+            nodes.push({ id: planetId, community_id: id, system_anchor_id: starId,
+              orbit_tier: planet, gravity_mass: 1, radius: 2.5,
+              x: cx + Math.cos(phase) * radius, y: cy + Math.sin(phase) * radius,
+              vx: 0, vy: 0 });
+            links.push({ source: starId, target: planetId, relation: 'orbits',
+              rest_length: radius, spring_strength: .08 });
+          }
+        }
+        const delta = (next, previous) => Math.atan2(Math.sin(next - previous),
+          Math.cos(next - previous));
+        const byId = id => nodes.find(node => node.id === id);
+        I.seedGalaxyOrbits(nodes, 51001, 48, 32, false);
+        I.seedGalaxySystemOrbits(nodes, 51001, 48, 40, false);
+        const starts = new Map(['s0', 's31', 's74'].map(id => {
+          const star = byId(id + '-star'), planet = byId(id + '-p1');
+          return [id, { global: Math.atan2(star.y, star.x),
+            local: Math.atan2(planet.y - star.y, planet.x - star.x) }];
+        }));
+        let maxSpeed = 0, speedCaps = 0, maxWarp = 0;
+        const options = {
+          gravity: 48, gravitationalConstant: 1, blackHoleMass: 1,
+          softening: 32, centralSoftening: 40, timestep: .032, wallClockSeconds: 1 / 30,
+          velocityDecay: .00005, speedLimit: 48, localRelativeSpeedLimit: 48,
+          includeMutualSystems: true, mutualSystemGravityFraction: .12,
+          mutualSystemSoftening: 80, exactLimit: 64, theta: .85,
+          includeRelations: true, includeRelationSprings: false,
+          skipSystemAnchorRelations: true, skipOrbitalSystemRelations: true,
+          includeOrbitalSeparation: true, orbitalSeparationPadding: 8,
+          orbitalSeparationStrength: .5, orbitalSeparationMaxCorrection: 4,
+          orbitalSeparationMaxVelocityCorrection: 8,
+          preserveLocalTangentialVelocity: true, preserveSystemRadii: true,
+          skipSystemAnchorPairs: true, systemAnchorExclusionPadding: 1.5,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
+          farFieldMinimumRadius: 96, farFieldSoftFraction: .82,
+          farFieldAcceleration: 12, farFieldMaxAcceleration: 16,
+          includeSpacetime: true, frameDraggingFraction: .018,
+          frameDraggingMaxAcceleration: .22, eventHorizonDecayRate: .12,
+          eventHorizonInwardAcceleration: .28, includeCollisions: false,
+        };
+        for (let step = 0; step < 90; step++) {
+          const tick = I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          maxSpeed = Math.max(maxSpeed, tick.maximumSpeed);
+          speedCaps += tick.speedCapped ? 1 : 0;
+          maxWarp = Math.max(maxWarp, tick.spacetime.maximumWarp);
+        }
+        const travel = [...starts.entries()].map(([id, start]) => {
+          const star = byId(id + '-star'), planet = byId(id + '-p1');
+          return { global: delta(Math.atan2(star.y, star.x), start.global),
+            local: delta(Math.atan2(planet.y - star.y, planet.x - star.x), start.local) };
+        });
+        emit({ nodes: nodes.length, links: links.length, maxSpeed, speedCaps, maxWarp, travel,
+          anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+        });
+        """
+    )
+    assert report["nodes"] == 501 and report["links"] == 400
+    assert report["finite"] is True
+    assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
+    assert report["maxSpeed"] <= 48
+    assert report["speedCaps"] == 0
+    # The selected systems prove both hierarchy levels remain live under the 500-node field.
+    assert all(abs(track["global"]) > .02 and abs(track["local"]) > .08
+               for track in report["travel"])
 
 
 @requires_node
@@ -7630,10 +7935,10 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
           frameQueue.clear();
           batch.forEach(callback => callback(timestamp));
         };
-        const windowListeners = Object.create(null);
-        window.addEventListener = (name, handler) => { windowListeners[name] = handler; };
+        const manualWindowListeners = Object.create(null);
+        window.addEventListener = (name, handler) => { manualWindowListeners[name] = handler; };
         window.removeEventListener = (name, handler) => {
-          if (windowListeners[name] === handler) delete windowListeners[name];
+          if (manualWindowListeners[name] === handler) delete manualWindowListeners[name];
         };
         const elementListeners = Object.create(null);
         el.addEventListener = (name, handler) => { elementListeners[name] = handler; };
@@ -7687,7 +7992,7 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
           candidate: candidatePhase(),
           steps: api.physicsDiagnostics().steps,
         };
-        windowListeners.pointermove(pointer('pointermove', nodes.heavy.x + 90, nodes.heavy.y + 45));
+        manualWindowListeners.pointermove(pointer('pointermove', nodes.heavy.x + 90, nodes.heavy.y + 45));
         const placedCandidate = candidatePhase();
         flush(6000);
         const duringDrag = {
@@ -7696,7 +8001,7 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
           steps: api.physicsDiagnostics().steps,
           dragging: api.physicsDiagnostics().dragging,
         };
-        windowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
+        manualWindowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
         const releaseSteps = api.physicsDiagnostics().steps;
         flush(7000); // physics continues immediately; no restore/isolation frame exists
         const releaseFrame = { unrelated: unrelatedPhase(), steps: api.physicsDiagnostics().steps };
@@ -7710,7 +8015,7 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
         flush(9000);
         const clickHeld = candidatePhase();
         const clickHeldSteps = api.physicsDiagnostics().steps;
-        windowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
+        manualWindowListeners.pointerup(pointer('pointerup', nodes.heavy.x, nodes.heavy.y));
         const clickReleased = candidatePhase();
         const clickReleaseSteps = api.physicsDiagnostics().steps;
         flush(9034);
@@ -7769,9 +8074,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-local-star-frame-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-live-spacetime-1'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260811-local-star-frame-1' in markup
+    assert '/v2-assets/ledger.js?v=20260811-live-spacetime-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

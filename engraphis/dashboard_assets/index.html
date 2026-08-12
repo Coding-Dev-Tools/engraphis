@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260811-local-star-frame-1">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260811-live-spacetime-1">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -363,6 +363,17 @@
                   <button class="graph-layer-chip active" type="button" data-graph-layer="semantic" aria-pressed="true"><i></i>Semantic <small id="graph-layer-semantic-count">0</small></button>
                   <button class="graph-layer-chip" type="button" data-graph-layer="code" aria-pressed="false"><i></i>Code overlay <small id="graph-layer-code-count">0</small></button>
                 </div>
+                <details id="graph-spacetime-tuning" class="graph-spacetime-tuning" open>
+                  <summary>Spacetime — black-hole orbit controls</summary>
+                  <div class="graph-tuning-grid">
+                    <label for="graph-gravitational-constant"><span>G · gravity</span><input id="graph-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-gravitational-constant-output">100</output></label>
+                    <label for="graph-black-hole-mass"><span>Black hole mass</span><input id="graph-black-hole-mass" type="range" min="20" max="500" value="160"><output id="graph-black-hole-mass-output">160</output></label>
+                    <label for="graph-space-damping"><span>Space friction</span><input id="graph-space-damping" type="range" min="0" max="15" step="0.1" value="1"><output id="graph-space-damping-output">1.0</output></label>
+                    <label for="graph-spring-stiffness"><span>Spring stiffness</span><input id="graph-spring-stiffness" type="range" min="0" max="100" value="32"><output id="graph-spring-stiffness-output">32</output></label>
+                  </div>
+                  <div class="graph-motion-row graph-orbit-pause"><button id="graph-orbits-pause" class="graph-switch" type="button" role="switch" aria-label="Pause orbital physics" aria-checked="false"><span></span></button><span>Pause orbits</span><small>physics</small></div>
+                  <p class="graph-note">Drag and release a node to slingshot it into a new orbit.</p>
+                </details>
                 <button id="graph-reset-tuning" class="graph-action" type="button">Reset to preset defaults</button>
               </details>
             </section>
@@ -692,6 +703,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260811-local-star-frame-1"></script>
+    <script src="/v2-assets/ledger.js?v=20260811-live-spacetime-1"></script>
 </body>
 </html>
