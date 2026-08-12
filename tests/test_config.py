@@ -23,6 +23,28 @@ RETIRED_RELAY_URLS = (
 )
 
 
+def test_deployment_mode_defaults_to_local(monkeypatch):
+    for name in config._HOSTED_MODE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    assert config.deployment_mode() == "local"
+    assert config.is_local_mode() is True
+    assert config.is_hosted_mode() is False
+
+
+def test_deployment_mode_detects_hosted_configuration_and_explicit_overrides(monkeypatch):
+    for name in config._HOSTED_MODE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://cloud.example.test")
+    assert config.deployment_mode() == "hosted"
+
+    monkeypatch.setenv("ENGRAPHIS_HOSTED_MODE", "false")
+    assert config.deployment_mode() == "local"
+    monkeypatch.setenv("ENGRAPHIS_HOSTED_MODE", "true")
+    assert config.deployment_mode() == "hosted"
+
+
 def test_rerank_model_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_RERANK_REVISION", raising=False)

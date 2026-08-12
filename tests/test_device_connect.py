@@ -1517,6 +1517,17 @@ def test_an_unconfigured_control_plane_is_a_clear_error(monkeypatch):
     assert caught.value.status == 400
 
 
+def test_local_mode_rejects_implicit_manifest_connect(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_HOSTED_MODE", "false")
+    monkeypatch.setattr(device_connect, "default_control_url", lambda: CONTROL_URL)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN)
+
+    assert caught.value.status == 409
+    assert "local mode" in str(caught.value)
+
+
 def test_token_dash_reads_stdin(monkeypatch, capsys):
     _install_opener(monkeypatch, _Opener(body=REGISTRATION))
 

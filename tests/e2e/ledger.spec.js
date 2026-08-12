@@ -1451,6 +1451,54 @@ test('a custom graph view restores every saved control and server filter', async
   await expect(page.getByPlaceholder('Filter to a repository or topic…')).toHaveValue('agent-memory');
 });
 
+test('a saved code view reloads when only its repository changes', async ({ page }) => {
+  await page.route('**/', async route => {
+    const response = await route.fetch();
+    const html = await response.text();
+    await route.fulfill({
+      response,
+      body: html.replace(
+        'data-graph-saved-view="operations" aria-pressed="false">Operations',
+        'data-graph-saved-view="custom" aria-pressed="false">Saved custom',
+      ),
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('engraphis-ledger-graph-preferences-v1', JSON.stringify({
+      includeCode: true,
+      repoFilter: 'repo-before',
+    }));
+    localStorage.setItem('engraphis-ledger-graph-custom-view-v1', JSON.stringify({
+      preset: 'radial', style: 'galaxy', color: 'community', palette: 'theme',
+      flow: true, labels: false, tuning: {}, minDegree: 1, depth: 2,
+      showUnlinked: false,
+      layers: { temporal: true, entity: true, causal: true, semantic: true, code: true },
+      includeCode: true, asOf: '', ghosts: true, size: 'degree', bridges: false,
+      collapse: false, repoFilter: 'repo-after',
+    }));
+  });
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+
+  const before = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true'
+      && url.searchParams.get('repo') === 'repo-before';
+  });
+  await before;
+
+  const after = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true'
+      && url.searchParams.get('repo') === 'repo-after';
+  });
+  await page.getByRole('button', { name: 'Saved custom' }).click();
+  await after;
+});
+
 test('themes persist and both visible interface selectors round-trip', async ({ page }) => {
   const errors = browserErrors(page);
   const isAxeStyleProbe = message => (

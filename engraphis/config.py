@@ -1008,6 +1008,51 @@ def _parse_csv(raw: str) -> list:
 settings = Settings()
 
 
+#: Env vars whose presence indicates a hosted/cloud-connected deployment.
+#: When ALL are absent, the installation is pure local mode.
+_HOSTED_MODE_ENV_VARS = (
+    "ENGRAPHIS_CLOUD_CONTROL_URL",
+    "ENGRAPHIS_CLOUD_COMPUTE_URL",
+    "ENGRAPHIS_CLOUD_ORGANIZATION_ID",
+    "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL",
+    "ENGRAPHIS_CLOUD_ACCESS_TOKEN",
+    "ENGRAPHIS_CONTROL_PLANE_URL",
+    "ENGRAPHIS_HOSTED_MODE",
+)
+
+
+def deployment_mode() -> str:
+    """Return the current deployment mode: ``"local"`` or ``"hosted"``.
+
+    Local mode is the default and activates when none of the hosted/cloud env vars
+    are set. Hosted mode activates when at least one hosted env var is present, or
+    when ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
+
+    This function is the single authority for mode detection. Code that needs to
+    distinguish local from hosted installations must call it rather than checking
+    environment variables directly.
+    """
+    hosted_override = os.environ.get("ENGRAPHIS_HOSTED_MODE", "").strip().lower()
+    if hosted_override in ("1", "true", "yes", "on"):
+        return "hosted"
+    if hosted_override in ("0", "false", "no", "off"):
+        return "local"
+    for var in _HOSTED_MODE_ENV_VARS:
+        if os.environ.get(var, "").strip():
+            return "hosted"
+    return "local"
+
+
+def is_local_mode() -> bool:
+    """Return True when the installation is in pure local mode."""
+    return deployment_mode() == "local"
+
+
+def is_hosted_mode() -> bool:
+    """Return True when the installation has hosted/cloud features configured."""
+    return deployment_mode() == "hosted"
+
+
 def canonicalize_relay_url(url: str) -> str:
     """Normalize a relay URL and migrate known retired vendor hosts."""
     normalized = (url or "").strip().rstrip("/")

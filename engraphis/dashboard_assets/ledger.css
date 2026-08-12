@@ -376,6 +376,10 @@ body[data-theme="paper"] .theme-switcher select { color-scheme: light; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c-ok); }
 .status-dot.unhealthy { background: var(--c-bad); }
 
+.mode-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.mode-badge.mode-local { background: #166534; color: #bbf7d0; border: 1px solid #22c55e; }
+.mode-badge.mode-hosted { background: #1e3a5f; color: #93c5fd; border: 1px solid #3b82f6; }
+
 .main { min-width: 0; min-height: 100vh; }
 .view { display: none; min-height: 100vh; animation: page-in .24s ease-out both; }
 .view.active { display: block; }
