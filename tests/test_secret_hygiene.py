@@ -98,7 +98,7 @@ def test_retire_is_canonical_and_forget_remains_a_compatibility_alias():
     assert service.store.get_memory(second["id"]) is not None
 
 
-def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
+def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path, monkeypatch):
     db_path = tmp_path / "engraphis.db"
     service = MemoryService.create(str(db_path))
     leaked = service.remember("Legacy row placeholder.", workspace="acme")
@@ -121,6 +121,14 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     service.store.audit("tester", "legacy_note", mid, "legacy audit detail " + _LEAK)
     service.store.conn.commit()
 
+    maintenance_transactions = []
+    original_maintenance = Store._checkpoint_and_vacuum
+
+    def observe_maintenance(conn, *, durable):
+        maintenance_transactions.append(conn.in_transaction)
+        return original_maintenance(conn, durable=durable)
+
+    monkeypatch.setattr(Store, "_checkpoint_and_vacuum", staticmethod(observe_maintenance))
     erased = service.secure_erase(mid, workspace="acme")
     assert erased["status"] == "securely_erased"
     assert erased["vector_index_cleanup"] == "deleted"
@@ -147,7 +155,9 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
         assert _LEAK.encode("utf-8") not in wal_path.read_bytes()
     # The physical result is explicit; a busy WAL/VACUUM must never be reported as success.
     assert erased["maintenance"]["wal"] in {"truncated", "busy", "failed"}
-    assert erased["maintenance"]["vacuum"] in {"completed", "failed"}
+    assert erased["maintenance"]["vacuum"] == "completed"
+    assert maintenance_transactions
+    assert maintenance_transactions[-1] is False
 
 
 def test_writable_store_enables_sqlite_secure_delete_before_an_emergency_erase(tmp_path):

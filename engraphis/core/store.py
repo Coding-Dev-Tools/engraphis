@@ -5273,6 +5273,11 @@ class Store:
                 result["wal"] = "failed"
         return result
 
+    def run_secure_erase_maintenance(self) -> dict:
+        """Run physical cleanup after the secure-erase transaction has committed."""
+        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
+        return self._checkpoint_and_vacuum(self.conn, durable=durable)
+
     def _recognised_local_backups(self) -> list[Path]:
         """Return recovery artefacts this Store created and can safely identify.
 
@@ -5312,7 +5317,8 @@ class Store:
 
     def secure_erase_memory(
             self, memory_id: str, *, actor: str = "user",
-            _target_ids: Optional[Iterable[str]] = None) -> dict:
+            _target_ids: Optional[Iterable[str]] = None,
+            _defer_maintenance: bool = False) -> dict:
         """Irreversibly erase one memory plus local index copies and known backups.
 
         This is a breach-remediation operation, not the normal ``retire`` lifecycle.
@@ -5320,6 +5326,10 @@ class Store:
         state, audit details for that record, WAL contents when SQLite can checkpoint,
         and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
         peers, and a process that already read the secret cannot be recalled or erased.
+
+        Physical maintenance is deferred when this method participates in an outer
+        transaction. Call :meth:`run_secure_erase_maintenance` after that transaction
+        commits; running ``VACUUM`` or a WAL checkpoint before then is invalid.
         """
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
@@ -5385,8 +5395,11 @@ class Store:
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
-        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
-        maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
+        maintenance = (
+            {"secure_delete": True, "wal": "deferred", "vacuum": "deferred"}
+            if _defer_maintenance or not owns_transaction
+            else self.run_secure_erase_maintenance()
+        )
 
         backup_processed = 0
         backup_failed = 0

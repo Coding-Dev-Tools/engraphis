@@ -2574,16 +2574,13 @@ class MemoryEngine:
                 target_ids = refreshed
                 result = self.store.secure_erase_memory(
                     memory_id, actor=actor, _target_ids=target_ids,
+                    _defer_maintenance=transaction_started,
                 )
                 if transaction_started and self.store.conn.transaction_owned_by_current_thread():
                     self.store.conn.commit()
-                    # Store maintenance runs before an engine-owned transaction can
-                    # commit; retry the WAL checkpoint now that the erased pages are
-                    # no longer held by this transaction.
-                    try:
-                        self.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    except Exception:  # noqa: BLE001 - physical cleanup is best effort
-                        pass
+                    # Physical maintenance must run after the engine-owned transaction
+                    # commits; VACUUM is invalid while the erase transaction is active.
+                    result["maintenance"] = self.store.run_secure_erase_maintenance()
             except BaseException:
                 if transaction_started and self.store.conn.transaction_owned_by_current_thread():
                     self.store.conn.rollback()

@@ -2619,6 +2619,24 @@ def test_secure_erase_classifies_content_free_tombstone_export(
     }
 
 
+def test_secure_erase_defers_maintenance_for_caller_owned_transaction(store):
+    wid = store.get_or_create_workspace("erase-outer-transaction")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_erase_outer_transaction", content="erasable record",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    store.conn.execute("BEGIN IMMEDIATE")
+
+    result = store.secure_erase_memory(memory_id)
+
+    assert result["maintenance"] == {
+        "secure_delete": True, "wal": "deferred", "vacuum": "deferred",
+    }
+    assert store.conn.in_transaction is True
+    store.conn.commit()
+    assert store.get_memory(memory_id) is None
+
+
 def test_secure_erase_rescans_successors_instead_of_trusting_stale_targets(store):
     wid = store.get_or_create_workspace("erase-successor-race")
     parent_id = store.add_memory(MemoryRecord(
