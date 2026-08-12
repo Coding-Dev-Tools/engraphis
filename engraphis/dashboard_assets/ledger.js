@@ -2829,6 +2829,8 @@
     if (state.graphData && Array.isArray(state.graphData.repositories)) {
       state.graphData.repositories.forEach(add);
     }
+    const workspace = state.workspaces.find(item => workspaceName(item) === state.workspace);
+    if (workspace && Array.isArray(workspace.repos)) workspace.repos.forEach(add);
     if (state.graphData && Array.isArray(state.graphData.nodes)) {
       state.graphData.nodes.forEach(item => {
         if (item && Array.isArray(item.repo_names)) item.repo_names.forEach(add);
