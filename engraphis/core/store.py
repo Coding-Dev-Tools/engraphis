@@ -5056,9 +5056,19 @@ class Store:
         """Include deterministic sync-conflict successors in one erase operation."""
         if not cls._has_table(conn, "memories"):
             return [memory_id]
+        primary = conn.execute(
+            "SELECT id, workspace_id, repo_id FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        if primary is None:
+            return [memory_id]
         rows = conn.execute(
-            "SELECT id, metadata, provenance FROM memories"
+            """SELECT id, workspace_id, repo_id, metadata, provenance
+               FROM memories
+               WHERE workspace_id IS ? AND repo_id IS ?""",
+            (primary["workspace_id"], primary["repo_id"]),
         ).fetchall()
+        same_authority_ids = {str(row["id"]) for row in rows}
         parents: dict[str, set[str]] = {}
         for row in rows:
             metadata = _loads(row["metadata"], {})
@@ -5066,12 +5076,22 @@ class Store:
             metadata = metadata if isinstance(metadata, dict) else {}
             provenance = provenance if isinstance(provenance, dict) else {}
             sync_conflict = metadata.get("sync_conflict")
-            candidates = {provenance.get("conflict_of")}
-            if isinstance(sync_conflict, dict):
-                candidates.add(sync_conflict.get("memory_id"))
+            provenance_parent = provenance.get("conflict_of")
+            metadata_parent = (
+                sync_conflict.get("memory_id")
+                if isinstance(sync_conflict, dict) else None
+            )
+            # A caller-controlled pointer is only a valid erase lineage when it
+            # resolves to a memory in the primary's authoritative workspace/repo.
+            # If both persisted envelopes claim a parent, they must agree; otherwise
+            # an untrusted row could widen the destructive target set by smuggling a
+            # foreign ID through one of the two fields.
+            if provenance_parent and metadata_parent and provenance_parent != metadata_parent:
+                continue
+            candidates = {provenance_parent, metadata_parent}
             for parent in candidates:
                 parent_id = str(parent or "")
-                if parent_id:
+                if parent_id and parent_id in same_authority_ids:
                     parents.setdefault(parent_id, set()).add(str(row["id"]))
         targets = [memory_id]
         seen = {memory_id}
@@ -5363,16 +5383,9 @@ class Store:
                         # commit (or roll back) as one unit.
             device_id = self.device_id()
             # Recompute under the transaction even when the engine supplies its earlier
-            # vector-index snapshot. Keep any explicit ids as a compatibility hint for
-            # already-detached derivatives, but never let that stale list replace the
-            # authoritative successor scan.
+            # vector-index snapshot. Keep accepting ``_target_ids`` for API compatibility,
+            # but never let a stale or forged list widen the authoritative target set.
             targets = self._secure_erase_targets(self.conn, memory_id)
-            seen = set(targets)
-            for target_id in _target_ids or ():
-                normalized = str(target_id or '')
-                if normalized and normalized not in seen:
-                    seen.add(normalized)
-                    targets.append(normalized)
             current_rows = []
             for target_id in targets:
                 marker = self.get_memory_sync_export(target_id)

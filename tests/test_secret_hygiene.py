@@ -230,6 +230,49 @@ def test_secure_erase_removes_sync_conflict_successors():
     } >= {original_id, successor_id}
 
 
+def test_secure_erase_does_not_follow_foreign_conflict_lineage():
+    engine = MemoryEngine.create(":memory:")
+    workspace_a = engine.store.get_or_create_workspace("workspace-a")
+    workspace_b = engine.store.get_or_create_workspace("workspace-b")
+    repo_a = engine.store.get_or_create_repo(workspace_a, "repo-a")
+    repo_b = engine.store.get_or_create_repo(workspace_b, "repo-b")
+    original_id = engine.remember(
+        "Workspace B repository secret.",
+        workspace_id=workspace_b,
+        repo_id=repo_b,
+        scope=Scope.REPO,
+    )
+
+    def add_successor(workspace_id, repo_id, label):
+        return engine.store.add_memory(MemoryRecord(
+            id="",
+            content=f"{label} secret copy.",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            scope=Scope.REPO,
+            metadata={"sync_conflict": {"memory_id": original_id}},
+            provenance={
+                "source": "sync_conflict",
+                "trusted": False,
+                "conflict_of": original_id,
+            },
+        ))
+
+    legitimate_id = add_successor(workspace_b, repo_b, "legitimate")
+    foreign_workspace_id = add_successor(workspace_a, repo_a, "foreign workspace")
+    foreign_repo_id = add_successor(workspace_b, repo_a, "foreign repository")
+
+    assert set(engine.store.secure_erase_target_ids(original_id)) == {
+        original_id, legitimate_id,
+    }
+    engine.secure_erase(original_id)
+
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(legitimate_id) is None
+    assert engine.store.get_memory(foreign_workspace_id) is not None
+    assert engine.store.get_memory(foreign_repo_id) is not None
+
+
 def test_secure_erase_deletes_transitive_successors_from_external_vector_index():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")
