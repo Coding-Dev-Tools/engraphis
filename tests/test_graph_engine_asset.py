@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -2928,7 +2928,7 @@ def test_dense_system_admission_assigns_clear_carrier_lanes_without_warping_loca
     """505 stacked systems receive one collision-free carrier admission, not live packing."""
     report = _run_node(
         """
-        const SYSTEMS = 84, PLANETS = 5, GAP = 8;
+        const SYSTEMS = 84, PLANETS = 5, GAP = 4;
         const nodes = [{ id: 'custom-central-mass', anchor_role: 'global', community_id: 'core',
           gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }];
         for (let system = 0; system < SYSTEMS; system++) {
@@ -2975,7 +2975,7 @@ def test_dense_system_admission_assigns_clear_carrier_lanes_without_warping_loca
           .map(node => [node.x, node.y, node.vx, node.vy]);
         const admissionStart = performance.now();
         const stats = I.establishGalaxyCarrierLanes(nodes, {
-          blackHoleExclusionPadding: 2.5, gap: GAP, layoutSeed: 7103,
+          blackHoleExclusionPadding: 2.5, layoutSeed: 7103,
         });
         const admissionMilliseconds = performance.now() - admissionStart;
         const after = localFrames(), final = metrics();
@@ -8956,7 +8956,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-jitter-stable-lanes-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
