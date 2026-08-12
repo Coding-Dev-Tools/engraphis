@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -948,6 +948,72 @@ def test_orbital_speed_scales_rotation_and_slightly_lifts_local_orbit_radius() -
     assert report["globalSpeeds"][0] < report["globalSpeeds"][1] < report["globalSpeeds"][2]
     assert report["live"][0]["global"] < report["live"][1]["global"] < report["live"][2]["global"]
     assert report["live"][0]["local"] < report["live"][1]["local"] < report["live"][2]["local"]
+
+
+@requires_node
+def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 8, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const phaseDelta = (from, to) => Math.atan2(
+          Math.sin(to - from), Math.cos(to - from));
+        const kinematicTrial = orbitalSpeed => {
+          const nodes = fixture();
+          let systemTravel = 0, localTravel = 0;
+          for (let step = 0; step < 24; step += 1) {
+            const beforeSystem = Math.atan2(nodes[1].y, nodes[1].x);
+            const beforeLocal = Math.atan2(nodes[2].y - nodes[1].y,
+              nodes[2].x - nodes[1].x);
+            I.advanceGalaxyKinematicOrbits(nodes, {
+              gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+              orbitalSpeed, layoutSeed: 19, timestep: .032,
+            });
+            systemTravel += Math.abs(phaseDelta(beforeSystem,
+              Math.atan2(nodes[1].y, nodes[1].x)));
+            localTravel += Math.abs(phaseDelta(beforeLocal,
+              Math.atan2(nodes[2].y - nodes[1].y, nodes[2].x - nodes[1].x)));
+          }
+          return { systemTravel, localTravel };
+        };
+        const liveCarrierTrial = orbitalSpeed => {
+          const nodes = fixture();
+          Object.defineProperty(nodes[1], '__galaxyCarrierLaneRadius', {
+            value: 120, writable: true, configurable: true, enumerable: false,
+          });
+          Object.defineProperty(nodes[1], '__galaxyCarrierLaneAngle', {
+            value: 0, writable: true, configurable: true, enumerable: false,
+          });
+          I.supportGalaxyCarrierOrbits(nodes, {
+            gravity: 48, softening: 32, centralSoftening: 40,
+            orbitalSpeed, layoutSeed: 19, timestep: .032,
+          });
+          return Math.abs(Math.atan2(nodes[1].y, nodes[1].x));
+        };
+        const slowKinematic = kinematicTrial(0);
+        const fastKinematic = kinematicTrial(120);
+        const slowCarrier = liveCarrierTrial(0);
+        const fastCarrier = liveCarrierTrial(120);
+        emit({ slowKinematic, fastKinematic, slowCarrier, fastCarrier,
+          kinematicSystemRatio: fastKinematic.systemTravel / slowKinematic.systemTravel,
+          kinematicLocalRatio: fastKinematic.localTravel / slowKinematic.localTravel,
+          carrierRatio: fastCarrier / slowCarrier });
+        """
+    )
+    assert report["slowKinematic"]["systemTravel"] > 0
+    assert report["slowKinematic"]["localTravel"] > 0
+    assert report["kinematicSystemRatio"] == pytest.approx(3, rel=0.02)
+    assert report["kinematicLocalRatio"] == pytest.approx(3, rel=0.02)
+    assert report["slowCarrier"] > 0
+    assert report["carrierRatio"] == pytest.approx(3, rel=0.02)
 
 
 @requires_node
@@ -8809,7 +8875,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
@@ -9817,4 +9883,4 @@ def test_graph_engine_is_syntactically_valid_when_node_is_installed() -> None:
         text=True,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.retu

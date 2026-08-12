@@ -971,9 +971,11 @@
           return;
         }
         repair.push(satellite);
+        const unitX = dx / currentRadius, unitY = dy / currentRadius;
+        const tangentX = -unitY * direction, tangentY = unitX * direction;
         desiredVelocity.set(satellite, {
-          vx: anchorVx - dy * omega * direction,
-          vy: anchorVy + dx * omega * direction,
+          vx: anchorVx + tangentX * targetTangent,
+          vy: anchorVy + tangentY * targetTangent,
         });
       });
       if (!repair.length) return;
@@ -2427,7 +2429,8 @@
           / 0x100000000 * Math.PI * 2;
       }
       const omega = Math.min(angularFrequency(orbit.radius),
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT / Math.max(1e-6, orbit.radius));
+        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed
+          / Math.max(1e-6, orbit.radius));
       orbit.angle += direction * omega * timestep;
       const targetX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
       const targetY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
@@ -2502,7 +2505,8 @@
         });
       }
       const omega = Math.min(angularFrequency(orbit.radius),
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT / Math.max(1e-6, orbit.radius));
+        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed
+          / Math.max(1e-6, orbit.radius));
       orbit.angle += direction * omega * timestep;
       const speed = omega * orbit.radius;
       moveNode(node, anchor.x + Math.cos(orbit.angle) * orbit.radius,
@@ -4324,6 +4328,7 @@
      black-hole satellites and receive the same support one body at a time. */
   function supportGalaxyCarrierOrbits(nodes, options) {
     const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const field = galaxyBlackHoleField(bodies, opts);
@@ -4354,7 +4359,8 @@
         field.coreMass / coreDenominator
         + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
       )));
-      return Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT, omega * radius);
+      return Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed,
+        omega * radius * orbitalSpeed);
     };
     const coreCircularSpeedAt = radius => {
       const localGravityMultiplier = galaxyLocalGravityMultiplier(anchor, opts);
@@ -4367,8 +4373,8 @@
           * radius / denominator : 0;
       const acceleration = Math.min(defaultGalaxySystemAccelerationCap(anchor, opts.gravity)
         * Math.max(0.25, localGravityMultiplier), rawAcceleration);
-      return Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-        Math.sqrt(Math.max(0, acceleration * radius)));
+      return Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed,
+        Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
     };
     const support = (group, carrier, targetSpeed, core) => {
       let dx = carrier.x - anchor.x, dy = carrier.y - anchor.y;
