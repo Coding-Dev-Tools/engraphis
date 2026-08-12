@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("fastapi", reason="full-stack extra not installed")
+
 
 @pytest.fixture(autouse=True)
 def _clean_hosted_env(monkeypatch):
