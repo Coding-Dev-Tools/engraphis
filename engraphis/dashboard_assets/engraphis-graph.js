@@ -4575,7 +4575,7 @@
        convergence contracts them back through one another.  Black-hole gravity still owns the
        radial orbit; this disables only the artificial per-slice carrier teleport. */
     const convergenceAnchor = opts.inwardConvergence === true
-      && opts.includeSystemPacking !== true ? galaxyGlobalAnchor(bodies) : null;
+      ? galaxyGlobalAnchor(bodies) : null;
     const initialRadii = convergenceAnchor ? new Map(
       [...precomputedCenters.entries()].map(([id, center]) => [id, {
         radius: Math.hypot(center.x - convergenceAnchor.x,
@@ -7002,7 +7002,10 @@
            pressure active at the same time double-corrects dense contacts and produces the
            visible jitter/reheating that rigid carrier translation is meant to eliminate. */
         crossCommunitySeparationStrength: 0,
-        includeSystemPacking: true,
+        /* A pointer-owned source must be the only moving layout authority. Re-packing every
+           other complete envelope during a drag can move an unrelated system sideways or away
+           from the dragged mass, masking the bounded gravitational follower field. */
+        includeSystemPacking: !activeDragNode,
         systemPackingGap: GALAXY_SYSTEM_PACKING_GAP,
         systemPackingStrength: GALAXY_SYSTEM_PACKING_STRENGTH,
         systemPackingMaxCorrection: GALAXY_SYSTEM_PACKING_MAX_CORRECTION,
@@ -7040,7 +7043,7 @@
            frame is split into several steps. */
         /* Black-hole gravity advances the carrier orbit continuously. The retired monotone
            inward teleport conflicts with complete-envelope packing and re-stacks the disk. */
-        inwardConvergence: false,
+        inwardConvergence: true,
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
         velocityDecay: GALAXY_VELOCITY_DECAY
           * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
