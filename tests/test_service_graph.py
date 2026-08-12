@@ -391,6 +391,54 @@ def test_graph_scene_history_scopes_supports_to_requested_repo():
         svc.close()
 
 
+def test_complete_history_marks_closed_support_connectors_as_ghosts():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        svc.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+            "VALUES (?, ?, ?, 'concept', 0)",
+            [("history-live-source", wid, "History Live Source"),
+             ("history-live-target", wid, "History Live Target")],
+        )
+        live_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_live", content="current evidence", workspace_id=wid,
+            scope=Scope.WORKSPACE, valid_from=0.0, ingested_at=0.0,
+        ))
+        closed_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_closed", content="closed evidence", workspace_id=wid,
+            scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0, ingested_at=0.0,
+        ))
+        edge_id = svc.store.upsert_edge(Edge(
+            id="history-live-edge", src="history-live-source", dst="history-live-target",
+            relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
+        ))
+        svc.store.add_edge_support(edge_id, {"memory_id": live_memory})
+        svc.store.add_edge_support(edge_id, {"memory_id": closed_memory})
+        svc.store.conn.execute(
+            "UPDATE edge_supports SET valid_to=100 WHERE edge_id=? AND memory_id=?",
+            (edge_id, closed_memory),
+        )
+        svc.store.conn.commit()
+
+        scene = svc.graph_scene(
+            workspace="acme", level="complete", as_of=150.0, include_history=True,
+        )
+        evidence = [edge for edge in scene["edges"]
+                    if edge["connector_kind"] == "evidence"]
+        live_evidence = [edge for edge in evidence if edge["source"] == live_memory]
+        closed_evidence = [edge for edge in evidence if edge["source"] == closed_memory]
+        assert live_evidence and all(not edge["ghost"] for edge in live_evidence)
+        assert len(closed_evidence) == 2
+        assert all(edge["ghost"] for edge in closed_evidence)
+        assert all(edge["strength"] == 0 for edge in closed_evidence)
+        assert all(edge["spring_strength"] == 0 for edge in closed_evidence)
+        relation = next(edge for edge in scene["edges"] if edge["id"] == edge_id)
+        assert relation["ghost"] is False
+    finally:
+        svc.close()
+
+
 def test_graph_scene_history_does_not_restore_filtered_support_from_provenance():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     try:
