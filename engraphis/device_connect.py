@@ -788,6 +788,9 @@ def connect(token: object, *, control_url: Optional[str] = None,
     Returns the redacted summary -- it is safe to print.  Raises
     :class:`DeviceConnectError` for every failure, with copy the customer can act on and
     never containing the token.  Nothing is written unless the exchange succeeded.
+
+    In local mode (no hosted env vars), connecting is refused to prevent accidental
+    org joins from a pure-local installation.
     """
 
     # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
