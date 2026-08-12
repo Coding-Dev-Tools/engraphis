@@ -81,6 +81,7 @@ from engraphis.core.store import (
     Store,
     TOMBSTONE_NEVER_EXPORT,
     TOMBSTONE_REMOTE_ERASURE,
+    _is_memory_database_path,
     now_ts,
 )
 
@@ -1881,10 +1882,7 @@ class SyncEngine:
         ``commit=False`` leaves the transaction open for the caller's batch (apply_bundle)."""
         quarantined = metadata_is_quarantined(rec.metadata)
         external_index_action = None
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         embedder = self.embedder
         rebuild_target = (
             self.store.embedding_rebuild_target() if persistent_store else None

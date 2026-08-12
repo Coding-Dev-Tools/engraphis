@@ -68,7 +68,12 @@ from engraphis.core.resolve import (
     resolve,
 )
 from engraphis.core.secrets import reject_secrets
-from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.store import (
+    Store,
+    _is_memory_database_path,
+    memory_matches_filter,
+    now_ts,
+)
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 
@@ -918,10 +923,7 @@ class MemoryEngine:
         # pending evidence is stored passively and cannot reinforce or supersede it.
         trusted_write = prompt_eligible(provenance, write_metadata)
         text = f"{title}\n{content}" if title else content
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if not poisoning.quarantined and persistent_store:
             if not self.embedding_space:
                 raise RuntimeError(
@@ -2383,10 +2385,7 @@ class MemoryEngine:
         directly from ``Store.iter_vectors(..., include_invalid=True)`` instead.
         """
         semantic_ready = bool(getattr(self.embedder, "supports_semantic_search", False))
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if semantic_ready and persistent_store:
             # History helpers bypass RecallEngine's readiness gate and read the
             # portable vector mirror directly; never compare a query against a
