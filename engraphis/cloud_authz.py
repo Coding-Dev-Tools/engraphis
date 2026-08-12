@@ -1,12 +1,12 @@
 """Client-side interpretation of Engraphis Cloud authorization denials.
 
 The control plane returns structured JSON bodies on 401/402/403 with a
-``reason`` field. This module maps those reasons to user-facing messages
-and UI actions (e.g. showing an upgrade prompt). All actual authorization
+``reason`` field.  This module maps those reasons to user-facing messages
+and UI actions (e.g. showing an upgrade prompt).  All actual authorization
 decisions are made server-side; this module only translates the verdict for
 the local dashboard's presentation layer.
 
-Never trust these values for access control. They are UX hints derived from
+Never trust these values for access control.  They are UX hints derived from
 an authoritative server response that has already been validated by
 ``cloud_session`` and ``cloud_features``.
 """
@@ -70,14 +70,20 @@ def interpret_denial(
 ) -> dict[str, Any]:
     """Translate a cloud denial into a dashboard-friendly structure.
 
-    Returns ``message``, ``reason``, ``upgrade_url``, and ``retryable`` fields.
-    Never raises; malformed or unexpected inputs degrade to a generic denial.
+    Returns a dict with:
+    - ``message``: human-readable explanation
+    - ``reason``: machine-readable reason code (or ``"unknown"``)
+    - ``upgrade_url``: billing URL when applicable, else ``None``
+    - ``retryable``: whether the caller should retry (only for stale tokens)
+
+    Never raises.  Malformed or unexpected inputs degrade to a generic denial.
     """
     if not isinstance(body, dict):
         return _generic_denial(status_code)
 
     reason = str(body.get("reason") or "").strip()
     if not reason:
+        # Fall back to legacy string-detail format.
         detail = body.get("detail") or body.get("error") or ""
         if isinstance(detail, dict):
             reason = str(detail.get("reason") or "")
@@ -98,6 +104,7 @@ def interpret_denial(
         "upgrade_url": None,
         "retryable": reason == REASON_TOKEN_STALE,
     }
+    # Prefer the server-provided upgrade_url; fall back to the known billing path.
     upgrade_url = body.get("upgrade_url")
     if upgrade_url and isinstance(upgrade_url, str):
         result["upgrade_url"] = upgrade_url
@@ -107,7 +114,7 @@ def interpret_denial(
 
 
 def _generic_denial(status_code: int) -> dict[str, Any]:
-    """Return a safe fallback for an unrecognized or malformed denial."""
+    """Fallback for unrecognized or malformed denial responses."""
     if status_code == 402:
         message = "A paid subscription is required for this feature."
     elif status_code == 401:
@@ -123,5 +130,9 @@ def _generic_denial(status_code: int) -> dict[str, Any]:
 
 
 def is_authoritative_denial(status_code: int) -> bool:
-    """Return whether *status_code* is a definitive cloud authorization verdict."""
+    """Return whether *status_code* represents a definitive cloud authorization verdict.
+
+    These statuses settle the local entitlement cache immediately rather than
+    being treated as transient failures.
+    """
     return status_code in {401, 402, 403}

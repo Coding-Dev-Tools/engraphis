@@ -1025,12 +1025,12 @@ def deployment_mode() -> str:
     """Return the current deployment mode: ``"local"`` or ``"hosted"``.
 
     Local mode is the default and activates when none of the hosted/cloud env vars
-    are set. Hosted mode activates when at least one hosted env var is present, or
-    when ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
+    are set.  Hosted mode activates when at least one hosted env var is present,
+    or when ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
 
-    This function is the single authority for mode detection. Code that needs to
-    distinguish local from hosted installations must call it rather than checking
-    environment variables directly.
+    This function is the single authority for mode detection.  All code that needs
+    to distinguish local from hosted installations MUST call this function rather
+    than checking env vars directly.
     """
     hosted_override = os.environ.get("ENGRAPHIS_HOSTED_MODE", "").strip().lower()
     if hosted_override in ("1", "true", "yes", "on"):
@@ -1044,7 +1044,7 @@ def deployment_mode() -> str:
 
 
 def is_local_mode() -> bool:
-    """Return True when the installation is in pure local mode."""
+    """Return True when the installation is in pure local mode (no hosted features)."""
     return deployment_mode() == "local"
 
 
