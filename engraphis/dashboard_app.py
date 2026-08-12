@@ -463,13 +463,14 @@ def create_app() -> FastAPI:
         from engraphis.config import deployment_mode, is_local_mode
         mode = deployment_mode()
         local = is_local_mode()
+        cloud_url = "" if local else licensing.upgrade_url("team")
         return {
             "enabled": bool(settings.api_token),
             "mode": "local-token" if settings.api_token else "open",
             "deployment_mode": mode,
             "user": None,
             "hosted_team": not local,
-            "cloud_url": "" if local else licensing.upgrade_url("team"),
+            "cloud_url": cloud_url,
             "local_invitations": local,
         }
 
