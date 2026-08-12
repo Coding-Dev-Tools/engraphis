@@ -60,11 +60,14 @@ def _mem_ids(svc, name):
         "SELECT id FROM memories WHERE workspace_id=?", (wid,))}
 
 
-def _import_one_document(svc, workspace: str, *, source_id: str = "d" * 64) -> dict:
+def _import_one_document(
+    svc, workspace: str, *, source_id: str = "d" * 64,
+    content: bytes = b"# Imported note\nThis source must remain resumable.\n",
+) -> dict:
     workspace_id = svc.store.get_or_create_workspace(workspace)
     scan = DocumentScan(root_path="", source_id=source_id)
     scan.documents.append(parse_document(
-        b"# Imported note\nThis source must remain resumable.\n", "notes.md",
+        content, "notes.md",
     ))
     return DocumentImporter(svc).import_scan(
         scan, workspace_id=workspace_id, repo_id=None, session_id=None,
@@ -734,6 +737,44 @@ def test_merge_invalidates_displaced_duplicate_source_memory(
         "SELECT COUNT(*) FROM audit WHERE target=? AND action='invalidate'",
         (source_item["memory_id"] if displaced == "source" else target_item["memory_id"],),
     ).fetchone()[0] == 1
+
+
+def test_merge_invalidates_duplicate_source_memory_when_content_differs():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(
+        svc, "source", content=b"# Source note\nThe source snapshot.\n",
+    )
+    target_report = _import_one_document(
+        svc, "target", content=b"# Target note\nThe target snapshot.\n",
+    )
+    c = svc.store.conn
+    source_memory_id = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()[0]
+    target_memory_id = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()[0]
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    source_memory = svc.store.get_memory(source_memory_id)
+    target_memory = svc.store.get_memory(target_memory_id)
+    assert source_memory is not None and target_memory is not None
+    assert source_memory.valid_to is not None
+    assert target_memory.valid_to is None
 
 
 def test_merge_rewrites_rehomed_source_memory_provenance_for_disjoint_paths():
