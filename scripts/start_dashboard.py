@@ -44,6 +44,22 @@ def _embed_model_from_environment() -> str:
     return _DEFAULT_EMBED_MODEL if configured is None else configured.strip()
 
 
+def _apply_runtime_settings(config_module, *, host: str, port: int) -> None:
+    """Keep the imported Settings snapshot aligned with launcher overrides.
+
+    ``dashboard_app`` imports the shared Settings instance, so update that object in
+    place after argparse resolves ``--host``/``--port``. Replacing the module global
+    would leave already-imported modules holding the stale snapshot, while leaving it
+    untouched makes CORS continue to allow the pre-override loopback port.
+    """
+    runtime_settings = config_module.settings
+    runtime_settings.host = host
+    runtime_settings.port = port
+    runtime_settings.cors_origins = config_module._parse_origins(
+        os.environ.get("ENGRAPHIS_CORS_ORIGINS", ""), port
+    )
+
+
 def _run_shortcut_install(silent: bool = False, icon: str = "") -> None:
     cmd = [sys.executable, "-m", "scripts.install_shortcuts"]
     if silent:
@@ -246,6 +262,7 @@ def main(argv=None) -> None:
     os.environ["ENGRAPHIS_EMBED_MODEL"] = _embed_model_from_environment()
     os.environ["ENGRAPHIS_HOST"] = args.host
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
+    _apply_runtime_settings(_config, host=args.host, port=args.port)
 
     try:
         from engraphis import __version__ as _engraphis_version
