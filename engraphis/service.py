@@ -9831,9 +9831,17 @@ class MemoryService:
             support_conditions = (
                 "relation.workspace_id=? AND relation.{endpoint}=target.id "
                 "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
-                "AND relation.valid_to IS NOT NULL AND relation.valid_to<=? "
+                "AND ("
+                "(relation.valid_to IS NOT NULL AND relation.valid_to<=? "
                 "AND (relation.valid_to_recorded_at IS NULL "
-                "OR relation.valid_to_recorded_at<=?) "
+                "OR relation.valid_to_recorded_at<=?)) "
+                "OR (support.valid_to IS NOT NULL AND support.valid_to<=? "
+                "AND (support.valid_to_recorded_at IS NULL "
+                "OR support.valid_to_recorded_at<=?)) "
+                "OR (memory.valid_to IS NOT NULL AND memory.valid_to<=? "
+                "AND (memory.valid_to_recorded_at IS NULL "
+                "OR memory.valid_to_recorded_at<=?))"
+                ") "
                 "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
                 "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
                 "AND (support.valid_from IS NULL OR support.valid_from<=?) "
@@ -9846,7 +9854,8 @@ class MemoryService:
                 "AND COALESCE(memory.scope, 'workspace')!='session'"
             )
             branch_params = (
-                wid, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                wid, anchor, anchor, known_anchor, anchor, known_anchor,
+                anchor, known_anchor, known_anchor, known_anchor,
                 anchor, known_anchor, known_anchor,
                 wid, anchor, known_anchor, known_anchor,
             )
@@ -9892,7 +9901,8 @@ class MemoryService:
             )
             if include_history:
                 branch_params = (
-                    wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                    wid, repo_id, anchor, anchor, known_anchor, anchor, known_anchor,
+                    anchor, known_anchor, known_anchor, known_anchor,
                     anchor, known_anchor, known_anchor,
                     wid, repo_id, anchor, known_anchor, known_anchor,
                 )
