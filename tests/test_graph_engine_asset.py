@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -8956,7 +8956,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-denser-carrier-lanes-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
@@ -9807,7 +9807,7 @@ def test_classic_graph_overview_uses_ledger_scope_and_limit() -> None:
         source = path.read_text(encoding="utf-8")
         load = source[source.index("async function loadLegacyGraph("):source.index("function graphUpdateAllNodesControl(")]
         assert "showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked" in load
-        assert "graphLimit=GRAPH_FULL?20000:320" in load
+        assert "graphLimit=GRAPH_FULL?40000:320" in load
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in load
         assert "+'&limit='+graphLimit+graphScope" in load
 

@@ -7,6 +7,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
+  with matching evidence, connector, payload, and full-loader ceilings; live-render safety
+  thresholds remain unchanged so oversized scenes stay on the static/kinematic path.
+
 - Galaxy admission now uses a tighter default carrier gap and calibrated orbital slack, keeping
   more complete solar systems in the black-hole interior without sacrificing painted clearance.
 
