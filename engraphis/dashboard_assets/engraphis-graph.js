@@ -225,6 +225,17 @@
   const GALAXY_MUTUAL_SYSTEM_SOFTENING = 80;
   const GALAXY_DRAG_POSITION_MAX_PULL = 2;
   const GALAXY_ORBITAL_SEPARATION_MULTIPLIER = 2;
+  /* `graph-repel` remains the persisted setting key for saved-view compatibility, but Galaxy
+     presents it as orbital speed. The neutral midpoint (60) preserves the shipped orbit rate. */
+  const GALAXY_ORBITAL_SPEED_MINIMUM = 0.5;
+  const GALAXY_ORBITAL_SPEED_MAXIMUM = 1.5;
+  function galaxyOrbitalSpeedMultiplier(setting) {
+    const raw = Number(setting);
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(120, raw)) : 60;
+    return GALAXY_ORBITAL_SPEED_MINIMUM
+      + (GALAXY_ORBITAL_SPEED_MAXIMUM - GALAXY_ORBITAL_SPEED_MINIMUM) * value / 120;
+  }
+  const GALAXY_ORBITAL_SEPARATION_BASE_SETTING = 60;
   /* Link distance is a physical scale, so doubled sensitivity uses the squared response
      (setting/reference)^2. The UI's 4..80 range spans 1/16x through 25x; the shipped setting
      remains 8 (0.25x). Authored star/planet topology is excluded from this constraint so the
@@ -705,12 +716,25 @@
       value: true, writable: true, configurable: true, enumerable: false,
     });
   }
+  function setGalaxyOrbitSpeed(node, multiplier) {
+    if (!node) return;
+    Object.defineProperty(node, '__galaxyOrbitSpeedMultiplier', {
+      value: multiplier, writable: true, configurable: true, enumerable: false,
+    });
+  }
+  function setGalaxySystemOrbitSpeed(node, multiplier) {
+    if (!node) return;
+    Object.defineProperty(node, '__galaxySystemOrbitSpeedMultiplier', {
+      value: multiplier, writable: true, configurable: true, enumerable: false,
+    });
+  }
   /* Seed once for each node/central-star pairing. The pairing tag is deliberately
      non-enumerable, so scene export remains portable. More importantly, it makes a
      compatibility node that became eligible only after a later reveal (or a changed declared
      star) receive its one circular local seed without re-seeding healthy planets each frame. */
   function seedGalaxyOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
     const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     /* Core-community satellites are local children of the explicit black hole. Admit only
        those that begin inside its painted horizon before taking a star-relative radius sample;
        the generic system seed below then gives them the ordinary BH-relative circular tangent.
@@ -865,7 +889,8 @@
         const inwardAcceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
         const omega = Math.sqrt(Math.max(0, inwardAcceleration / currentRadius));
-        const targetTangent = omega * currentRadius;
+        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+          omega * currentRadius * orbitalSpeed);
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
@@ -874,6 +899,20 @@
         const anchoredHere = previousAnchorId === anchorId;
         const anchorChanged = !!previousAnchorId && !anchoredHere;
         const wasSeeded = wasOrbitSeeded.get(satellite) === true;
+        const previousSpeed = Number(satellite.__galaxyOrbitSpeedMultiplier);
+        const speedKnown = Number.isFinite(previousSpeed);
+        const speedChanged = speedKnown
+          && Math.abs(previousSpeed - orbitalSpeed) > 1e-9;
+        if (wasSeeded && anchoredHere && speedChanged) {
+          const unitX = dx / currentRadius, unitY = dy / currentRadius;
+          const radialSpeed = relativeVx * unitX + relativeVy * unitY;
+          const tangentSpeed = (-unitY * relativeVx + unitX * relativeVy);
+          const tangentDirection = Math.sign(tangentSpeed) || direction;
+          const signedTarget = targetTangent * tangentDirection;
+          satellite.vx = anchorVx + radialSpeed * unitX - unitY * signedTarget;
+          satellite.vy = anchorVy + radialSpeed * unitY + unitX * signedTarget;
+        }
+        setGalaxyOrbitSpeed(satellite, orbitalSpeed);
         /* A preexisting healthy phase only needs its parent tag. Repaired legacy/late nodes
            must be genuinely sub-orbital before we touch them; this one-shot threshold avoids
            resetting a valid eccentric phase on ordinary render calls. */
@@ -883,7 +922,7 @@
            Repair only a truly frozen tagged phase (rather than every merely eccentric orbit),
            while untagged compatibility nodes still use the conservative sub-orbital check. */
         const frozenLocally = Math.abs(tangent) < 1e-8;
-        if (wasSeeded && !anchorChanged
+        if (wasSeeded && speedKnown && !anchorChanged
           && ((anchoredHere && !frozenLocally) || (!previousAnchorId && movingLocally))) {
           setGalaxyOrbitAnchor(satellite, anchor);
           setGalaxyOrbitSeeded(satellite);
@@ -913,6 +952,7 @@
      every local star/planet relative orbit rather than leaving a visibly frozen island. */
   function seedGalaxySystemOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
     const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     /* Compatibility scenes may omit velocity fields on the selected fallback anchor. Give
        every physical body a finite frame velocity before computing system COM tangents; this
        is deliberately not a seed tag, so normal admission/repair policy remains unchanged. */
@@ -952,6 +992,10 @@
       const members = item.center.nodes;
       const carrier = galaxySystemAnchor(members) || members[0];
       const tagged = members.some(node => node.__galaxySystemOrbitSeeded === true);
+      const previousSpeed = Number(carrier.__galaxySystemOrbitSpeedMultiplier);
+      const speedKnown = Number.isFinite(previousSpeed);
+      const speedChanged = speedKnown
+        && Math.abs(previousSpeed - orbitalSpeed) > 1e-9;
       /* The dominant star—not the barycentre altered by its planets' local tangents—is the
          galactic carrier. G_star may change planet speed without changing this G_center orbit;
          translating every member by the star's carrier correction preserves all local relative
@@ -966,7 +1010,7 @@
          per-render carousel while not accepting a nearly frozen cached tag forever. */
       const stalledThreshold = Math.max(0.0025, item.circularSpeed * 0.18);
       const stalled = Math.abs(tangentialSpeed) < stalledThreshold;
-      if (tagged && !stalled) {
+      if (tagged && (!speedKnown || !speedChanged) && !stalled) {
         members.forEach(node => {
           node.vx = Number.isFinite(node.vx) ? node.vx : 0;
           node.vy = Number.isFinite(node.vy) ? node.vy : 0;
@@ -980,11 +1024,14 @@
       }
       const tangentFactor = 0.92
         + (seededHash(layoutSeed, 'system-speed:' + item.center.id) / 0x100000000) * 0.12;
+      /* Start every system on a gentle settling spiral. A symmetric +/- phase can launch an
+         outer system away from the well before gravity turns it around; a bounded inward kick
+         gives the black-hole centre first claim on motion while preserving tangential rotation. */
       /* Start on the collision-free lane itself. A compulsory inward kick contradicts the
          circular seed and makes every otherwise healthy system spiral into its neighbours. */
       const radialFactor = 0;
-      const speed = Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT,
-        item.circularSpeed * tangentFactor);
+      const speed = Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed,
+        item.circularSpeed * tangentFactor * orbitalSpeed);
       const kick = {
         vx: tangentX * speed + outwardX * speed * radialFactor,
         vy: tangentY * speed + outwardY * speed * radialFactor,
@@ -998,6 +1045,7 @@
       members.forEach(node => {
         node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + deltaX;
         node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + deltaY;
+        setGalaxySystemOrbitSpeed(node, orbitalSpeed);
         Object.defineProperty(node, '__galaxySystemOrbitSeeded', {
           value: true, writable: true, configurable: true, enumerable: false
         });
@@ -2160,6 +2208,7 @@
      black-hole sweep without feeding any energy back into the evidence simulation. */
   function integrateGalaxyGhostOrbits(nodes, options) {
     const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const ghosts = (nodes || []).filter(node => node && node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -2201,8 +2250,8 @@
         field.coreMass / coreDenominator
         + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
       );
-      const omega = Math.min(Math.sqrt(Math.max(0, omegaSquared)),
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT / Math.max(1e-6, radius));
+      const omega = Math.min(Math.sqrt(Math.max(0, omegaSquared)) * orbitalSpeed,
+        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed / Math.max(1e-6, radius));
       angle += direction * omega * timestep;
       node.x = anchor.x + Math.cos(angle) * radius;
       node.y = anchor.y + Math.sin(angle) * radius;
@@ -2224,6 +2273,7 @@
      kinematic only—no mass, contact, link, or recoil is introduced into the evidence model. */
   function advanceGalaxyKinematicOrbits(nodes, options) {
     const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const empty = { bodies: bodies.length, systems: 0, satellites: 0,
@@ -2264,7 +2314,7 @@
       return Math.sqrt(Math.max(0, field.gravitationalConstant * (
         field.coreMass / coreDenominator
         + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
-      )));
+      ))) * orbitalSpeed;
     };
     const boundedRadius = (radius, extent) => {
       const inner = nodeRadius(anchor) + Math.max(0, extent)
@@ -2333,8 +2383,9 @@
         const localAcceleration = Math.min(
           defaultGalaxySystemAccelerationCap(star, opts.gravity)
             * Math.max(0.25, localGravityMultiplier), rawLocalAcceleration);
-        const localOmega = Math.min(Math.sqrt(Math.max(0, localAcceleration / localRadius)),
-          GALAXY_LOCAL_RELATIVE_SPEED_LIMIT / localRadius);
+        const localOmega = Math.min(
+          Math.sqrt(Math.max(0, localAcceleration / localRadius)) * orbitalSpeed,
+          GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
         local.angle += local.direction * localOmega * timestep;
         const localSpeed = localOmega * localRadius;
         localTargets.push({ node,
@@ -4790,6 +4841,97 @@
      A caller can substep at a stable wall-clock cadence without ever scaling force by D3
      alpha.  Collision impulses happen after the second kick and the damping is a property
      of this integrator, not a side effect of D3's simulation. */
+  /* Keep the slider responsive after gravity has integrated a few frames. Seeding alone changes
+     the initial tangent, but the natural field would otherwise pull every orbit back toward its
+     unslaved angular rate. This controller changes only tangential velocity: radial gravity,
+     local geometry, and the cached outer envelope remain independent of the speed control. */
+  function applyGalaxyOrbitalSpeedControl(nodes, options) {
+    const opts = options || {};
+    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const field = galaxyBlackHoleField(bodies, opts);
+    const globalAnchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
+    const stats = { systems: 0, localSatellites: 0, multiplier: orbitalSpeed };
+    if (!globalAnchor || !(field.gravitationalConstant > 0)) return stats;
+    const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
+    const centralSoftening = Math.max(0.1,
+      Number(opts.centralSoftening) || Number(opts.softening) || 40);
+    const globalTargetSpeed = radius => {
+      const coreDenominator = Math.pow(radius * radius + centralSoftening * centralSoftening, 1.5);
+      const haloDenominator = Math.pow(radius * radius + field.haloScale * field.haloScale, 1.5);
+      const omega = Math.sqrt(Math.max(0, field.gravitationalConstant * (
+        field.coreMass / coreDenominator
+        + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
+      )));
+      return Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed,
+        omega * radius * orbitalSpeed);
+    };
+    const supportCarrier = (members, carrier) => {
+      if (!carrier || carrier === globalAnchor) return;
+      const dx = carrier.x - globalAnchor.x, dy = carrier.y - globalAnchor.y;
+      const radius = Math.hypot(dx, dy);
+      if (!(radius > 1e-9)) return;
+      const relativeVx = (Number.isFinite(carrier.vx) ? carrier.vx : 0)
+        - (Number.isFinite(globalAnchor.vx) ? globalAnchor.vx : 0);
+      const relativeVy = (Number.isFinite(carrier.vy) ? carrier.vy : 0)
+        - (Number.isFinite(globalAnchor.vy) ? globalAnchor.vy : 0);
+      const unitX = dx / radius, unitY = dy / radius;
+      const tangentX = -unitY, tangentY = unitX;
+      const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+      const sign = Math.sign(currentTangent) || direction;
+      const desiredTangent = globalTargetSpeed(radius) * sign;
+      const delta = desiredTangent - currentTangent;
+      members.forEach(node => {
+        if (node.id === opts.fixedNodeId) return;
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
+      });
+      stats.systems++;
+    };
+    const centers = communityCenters(bodies);
+    centers.forEach(center => {
+      const members = center.nodes;
+      const carrier = galaxySystemAnchor(members) || members[0];
+      if (center.id !== communityKey(globalAnchor)) supportCarrier(members, carrier);
+      const localAnchor = carrier && carrier.anchor_role === 'global' ? globalAnchor : carrier;
+      if (!localAnchor) return;
+      const localGravityMultiplier = galaxyLocalGravityMultiplier(localAnchor, opts);
+      const localGravity = galaxySystemGravityConstant(localAnchor, opts.gravity)
+        * localGravityMultiplier;
+      const localAccelerationCap = defaultGalaxySystemAccelerationCap(localAnchor, opts.gravity)
+        * Math.max(0.25, localGravityMultiplier);
+      const anchorMass = finitePositive(localAnchor.gravity_mass, 1, 1000);
+      members.forEach(node => {
+        if (node === localAnchor || node.id === opts.fixedNodeId) return;
+        const dx = node.x - localAnchor.x, dy = node.y - localAnchor.y;
+        const radius = Math.hypot(dx, dy);
+        if (!(radius > 1e-9)) return;
+        const denominator = Math.pow(radius * radius
+          + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
+        const rawAcceleration = denominator > 0
+          ? localGravity * anchorMass * radius / denominator : 0;
+        const acceleration = Math.min(localAccelerationCap, rawAcceleration);
+        const baseSpeed = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+          Math.sqrt(Math.max(0, acceleration * radius)));
+        const unitX = dx / radius, unitY = dy / radius;
+        const tangentX = -unitY, tangentY = unitX;
+        const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
+          - (Number.isFinite(localAnchor.vx) ? localAnchor.vx : 0);
+        const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
+          - (Number.isFinite(localAnchor.vy) ? localAnchor.vy : 0);
+        const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+        const sign = Math.sign(currentTangent)
+          || ((seededHash(opts.layoutSeed, 'system:' + String(center.id)) & 1) ? 1 : -1);
+        const delta = baseSpeed * orbitalSpeed * sign - currentTangent;
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
+        stats.localSatellites++;
+      });
+    });
+    return stats;
+  }
+
   function integrateGalaxyLeapfrog(nodes, links, bridges, options) {
     // kick-drift-kick: sample at x(t), drift from the half kick, then close at x(t + dt).
     /* Boundary projections are allowed to converge over several fixed slices, but one slice
@@ -7235,10 +7377,15 @@
 
     function galaxyIntegratorOptions() {
       const orbitScale = galaxyRelationOrbitScale(state.settings.link);
-      const orbitalSeparationPadding = galaxyOrbitalSeparationPadding(state.settings.repel);
-      const orbitalSeparationStrength = galaxyOrbitalSeparationStrength(state.settings.repel);
+      const orbitalSpeed = galaxyOrbitalSpeedMultiplier(state.settings.repel);
+      /* The repurposed control owns angular velocity; keep the physical contact cushion neutral. */
+      const orbitalSeparationPadding = galaxyOrbitalSeparationPadding(
+        GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
+      const orbitalSeparationStrength = galaxyOrbitalSeparationStrength(
+        GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
       return {
         fixedNodeId: activeDragNode ? activeDragNode.id : null,
+        orbitalSpeed: state.settings.repel,
         layoutSeed: raw.meta && raw.meta.layout_seed !== undefined ? raw.meta.layout_seed : 0,
         dragSource: activeDragNode,
         dragFollowers,
@@ -7385,6 +7532,7 @@
 
     function physicsDiagnostics() {
       const data = fg.graphData() || {};
+      const orbitalSpeed = galaxyOrbitalSpeedMultiplier(state.settings.repel);
       const diagnosticAnchor = galaxyGlobalAnchor(data.nodes || []);
       return Object.assign(galaxyMotionDiagnostics(data.nodes || []), {
         mode: state.settings.mode,
@@ -7468,6 +7616,9 @@
           GALAXY_RELATION_CONSTRAINT_RESPONSE_MULTIPLIER,
         relationConstraintMaxCorrection:
           GALAXY_RELATION_CONSTRAINT_MAX_CORRECTION,
+        orbitalSpeedSetting: state.settings.repel,
+        orbitalSpeedMultiplier: orbitalSpeed,
+        /* Compatibility diagnostics retain the old names for saved-view tooling. */
         orbitalSeparationSetting: state.settings.repel,
         orbitalSeparationPadding: galaxyOrbitalSeparationPadding(state.settings.repel),
         orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
@@ -7562,6 +7713,10 @@
               data.nodes || [], data.links || [], raw.community_bridges || [],
               galaxyIntegratorOptions()
             );
+          if (!kinematicFallback) {
+            report.orbitalSpeed = applyGalaxyOrbitalSpeedControl(
+              data.nodes || [], galaxyIntegratorOptions());
+          }
           galaxySteps++;
           if (kinematicFallback) {
             galaxyKinematicSteps++;
@@ -7853,6 +8008,7 @@
             data.nodes, raw.meta && raw.meta.layout_seed,
             state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
             { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+              orbitalSpeed: state.settings.repel,
               gravitationalConstant: state.settings.gravitationalConstant,
               localGravitationalConstant: state.settings.localGravitationalConstant }
           );
@@ -7860,7 +8016,8 @@
             data.nodes, raw.meta && raw.meta.layout_seed,
             state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
             { gravitationalConstant: state.settings.gravitationalConstant,
-              blackHoleMass: state.settings.blackHoleMass }
+              blackHoleMass: state.settings.blackHoleMass,
+              orbitalSpeed: state.settings.repel }
           );
         } else clearPinnedPositions(data);
         /* graphData() may paint synchronously. Enforce the event horizon after every layout
@@ -7924,6 +8081,7 @@
           data.nodes, raw.meta && raw.meta.layout_seed,
           state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
           { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+            orbitalSpeed: state.settings.repel,
             gravitationalConstant: state.settings.gravitationalConstant,
             localGravitationalConstant: state.settings.localGravitationalConstant }
         );
@@ -7931,7 +8089,8 @@
           data.nodes, raw.meta && raw.meta.layout_seed,
           state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
           { gravitationalConstant: state.settings.gravitationalConstant,
-            blackHoleMass: state.settings.blackHoleMass }
+            blackHoleMass: state.settings.blackHoleMass,
+            orbitalSpeed: state.settings.repel }
         );
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
@@ -9102,7 +9261,8 @@
       galaxyStellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       defaultGalaxyStellarAccelerationCap, defaultGalaxySystemAccelerationCap,
       galaxySceneWithinLiveLimit,
-      galaxyRelationOrbitScale,
+      galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier,
+      applyGalaxyOrbitalSpeedControl,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, ensureGalaxyPositions,
       seedGalaxyOrbits, seedGalaxySystemOrbits,
