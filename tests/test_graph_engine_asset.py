@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1061,6 +1061,95 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
     assert report["ratio"] == pytest.approx(3, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "connected"]
     assert report["fast"]["grouped"] == ["black-hole", "connected"]
+
+
+@requires_node
+def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planets() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'community-child', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'community-child', gravity_mass: 8, radius: 5,
+            x: 72, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'community-child',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 88, y: 0, vx: 0, vy: 0 },
+        ];
+        const trial = orbitalSpeed => {
+          const nodes = fixture();
+          I.markGalaxyBlackHoleChildren(nodes, [
+            { source: 'black-hole', target: 'community-child', relation: 'orbits' },
+          ]);
+          I.seedGalaxyOrbits(nodes, 81, 48, 32, false, { orbitalSpeed });
+          let travel = 0;
+          for (let step = 0; step < 30; step += 1) {
+            const before = Math.atan2(nodes[1].y, nodes[1].x);
+            I.supportGalaxyCarrierOrbits(nodes, {
+              gravity: 48, softening: 32, centralSoftening: 40,
+              orbitalSpeed, layoutSeed: 81, timestep: .032,
+            });
+            const after = Math.atan2(nodes[1].y, nodes[1].x);
+            travel += Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+          }
+          return { travel, grouped: I.galaxyOrbitGroups(nodes).get('black-hole'),
+                localDistance: Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y) };
+        };
+        const kinematicTrial = orbitalSpeed => {
+          const nodes = fixture();
+          I.markGalaxyBlackHoleChildren(nodes, [
+            { source: 'black-hole', target: 'community-child', relation: 'orbits' },
+          ]);
+          I.seedGalaxyOrbits(nodes, 81, 48, 32, false, { orbitalSpeed });
+          let travel = 0;
+          for (let step = 0; step < 30; step += 1) {
+            const before = Math.atan2(nodes[1].y, nodes[1].x);
+            I.advanceGalaxyKinematicOrbits(nodes, {
+              gravity: 48, softening: 32, centralSoftening: 40,
+              orbitalSpeed, layoutSeed: 81, timestep: .032,
+            });
+            const after = Math.atan2(nodes[1].y, nodes[1].x);
+            travel += Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+          }
+          return { travel, grouped: I.galaxyOrbitGroups(nodes).get('black-hole'),
+            localDistance: Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y) };
+        };
+        const slow = trial(0), fast = trial(120);
+        const slowKinematic = kinematicTrial(0), fastKinematic = kinematicTrial(120);
+        emit({ slow: { travel: slow.travel,
+          grouped: slow.grouped && slow.grouped.nodes.map(node => node.id),
+          localDistance: slow.localDistance },
+          fast: { travel: fast.travel,
+            grouped: fast.grouped && fast.grouped.nodes.map(node => node.id),
+            localDistance: fast.localDistance },
+          slowKinematic: { travel: slowKinematic.travel,
+            grouped: slowKinematic.grouped && slowKinematic.grouped.nodes.map(node => node.id),
+            localDistance: slowKinematic.localDistance },
+          fastKinematic: { travel: fastKinematic.travel,
+            grouped: fastKinematic.grouped && fastKinematic.grouped.nodes.map(node => node.id),
+            localDistance: fastKinematic.localDistance },
+          ratio: fast.travel / slow.travel,
+          kinematicRatio: fastKinematic.travel / slowKinematic.travel });
+        """
+    )
+    assert report["slow"]["travel"] > 0
+    assert report["fast"]["travel"] > report["slow"]["travel"]
+    assert report["ratio"] == pytest.approx(3, rel=0.03)
+    assert report["slow"]["grouped"] == ["black-hole", "community-child", "planet"]
+    assert report["fast"]["grouped"] == ["black-hole", "community-child", "planet"]
+    assert report["slow"]["localDistance"] > 14
+    # The fast endpoint is allowed to widen the local orbit modestly; it must not detach the
+    # planet from the same moving community system or collapse the local band.
+    assert report["fast"]["localDistance"] > report["slow"]["localDistance"]
+    assert report["fast"]["localDistance"] < 18
+    assert report["slowKinematic"]["travel"] > 0
+    assert report["fastKinematic"]["travel"] > report["slowKinematic"]["travel"]
+    assert report["kinematicRatio"] == pytest.approx(3, rel=0.03)
+    assert report["slowKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
+    assert report["fastKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
+    assert report["fastKinematic"]["localDistance"] > report["slowKinematic"]["localDistance"]
 
 
 @requires_node
@@ -8956,7 +9045,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-graph-capacity-2x-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader

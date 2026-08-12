@@ -568,6 +568,7 @@
     const values = Array.isArray(nodes) ? nodes : [];
     const anchor = galaxyGlobalAnchor(values);
     const connected = new Set();
+    const orbiting = new Set();
     const endpointId = endpoint => endpoint && typeof endpoint === 'object'
       ? endpoint.id : endpoint;
     (Array.isArray(links) ? links : []).forEach(link => {
@@ -575,16 +576,22 @@
       const target = endpointId(link && link.target);
       const anchorId = anchor ? String(anchor.id) : null;
       if (anchorId === null) return;
+      const relationValue = link && link.relation !== undefined
+        ? link.relation : link && link.label;
+      const isOrbitalRelation = String(relationValue || '').trim().toLowerCase()
+        .indexOf('orbit') === 0;
       if (String(source) === anchorId && target !== undefined && target !== null) {
         connected.add(String(target));
+        if (isOrbitalRelation) orbiting.add(String(target));
       } else if (String(target) === anchorId && source !== undefined && source !== null) {
         connected.add(String(source));
+        if (isOrbitalRelation) orbiting.add(String(source));
       }
     });
     values.forEach(node => {
       if (!node || node === anchor) return;
       const isDirectChild = connected.has(String(node.id))
-        && node.anchor_role !== 'community';
+        && (node.anchor_role !== 'community' || orbiting.has(String(node.id)));
       setGalaxyBlackHoleChild(node, isDirectChild);
     });
     return values;
@@ -702,6 +709,8 @@
     const communityAnchors = new Map();
     const globalAnchor = (nodes || []).find(node => node && !node.ghost
       && node.anchor_role === 'global');
+    const byId = new Map((nodes || []).filter(node => node && node.id !== undefined)
+      .map(node => [String(node.id), node]));
     (nodes || []).forEach(node => {
       if (!node || node.ghost
         || (node.anchor_role !== 'global' && node.anchor_role !== 'community')) return;
@@ -718,10 +727,23 @@
       const parent = node.system_anchor_id === undefined || node.system_anchor_id === null
         ? '' : String(node.system_anchor_id);
       const declared = communityAnchors.get(communityKey(node));
-      const key = parent || (node.__galaxyBlackHoleChild === true && globalAnchor
-        ? String(globalAnchor.id) : (node.anchor_role === 'global'
-        || (node.anchor_role === 'community' && !(declared && declared.global))
-        ? String(node.id) : (declared ? declared.id : communityKey(node))));
+      let followsBlackHoleChild = node.__galaxyBlackHoleChild === true;
+      let parentNode = parent ? byId.get(parent) : null;
+      const visited = new Set();
+      while (!followsBlackHoleChild && parentNode && !visited.has(String(parentNode.id))) {
+        visited.add(String(parentNode.id));
+        followsBlackHoleChild = parentNode.__galaxyBlackHoleChild === true;
+        const nextParent = parentNode.system_anchor_id === undefined
+          || parentNode.system_anchor_id === null ? '' : String(parentNode.system_anchor_id);
+        parentNode = nextParent && nextParent !== String(parentNode.id)
+          ? byId.get(nextParent) : null;
+      }
+      const key = followsBlackHoleChild && globalAnchor
+        ? String(globalAnchor.id)
+        : parent || (node.anchor_role === 'global'
+          || (node.anchor_role === 'community' && !(declared && declared.global))
+          ? String(node.id)
+          : (declared ? declared.id : communityKey(node)));
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       let group = groups.get(key);
       if (!group) {
@@ -737,6 +759,9 @@
     return groups;
   }
   function galaxySystemAnchor(members) {
+    const global = (members || []).find(node => node && !node.ghost
+      && node.anchor_role === 'global');
+    if (global) return global;
     const declaredIds = new Set((members || []).map(node => node && node.system_anchor_id)
       .filter(value => value !== undefined && value !== null).map(String));
     return (members || []).slice().sort((left, right) => {
@@ -751,6 +776,35 @@
           - finitePositive(left.gravity_mass, 1, 1000)
         || String(left.id).localeCompare(String(right.id));
     })[0] || null;
+  }
+  /* A community anchor can itself be an explicit black-hole satellite. Keep its declared
+     stellar children in the same central carrier group so support translates the local system
+     together instead of leaving the planet group to orbit its already-detached star. */
+  function galaxyBlackHoleCoreSystems(members, globalAnchor) {
+    const values = (members || []).filter(node => node && node !== globalAnchor);
+    const byId = new Map(values.map(node => [String(node.id), node]));
+    const groups = new Map();
+    values.forEach(node => {
+      let root = node;
+      let current = node;
+      const visited = new Set();
+      while (current && current.system_anchor_id !== undefined
+        && current.system_anchor_id !== null) {
+        const parentId = String(current.system_anchor_id);
+        if (!parentId || parentId === String(current.id)
+          || parentId === String(globalAnchor && globalAnchor.id)
+          || visited.has(parentId)) break;
+        visited.add(parentId);
+        const parent = byId.get(parentId);
+        if (!parent) break;
+        root = parent;
+        current = parent;
+      }
+      const key = String(root.id);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(node);
+    });
+    return [...groups.values()];
   }
   function orderedGalaxySatellites(members, anchor) {
     return (members || []).filter(node => node !== anchor).map(node => {
@@ -4514,12 +4568,14 @@
     const coreKey = String(anchor.id);
     galaxyOrbitGroups(bodies).forEach(center => {
       if (center.id === coreKey) {
-        center.nodes.forEach(node => {
-          if (node === anchor || (fixedNodeId !== null && String(node.id) === fixedNodeId)) return;
+        galaxyBlackHoleCoreSystems(center.nodes, anchor).forEach(group => {
+          const carrier = galaxySystemAnchor(group) || group[0];
+          if (!carrier || (fixedNodeId !== null && group.some(node =>
+            String(node.id) === fixedNodeId))) return;
           stats.eligible++;
           stats.coreEligible++;
-          support([node], node,
-            coreCircularSpeedAt(Math.hypot(node.x - anchor.x, node.y - anchor.y)), true);
+          support(group, carrier,
+            coreCircularSpeedAt(Math.hypot(carrier.x - anchor.x, carrier.y - anchor.y)), true);
         });
         return;
       }

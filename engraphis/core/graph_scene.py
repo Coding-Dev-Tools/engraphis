@@ -28,6 +28,11 @@ GOLDEN_ANGLE = math.pi * (3.0 - math.sqrt(5.0))
 # than merely making the system anchors appear closer.
 GALACTIC_INITIAL_COMPACTNESS = 0.8
 GALACTIC_RADIUS_SCALE = 0.5 * GALACTIC_INITIAL_COMPACTNESS
+# Keep complete solar-system envelopes just outside one another while avoiding the
+# large empty radial bands that made most systems appear beyond the black-hole interior.
+# This matches the dashboard's default painted carrier gap (4 units) as a small
+# proportional envelope allowance instead of adding a blanket 15% radial tax.
+GALAXY_ENVELOPE_CLEARANCE_FACTOR = 1.04
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
     "is", "it", "of", "on", "or", "that", "the", "this", "to", "was", "were",
@@ -517,7 +522,9 @@ def _community_positions(
             maximum_placed_radius = max(maximum_placed_radius, system_radius)
 
         def collides(x: float, y: float, system_radius: float) -> bool:
-            reach = 1.15 * (system_radius + maximum_placed_radius)
+            reach = GALAXY_ENVELOPE_CLEARANCE_FACTOR * (
+                system_radius + maximum_placed_radius
+            )
             cell_x, cell_y = math.floor(x / cell_size), math.floor(y / cell_size)
             cell_reach = max(1, math.ceil(reach / cell_size))
             for grid_x in range(cell_x - cell_reach, cell_x + cell_reach + 1):
@@ -525,7 +532,9 @@ def _community_positions(
                     for other_x, other_y, other_radius in spatial_cells.get(
                         (grid_x, grid_y), ()
                     ):
-                        clearance = 1.15 * (system_radius + other_radius)
+                        clearance = GALAXY_ENVELOPE_CLEARANCE_FACTOR * (
+                            system_radius + other_radius
+                        )
                         if math.hypot(x - other_x, y - other_y) < clearance:
                             return True
             return False
