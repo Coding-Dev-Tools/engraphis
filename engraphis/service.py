@@ -9754,6 +9754,13 @@ class MemoryService:
         # exact world-time snapshot while limiting the graph to what was then known.
         include_relation_history = valid_at is not None
         temporal_requested = valid_at is not None or known_at is not None
+        selected_graph_layers = None
+        selected_layers = None
+        if layers is not None:
+            selected_graph_layers = [
+                _enum(layer, GraphLayer, "layer") for layer in layers
+            ]
+            selected_layers = {layer.value for layer in selected_graph_layers}
 
         def temporal_sql(alias: str, *, history: bool = False
                          ) -> tuple[str, list[float]]:
@@ -9817,12 +9824,24 @@ class MemoryService:
             public_sql, public_params = public_edge_sql(
                 "relation", history=include_relation_history
             )
+            layer_sql = ""
+            layer_params: list[Any] = []
+            if connected_only and selected_layers is not None:
+                if not selected_layers:
+                    layer_sql = " AND 0"
+                else:
+                    marks = ",".join("?" for _ in selected_layers)
+                    layer_sql = (
+                        " AND COALESCE(relation.layer, 'semantic') IN ("
+                        f"{marks})"
+                    )
+                    layer_params.extend(sorted(selected_layers))
             sql = f"""
                 WITH edge_visibility AS (
                     SELECT relation.id, relation.src, relation.dst
                     FROM edges relation
                     WHERE relation.workspace_id=? AND {relation_sql}
-                      AND {public_sql}
+                      AND {public_sql}{layer_sql}
                 ), all_endpoint AS (
                     SELECT src AS entity_id FROM edges WHERE workspace_id=?
                     UNION ALL
@@ -9851,7 +9870,7 @@ class MemoryService:
                        OR COALESCE(visible.degree, 0)>0)
             """
             params: list[Any] = [
-                wid, *relation_params, *public_params, wid, wid,
+                wid, *relation_params, *public_params, *layer_params, wid, wid,
                 wid, system_anchor,
             ]
             if connected_only:
@@ -9883,13 +9902,6 @@ class MemoryService:
             )
         entity_rows = [dict(row) for row in ents]
         node_ids = {row["id"] for row in entity_rows}
-        selected_graph_layers = None
-        selected_layers = None
-        if layers is not None:
-            selected_graph_layers = [
-                _enum(layer, GraphLayer, "layer") for layer in layers
-            ]
-            selected_layers = {layer.value for layer in selected_graph_layers}
         # Nodes are capped at ``limit``; edges need their own cap or a large workspace
         # graph / indexed repo lets the lowest-privilege caller pull an unbounded
         # payload. The SQL fetches are limited too, so server-side work stays bounded.
