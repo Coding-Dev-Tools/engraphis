@@ -145,18 +145,40 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
     if overlap > 0 and len(chunks) > 1:
         # Clamp overlap so overlapped chunks never exceed chunk_size.
         safe_overlap = min(overlap, max(chunk_size // 2, 1))
+
+        def take_piece(source: str, limit: int) -> tuple[str, str]:
+            """Take a bounded piece without dropping the remainder."""
+            if not source:
+                return "", ""
+            if len(source) <= limit:
+                return source, ""
+            # Prefer a whitespace boundary so overlap does not split an ordinary
+            # word. A long unbroken token still falls back to the hard limit.
+            boundary = max(source.rfind(" ", 0, limit), source.rfind("\n", 0, limit))
+            end = boundary + 1 if boundary >= 0 else limit
+            if end <= 0:
+                end = limit
+            return source[:end], source[end:]
+
+        def append_preserving_source(output: list[str], prefix: str, source: str) -> None:
+            """Add overlap plus all source text, splitting instead of truncating."""
+            if not source:
+                return
+            if len(prefix) >= chunk_size:
+                prefix = prefix[: max(chunk_size - 1, 0)]
+            content_budget = max(chunk_size - len(prefix), 1)
+            first, remaining = take_piece(source, content_budget)
+            output.append(prefix + first)
+            while remaining:
+                piece, remaining = take_piece(remaining, chunk_size)
+                output.append(piece)
+
         overlapped = [chunks[0]]
         for i in range(1, len(chunks)):
-            prev_tail = chunks[i - 1][-safe_overlap:] if len(chunks[i - 1]) > safe_overlap else chunks[i - 1]
-            combined = prev_tail + " " + chunks[i]
-            # Reserve the budget for the overlap first. Truncating from the left here
-            # silently removes the overlap itself whenever the source chunk is full.
-            if len(combined) > chunk_size:
-                content_budget = max(chunk_size - len(prev_tail) - 1, 0)
-                combined = prev_tail + (
-                    " " + chunks[i][:content_budget] if content_budget else ""
-                )
-            overlapped.append(combined)
+            previous = chunks[i - 1]
+            prev_tail = previous[-safe_overlap:] if len(previous) > safe_overlap else previous
+            prefix = (prev_tail + " ") if prev_tail else ""
+            append_preserving_source(overlapped, prefix, chunks[i])
         chunks = overlapped
 
     return chunks
