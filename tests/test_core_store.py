@@ -73,6 +73,31 @@ def test_store_preserves_regular_sqlite_uri_options(tmp_path):
     assert not missing.exists()
 
 
+def test_store_preserves_named_memory_uri_identity_for_maintenance(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    uri = "file:shared?mode=memory&cache=shared"
+    store = Store(uri)
+    try:
+        assert store.path == uri
+        assert store._recognised_local_backups() == []
+
+        with pytest.raises(RuntimeError, match="durable pre-migration backup"):
+            store._backup_before_v4_migration()
+
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "uri", [":memory:", "file::memory:", "file::memory:?cache=shared",
+             "file:shared?mode=memory&cache=shared"],
+)
+def test_read_only_store_rejects_memory_uris(uri):
+    with pytest.raises(ValueError, match="existing database file"):
+        Store(uri, read_only=True)
+
+
 def test_temporal_mutations_reject_inverted_intervals(store):
     workspace_id = store.get_or_create_workspace("intervals")
     memory_id = store.add_memory(MemoryRecord(

@@ -1112,10 +1112,18 @@ class Store:
         :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
         callable is rejected before it can be invoked.
         """
-        self.path = _physical_sqlite_path(path) if str(path).startswith("file:") else path
+        # Keep named shared-memory URIs intact for lifecycle bookkeeping.  A URI such
+        # as ``file:shared?mode=memory&cache=shared`` is a logical SQLite database,
+        # not a filesystem path named ``shared``; reducing it here would let migration
+        # backups or secure-erase discovery create/inspect unrelated disk files.
+        self.path = (
+            path if _is_memory_database_path(path)
+            else _physical_sqlite_path(path) if str(path).startswith("file:")
+            else path
+        )
         self._connect = connect
         self.read_only = bool(read_only)
-        if self.read_only and path == ":memory:":
+        if self.read_only and _is_memory_database_path(path):
             raise ValueError("read-only Store requires an existing database file")
         read_only_path: Optional[str] = None
         if self.read_only:
@@ -1841,7 +1849,7 @@ class Store:
         Preserve the legacy v4/v5 names and use the target schema version for newer
         backups.
         """
-        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+        if not self.path or _is_memory_database_path(self.path):
             raise RuntimeError("schema migration requires a durable pre-migration backup")
         backup_version = max(4, min(SCHEMA_VERSION, previous_version + 1))
         backup_path = f"{self.path}.pre-migration-v{backup_version}.bak"
@@ -5313,7 +5321,7 @@ class Store:
 
     def run_secure_erase_maintenance(self) -> dict:
         """Run physical cleanup after the secure-erase transaction has committed."""
-        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
+        durable = bool(self.path) and not _is_memory_database_path(self.path)
         return self._checkpoint_and_vacuum(self.conn, durable=durable)
 
     def _recognised_local_backups(self) -> list[Path]:
@@ -5323,7 +5331,7 @@ class Store:
         another process's encrypted backup location. Those remain an explicit operator
         obligation in the secure-erasure result and documentation.
         """
-        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+        if not self.path or _is_memory_database_path(self.path):
             return []
         primary = Path(self.path).resolve()
         parent = primary.parent
