@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from engraphis.llm.client import LLMClient
@@ -173,13 +172,17 @@ def _parse_json(raw: str) -> dict[str, Any]:
         text = "\n".join(lines[1:])
         if text.rstrip().endswith("```"):
             text = text.rsplit("```", 1)[0]
-    # Try to extract JSON from the response
-    # Non-greedy match to avoid spanning across multiple JSON objects or stray braces.
-    json_match = re.search(r'\{[\s\S]*?\}', text)
-    if json_match:
-        text = json_match.group(0)
-    try:
-        return json.loads(text)
-    except Exception as exc:
-        logger.debug("JSON parse fallback to raw (%s)", type(exc).__name__)
-        return {"raw": raw}
+    decoder = json.JSONDecoder()
+    candidates = [text]
+    # LLMs sometimes add a short explanation before the JSON. Start decoding at each
+    # object boundary so raw_decode can balance nested objects and arrays correctly.
+    candidates.extend(text[index:] for index, char in enumerate(text) if char == "{")
+    for candidate in candidates:
+        try:
+            value, _ = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    logger.debug("JSON parse fallback to raw (no complete object found)")
+    return {"raw": raw}
