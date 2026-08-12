@@ -1470,7 +1470,7 @@ test('a saved code view reloads when only its repository changes', async ({ page
   await page.addInitScript(() => {
     localStorage.setItem('engraphis-ledger-graph-preferences-v1', JSON.stringify({
       includeCode: true,
-      repoFilter: 'repo-before',
+      repoFilter: '',
     }));
     localStorage.setItem('engraphis-ledger-graph-custom-view-v1', JSON.stringify({
       preset: 'radial', style: 'galaxy', color: 'community', palette: 'theme',
@@ -1481,15 +1481,24 @@ test('a saved code view reloads when only its repository changes', async ({ page
       collapse: false, repoFilter: 'repo-after',
     }));
   });
-  await mockApi(page);
+  await mockApi(page, {
+    workspaces: [{
+      name: workspace,
+      memories: memories.length,
+      repos: ['repo-before', 'repo-after'],
+    }],
+  });
   await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+
   const before = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('include_code') === 'true'
       && url.searchParams.get('repo') === 'repo-before';
   });
-  await page.locator('.nav-item[data-view="relations"]').click();
+  await page.locator('#graph-repo-filter').fill('repo-before');
   await before;
 
   const after = page.waitForRequest(request => {
