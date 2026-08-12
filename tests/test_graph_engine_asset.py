@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1014,6 +1014,53 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
     assert report["kinematicLocalRatio"] == pytest.approx(3, rel=0.02)
     assert report["slowCarrier"] > 0
     assert report["carrierRatio"] == pytest.approx(3, rel=0.02)
+
+
+@requires_node
+def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> None:
+    report = _run_node(
+        """
+        const fixture = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          /* This legacy-shaped child has only a direct graph edge, not system_anchor_id. */
+          { id: 'connected', community_id: 'cross-core', gravity_mass: 3,
+            radius: 3, x: 52, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 8, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+        ];
+        const trial = orbitalSpeed => {
+          const nodes = fixture();
+          I.markGalaxyBlackHoleChildren(nodes, [
+            { source: 'black-hole', target: 'connected', relation: 'orbits' },
+          ]);
+          I.seedGalaxyOrbits(nodes, 77, 48, 32, false, { orbitalSpeed });
+          let travel = 0;
+          for (let step = 0; step < 30; step += 1) {
+            const before = Math.atan2(nodes[1].y, nodes[1].x);
+            I.supportGalaxyCarrierOrbits(nodes, {
+              gravity: 48, softening: 32, centralSoftening: 40,
+              orbitalSpeed, layoutSeed: 77, timestep: .032,
+            });
+            const after = Math.atan2(nodes[1].y, nodes[1].x);
+            travel += Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+          }
+          return { travel, child: nodes[1], grouped: I.galaxyOrbitGroups(nodes).get('black-hole') };
+        };
+        const slow = trial(0), fast = trial(120);
+        emit({ slow: { travel: slow.travel, child: slow.child,
+          grouped: slow.grouped && slow.grouped.nodes.map(node => node.id) },
+          fast: { travel: fast.travel, child: fast.child,
+            grouped: fast.grouped && fast.grouped.nodes.map(node => node.id) },
+          ratio: fast.travel / slow.travel });
+        """
+    )
+    assert report["slow"]["travel"] > 0
+    assert report["fast"]["travel"] > report["slow"]["travel"]
+    assert report["ratio"] == pytest.approx(3, rel=0.03)
+    assert report["slow"]["grouped"] == ["black-hole", "connected"]
+    assert report["fast"]["grouped"] == ["black-hole", "connected"]
 
 
 @requires_node
@@ -8875,7 +8922,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-kinematics-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-linked-orbits-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader

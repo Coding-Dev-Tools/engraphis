@@ -538,6 +538,48 @@
     return String(node && node.community !== undefined && node.community !== null
       ? node.community : 0);
   }
+  function setGalaxyBlackHoleChild(node, value) {
+    if (!node) return;
+    if (!value) {
+      try { delete node.__galaxyBlackHoleChild; } catch (_) { /* compatibility payload */ }
+      return;
+    }
+    try {
+      Object.defineProperty(node, '__galaxyBlackHoleChild', {
+        value: true, writable: true, configurable: true, enumerable: false,
+      });
+    } catch (_) {
+      node.__galaxyBlackHoleChild = true;
+    }
+  }
+  /* A direct black-hole edge is a valid hierarchy declaration even when an older payload lacks
+     system_anchor_id or puts the child in a different community. Mark those non-anchor nodes so
+     every orbit path (live support and oversized kinematics) groups them around the fixed hole. */
+  function markGalaxyBlackHoleChildren(nodes, links) {
+    const values = Array.isArray(nodes) ? nodes : [];
+    const anchor = galaxyGlobalAnchor(values);
+    const connected = new Set();
+    const endpointId = endpoint => endpoint && typeof endpoint === 'object'
+      ? endpoint.id : endpoint;
+    (Array.isArray(links) ? links : []).forEach(link => {
+      const source = endpointId(link && link.source);
+      const target = endpointId(link && link.target);
+      const anchorId = anchor ? String(anchor.id) : null;
+      if (anchorId === null) return;
+      if (String(source) === anchorId && target !== undefined && target !== null) {
+        connected.add(String(target));
+      } else if (String(target) === anchorId && source !== undefined && source !== null) {
+        connected.add(String(source));
+      }
+    });
+    values.forEach(node => {
+      if (!node || node === anchor) return;
+      const isDirectChild = connected.has(String(node.id))
+        && node.anchor_role !== 'community';
+      setGalaxyBlackHoleChild(node, isDirectChild);
+    });
+    return values;
+  }
   function fallbackGravityMass(degree, maxDegree) {
     const normalized = Math.max(0, Math.min(1,
       finitePositive(degree, 0, Number.MAX_VALUE) / Math.max(1, Number(maxDegree) || 1)));
@@ -649,6 +691,8 @@
   function galaxyOrbitGroups(nodes) {
     const groups = new Map();
     const communityAnchors = new Map();
+    const globalAnchor = (nodes || []).find(node => node && !node.ghost
+      && node.anchor_role === 'global');
     (nodes || []).forEach(node => {
       if (!node || node.ghost
         || (node.anchor_role !== 'global' && node.anchor_role !== 'community')) return;
@@ -665,9 +709,10 @@
       const parent = node.system_anchor_id === undefined || node.system_anchor_id === null
         ? '' : String(node.system_anchor_id);
       const declared = communityAnchors.get(communityKey(node));
-      const key = parent || (node.anchor_role === 'global'
+      const key = parent || (node.__galaxyBlackHoleChild === true && globalAnchor
+        ? String(globalAnchor.id) : (node.anchor_role === 'global'
         || (node.anchor_role === 'community' && !(declared && declared.global))
-        ? String(node.id) : (declared ? declared.id : communityKey(node)));
+        ? String(node.id) : (declared ? declared.id : communityKey(node))));
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       let group = groups.get(key);
       if (!group) {
@@ -771,7 +816,8 @@
       const coreSatellites = (nodes || []).filter(node => node && node !== blackHole
         && !node.ghost && node.id !== opts.fixedNodeId
         && (String(node.system_anchor_id || '') === String(blackHole.id)
-          || communityKey(node) === coreKey)
+          || communityKey(node) === coreKey
+          || node.__galaxyBlackHoleChild === true)
         && Number.isFinite(node.x) && Number.isFinite(node.y));
       /* Coincident core children used to hash into an extremely narrow angular sector, then
          enter the maximum-decay band as one merged-looking blob. Give every penetrating child
@@ -8091,6 +8137,7 @@
              server coordinates are preserved byte-for-byte by ensureGalaxyPositions(). */
           ensureGalaxyPositions(data.nodes, raw.meta && raw.meta.layout_seed);
           releasePinnedPositions(data);
+          markGalaxyBlackHoleChildren(data.nodes, data.links);
           /* Fresh server coordinates may contain dozens of mutually intersecting complete
              systems. Pack them once in open space before any carrier velocity or finite outer
              envelope is cached; the later field is then sized from the already-clear scene. */
@@ -8182,6 +8229,7 @@
         releasePinnedPositions(data);
       }
       if (reused && galaxyMode && !staticFullLayout) {
+        markGalaxyBlackHoleChildren(data.nodes, data.links);
         seedGalaxyOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
           state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
@@ -9371,7 +9419,8 @@
       galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier, galaxyOrbitalRadiusMultiplier,
       applyGalaxyOrbitalSpeedControl,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
-      communityKey, communityCenters, ensureGalaxyPositions,
+      communityKey, communityCenters, galaxyOrbitGroups, ensureGalaxyPositions,
+      markGalaxyBlackHoleChildren,
       seedGalaxyOrbits, seedGalaxySystemOrbits,
       applyGalaxyGravity, applyGalaxySystemHaloGravity, applyGalaxyEnclosedSystemGravity,
       applyGalaxySystemAnchorGravity, applyGalaxySystemAnchorExclusion,
