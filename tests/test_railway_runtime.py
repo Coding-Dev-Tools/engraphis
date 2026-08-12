@@ -103,3 +103,29 @@ def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):
     assert captured["port"] == 8791
     assert captured["host"] == start_dashboard.os.environ.get("ENGRAPHIS_HOST", "127.0.0.1")
     assert start_dashboard.os.environ["ENGRAPHIS_PORT"] == "8791"
+
+
+def test_launcher_updates_cors_snapshot_after_port_override(monkeypatch):
+    uvicorn = pytest.importorskip("uvicorn")
+    from engraphis import config
+
+    original = (config.settings.host, config.settings.port, config.settings.cors_origins)
+    captured = {}
+    monkeypatch.setenv("ENGRAPHIS_PORT", "8700")
+    monkeypatch.delenv("ENGRAPHIS_CORS_ORIGINS", raising=False)
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: True)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
+    fake_dashboard = types.ModuleType("engraphis.dashboard_app")
+    fake_dashboard.app = object()
+    monkeypatch.setitem(sys.modules, "engraphis.dashboard_app", fake_dashboard)
+
+    try:
+        start_dashboard.main(["--no-open", "--port", "9000"])
+        assert captured["port"] == 9000
+        assert config.settings.host == "127.0.0.1"
+        assert config.settings.port == 9000
+        assert config.settings.cors_origins == [
+            "http://127.0.0.1:9000", "http://localhost:9000",
+        ]
+    finally:
+        config.settings.host, config.settings.port, config.settings.cors_origins = original
