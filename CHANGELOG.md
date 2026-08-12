@@ -7,6 +7,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Galaxy mode now exposes normalized controls for gravitational constant, compact black-hole
+  mass, independent local-solar gravity, space friction, edge-spring stiffness, and orbit
+  pause/play. The fixed-step Velocity Verlet field superposes black-hole carrier motion with
+  softened dominant-star orbits, adds bounded near-horizon frame dragging, differential tidal
+  stretching, and carrier-only orbital decay, preserves Hooke tethers and short-range
+  repulsion, and captures sub-escape drag releases into their authored star system while high
+  velocity releases escape. A bounded canvas layer renders the central gravity well, lens halo,
+  short trails, and up to 24 shallow local-star wells without adding simulation bodies.
 - The dashboard Galaxy graph now caches its outer safety radius at 1.75× the initial painted
   extent; escaped nodes are confined to that fixed envelope instead of expanding it.
 - The Galaxy gravity slider now spans `0..400` while retaining the release-stable default
@@ -29,6 +37,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- Near-horizon curvature is now measured from each system's dominant-star carrier through a
+  bounded black-hole-scale band. A wide solar system can no longer be misclassified as already
+  inside the gravity well and have its ordinary galactic angular momentum drained.
 - Galaxy systems revealed after the initial render, restored with zeroed velocity, or shown as
   singletons now receive their own black-hole-frame tangential admission instead of being marked
   seeded while stationary. Oversized Complete views use a bounded node-only hierarchical orbit

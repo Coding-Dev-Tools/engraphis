@@ -12,6 +12,7 @@
   const SAMPLE_INTERVAL = 33;
   const GRID_RINGS = 9;
   const GRID_SPOKES = 20;
+  const MAX_LOCAL_WELLS = 24;
   const finite = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const reducedMotion = () => typeof matchMedia === 'function'
     && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -27,6 +28,17 @@
       && node.isCentral !== true && node.central !== true)
       .sort((a, b) => Math.hypot(finite(b.vx), finite(b.vy)) - Math.hypot(finite(a.vx), finite(a.vy)))
       .slice(0, MAX_TRAIL_NODES);
+  }
+
+  function localAnchors(snapshot) {
+    const supplied = Array.isArray(snapshot && snapshot.systemAnchors) ? snapshot.systemAnchors : [];
+    const fallback = Array.isArray(snapshot && snapshot.nodes) ? snapshot.nodes.filter(node => node
+      && (node.isSystemAnchor === true || node.anchorRole === 'community')) : [];
+    return (supplied.length ? supplied : fallback).filter(anchor => anchor
+      && Number.isFinite(anchor.x) && Number.isFinite(anchor.y))
+      .sort((left, right) => finite(right.mass || right.gravityMass || right.radius)
+        - finite(left.mass || left.gravityMass || left.radius))
+      .slice(0, MAX_LOCAL_WELLS);
   }
 
   function create(container, engine) {
@@ -64,6 +76,12 @@
       const center = physicalToScreen(physicalCenter);
       const edge = physicalToScreen({ x: physicalCenter.x + finite(physicalCenter.radius), y: physicalCenter.y });
       return center && edge ? Math.max(10, Math.abs(edge.x - center.x)) : Math.max(10, finite(physicalCenter.radius));
+    };
+
+    const screenDistance = (origin, graphDistance, fallback) => {
+      const start = physicalToScreen(origin);
+      const edge = physicalToScreen({ x: origin.x + graphDistance, y: origin.y });
+      return start && edge ? Math.max(fallback, Math.abs(edge.x - start.x)) : fallback;
     };
 
     const resize = () => {
@@ -124,6 +142,39 @@
       ctx.restore();
     };
 
+    const drawLocalWells = snapshot => {
+      const anchors = localAnchors(snapshot);
+      if (!anchors.length) return;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      anchors.forEach(anchor => {
+        const center = physicalToScreen(anchor);
+        if (!center || center.x < -160 || center.y < -160
+          || center.x > container.clientWidth + 160 || center.y > container.clientHeight + 160) return;
+        const radius = screenRadius(anchor);
+        const orbitRadius = Math.max(radius * 2.5, Math.min(96, screenDistance(anchor,
+          finite(anchor.systemOrbitRadius || anchor.orbitRadius) || radius * 5, radius * 5)));
+        const glow = ctx.createRadialGradient(center.x, center.y, Math.max(1, radius * .5),
+          center.x, center.y, orbitRadius * 1.15);
+        glow.addColorStop(0, 'rgba(255, 210, 116, .08)');
+        glow.addColorStop(.55, 'rgba(245, 169, 80, .025)');
+        glow.addColorStop(1, 'rgba(245, 169, 80, 0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, orbitRadius * 1.15, 0, Math.PI * 2);
+        ctx.fill();
+        for (let ring = 1; ring <= 2; ring += 1) {
+          ctx.beginPath();
+          ctx.ellipse(center.x, center.y, orbitRadius * ring / 2,
+            orbitRadius * ring * .70 / 2, .18, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255, 191, 116, ${.045 + ring * .018})`;
+          ctx.lineWidth = .7;
+          ctx.stroke();
+        }
+      });
+      ctx.restore();
+    };
+
     const drawTrails = () => {
       if (reducedMotion()) return;
       ctx.save();
@@ -179,15 +230,26 @@
         const physicalCenter = snapshotCenter(latest);
         const center = physicalToScreen(physicalCenter);
         if (center) drawGrid({ ...center, radius: screenRadius(physicalCenter) }, bounds);
+        drawLocalWells(latest);
         drawTrails();
       }
-      if (active) frame = requestAnimationFrame(draw);
+      /* Paused physics retains one static spacetime paint, then releases the compositor.
+         Local wells and guide rings are deliberately still visible under reduced motion;
+         only sampled velocity trails are suppressed there. */
+      if (active && !document.hidden && !(latest && latest.paused)) frame = requestAnimationFrame(draw);
       else frame = 0;
     };
 
-    const wake = () => { if (!frame && !destroyed) frame = requestAnimationFrame(draw); };
-    const onFrame = event => { latest = event && event.detail ? event.detail : latest; if (active) wake(); };
+    const wake = () => {
+      if (!frame && !destroyed && active && !document.hidden) frame = requestAnimationFrame(draw);
+    };
+    const onFrame = event => {
+      latest = event && event.detail ? event.detail : latest;
+      if (active) wake();
+    };
     container.addEventListener('engraphisgraphphysicschange', onFrame);
+    const onVisibilityChange = () => { if (!document.hidden) wake(); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
     if (observer) observer.observe(container);
     return {
@@ -202,6 +264,7 @@
         destroyed = true;
         cancelAnimationFrame(frame);
         container.removeEventListener('engraphisgraphphysicschange', onFrame);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         if (observer) observer.disconnect();
         canvas.remove();
         trails.clear();
