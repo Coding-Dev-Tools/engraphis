@@ -149,9 +149,13 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
         for i in range(1, len(chunks)):
             prev_tail = chunks[i - 1][-safe_overlap:] if len(chunks[i - 1]) > safe_overlap else chunks[i - 1]
             combined = prev_tail + " " + chunks[i]
-            # Hard cap: truncate from the left if still over budget.
+            # Reserve the budget for the overlap first. Truncating from the left here
+            # silently removes the overlap itself whenever the source chunk is full.
             if len(combined) > chunk_size:
-                combined = combined[-chunk_size:]
+                content_budget = max(chunk_size - len(prev_tail) - 1, 0)
+                combined = prev_tail + (
+                    " " + chunks[i][:content_budget] if content_budget else ""
+                )
             overlapped.append(combined)
         chunks = overlapped
 

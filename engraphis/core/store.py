@@ -8156,7 +8156,7 @@ class Store:
             for scope_id in verification_ids
         ]
         verification = {
-            "valid": bool(verifications) and all(item["valid"] for item in verifications),
+            "valid": all(item["valid"] for item in verifications),
             "errors": [
                 {**error, "workspace_id": scope_id}
                 for scope_id, item in zip(verification_ids, verifications)
