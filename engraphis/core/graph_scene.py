@@ -252,14 +252,30 @@ def _hierarchy_anchors(
     nodes: Mapping[str, Mapping[str, Any]],
     community_members: Mapping[str, Sequence[str]],
 ) -> tuple[dict[str, str], str]:
-    """Choose a dominant live core per system and the strongest core for the galaxy."""
-    anchors = {
-        community_id: anchor_id
-        for community_id, member_ids in sorted(community_members.items())
-        for anchor_id in [_dominant_member(nodes, member_ids)]
-        if anchor_id
-    }
-    global_anchor = _dominant_member(nodes, anchors.values())
+    """Choose explicit hierarchy authority first, then deterministic evidence cores.
+
+    ``anchor_role`` is server-authored authority and survives filtering/reprojection. Labels
+    and names are deliberately absent from selection: renamed entities retain identical
+    physics. A malformed payload with several explicit candidates is resolved by the same
+    mass/structure/id ordering as an unannotated payload.
+    """
+    anchors: dict[str, str] = {}
+    for community_id, member_ids in sorted(community_members.items()):
+        explicit = [
+            node_id for node_id in member_ids
+            if node_id in nodes
+            and nodes[node_id].get("anchor_role") in {"global", "community"}
+        ]
+        anchor_id = _dominant_member(nodes, explicit or member_ids)
+        if anchor_id:
+            anchors[community_id] = anchor_id
+    explicit_global = [
+        node_id for node_id, node in nodes.items()
+        if not node.get("ghost") and node.get("anchor_role") == "global"
+    ]
+    global_anchor = _dominant_member(
+        nodes, explicit_global or anchors.values()
+    )
     return anchors, global_anchor
 
 

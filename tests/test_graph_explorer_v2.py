@@ -27,6 +27,55 @@ from engraphis import service as service_module
 from engraphis.service import GraphIndexRebuilding, MemoryService, ValidationError
 
 
+def test_hierarchy_anchors_are_metadata_driven_not_coding_dev_tools_label():
+    """A renamed explicit global remains central even against the historical-name decoy."""
+    def resolve(rows):
+        nodes = {
+            row["id"]: {
+                "id": row["id"], "label": row.get("label", row["id"]),
+                "gravity_mass": row.get("gravity_mass", 1.0),
+                "scene_rank": row.get("scene_rank", 0.0),
+                "weighted_degree": row.get("weighted_degree", 0.0),
+                "anchor_role": row.get("anchor_role", "community"),
+            }
+            for row in rows
+        }
+        return graph_scene_module._hierarchy_anchors(
+            nodes, {node_id: [node_id] for node_id in nodes}
+        )
+
+    explicit = [
+        {"id": "custom-orbit-root", "label": "Before rename", "anchor_role": "global",
+         "gravity_mass": 1.0},
+        {"id": "Coding-Dev-Tools", "label": "Coding-Dev-Tools", "gravity_mass": 999.0},
+    ]
+    _, before = resolve(explicit)
+    explicit[0]["label"] = "After arbitrary rename"
+    _, after = resolve(explicit)
+    assert before == after == "custom-orbit-root"
+
+    # Without authored global authority, physics uses deterministic mass, rank, degree, then id.
+    _, mass_winner = resolve([
+        {"id": "mass-winner", "gravity_mass": 12},
+        {"id": "high-rank", "gravity_mass": 11, "scene_rank": 999},
+    ])
+    _, rank_winner = resolve([
+        {"id": "low-rank", "gravity_mass": 8, "scene_rank": 1},
+        {"id": "high-rank", "gravity_mass": 8, "scene_rank": 2},
+    ])
+    _, degree_winner = resolve([
+        {"id": "low-degree", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 1},
+        {"id": "high-degree", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+    ])
+    _, id_winner = resolve([
+        {"id": "zeta", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+        {"id": "alpha", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+    ])
+    assert (mass_winner, rank_winner, degree_winner, id_winner) == (
+        "mass-winner", "high-rank", "high-degree", "alpha"
+    )
+
+
 def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
     db = tmp_path / "v3.db"
     conn = sqlite3.connect(db)

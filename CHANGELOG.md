@@ -37,6 +37,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- Galaxy hierarchy authority is now label-independent: an authored `anchor_role="global"`
+  selects the central mass regardless of its display name or evidence mass, while unannotated
+  compatibility scenes fall back deterministically through mass, rank, degree, and stable ID.
 - Near-horizon curvature is now measured from each system's dominant-star carrier through a
   bounded black-hole-scale band. A wide solar system can no longer be misclassified as already
   inside the gravity well and have its ordinary galactic angular momentum drained.
