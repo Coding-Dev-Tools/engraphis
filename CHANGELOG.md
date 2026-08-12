@@ -7,6 +7,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Galaxy admission now uses a tighter default carrier gap and calibrated orbital slack, keeping
+  more complete solar systems in the black-hole interior without sacrificing painted clearance.
+
 - Galaxy mode now exposes normalized controls for gravitational constant, compact black-hole
   mass, independent local-solar gravity, space friction, edge-spring stiffness, and orbit
   pause/play. The fixed-step Velocity Verlet field superposes black-hole carrier motion with

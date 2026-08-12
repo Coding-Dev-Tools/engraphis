@@ -291,9 +291,15 @@
   /* Solar systems are packed by their complete painted envelopes, never by pushing arbitrary
      cross-community node pairs.  Eight world units stays visible between two outer planets;
      the bounded response lets live systems keep orbiting while their carrier frames separate. */
-  const GALAXY_SYSTEM_PACKING_GAP = 8;
+  /* Default Galaxy admission should keep complete solar systems visually near the black-hole
+     interior. Four world units still leaves a painted clearance band, while the explicit
+     higher gaps used by callers/tests remain available through `systemPackingGap`. */
+  const GALAXY_SYSTEM_PACKING_GAP = 4;
   const GALAXY_SYSTEM_PACKING_STRENGTH = 0.45;
   const GALAXY_SYSTEM_PACKING_MAX_CORRECTION = 6;
+  /* The orbital-speed control can expand local radii by at most 6%. Keep a small additional
+     margin, but do not reserve the old 12% by default because that needlessly adds outer rings. */
+  const GALAXY_CARRIER_LANE_SLACK = 1.08;
   /* Tiny solver drift should keep the deterministic lane phase shared across a ring. A larger
      displacement is an actual contact/boundary correction and is allowed to become phase. */
   const GALAXY_LANE_PHASE_CORRECTION_DISTANCE = 0.5;
@@ -3606,8 +3612,11 @@
       evidenceNodeRadius(anchor, 3), 160), coreEnvelope ? coreEnvelope.radius : 0);
     let cursor = 0, previousLaneRadius = coreRadius, previousLaneExtent = 0, laneIndex = 0;
     while (cursor < systems.length) {
-      /* Reserve modest dynamical slack for a planet's painted local eccentric sweep. */
-      const laneExtent = systems[cursor].radius * 1.12;
+      /* Reserve enough slack for the full orbital-speed radius range without letting the
+         admission pass manufacture a wide empty halo around the black hole. */
+      const laneSlack = Math.max(GALAXY_CARRIER_LANE_SLACK,
+        galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed) + 0.02);
+      const laneExtent = systems[cursor].radius * laneSlack;
       let laneRadius = Math.max(coreRadius + laneExtent + gap
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
       previousLaneRadius + previousLaneExtent + laneExtent + gap);
