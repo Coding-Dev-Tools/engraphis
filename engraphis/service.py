@@ -8402,7 +8402,7 @@ class MemoryService:
                     "AND (ingested_at IS NULL OR ingested_at<=?) "
                     "AND (expired_at IS NULL OR ?<expired_at)"
                 )
-                memory_params.extend([t, t, known_t, known_t])
+                memory_params.extend([t, known_t, known_t, known_t])
             memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
             if clean_memory_types:
                 type_marks = ",".join("?" for _ in clean_memory_types)

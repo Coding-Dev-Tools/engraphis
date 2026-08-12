@@ -1330,6 +1330,36 @@ def test_graph_scene_applies_independent_world_and_system_anchors():
         )
 
 
+def test_graph_scene_keeps_support_metadata_when_closure_was_recorded_later():
+    service, _alpha, _beta, _gamma = _seed_service()
+    support = service.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+    ).fetchone()
+    assert support is not None
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE id=?",
+        (support["memory_id"],),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE id='edge_ab'"
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", valid_at=75, known_at=25,
+    )
+
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    assert support["memory_id"] in edge["support_memory_ids"]
+
+
 def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():
     service, alpha, _beta, gamma = _seed_service()
     app = FastAPI()
