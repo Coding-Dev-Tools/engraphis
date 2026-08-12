@@ -21,6 +21,7 @@
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
     graphDataAsOf: null,
+    graphDataRepo: '',
     graphMeta: null,
     graphMode: 'overview',
     graphShowUnlinked: true,
@@ -705,6 +706,19 @@
     if (dot) dot.classList.toggle('unhealthy', !healthy);
   }
 
+  function setDeploymentMode(mode) {
+    const el = byId('deployment-mode-badge');
+    if (!el) return;
+    const isLocal = mode === 'local';
+    el.textContent = isLocal ? 'LOCAL' : 'HOSTED';
+    el.title = isLocal
+      ? 'Local mode: no hosted cloud configured. Data stays on this machine.'
+      : 'Hosted mode: connected to Engraphis Cloud.';
+    el.classList.toggle('mode-local', isLocal);
+    el.classList.toggle('mode-hosted', !isLocal);
+    el.hidden = false;
+  }
+
   function memoryType(memory) {
     return memory.memory_type || memory.mtype || 'semantic';
   }
@@ -1064,6 +1078,7 @@
     state.graphData = null;
     state.graphDataIncludeCode = false;
     state.graphDataShowUnlinked = false;
+    state.graphDataRepo = '';
     state.selectedMemory = '';
     // Detail/editor handlers close over a memory record.  Clear both before the
     // workspace fetches begin so a stale form cannot write that record into the
@@ -2574,9 +2589,11 @@
     const previousIncludeCode = state.graphIncludeCode;
     const previousShowUnlinked = state.graphShowUnlinked;
     const previousAsOf = byId('graph-as-of').value;
+    const previousRepo = (byId('graph-repo-filter').value || '').trim();
     const asOf = typeof view.asOf === 'string' ? view.asOf : previousAsOf;
     const repoFilter = typeof view.repoFilter === 'string'
       ? view.repoFilter.slice(0, 200) : byId('graph-repo-filter').value;
+    const nextRepo = repoFilter.trim();
     state.graphIncludeCode = typeof view.includeCode === 'boolean'
       ? view.includeCode : state.graphIncludeCode;
     byId('graph-preset').value = preset;
@@ -2628,7 +2645,8 @@
     }
     saveGraphPreferences();
     if (previousIncludeCode !== state.graphIncludeCode
-      || previousShowUnlinked !== state.graphShowUnlinked || previousAsOf !== asOf) {
+      || previousShowUnlinked !== state.graphShowUnlinked || previousAsOf !== asOf
+      || previousRepo !== nextRepo) {
       loadGraph({ force: true });
     }
     const label = all('[data-graph-saved-view]').find(control => control.dataset.graphSavedView === id);
@@ -2808,11 +2826,13 @@
 
   async function loadGraph({ force = false } = {}) {
     if (!state.workspace) return;
+    const currentRepo = (byId('graph-repo-filter').value || '').trim();
     if (!force && state.graphWorkspace === state.workspace
       && state.graphDataMode === state.graphMode
       && state.graphDataIncludeCode === state.graphIncludeCode
       && state.graphDataShowUnlinked === state.graphShowUnlinked
-      && state.graphDataAsOf === graphAsOfTimestamp() && state.graphData) {
+      && state.graphDataAsOf === graphAsOfTimestamp()
+      && state.graphDataRepo === currentRepo && state.graphData) {
       if (state.graphEngine) state.graphEngine.resize();
       return;
     }
@@ -2821,7 +2841,7 @@
     const targetIncludeCode = state.graphIncludeCode;
     const targetShowUnlinked = state.graphShowUnlinked;
     const targetAsOf = graphAsOfTimestamp();
-    const targetRepo = (byId('graph-repo-filter').value || '').trim();
+    const targetRepo = currentRepo;
     const fullGraph = targetMode === 'full';
     const key = graphLoadKey(
       targetWorkspace, targetMode, targetIncludeCode, targetShowUnlinked, targetAsOf, targetRepo,
@@ -2908,6 +2928,7 @@
         state.graphDataIncludeCode = targetIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
+        state.graphDataRepo = targetRepo;
         const sceneMeta = scene.meta || payload.meta || {};
         if (sceneMeta.degraded && sceneMeta.requested_include_code
           && sceneMeta.include_code === false) {
@@ -3521,9 +3542,12 @@
         state.license = license;
         updatePlanBadge();
         renderSidebarCta();
+        setDeploymentMode(auth.deployment_mode || 'local');
         renderObject(target, {
+          deployment_mode: auth.deployment_mode || 'local',
           local_mode: auth.mode || 'open',
           hosted_team: Boolean(auth.hosted_team),
+          local_invitations: Boolean(auth.local_invitations),
           cloud_access: Boolean(license.cloud_access_active),
           plan: license.plan || 'local',
         }, 'Connection state');

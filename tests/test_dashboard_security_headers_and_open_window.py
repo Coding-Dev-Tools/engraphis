@@ -199,7 +199,10 @@ def test_public_metadata_does_not_expose_team_account_routes(monkeypatch, tmp_pa
         state = client.get("/api/auth/state")
         assert state.status_code == 200
         assert state.json()["enabled"] is False
-        assert state.json()["hosted_team"] is True
+        assert state.json()["deployment_mode"] == "local"
+        assert state.json()["hosted_team"] is False
+        assert state.json()["cloud_url"] == ""
+        assert state.json()["local_invitations"] is True
         assert client.post("/api/auth/setup", json={}).status_code == 403
 
 

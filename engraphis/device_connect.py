@@ -794,6 +794,20 @@ def connect(token: object, *, control_url: Optional[str] = None,
     # masked by whatever the identity or storage pre-flight happens to hit on the way to
     # the same rejection inside ``post_connect``.
     timeout = _validated_timeout(timeout)
+
+    # Mode boundary guard: a pure-local installation must not accidentally connect
+    # to a hosted org. The operator must explicitly set hosted env vars first.
+    from engraphis.config import is_local_mode
+    if is_local_mode() and control_url is None and compute_url is None:
+        # A missing manifest endpoint should retain the normal configuration error;
+        # otherwise pure-local mode reports the wrong problem before preflight runs.
+        if default_control_url():
+            raise DeviceConnectError(
+                "This installation is in local mode (no hosted cloud configured). "
+                "To connect to Engraphis Cloud, set ENGRAPHIS_CLOUD_CONTROL_URL first, "
+                "or pass --control-url explicitly.",
+                status=409,
+            )
     normalized = normalize_connect_token(token)
     # Last check before the point of no return.  ``client_identity`` may have written its
     # file minutes or months ago, so a writable state directory then is no evidence of one

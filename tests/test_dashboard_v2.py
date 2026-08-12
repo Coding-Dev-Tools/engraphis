@@ -1024,7 +1024,10 @@ def test_team_account_routes_are_not_in_public_runtime(monkeypatch, tmp_path):
         assert client.get("/api/auth/users").status_code == 404
         state = client.get("/api/auth/state").json()
         assert state["enabled"] is False
-        assert state["hosted_team"] is True
+        assert state["deployment_mode"] == "local"
+        assert state["hosted_team"] is False
+        assert state["cloud_url"] == ""
+        assert state["local_invitations"] is True
 
 
 def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path):
