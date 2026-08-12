@@ -989,7 +989,7 @@ def test_hierarchical_center_and_star_g_have_exact_velocity_superposition() -> N
     report = _run_node(
         """
         const make = () => [
-          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          { id: 'arbitrary-singularity-orbit-root', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
             gravity_mass: 10, radius: 5, x: 168, y: 24, vx: 0, vy: 0 },
@@ -1013,11 +1013,20 @@ def test_hierarchical_center_and_star_g_have_exact_velocity_superposition() -> N
             finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
           };
         };
-        emit({ base: run(1, 1), centerOnly: run(2, 1), starOnly: run(1, 2) });
+        const explicitRoleWins = I.galaxyGlobalAnchor([
+          { id: 'arbitrary-singularity-orbit-root', anchor_role: 'global', gravity_mass: 1, x: 0, y: 0 },
+          { id: 'Coding-Dev-Tools', gravity_mass: 999, x: 1, y: 0 },
+        ]).id;
+        const massFallbackWins = I.galaxyGlobalAnchor([
+          { id: 'small-ordinary', gravity_mass: 4, x: 0, y: 0 },
+          { id: 'largest-ordinary', gravity_mass: 12, x: 1, y: 0 },
+        ]).id;
+        emit({ base: run(1, 1), centerOnly: run(2, 1), starOnly: run(1, 2),
+          explicitRoleWins, massFallbackWins });
         """
     )
-    assert all(item["finite"] for item in report.values())
-    for sample in report.values():
+    for sample in (report["base"], report["centerOnly"], report["starOnly"]):
+        assert sample["finite"] is True
         assert sample["sumError"] < 1e-12
         assert abs(sample["tangent"]) > 1e-5
         assert abs(sample["radial"]) < 1e-8
@@ -1026,15 +1035,17 @@ def test_hierarchical_center_and_star_g_have_exact_velocity_superposition() -> N
     assert report["starOnly"]["carrier"] == pytest.approx(report["base"]["carrier"], abs=1e-10)
     assert report["centerOnly"]["localSpeed"] == pytest.approx(report["base"]["localSpeed"], rel=1e-10)
     assert report["starOnly"]["localSpeed"] > report["base"]["localSpeed"] * 1.35
+    assert report["explicitRoleWins"] == "arbitrary-singularity-orbit-root"
+    assert report["massFallbackWins"] == "largest-ordinary"
 
 
 @requires_node
-def test_actual_scene_hierarchy_keeps_coding_dev_tools_global_and_community_stars_local() -> None:
-    """The served labels map to one black hole and separate Users/Pre-PR solar systems."""
+def test_arbitrary_global_label_and_community_stars_keep_nested_orbits() -> None:
+    """An arbitrary central label supports the same Users/Pre-PR nested hierarchy."""
     report = _run_node(
         """
         const nodes = [
-          { id: 'Coding-Dev-Tools', anchor_role: 'global', community_id: 'core',
+          { id: 'workspace-orbit-root', anchor_role: 'global', community_id: 'core',
             gravity_mass: 80, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
             gravity_mass: 10, radius: 5, x: 160, y: 20, vx: 0, vy: 0 },
@@ -1061,7 +1072,7 @@ def test_actual_scene_hierarchy_keeps_coding_dev_tools_global_and_community_star
           users: local('Users', 'users-planet'), prePr: local('Pre-PR', 'pre-pr-planet') });
         """
     )
-    assert report["global"] == "Coding-Dev-Tools"
+    assert report["global"] == "workspace-orbit-root"
     for system, star_id in ((report["users"], "Users"), (report["prePr"], "Pre-PR")):
         assert system["anchor"] == star_id
         assert abs(system["tangent"]) > 1e-5
@@ -1074,7 +1085,7 @@ def test_horizon_tides_are_bounded_local_and_leave_far_solar_frames_untouched() 
     report = _run_node(
         """
         const make = radius => [
-          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          { id: 'custom-heavy-center-δ', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'star', anchor_role: 'community', community_id: 'solar', system_anchor_id: 'star',
             gravity_mass: 9, radius: 4, x: radius, y: 0, vx: 0, vy: 2 },
@@ -1119,7 +1130,7 @@ def test_slingshot_capture_preserves_authored_star_and_high_speed_release_escape
     report = _run_node(
         """
         const nodes = [
-          { id: 'Coding-Dev-Tools', anchor_role: 'global', community_id: 'core',
+          { id: 'custom-heavy-center-ζ', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
             gravity_mass: 10, radius: 5, x: 80, y: 0, vx: 2, vy: -1 },
@@ -1247,8 +1258,10 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
         let released = null;
         const api = G.create(el, { onSlingshotRelease: value => { released = value; } });
         api.setData({ nodes: [
-          { id: 'black-hole', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
+          { id: 'custom-heavy-center-kappa', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
             radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'Coding-Dev-Tools', community_id: 'decoy', gravity_mass: 999,
+            radius: 5, x: -140, y: 0, vx: 0, vy: 0 },
           { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
             gravity_mass: 9, radius: 5, x: 92, y: 0, vx: 0, vy: 0 },
           { id: 'users-planet', community_id: 'users', system_anchor_id: 'Users', orbit_tier: 1,
@@ -1286,6 +1299,7 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     assert diagnostics["G_center"] == pytest.approx(1.75)
     assert diagnostics["G_star"] == pytest.approx(2.25)
     assert report["paused"]["snapshot"]["paused"] is True
+    assert report["paused"]["snapshot"]["center"]["id"] == "custom-heavy-center-kappa"
     anchors = report["paused"]["snapshot"]["systemAnchors"]
     assert len(anchors) == 1
     assert {key: anchors[0][key] for key in ("id", "x", "y", "mass", "memberCount",
@@ -8284,9 +8298,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-hierarchical-spacetime-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-structural-orbit-root-1'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260811-hierarchical-spacetime-1' in markup
+    assert '/v2-assets/ledger.js?v=20260811-structural-orbit-root-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

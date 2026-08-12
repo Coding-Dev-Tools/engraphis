@@ -1637,9 +1637,17 @@
       const anchorGlobal = anchor.anchor_role === 'global' ? 1 : 0;
       const nodeMass = finitePositive(node.gravity_mass, 1, 1000);
       const anchorMass = finitePositive(anchor.gravity_mass, 1, 1000);
+      const nodeRank = Number.isFinite(Number(node.scene_rank)) ? Number(node.scene_rank) : 0;
+      const anchorRank = Number.isFinite(Number(anchor.scene_rank)) ? Number(anchor.scene_rank) : 0;
+      const nodeStructure = Number.isFinite(Number(node.weighted_degree))
+        ? Number(node.weighted_degree) : (Number.isFinite(Number(node.degree)) ? Number(node.degree) : 0);
+      const anchorStructure = Number.isFinite(Number(anchor.weighted_degree))
+        ? Number(anchor.weighted_degree) : (Number.isFinite(Number(anchor.degree)) ? Number(anchor.degree) : 0);
       if (nodeGlobal > anchorGlobal || (nodeGlobal === anchorGlobal
         && (nodeMass > anchorMass || (nodeMass === anchorMass
-          && String(node.id).localeCompare(String(anchor.id)) < 0)))) anchor = node;
+          && (nodeRank > anchorRank || (nodeRank === anchorRank
+            && (nodeStructure > anchorStructure || (nodeStructure === anchorStructure
+              && String(node.id).localeCompare(String(anchor.id)) < 0)))))))) anchor = node;
     });
     return anchor;
   }
