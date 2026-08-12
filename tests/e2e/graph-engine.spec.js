@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260812-stable-orbit-lanes-6';
+const stellarOrbitAssetVersion = '20260812-orbital-speed-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -2941,7 +2941,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(resumed.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
 });
 
-test('Galaxy sliders retain full ranges with contractive release-stable response', async ({ page }, testInfo) => {
+test('Galaxy sliders retain full ranges with orbital-speed and radius response', async ({ page }, testInfo) => {
   // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
   // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -2952,7 +2952,7 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
   const strong = await gravityTrial(page, 200);
   const compactOrbits = await orbitalSeparationTrial(page, 0);
   const separatedOrbits = await orbitalSeparationTrial(page, 120, 16);
-  await testInfo.attach('orbital-separation-convergence.json', {
+  await testInfo.attach('orbital-speed-convergence.json', {
     body: Buffer.from(JSON.stringify({ compactOrbits, separatedOrbits }, null, 2)),
     contentType: 'application/json',
   });
@@ -3026,19 +3026,24 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
   expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(2743.3846153846152, 12);
   expect(strong.before.diagnostics.localGravity).toBeCloseTo(1371.6923076923076, 12);
   expect(compactOrbits.before.diagnostics.orbitalSeparationSetting).toBe(0);
-  expect(compactOrbits.before.diagnostics.orbitalSeparationPadding).toBe(0);
-  expect(compactOrbits.before.diagnostics.orbitalSeparationStrength).toBe(0);
+  expect(compactOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(0.5);
+  expect(compactOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(0.94, 12);
+  expect(compactOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
+  expect(compactOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationSetting).toBe(120);
-  expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(30);
+  expect(separatedOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1.5);
+  expect(separatedOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.06, 12);
+  expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
   expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
-  expect(separatedOrbits.nonAnchorAfter).toBeGreaterThan(
-    compactOrbits.nonAnchorAfter * 1.35,
+  expect(separatedOrbits.starPlanetBefore).toBeGreaterThan(compactOrbits.starPlanetBefore);
+  expect(separatedOrbits.starPlanetBefore).toBeCloseTo(
+    compactOrbits.starPlanetBefore * (1.06 / 0.94), 6,
   );
-  // Repel remains active for the linked non-anchor planet↔moon contact, but it must not
-  // turn the dominant star↔planet orbit into the old large-radius slider cushion.
-  expect(separatedOrbits.starPlanetAfter).toBeLessThan(separatedOrbits.starPlanetRepelTarget);
+  // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
+  // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
+  expect(separatedOrbits.starPlanetAfter).toBeGreaterThan(compactOrbits.starPlanetAfter);
   expect(separatedOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
   expect(Math.max(...separatedOrbits.corrections.slice(-4))).toBeLessThan(
     Math.max(...separatedOrbits.corrections.slice(0, 4)) * 0.05,

@@ -415,7 +415,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-stable-orbit-lanes-6'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-6'),
@@ -2245,7 +2245,7 @@
       if (size.value === 'evidence_mass') size.value = size.dataset.legacyValue || 'degree';
     }
     const labels = galaxy
-      ? ['Orbital separation', 'Link distance · tight ↔ loose', 'Gravity strength · loose ↔ tight']
+      ? ['Orbital speed', 'Link distance · tight ↔ loose', 'Gravity strength · loose ↔ tight']
       : ['Repel force', 'Link distance', 'Centre gravity'];
     ['graph-repel-label', 'graph-link-label', 'graph-gravity-label'].forEach((id, index) => {
       const label = byId(id);

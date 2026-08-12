@@ -229,11 +229,20 @@
      presents it as orbital speed. The neutral midpoint (60) preserves the shipped orbit rate. */
   const GALAXY_ORBITAL_SPEED_MINIMUM = 0.5;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 1.5;
+  const GALAXY_ORBITAL_RADIUS_MINIMUM = 0.94;
+  const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.06;
   function galaxyOrbitalSpeedMultiplier(setting) {
     const raw = Number(setting);
     const value = Number.isFinite(raw) ? Math.max(0, Math.min(120, raw)) : 60;
     return GALAXY_ORBITAL_SPEED_MINIMUM
       + (GALAXY_ORBITAL_SPEED_MAXIMUM - GALAXY_ORBITAL_SPEED_MINIMUM) * value / 120;
+  }
+  function galaxyOrbitalRadiusMultiplier(setting) {
+    const speed = galaxyOrbitalSpeedMultiplier(setting);
+    return GALAXY_ORBITAL_RADIUS_MINIMUM
+      + (GALAXY_ORBITAL_RADIUS_MAXIMUM - GALAXY_ORBITAL_RADIUS_MINIMUM)
+        * (speed - GALAXY_ORBITAL_SPEED_MINIMUM)
+        / (GALAXY_ORBITAL_SPEED_MAXIMUM - GALAXY_ORBITAL_SPEED_MINIMUM);
   }
   const GALAXY_ORBITAL_SEPARATION_BASE_SETTING = 60;
   /* Link distance is a physical scale, so doubled sensitivity uses the squared response
@@ -722,6 +731,13 @@
       value: multiplier, writable: true, configurable: true, enumerable: false,
     });
   }
+  function setGalaxyOrbitBaseRadius(node, radius) {
+    if (!node || !Number.isFinite(radius) || radius <= 0
+      || Number.isFinite(Number(node.__galaxyOrbitBaseRadius))) return;
+    Object.defineProperty(node, '__galaxyOrbitBaseRadius', {
+      value: radius, writable: true, configurable: true, enumerable: false,
+    });
+  }
   function setGalaxySystemOrbitSpeed(node, multiplier) {
     if (!node) return;
     Object.defineProperty(node, '__galaxySystemOrbitSpeedMultiplier', {
@@ -735,6 +751,9 @@
   function seedGalaxyOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
+    const speedControlEnabled = opts.restorePhase !== true
+      && Number.isFinite(Number(opts.orbitalSpeed));
     /* Core-community satellites are local children of the explicit black hole. Admit only
        those that begin inside its painted horizon before taking a star-relative radius sample;
        the generic system seed below then gives them the ordinary BH-relative circular tangent.
@@ -879,18 +898,37 @@
       orderedGalaxySatellites(center.nodes, anchor).forEach(item => {
         const satellite = item.node;
         if (satellite.ghost || satellite.id === opts.fixedNodeId) return;
-        const dx = satellite.x - anchor.x, dy = satellite.y - anchor.y;
-        const currentRadius = Math.hypot(dx, dy);
+        let dx = satellite.x - anchor.x, dy = satellite.y - anchor.y;
+        let currentRadius = Math.hypot(dx, dy);
         if (!(currentRadius > 1e-9)) return;
+        setGalaxyOrbitBaseRadius(satellite, currentRadius);
+        const baseRadius = Number(satellite.__galaxyOrbitBaseRadius);
+        if (speedControlEnabled) {
+          const minimumRadius = finitePositive(anchor.radius, evidenceNodeRadius(anchor, 3), 160)
+            + finitePositive(satellite.radius, evidenceNodeRadius(satellite, 3), 160)
+            + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING;
+          const targetRadius = Math.max(minimumRadius, baseRadius * orbitalRadius);
+          if (Number.isFinite(targetRadius) && Math.abs(targetRadius - currentRadius) > 1e-9) {
+            const angle = Math.atan2(dy, dx);
+            satellite.x = anchor.x + Math.cos(angle) * targetRadius;
+            satellite.y = anchor.y + Math.sin(angle) * targetRadius;
+            if (Number.isFinite(satellite.fx)) satellite.fx = satellite.x;
+            if (Number.isFinite(satellite.fy)) satellite.fy = satellite.y;
+            dx = satellite.x - anchor.x;
+            dy = satellite.y - anchor.y;
+            currentRadius = targetRadius;
+          }
+        }
+        const speedRadius = speedControlEnabled ? baseRadius : currentRadius;
         const denominator = Math.pow(
-          currentRadius * currentRadius + epsilon * epsilon, 1.5);
+          speedRadius * speedRadius + epsilon * epsilon, 1.5);
         const rawInwardAcceleration = denominator > 0
-          ? localGravity * anchorMass * currentRadius / denominator : 0;
+          ? localGravity * anchorMass * speedRadius / denominator : 0;
         const inwardAcceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
-        const omega = Math.sqrt(Math.max(0, inwardAcceleration / currentRadius));
+        const omega = Math.sqrt(Math.max(0, inwardAcceleration / speedRadius));
         const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          omega * currentRadius * orbitalSpeed);
+          omega * speedRadius * orbitalSpeed);
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
@@ -7618,10 +7656,13 @@
           GALAXY_RELATION_CONSTRAINT_MAX_CORRECTION,
         orbitalSpeedSetting: state.settings.repel,
         orbitalSpeedMultiplier: orbitalSpeed,
+        orbitalRadiusMultiplier: galaxyOrbitalRadiusMultiplier(state.settings.repel),
         /* Compatibility diagnostics retain the old names for saved-view tooling. */
         orbitalSeparationSetting: state.settings.repel,
-        orbitalSeparationPadding: galaxyOrbitalSeparationPadding(state.settings.repel),
-        orbitalSeparationStrength: galaxyOrbitalSeparationStrength(state.settings.repel),
+        orbitalSeparationPadding: galaxyOrbitalSeparationPadding(
+          GALAXY_ORBITAL_SEPARATION_BASE_SETTING),
+        orbitalSeparationStrength: galaxyOrbitalSeparationStrength(
+          GALAXY_ORBITAL_SEPARATION_BASE_SETTING),
         crossSystemRepulsionPadding: GALAXY_CROSS_SYSTEM_REPULSION_PADDING,
         crossSystemRepulsionStrength: 0,
         systemPacking: { ...galaxyLastSystemPacking },
@@ -8008,6 +8049,7 @@
             data.nodes, raw.meta && raw.meta.layout_seed,
             state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
             { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+              restorePhase: galaxyPhaseRestorePending,
               orbitalSpeed: state.settings.repel,
               gravitationalConstant: state.settings.gravitationalConstant,
               localGravitationalConstant: state.settings.localGravitationalConstant }
@@ -8081,6 +8123,7 @@
           data.nodes, raw.meta && raw.meta.layout_seed,
           state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
           { fixedNodeId: activeDragNode ? activeDragNode.id : null,
+            restorePhase: galaxyPhaseRestorePending,
             orbitalSpeed: state.settings.repel,
             gravitationalConstant: state.settings.gravitationalConstant,
             localGravitationalConstant: state.settings.localGravitationalConstant }
@@ -9261,7 +9304,7 @@
       galaxyStellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       defaultGalaxyStellarAccelerationCap, defaultGalaxySystemAccelerationCap,
       galaxySceneWithinLiveLimit,
-      galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier,
+      galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier, galaxyOrbitalRadiusMultiplier,
       applyGalaxyOrbitalSpeedControl,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, ensureGalaxyPositions,

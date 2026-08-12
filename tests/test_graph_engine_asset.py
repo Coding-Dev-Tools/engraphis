@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat"
+        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260810-galaxy-explicit-reheat"
+        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -875,6 +875,79 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     source = ASSET.read_text(encoding="utf-8")
     assert "const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 2;" in source
     assert "const GALAXY_GRAVITY_MAXIMUM = 400;" in source
+
+
+@requires_node
+def test_orbital_speed_scales_rotation_and_slightly_lifts_local_orbit_radius() -> None:
+    report = _run_node(
+        """
+        const settings = [0, 60, 120];
+        const localTrial = setting => {
+          const nodes = [
+            { id: 'star', anchor_role: 'community', community_id: 'solar',
+              system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, radius: 2,
+              x: 30, y: 0, vx: 0, vy: 0 },
+          ];
+          I.seedGalaxyOrbits(nodes, 19, 48, 12, false, { orbitalSpeed: setting });
+          return {
+            radius: Math.hypot(nodes[1].x - nodes[0].x, nodes[1].y - nodes[0].y),
+            speed: Math.hypot(nodes[1].vx - nodes[0].vx,
+              nodes[1].vy - nodes[0].vy),
+          };
+        };
+        const globalTrial = setting => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              gravity_mass: 8, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'solar',
+              system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+          ];
+          I.seedGalaxySystemOrbits(nodes, 19, 48, 40, false, { orbitalSpeed: setting });
+          return Math.hypot(nodes[1].vx - nodes[0].vx,
+            nodes[1].vy - nodes[0].vy);
+        };
+        const liveTrial = setting => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              gravity_mass: 8, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'solar',
+              system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, radius: 2,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ];
+          I.applyGalaxyOrbitalSpeedControl(nodes, {
+            gravity: 48, softening: 32, centralSoftening: 40,
+            orbitalSpeed: setting, layoutSeed: 19,
+          });
+          return {
+            global: Math.hypot(nodes[1].vx, nodes[1].vy),
+            local: Math.hypot(nodes[2].vx - nodes[1].vx,
+              nodes[2].vy - nodes[1].vy),
+          };
+        };
+        emit({
+          multipliers: settings.map(I.galaxyOrbitalSpeedMultiplier),
+          radii: settings.map(setting => localTrial(setting).radius),
+          localSpeeds: settings.map(setting => localTrial(setting).speed),
+          globalSpeeds: settings.map(globalTrial),
+          live: settings.map(liveTrial),
+        });
+        """
+    )
+    assert report["multipliers"] == pytest.approx([0.5, 1, 1.5])
+    assert report["radii"][0] < report["radii"][1] < report["radii"][2]
+    assert report["radii"][1] == pytest.approx(30)
+    assert report["radii"][2] == pytest.approx(31.8)
+    assert report["localSpeeds"][0] < report["localSpeeds"][1] < report["localSpeeds"][2]
+    assert report["globalSpeeds"][0] < report["globalSpeeds"][1] < report["globalSpeeds"][2]
+    assert report["live"][0]["global"] < report["live"][1]["global"] < report["live"][2]["global"]
+    assert report["live"][0]["local"] < report["live"][1]["local"] < report["live"][2]["local"]
 
 
 @requires_node
@@ -8712,7 +8785,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-stable-orbit-lanes-6'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
