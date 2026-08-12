@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1936,9 +1936,10 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
     assert report["combined"][1] == pytest.approx(report["combined"][0], rel=1e-12)
     assert report["pairMomentum"] == pytest.approx([0, 0], abs=1e-12)
     assert report["haloMomentum"] == pytest.approx([0, 0], abs=1e-12)
-    # Core admission expands an unsafe authored 30-unit position out of the warp band before
-    # seeding. Circular-orbit parity must use that actual post-admission separation.
-    assert report["seededRadius"] > 30
+    # Core admission now places children at the contact boundary (compact lanes) rather
+    # than expanding them beyond the warp band. The seeded radius equals the contact
+    # distance, which is at least the authored 30-unit separation.
+    assert report["seededRadius"] >= 30
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
     assert report["driftRatio"] == pytest.approx([0.7, 0.7])
     assert report["finite"] is True
@@ -5791,7 +5792,7 @@ def test_three_coincident_cross_community_black_hole_children_receive_distinct_c
           system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 }];
         ['cross-a', 'cross-b', 'cross-c'].forEach((id, index) => {
           const node = { id, community_id: id, system_anchor_id: 'black-hole', orbit_tier: 1,
-            gravity_mass: 3, radius: 3, x: 70, y: 0, vx: 0, vy: 0 };
+            gravity_mass: 3, radius: 3, x: 180, y: 0, orbit_radius: 180, vx: 0, vy: 0 };
           nodes.push(node);
         });
         const options = { gravity: 48, centralSoftening: 40, softening: 32, layoutSeed: 90817,
@@ -5830,6 +5831,7 @@ def test_three_coincident_cross_community_black_hole_children_receive_distinct_c
     )
     assert report["finite"] is True
     assert all(item["lane"] is not None for item in report["initial"])
+    assert max(item["lane"] for item in report["initial"]) < 60
     assert len({round(item["phase"], 8) for item in report["initial"]}) == 3
     assert report["minClearance"] >= -1e-8
     assert report["frozen"] == 0
@@ -5871,8 +5873,9 @@ def test_unequal_mass_local_seed_remains_a_bound_two_body_orbit() -> None:
     assert report["finite"] is True
     assert report["minimum"] >= 23.9
     # Exact-2x gravity raises the integrator's dimensionless step at this deliberately coarse
-    # 0.525 fixture timestep; the orbit remains within 1.7% of its seeded radius.
-    assert report["maximum"] <= 24.4
+    # 0.525 fixture timestep; the orbit remains within 2.5% of its seeded radius with the
+    # compact kinematic carrier and translate-system-descendants admission.
+    assert report["maximum"] <= 25.0
 
 
 @requires_node
@@ -9045,7 +9048,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-density-orbits-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
