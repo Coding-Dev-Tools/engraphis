@@ -569,7 +569,7 @@ when you are ready to evaluate the service boundary and billing options.
 | Memory engine + Smart MCP (Classic 34-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
-| Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
+| Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
 | Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
