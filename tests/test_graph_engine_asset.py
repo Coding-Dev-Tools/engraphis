@@ -6858,6 +6858,133 @@ def test_every_local_member_gets_a_live_coherent_orbit_about_its_inferred_star()
 
 
 @requires_node
+def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motion() -> None:
+    """The black-hole carrier frame must include legacy members without parent metadata.
+
+    A filtered payload can retain a black-hole-linked community star and its planets while
+    dropping ``system_anchor_id`` from the planets. Those bodies still need one global carrier
+    orbit around the hole and one independent local orbit around that star, in both the live and
+    O(n) oversized render paths.
+    """
+    report = _run_node(
+        """
+        const make = () => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            // Directly linked star intentionally has no system_anchor_id.
+            { id: 'core-star', anchor_role: 'community', community_id: 'core-satellite',
+              gravity_mass: 8, radius: 5, x: 38, y: 0, vx: 0, vy: 0 },
+            // Neither local metadata field is present: community-anchor inference is required.
+            { id: 'core-planet', community_id: 'core-satellite',
+              gravity_mass: 1, radius: 2.5, x: 50, y: 0, vx: 0, vy: 0 },
+            { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+              system_anchor_id: 'outer-star', gravity_mass: 8, radius: 5,
+              x: 120, y: 18, vx: 0, vy: 0 },
+            { id: 'outer-planet', community_id: 'outer', system_anchor_id: 'outer-star',
+              gravity_mass: 1, radius: 2.5, x: 138, y: 18, vx: 0, vy: 0 },
+          ];
+          const links = [
+            { source: 'black-hole', target: 'core-star', relation: 'orbits' },
+            { source: 'core-star', target: 'core-planet', relation: 'orbits' },
+            { source: 'outer-star', target: 'outer-planet', relation: 'orbits' },
+          ];
+          I.markGalaxyBlackHoleChildren(nodes, links);
+          return { nodes, links };
+        };
+        const delta = (next, previous) => Math.atan2(Math.sin(next - previous),
+          Math.cos(next - previous));
+        const run = kinematic => {
+          const { nodes, links } = make();
+          const options = {
+            layoutSeed: 501, gravity: 48, softening: 32, centralSoftening: 48,
+            localSoftening: 40, orbitalSpeed: 48, blackHoleMass: 1,
+            gravitationalConstant: 1, localGravitationalConstant: 1,
+            timestep: 0.032, velocityDecay: 0.00005, speedLimit: 48,
+            includeMutualSystems: true, mutualSystemGravityFraction: 0.12,
+            mutualSystemSoftening: 80, includeRelations: false,
+            includeOrbitalSeparation: false, includeSystemPacking: false,
+            includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+            includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
+            farFieldMinimumRadius: 96, farFieldSoftFraction: 0.82,
+            localRelativeSpeedLimit: 48, wallClockSeconds: 1 / 30,
+            includeCollisions: false,
+          };
+          I.seedGalaxyOrbits(nodes, 501, 48, 32, false, options);
+          I.seedGalaxySystemOrbits(nodes, 501, 48, 40, false, options);
+          const groups = [...I.galaxyOrbitGroups(nodes).entries()]
+            .map(([id, group]) => [id, group.nodes.map(node => node.id)]);
+          const blackHole = nodes[0], coreStar = nodes[1], corePlanet = nodes[2];
+          const outerStar = nodes[3], outerPlanet = nodes[4];
+          const globalNodes = [coreStar, corePlanet, outerStar, outerPlanet];
+          const localPairs = [[corePlanet, coreStar], [outerPlanet, outerStar]];
+          const globalPrevious = new Map(globalNodes.map(node => [node.id,
+            Math.atan2(node.y - blackHole.y, node.x - blackHole.x)]));
+          const localPrevious = new Map(localPairs.map(([node, star]) => [node.id,
+            Math.atan2(node.y - star.y, node.x - star.x)]));
+          const globalTravel = new Map(globalNodes.map(node => [node.id, 0]));
+          const localTravel = new Map(localPairs.map(([node]) => [node.id, 0]));
+          const step = () => kinematic
+            ? I.advanceGalaxyKinematicOrbits(nodes, options)
+            : I.integrateGalaxyLeapfrog(nodes, links, [], options);
+          for (let index = 0; index < 240; index++) {
+            step();
+            globalNodes.forEach(node => {
+              const angle = Math.atan2(node.y - blackHole.y, node.x - blackHole.x);
+              globalTravel.set(node.id, globalTravel.get(node.id)
+                + delta(angle, globalPrevious.get(node.id)));
+              globalPrevious.set(node.id, angle);
+            });
+            localPairs.forEach(([node, star]) => {
+              const angle = Math.atan2(node.y - star.y, node.x - star.x);
+              localTravel.set(node.id, localTravel.get(node.id)
+                + delta(angle, localPrevious.get(node.id)));
+              localPrevious.set(node.id, angle);
+            });
+          }
+          return { groups, global: [...globalTravel.values()], local: [...localTravel.values()],
+            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+              .every(Number.isFinite)) };
+        };
+        emit({ live: run(false), kinematic: run(true) });
+        """
+    )
+    for mode in ("live", "kinematic"):
+        result = report[mode]
+        assert report[mode]["finite"] is True
+        assert abs(min(result["global"], key=abs)) > 0.1, result
+        assert abs(min(result["local"], key=abs)) > 0.1, result
+    core_group = next(group for group in report["kinematic"]["groups"] if group[0] == "black-hole")
+    assert set(core_group[1]) == {"black-hole", "core-star", "core-planet"}
+
+
+@requires_node
+def test_reseeding_a_live_black_hole_lane_does_not_rewind_its_phase() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'child', community_id: 'child', system_anchor_id: 'black-hole',
+            gravity_mass: 3, radius: 3, x: 120, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = { gravity: 48, softening: 32, centralSoftening: 40,
+          localSoftening: 40, layoutSeed: 77, orbitalSpeed: 48,
+          timestep: 1 / 30, includeSystemPacking: false };
+        I.seedGalaxyOrbits(nodes, 77, 48, 32, false, options);
+        for (let step = 0; step < 60; step++) I.advanceGalaxyKinematicOrbits(nodes, options);
+        const before = [nodes[1].x, nodes[1].y, nodes[1].__galaxyCoreLaneAngle];
+        I.seedGalaxyOrbits(nodes, 77, 48, 32, false, options);
+        const after = [nodes[1].x, nodes[1].y, nodes[1].__galaxyCoreLaneAngle];
+        emit({ before, after });
+        """
+    )
+    assert report["after"] == pytest.approx(report["before"], abs=1e-12)
+
+
+@requires_node
 def test_tagged_local_orbit_is_repaired_when_a_render_lifecycle_zeroes_its_phase() -> None:
     """An orbit-parent tag is provenance, never a permanent exemption from repair.
 

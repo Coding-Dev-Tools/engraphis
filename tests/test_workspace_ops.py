@@ -688,6 +688,88 @@ def test_merge_collapses_duplicate_source_vaults_without_duplicate_paths():
     ).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    ("source_seen", "target_seen", "displaced"),
+    [(1.0, 2.0, "source"), (2.0, 1.0, "target")],
+)
+def test_merge_invalidates_displaced_duplicate_source_memory(
+    source_seen, target_seen, displaced,
+):
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (source_seen, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (target_seen, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    source_memory = svc.store.get_memory(source_item["memory_id"])
+    target_memory = svc.store.get_memory(target_item["memory_id"])
+    assert source_memory is not None and target_memory is not None
+    if displaced == "source":
+        assert source_memory.valid_to is not None
+        assert target_memory.valid_to is None
+    else:
+        assert source_memory.valid_to is None
+        assert target_memory.valid_to is not None
+    assert c.execute(
+        "SELECT COUNT(*) FROM audit WHERE target=? AND action='invalidate'",
+        (source_item["memory_id"] if displaced == "source" else target_item["memory_id"],),
+    ).fetchone()[0] == 1
+
+
+def test_merge_rewrites_rehomed_source_memory_provenance_for_disjoint_paths():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_id = svc.store.get_or_create_workspace("target")
+    scan = DocumentScan(root_path="", source_id="d" * 64)
+    scan.documents.append(parse_document(
+        b"# Target note\nA distinct source path.\n", "target.md",
+    ))
+    target_report = DocumentImporter(svc).import_scan(
+        scan, workspace_id=target_id, repo_id=None, session_id=None,
+        scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_label="Imported notes", confirmed=True,
+    )
+    source_item = svc.store.list_source_import_items(vault_id=source_report["source_id"])[0]
+
+    svc.merge_workspaces("source", "target")
+
+    target_vault = svc.store.list_source_vaults(workspace_id=target_id, kind="documents")[0]
+    rehomed = svc.store.conn.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path='notes.md'",
+        (target_vault["id"],),
+    ).fetchone()
+    assert rehomed is not None
+    memory = svc.store.get_memory(source_item["memory_id"])
+    assert memory is not None
+    assert memory.metadata["document"]["source_id"] == rehomed["id"]
+    assert memory.metadata["document"]["vault_id"] == target_vault["id"]
+    assert target_report["source_id"] == target_vault["id"]
+
+
 def test_copy_preserves_document_source_manifest_and_remaps_memory_metadata():
     svc = MemoryService.create(
         ":memory:", embed_dim=64, extractor="none",
