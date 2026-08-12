@@ -9883,4 +9883,4 @@ def test_graph_engine_is_syntactically_valid_when_node_is_installed() -> None:
         text=True,
         check=False,
     )
-    assert result.retu
+    assert result.returncode == 0, result.stderr

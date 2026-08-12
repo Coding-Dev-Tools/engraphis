@@ -27,8 +27,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   ping-pong. Same-system contacts project along each declared stellar orbit so they preserve
   radius and relative velocity while the dominant star remains fixed in the local system frame.
 - Galaxy's `Orbital speed` control now scales local stellar rotation and whole-system rotation
-  around the central galaxy anchor. Its faster endpoint also gives planets a modest 6% larger
-  local orbital radius while the midpoint remains unchanged; saved views continue using `repel`.
+  around the central galaxy anchor in both live and oversized kinematic layouts. Its faster
+  endpoint also gives planets a modest 6% larger local orbital radius while the midpoint remains
+  unchanged; saved views continue using `repel`.
 - Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
   the lower end of the slider.
 - Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
