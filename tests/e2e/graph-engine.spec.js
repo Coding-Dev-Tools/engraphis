@@ -1030,15 +1030,28 @@ test('Classic releases a dragged node without reheating with reduced visual moti
 
   await page.mouse.move(drag.x, drag.y);
   await page.mouse.down();
-  await page.mouse.move(drag.x + 80, drag.y + 40, { steps: 8 });
+  // Reduced motion suppresses visual transitions, not the live physics clock.  Move far
+  // enough to cross the manual-drag threshold, then use the actual held position as the
+  // baseline; the node may have advanced between the initial hit-test snapshot and pointerdown.
+  await page.mouse.move(drag.x + 8, drag.y + 4);
+  const dragStart = await page.evaluate(() => {
+    const node = window.__fg.graphData().nodes[0];
+    return { x: node.x, y: node.y, fx: node.fx, fy: node.fy };
+  });
+  await page.mouse.move(drag.x + 80, drag.y + 40, { steps: 7 });
+  const during = await page.evaluate(() => {
+    const node = window.__fg.graphData().nodes[0];
+    return { x: node.x, y: node.y, fx: node.fx, fy: node.fy };
+  });
   await page.mouse.up();
   const after = await page.evaluate(() => {
     const node = window.__fg.graphData().nodes[0];
     return { x: node.x, y: node.y, fx: node.fx, fy: node.fy };
   });
 
-  expect(after.x - drag.before.x).toBeCloseTo(80 / drag.zoom, 0);
-  expect(after.y - drag.before.y).toBeCloseTo(40 / drag.zoom, 0);
+  expect(during.x - dragStart.x).toBeCloseTo(72 / drag.zoom, 0);
+  expect(during.y - dragStart.y).toBeCloseTo(36 / drag.zoom, 0);
+  expect(Number.isFinite(during.fx) && Number.isFinite(during.fy)).toBe(true);
   expect(after.fx).toBeUndefined();
   expect(after.fy).toBeUndefined();
   expect(session.pageErrors).toEqual([]);
