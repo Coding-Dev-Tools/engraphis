@@ -1479,14 +1479,13 @@ test('a saved code view reloads when only its repository changes', async ({ page
   });
   await mockApi(page);
   await page.goto('/');
-  await page.locator('.nav-item[data-view="relations"]').click();
-
   const before = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('include_code') === 'true'
       && url.searchParams.get('repo') === 'repo-before';
   });
+  await page.locator('.nav-item[data-view="relations"]').click();
   await before;
 
   const after = page.waitForRequest(request => {
