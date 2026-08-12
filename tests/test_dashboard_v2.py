@@ -895,6 +895,16 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             assert behavior in script.text
 
 
+def test_graph_palette_notice_auto_dismisses_after_three_seconds(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "const NOTICE_DURATION_MS = 3000;" in script.text
+        assert "clearTimeout(noticeTimer);" in script.text
+        assert "noticeTimer = setTimeout(" in script.text
+        assert "banner.hidden = true;" in script.text
+
+
 def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         engine = client.get("/v2-assets/engraphis-graph.js")

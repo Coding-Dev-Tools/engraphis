@@ -1140,6 +1140,10 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByRole('button', { name: 'Show all nodes' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  const paletteNotice = page.locator('#notice-banner');
+  await page.locator('[data-graph-palette-choice="ember"]').click();
+  await expect(paletteNotice).toHaveText('ember palette applied to the graph.');
+  await expect(paletteNotice).toBeHidden({ timeout: 4500 });
   const hideUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && url.searchParams.get('connected_only') === 'true';
