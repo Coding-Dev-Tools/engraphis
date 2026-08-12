@@ -382,6 +382,17 @@ class ValidationError(ValueError):
     """Raised when untrusted input fails a guard. Message is safe to surface."""
 
 
+class WorkspaceBindingError(ValidationError):
+    """Raised when a request crosses the configured workspace boundary.
+
+    This remains separate from ordinary input validation so API surfaces can return a
+    fixed configuration error without echoing the requested workspace or allow-list.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("workspace is not permitted by this instance's configuration")
+
+
 def _reject_secret_capture(fields) -> None:
     """Map the core content-free secret rejection into this facade's error type."""
     try:
@@ -1148,8 +1159,8 @@ class MemoryService:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
-        # Replicate the binding on the Store itself so no caller (including a future
-        # sync path) can bypass ENGRAPHIS_WORKSPACES by calling Store methods directly.
+        # Replicate an explicit service binding on the Store itself so no caller
+        # (including a future sync path) can bypass it by calling Store directly.
         self.store.allowed_workspaces = self.allowed_workspaces
         # Workspaces whose graph has been lazily backfilled this process — see
         # ``graph()``. Guards against rescanning a workspace whose memories genuinely
@@ -1425,8 +1436,8 @@ class MemoryService:
 
     def _authorize_workspace(self, ws: str) -> str:
         """Enforce the server-side workspace binding. When this instance is bound to a set
-        of workspaces (``ENGRAPHIS_WORKSPACES``), no caller may read or write a workspace
-        outside it — knowing or guessing the name is not enough. This is what makes
+        of workspaces, no caller may read or write a workspace outside it — knowing or
+        guessing the name is not enough. This is what makes
         ``workspace`` a *hard* isolation boundary rather than an advisory label the client
         asserts and the server trusts (scope is enforced server-side on
         every read/write — never trust client-supplied scope alone). An empty binding — the
@@ -1440,7 +1451,7 @@ class MemoryService:
         mode there is no current user, so this is a no-op and shared/single-tenant
         behaviour is unchanged."""
         if self.allowed_workspaces is not None and ws not in self.allowed_workspaces:
-            raise ValidationError(f"workspace '{ws}' is not permitted on this instance")
+            raise WorkspaceBindingError()
         self._enforce_personal_access(ws)
         return ws
 
@@ -4823,9 +4834,9 @@ class MemoryService:
         memory is written to it — the dashboard's Workspaces tab and the agent write path
         both otherwise only mint a workspace lazily (``get_or_create_workspace``), which
         left no way to pre-create the folders users then choose to submit to. Enforces the
-        same binding and name validation every other entry point does, so a bound instance
-        (``ENGRAPHIS_WORKSPACES``) still refuses names outside its allow-list, and rejects a
-        name that already exists (mirrors ``rename``'s uniqueness check).
+        same explicit binding and name validation every other entry point does, so a
+        deliberately bound service still refuses names outside its allow-list, and rejects
+        a name that already exists (mirrors ``rename``'s uniqueness check).
 
         ``visibility`` defaults to ``'personal'``: a new team folder is private to its
         creator until they intentionally share it. ``'shared'`` requires
