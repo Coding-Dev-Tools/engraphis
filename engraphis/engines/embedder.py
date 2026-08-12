@@ -164,6 +164,15 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
             """Add overlap plus all source text, splitting instead of truncating."""
             if not source:
                 return
+            # A normal source chunk already fits by itself. Reduce the duplicated
+            # prefix until the complete chunk fits; never split a source chunk merely
+            # to preserve an overlap, since that can lose a suffix or split a token.
+            if len(source) <= chunk_size:
+                prefix_budget = max(chunk_size - len(source), 0)
+                if len(prefix) > prefix_budget:
+                    prefix = prefix[-prefix_budget:] if prefix_budget else ""
+                output.append(prefix + source)
+                return
             if len(prefix) >= chunk_size:
                 prefix = prefix[: max(chunk_size - 1, 0)]
             content_budget = max(chunk_size - len(prefix), 1)
