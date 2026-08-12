@@ -170,6 +170,34 @@ def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace()
     assert health["conflict_frequency"] == {"total": 1, "last_7d": 1}
 
 
+def test_memory_health_uses_current_bitemporal_visibility():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.remember(
+        "Visible health marker.", workspace="alpha", scope="workspace"
+    )
+    future_ingested = service.remember(
+        "Future ingestion marker.", workspace="alpha", scope="workspace"
+    )
+    future_expiring = service.remember(
+        "Future expiration marker.", workspace="alpha", scope="workspace"
+    )
+    now = time.time()
+    service.store.conn.execute(
+        "UPDATE memories SET ingested_at=? WHERE id=?",
+        (now + 3600, future_ingested["id"]),
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET expired_at=? WHERE id=?",
+        (now + 3600, future_expiring["id"]),
+    )
+    service.store.conn.commit()
+
+    health = service.memory_health(workspace="alpha")
+
+    assert sum(bucket["count"] for bucket in health["decay_distribution"]) == 2
+    assert health["orphan_count"] == 2
+
+
 def test_remember_then_recall_roundtrip():
     s = _svc()
     out = s.remember("We use pnpm as the package manager for all frontend repos.",
