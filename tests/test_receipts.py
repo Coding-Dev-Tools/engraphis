@@ -10,6 +10,13 @@ from engraphis.core.store import Store
 from engraphis.service import MemoryService
 
 
+def test_empty_context_savings_scope_has_valid_receipt_chain():
+    summary = Store(":memory:").context_savings()
+
+    assert summary["receipt_chain_valid"] is True
+    assert summary["receipt_chain_error_count"] == 0
+
+
 def test_receipts_are_content_free_and_tamper_evident():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("private-workspace")
