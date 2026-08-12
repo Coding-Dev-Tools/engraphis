@@ -10446,10 +10446,11 @@ class MemoryService:
         conn = self.store.conn
         now = _time.time()
         live = ("(valid_from IS NULL OR valid_from<=?) AND (valid_to IS NULL OR ?<valid_to) "
-                "AND expired_at IS NULL")
+                "AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)")
         base_where = " WHERE workspace_id=? AND COALESCE(scope,'workspace')!='session'"
         live_where = f"{base_where} AND {live}"
-        live_params: list[Any] = [wid, now, now]
+        live_params: list[Any] = [wid, now, now, now, now]
         # ── Decay distribution (retention buckets) ──────────────────────────────
         # R(t) = exp(-Δt_days / S). Bucket into 5 bands: critical (<0.2), low
         # (0.2–0.4), medium (0.4–0.6), high (0.6–0.8), strong (>0.8).
@@ -10517,13 +10518,14 @@ class MemoryService:
         # A memory is an orphan when it has zero live rows in memory_entities.
         # The NOT EXISTS subquery uses the existing idx_memory_entity_memory
         # index on (memory_id, valid_to, expired_at).
-        orphan_params: list[Any] = [wid, now, now]
+        orphan_params: list[Any] = [wid, now, now, now, now]
         orphan_sql_clean = (
             "SELECT COUNT(*) AS n FROM memories m "
             "WHERE m.workspace_id=? AND COALESCE(m.scope,'workspace')!='session' "
             "AND (m.valid_from IS NULL OR m.valid_from<=?) "
             "AND (m.valid_to IS NULL OR ?<m.valid_to) "
-            "AND m.expired_at IS NULL "
+            "AND (m.ingested_at IS NULL OR m.ingested_at<=?) "
+            "AND (m.expired_at IS NULL OR ?<m.expired_at) "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM memory_entities me "
             "  WHERE me.memory_id=m.id AND me.valid_to IS NULL AND me.expired_at IS NULL"
