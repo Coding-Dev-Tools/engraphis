@@ -33,7 +33,7 @@ from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from urllib.request import url2pathname
 
 from engraphis import __version__
@@ -95,6 +95,21 @@ def _is_memory_database_path(db_path: str) -> bool:
         return True
     query = parse_qs(parsed.query)
     return "memory" in query.get("mode", [])
+
+
+def _is_read_only_database_uri(db_path: str) -> bool:
+    """Detect URI options that prohibit writes to the SQLite target."""
+    text = str(db_path or "")
+    if not text.startswith("file:"):
+        return False
+    query = parse_qs(urlsplit(text.replace("\\", "/")).query)
+    modes = {value.casefold() for value in query.get("mode", [])}
+    if "ro" in modes:
+        return True
+    return any(
+        value.casefold() not in {"", "0", "false", "no", "off"}
+        for value in query.get("immutable", [])
+    )
 
 
 def _physical_database_path(db_path: str) -> str:
@@ -1346,7 +1361,13 @@ class MemoryService:
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
                query_planner=None, read_only: bool = False) -> "MemoryService":
-        db_path = _physical_database_path(db_path)
+        database_path = str(db_path)
+        physical_db_path = _physical_database_path(database_path)
+        migration_allowed = (
+            not _is_memory_database_path(database_path)
+            and not read_only
+            and not _is_read_only_database_uri(database_path)
+        )
         # extractor / graph_extractor default to the configured backends
         # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
         # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
@@ -1366,14 +1387,14 @@ class MemoryService:
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
-        if not _is_memory_database_path(db_path) and not read_only:
-            _auto_migrate_v1_if_needed(db_path)
+        if migration_allowed:
+            _auto_migrate_v1_if_needed(physical_db_path)
         # Optional encryption at rest: if ENGRAPHIS_DB_KEY[_FILE] is set, memories are
         # stored in a SQLCipher-encrypted database. Off by default (returns None).
         from engraphis.backends.encrypted_db import connector_from_env
         connect = connector_from_env()
         engine = MemoryEngine.create(
-            db_path, embed_model=embed_model, embed_revision=embed_revision,
+            database_path, embed_model=embed_model, embed_revision=embed_revision,
             require_immutable_models=require_immutable_models,
             embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
@@ -1383,9 +1404,9 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
         )
-        if not _is_memory_database_path(db_path) and not read_only:
+        if migration_allowed:
             try:
-                _warn_if_db_empty_with_populated_sibling(db_path)
+                _warn_if_db_empty_with_populated_sibling(physical_db_path)
             except Exception:  # noqa: BLE001 — diagnostics never block startup
                 pass
         return cls(engine, allowed_workspaces=allowed_workspaces)

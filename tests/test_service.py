@@ -84,6 +84,16 @@ def test_empty_configured_db_warns_about_populated_owner_db(tmp_path, monkeypatc
     assert "1 memories" in warning
 
 
+def test_memory_service_preserves_regular_sqlite_uri_options(tmp_path):
+    """URI modes must reach SQLite instead of being converted to a writable path."""
+    missing = tmp_path / "missing.db"
+    uri = missing.as_uri() + "?mode=rw"
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        MemoryService.create(uri, extractor="none", graph_extractor="none")
+    assert not missing.exists()
+
+
 def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
     service = MemoryService.create(":memory:", graph_extractor="none")
 
