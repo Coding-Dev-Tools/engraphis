@@ -55,6 +55,24 @@ def test_schema_version(store):
     assert store.schema_version == SCHEMA_VERSION
 
 
+def test_store_preserves_regular_sqlite_uri_options(tmp_path):
+    path = tmp_path / "uri.db"
+    writable = Store(str(path))
+    writable.close()
+
+    readonly = Store(path.as_uri() + "?mode=ro&immutable=1", read_only=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            readonly.conn.execute("CREATE TABLE should_not_write(value TEXT)")
+    finally:
+        readonly.close()
+
+    missing = tmp_path / "missing.db"
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        Store(missing.as_uri() + "?mode=rw")
+    assert not missing.exists()
+
+
 def test_temporal_mutations_reject_inverted_intervals(store):
     workspace_id = store.get_or_create_workspace("intervals")
     memory_id = store.add_memory(MemoryRecord(

@@ -102,6 +102,21 @@ def _is_memory_database_path(path: str) -> bool:
     query = parse_qs(parsed.query)
     return "memory" in query.get("mode", [])
 
+
+def _physical_sqlite_path(path: str) -> str:
+    """Return the filesystem path represented by a regular SQLite file URI."""
+    text = str(path)
+    if not text.startswith("file:"):
+        return text
+    parsed = urlsplit(text.replace("\\", "/"))
+    if parsed.scheme != "file" or not parsed.path:
+        raise ValueError("file database URI must include a path")
+    uri_path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        uri_path = f"//{parsed.netloc}{uri_path}"
+    from urllib.request import url2pathname
+    return str(Path(url2pathname(uri_path)).expanduser())
+
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 120.0
 _LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
 _LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
@@ -1113,7 +1128,7 @@ class Store:
                 )
             read_only_path = self._preflight_read_only_path(path)
         if not _is_memory_database_path(path) and not self.read_only:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(_physical_sqlite_path(path)).parent.mkdir(parents=True, exist_ok=True)
         raw_conn = self._open_connection(read_only_path or path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
@@ -1172,14 +1187,13 @@ class Store:
                 return self._connect.open_read_only(path)  # type: ignore[attr-defined]
             return self._connect(path)
         if self.read_only:
-            uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+            uri = Path(_physical_sqlite_path(path)).resolve().as_uri() + "?mode=ro&immutable=1"
             conn = sqlite3.connect(
                 uri, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
                 check_same_thread=False,
             )
-        elif _is_memory_database_path(path) and path.startswith("file:"):
-            # Named shared-memory URI: pass through with uri=True so SQLite
-            # recognizes the mode=memory query parameter.
+        elif str(path).startswith("file:"):
+            # Preserve all SQLite URI options, including mode=ro/rw and immutable.
             conn = sqlite3.connect(
                 path, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
                 check_same_thread=False,
@@ -1200,7 +1214,7 @@ class Store:
         refused because an immutable connection would skip recovery and silently
         expose an incomplete snapshot.
         """
-        candidate = Path(path)
+        candidate = Path(_physical_sqlite_path(path))
         try:
             info = os.lstat(candidate)
         except OSError:
