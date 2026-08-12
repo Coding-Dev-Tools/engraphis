@@ -16,7 +16,7 @@ from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
-ALGORITHM_VERSION = "galaxy-v6"
+ALGORITHM_VERSION = "galaxy-v7-system-envelope-packing"
 PUBLIC_REFERENCE_ID_LIMIT = 200
 PUBLIC_FACET_LIMIT = 100
 PUBLIC_REPO_NAME_LIMIT = 100
@@ -423,7 +423,14 @@ def _community_positions(
     dict[str, tuple[float, float]],
     dict[str, dict[str, int | float | bool]],
 ]:
-    """Seed deterministic logarithmic spiral arms with compactness-first placement."""
+    """Seed deterministic logarithmic arms, then pack complete system envelopes.
+
+    ``radius_scale`` controls the preferred spiral target, not a post-layout geometric
+    contraction.  Contracting already-packed centres was visually compact but invalidated the
+    very system radii used by the collision test: large communities consequently began life
+    intersecting the black-hole system or one another.  The final pass starts from the scaled
+    targets and moves whole systems outward/along the arm until their painted envelopes clear.
+    """
     ordered = sorted(communities, key=lambda item: (
         0 if str(item["id"]) == global_community_id else 1,
         -_finite_float(item.get("mass"), 0.0),
@@ -490,12 +497,17 @@ def _community_positions(
 
     def pack_with_radial_clearance(
         targets: Mapping[str, tuple[float, float]],
-    ) -> dict[str, tuple[float, float]]:
+    ) -> tuple[dict[str, tuple[float, float]], set[str]]:
         positions: dict[str, tuple[float, float]] = {}
-        cell_size = max(36.0, spacing)
+        # Radius-aware cells keep a pathological 10,000-unit community from scanning tens of
+        # thousands of empty 98-unit buckets on every attempt.
+        cell_size = max(36.0, spacing, max(
+            (float(spec["system_radius"]) for spec in specs), default=36.0
+        ))
         spatial_cells: dict[tuple[int, int], list[tuple[float, float, float]]] = (
             defaultdict(list)
         )
+        unresolved: set[str] = set()
         maximum_placed_radius = 0.0
 
         def place(x: float, y: float, system_radius: float) -> None:
@@ -527,107 +539,66 @@ def _community_positions(
             else:
                 axis_radius = math.hypot(target_x, target_y / disk_eccentricity)
                 angle = math.atan2(target_y / disk_eccentricity, target_x)
-                for attempt in range(128):
+                # Moving only the system centre preserves every local star/planet offset.  The
+                # logarithmic walk is deterministic and gives dense 500+ node scenes enough
+                # radial headroom without a quadratic all-node relaxation.
+                found = False
+                for attempt in range(256):
                     trial_angle = angle + direction * 0.045 * attempt
                     trial_radius = axis_radius * math.exp(0.018 * attempt)
                     x = trial_radius * math.cos(trial_angle)
                     y = disk_eccentricity * trial_radius * math.sin(trial_angle)
                     if not collides(x, y, system_radius):
+                        found = True
                         break
+                if not found:
+                    unresolved.add(community_id)
             positions[community_id] = (x, y)
             place(x, y, system_radius)
-        return positions
+        return positions, unresolved
 
-    def pack_at_fixed_radius(
-        targets: Mapping[str, tuple[float, float]],
-    ) -> tuple[dict[str, tuple[float, float]], dict[str, dict[str, bool]]]:
-        positions: dict[str, tuple[float, float]] = {}
-        flags: dict[str, dict[str, bool]] = {}
-        cell_size = max(36.0, spacing)
-        spatial_cells: dict[tuple[int, int], list[tuple[float, float, float]]] = (
-            defaultdict(list)
-        )
-        maximum_placed_radius = 0.0
-
-        def place(x: float, y: float, system_radius: float) -> None:
-            nonlocal maximum_placed_radius
-            cell = (math.floor(x / cell_size), math.floor(y / cell_size))
-            spatial_cells[cell].append((x, y, system_radius))
-            maximum_placed_radius = max(maximum_placed_radius, system_radius)
-
-        def clearance_ratio(x: float, y: float, system_radius: float) -> float:
-            reach = 1.15 * (system_radius + maximum_placed_radius)
-            cell_x, cell_y = math.floor(x / cell_size), math.floor(y / cell_size)
-            cell_reach = max(1, math.ceil(reach / cell_size))
-            minimum_ratio = float("inf")
-            for grid_x in range(cell_x - cell_reach, cell_x + cell_reach + 1):
-                for grid_y in range(cell_y - cell_reach, cell_y + cell_reach + 1):
-                    for other_x, other_y, other_radius in spatial_cells.get(
-                        (grid_x, grid_y), ()
-                    ):
-                        denominator = system_radius + other_radius
-                        if denominator > 0.0:
-                            minimum_ratio = min(
-                                minimum_ratio,
-                                math.hypot(x - other_x, y - other_y) / denominator,
-                            )
-            return minimum_ratio
-
-        # Small/interactive scenes get a fine angular search. Static large scenes keep the
-        # same bounded arm width with fewer samples, avoiding an expensive dense overlap scan.
-        angular_steps = 16 if len(specs) <= 64 else (8 if len(specs) <= 600 else 4)
-        angular_step = 0.72 / angular_steps
-        angular_offsets = [0.0]
-        for step in range(1, angular_steps + 1):
-            angular_offsets.extend((angular_step * step, -angular_step * step))
-        for spec in specs:
-            community_id = str(spec["id"])
-            system_radius = float(spec["system_radius"])
-            target_x, target_y = targets[community_id]
-            target_radius = math.hypot(target_x, target_y)
-            target_phase = math.atan2(target_y, target_x)
-            best = (target_x, target_y, -1.0, 0.0)
-            for angular_offset in angular_offsets:
-                candidate_phase = target_phase + direction * angular_offset
-                candidate_x = target_radius * math.cos(candidate_phase)
-                candidate_y = target_radius * math.sin(candidate_phase)
-                ratio = clearance_ratio(candidate_x, candidate_y, system_radius)
-                if ratio > best[2]:
-                    best = (candidate_x, candidate_y, ratio, angular_offset)
-                if ratio >= 1.15:
-                    break
-            x, y, ratio, angular_offset = best
-            positions[community_id] = (x, y)
-            flags[community_id] = {
-                "adjusted": abs(angular_offset) > 1e-12,
-                "overlap": math.isfinite(ratio) and ratio < 1.15,
-            }
-            place(x, y, system_radius)
-        return positions, flags
 
     nominal_targets = {
         str(spec["id"]): (float(spec["nominal_x"]), float(spec["nominal_y"]))
         for spec in specs
     }
-    baseline_positions = pack_with_radial_clearance(nominal_targets)
-    contracted_targets = {
+    preferred_targets = {
         community_id: (
-            baseline_x * clean_radius_scale,
-            baseline_y * clean_radius_scale,
+            nominal_x * clean_radius_scale,
+            nominal_y * clean_radius_scale,
         )
-        for community_id, (baseline_x, baseline_y) in baseline_positions.items()
+        for community_id, (nominal_x, nominal_y) in nominal_targets.items()
     }
-    positions, placement_flags = pack_at_fixed_radius(contracted_targets)
+    # Pack *after* applying compactness.  This is the key invariant: compactness may choose a
+    # close preferred orbit, but it may never contract two complete solar-system envelopes
+    # through each other.  The older fixed-radius angular search could only flag an impossible
+    # ring; this radial continuation always has a collision-free solution in open space.
+    positions, unresolved = pack_with_radial_clearance(preferred_targets)
+    placement_flags = {
+        community_id: {
+            "adjusted": math.hypot(
+                positions[community_id][0] - preferred_x,
+                positions[community_id][1] - preferred_y,
+            ) > 1e-9,
+            "overlap": community_id in unresolved,
+        }
+        for community_id, (preferred_x, preferred_y) in preferred_targets.items()
+    }
     hints: dict[str, dict[str, int | float | bool]] = {}
     for spec in specs:
         community_id = str(spec["id"])
         x, y = positions[community_id]
-        target_x, target_y = contracted_targets[community_id]
+        target_x, target_y = preferred_targets[community_id]
         actual_radius = math.hypot(x, y)
-        target_radius = math.hypot(target_x, target_y)
+        preferred_radius = math.hypot(target_x, target_y)
         hints[community_id] = {
             "galactic_radius": round(actual_radius, 6),
-            "galactic_target_radius": round(target_radius, 6),
+            # Convergence follows this target every live slice.  It must therefore be the
+            # clearance-adjusted carrier orbit, or it continually drags the freshly packed
+            # system back through its neighbours.  Preserve the compact spiral preference as
+            # a diagnostic only; it is never a physical attractor after packing.
+            "galactic_target_radius": round(actual_radius, 6),
+            "galactic_preferred_radius": round(preferred_radius, 6),
             "galactic_radius_scale": round(clean_radius_scale, 6),
             "galactic_initial_compactness": GALACTIC_INITIAL_COMPACTNESS,
             "galactic_clearance_adjusted": placement_flags[community_id]["adjusted"],

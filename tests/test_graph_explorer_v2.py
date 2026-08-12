@@ -1094,7 +1094,7 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
         )
 
 
-def test_community_spiral_starts_twenty_percent_closer_and_reports_overlap():
+def test_community_spiral_packs_compact_preferred_targets_without_envelope_overlap():
     communities = [
         {"id": f"system-{index:02d}", "mass": 100.0 - index, "radius": radius}
         for index, radius in enumerate([69.6, 66.3, *([36.0] * 22)])
@@ -1106,10 +1106,6 @@ def test_community_spiral_starts_twenty_percent_closer_and_reports_overlap():
     repeated = graph_scene_module._community_positions(
         communities, "system-00", 1779033703, spacing=98.0
     )
-    baseline_positions, baseline_hints = graph_scene_module._community_positions(
-        communities, "system-00", 1779033703, spacing=98.0, radius_scale=0.5
-    )
-
     assert (positions, hints) == repeated
     assert positions["system-00"] == (0.0, 0.0)
     assert hints["system-00"]["galactic_radius"] == 0.0
@@ -1118,38 +1114,29 @@ def test_community_spiral_starts_twenty_percent_closer_and_reports_overlap():
     assert hints["system-00"]["galactic_initial_compactness"] == 0.8
     assert hints["system-00"]["galactic_overlap"] is False
     assert hints["system-00"]["galactic_arm"] == -1
-    outer_hints = [
-        hint for community_id, hint in hints.items() if community_id != "system-00"
-    ]
+    outer_hints = [hint for community_id, hint in hints.items() if community_id != "system-00"]
     assert len({hint["galactic_arm"] for hint in outer_hints}) in {2, 3}
     assert all(0.84 <= hint["galactic_eccentricity"] <= 0.92
                for hint in hints.values())
 
     for community in communities[1:]:
         community_id = community["id"]
-        assert hints[community_id]["galactic_radius"] == pytest.approx(
-            0.8 * baseline_hints[community_id]["galactic_radius"], abs=1e-6
-        )
-        assert hints[community_id]["galactic_target_radius"] == pytest.approx(
-            0.8 * baseline_hints[community_id]["galactic_target_radius"], abs=1e-6
-        )
+        # 0.4 remains the compact preferred scale, but the resulting physical carrier orbit
+        # must expand as needed for complete painted solar-system envelopes.
+        assert hints[community_id]["galactic_preferred_radius"] <= hints[community_id]["galactic_radius"]
+        assert hints[community_id]["galactic_target_radius"] == hints[community_id]["galactic_radius"]
         assert math.hypot(*positions[community_id]) == pytest.approx(
             hints[community_id]["galactic_radius"], abs=1e-6
-        )
-        assert math.hypot(*baseline_positions[community_id]) == pytest.approx(
-            baseline_hints[community_id]["galactic_radius"], abs=1e-6
         )
 
     overlap_pairs = 0
     for left_index, left in enumerate(communities):
         for right in communities[left_index + 1:]:
             distance = math.dist(positions[left["id"]], positions[right["id"]])
-            if distance < 1.15 * (left["radius"] + right["radius"]):
+            if distance < 1.15 * (left["radius"] + right["radius"]) - 1e-8:
                 overlap_pairs += 1
-                assert (hints[left["id"]]["galactic_overlap"]
-                        or hints[right["id"]]["galactic_overlap"])
-    assert overlap_pairs > 0
-    assert any(hint["galactic_overlap"] for hint in outer_hints)
+    assert overlap_pairs == 0
+    assert not any(hint["galactic_overlap"] for hint in outer_hints)
     radial_span = max(math.hypot(x, y) for x, y in positions.values())
     x_span = max(x for x, _y in positions.values()) - min(
         x for x, _y in positions.values()
@@ -1177,8 +1164,9 @@ def test_community_spiral_starts_twenty_percent_closer_and_reports_overlap():
     assert outer_radii[-1] / outer_radii[0] >= 2.0
     assert gap_deviation / mean_gap >= 0.25
     assert len({round(gap, 3) for gap in angular_gaps}) >= len(angular_gaps) // 2
-    assert radial_span < 250.0
-    assert max(x_span, y_span) < 900.0
+    # Envelope clearance grows a dense galaxy only as much as is geometrically necessary.
+    assert radial_span < 1200.0
+    assert max(x_span, y_span) < 2400.0
 
 
 def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
@@ -1688,10 +1676,10 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v6"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v7-system-envelope-packing"
 
 
-def test_graph_scene_v6_flags_projection_repo_names_and_cache_identity():
+def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
     service, alpha, _beta, _gamma = _seed_service()
     workspace_id = service.store.conn.execute(
         "SELECT id FROM workspaces WHERE name='acme'"
@@ -1711,7 +1699,7 @@ def test_graph_scene_v6_flags_projection_repo_names_and_cache_identity():
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v6"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v7-system-envelope-packing"
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True

@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260811-structural-orbit-root-1';
+const stellarOrbitAssetVersion = '20260812-annulus-aware-packing-3';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -460,6 +460,43 @@ async function galaxySystemSnapshot(page) {
       finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
         .every(value => Number.isFinite(value))),
     };
+  });
+}
+
+/* Envelope clearance is a paint-space requirement: node centres can be distinct while complete
+   star+planet circles visibly overlap.  Measure each independent system at the actual canvas
+   transform, including node radii, so zoom-to-fit cannot hide a stacked galaxy. */
+async function renderedSystemEnvelopeSnapshot(page) {
+  return page.evaluate(() => {
+    const graph = window.__fg;
+    const nodes = graph.graphData().nodes.filter(node => !node.ghost);
+    const byId = new Map(nodes.map(node => [String(node.id), node]));
+    const systems = nodes.filter(node => node.anchor_role === 'community').map(star => {
+      const members = nodes.filter(node => String(node.system_anchor_id || '') === String(star.id));
+      const point = graph.graph2ScreenCoords(star.x, star.y);
+      const radius = Math.max(...members.map(node => {
+        const member = graph.graph2ScreenCoords(node.x, node.y);
+        const edge = graph.graph2ScreenCoords(node.x + Number(node.radius || 0), node.y);
+        return Math.hypot(member.x - point.x, member.y - point.y)
+          + Math.hypot(edge.x - member.x, edge.y - member.y);
+      }));
+      const unit = graph.graph2ScreenCoords(star.x + 1, star.y);
+      return { id: String(star.id), x: point.x, y: point.y, radius,
+        pixelsPerGraphUnit: Math.hypot(unit.x - point.x, unit.y - point.y), members: members.length };
+    });
+    let minimumClearance = Infinity, overlaps = 0;
+    for (let left = 0; left < systems.length; left += 1) for (let right = 0;
+      right < left; right += 1) {
+      const a = systems[left], b = systems[right];
+      // The runtime gap is eight graph units, converted using the smaller local screen scale.
+      const clearance = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
+      const required = 8 * Math.min(a.pixelsPerGraphUnit, b.pixelsPerGraphUnit);
+      minimumClearance = Math.min(minimumClearance, clearance - required);
+      if (clearance < required - .75) overlaps += 1;
+    }
+    return { systems, minimumClearance, overlaps,
+      finite: systems.every(system => [system.x, system.y, system.radius,
+        system.pixelsPerGraphUnit].every(Number.isFinite)) };
   });
 }
 
@@ -1579,7 +1616,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.orbitalSeparationSetting).toBe(60);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
       expect(diagnostics.orbitalSeparationStrength).toBe(1);
-      expect(diagnostics.crossSystemRepulsionStrength).toBeCloseTo(0.18, 12);
+      expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(48);
@@ -1645,6 +1682,35 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       && window.__engraphisGraph.physicsDiagnostics().active
       && window.__engraphisGraph.physicsDiagnostics().steps > steps, pausedSteps);
     expect(session.pageErrors).toEqual([]);
+  });
+
+test('served Galaxy paints complete independent solar envelopes with a visible clearance',
+  async ({ page }, testInfo) => {
+    test.setTimeout(55_000);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await openDashboard(page, { graphScene: servedLargeGalaxyScene });
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 30_000 });
+    await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+      && window.__fg.graphData().nodes.length === 542
+      && window.__engraphisGraph.physicsDiagnostics().steps >= 12, null, { timeout: 35_000 });
+    const before = await renderedSystemEnvelopeSnapshot(page);
+    const steps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps + 24);
+    await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
+      steps, { timeout: 25_000 });
+    const after = await renderedSystemEnvelopeSnapshot(page);
+    await testInfo.attach('served-system-envelope-clearance.json', {
+      body: Buffer.from(JSON.stringify({ before, after }, null, 2)),
+      contentType: 'application/json',
+    });
+    for (const snapshot of [before, after]) {
+      expect(snapshot.finite).toBe(true);
+      expect(snapshot.systems).toHaveLength(60);
+      expect(snapshot.systems.every(system => system.members === 9)).toBe(true);
+      expect(snapshot.overlaps).toBe(0);
+      expect(snapshot.minimumClearance).toBeGreaterThanOrEqual(-.75);
+    }
   });
 
 test('served Complete Galaxy uses the lightweight all-body orbit path instead of a frozen layout',
@@ -2672,8 +2738,7 @@ test('Galaxy sliders retain full ranges with contractive release-stable response
   expect(separatedOrbits.before.diagnostics.orbitalSeparationSetting).toBe(120);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(30);
   expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
-  expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength)
-    .toBeCloseTo(0.18, 12);
+  expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
   expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
   expect(separatedOrbits.nonAnchorAfter).toBeGreaterThan(
     compactOrbits.nonAnchorAfter * 1.35,
