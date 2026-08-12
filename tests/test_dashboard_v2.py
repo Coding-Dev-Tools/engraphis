@@ -895,6 +895,18 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             assert behavior in script.text
 
 
+def test_code_overlay_scopes_only_to_known_repositories(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "function graphRepositoryNames()" in script.text
+        assert "function validatedGraphRepository(value)" in script.text
+        assert "repositories: Array.isArray(scene.repos)" in script.text
+        assert "const validatedRepo = targetIncludeCode ? validatedGraphRepository(targetRepo) : '';" in script.text
+        assert "const codeRepo = validatedRepo" in script.text
+        assert "targetIncludeCode && targetRepo" not in script.text
+
+
 def test_graph_palette_notice_auto_dismisses_after_three_seconds(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         script = client.get("/v2-assets/ledger.js")

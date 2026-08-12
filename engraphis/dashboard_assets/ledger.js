@@ -2820,6 +2820,32 @@
     return JSON.stringify([workspace, mode, includeCode, showUnlinked, asOf, repo || '']);
   }
 
+  function graphRepositoryNames() {
+    const names = new Set();
+    const add = value => {
+      const name = text(value).trim();
+      if (name) names.add(name);
+    };
+    if (state.graphData && Array.isArray(state.graphData.repositories)) {
+      state.graphData.repositories.forEach(add);
+    }
+    if (state.graphData && Array.isArray(state.graphData.nodes)) {
+      state.graphData.nodes.forEach(item => {
+        if (item && Array.isArray(item.repo_names)) item.repo_names.forEach(add);
+      });
+    }
+    return names;
+  }
+
+  function validatedGraphRepository(value) {
+    const candidate = text(value).trim().toLowerCase();
+    if (!candidate) return '';
+    for (const name of graphRepositoryNames()) {
+      if (name.toLowerCase() === candidate) return name;
+    }
+    return '';
+  }
+
   function isCurrentGraphLoad(request) {
     return Boolean(request
       && request.id === state.graphLoadRequest
@@ -2912,8 +2938,9 @@
           : `&node_limit=${GRAPH_INITIAL_NODE_LIMIT}&edge_limit=${GRAPH_INITIAL_EDGE_LIMIT}`;
         const connectedOnly = !fullGraph && !targetShowUnlinked ? '&connected_only=true' : '';
         const includeCode = targetIncludeCode ? '&include_code=true' : '';
-        const codeRepo = targetIncludeCode && targetRepo
-          ? `&repo=${encodeURIComponent(targetRepo)}` : '';
+        const validatedRepo = targetIncludeCode ? validatedGraphRepository(targetRepo) : '';
+        const codeRepo = validatedRepo
+          ? `&repo=${encodeURIComponent(validatedRepo)}` : '';
         const asOf = targetAsOf === null ? '' : `&as_of=${encodeURIComponent(targetAsOf / 1000)}`;
         const history = targetAsOf === null ? '' : '&include_history=true';
         // Complete Ledger views are canonical entity projections. Memory nodes remain available
@@ -2932,6 +2959,8 @@
         const data = {
           nodes: graphNodes(scene),
           links: graphLinks(scene),
+          repositories: Array.isArray(scene.repos)
+            ? scene.repos.filter(repo => typeof repo === 'string') : [],
           suggestions: scene.suggestions || [],
           communities: scene.communities || [],
           community_bridges: scene.community_bridges || scene.bridges || [],
