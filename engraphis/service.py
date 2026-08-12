@@ -5078,7 +5078,8 @@ class MemoryService:
         keeps its own id, content and full history, it just changes workspace.
         Repos/entities that collide by name with something already in ``target``
         are folded together (their memories, edges and code symbols repointed at
-        the surviving row); everything else is simply relabeled onto ``target``.
+        the surviving row); source-import manifests are rehomed or merged by source
+        identity; everything else is simply relabeled onto ``target``.
         Irreversible, so the UI gates it behind a confirm, same as delete."""
         src = self._clean_ws(source)
         dst = self._clean_ws(target)
@@ -5410,6 +5411,132 @@ class MemoryService:
                     f"WHERE workspace_id=? AND repo_id IS ?",
                     (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
 
+        # Source-import manifests are durable workspace state, not disposable job
+        # output. Rehome them after repos, sessions, memories, and jobs so their scope
+        # triggers see the destination hierarchy. When both workspaces imported the
+        # same source identity, keep one vault and merge its current per-path manifest;
+        # source-import job items are repointed before the losing row is removed so
+        # historical reports do not lose their source references.
+        from engraphis.obsidian_import import stable_source_key as _stable_source_key
+
+        def _source_key_for_destination(item: dict, destination_vault_id: str) -> str:
+            """Re-key a current source item when two vault ids are folded together."""
+            memory_id = item.get("memory_id")
+            if not memory_id:
+                return str(item["source_key"])
+            record = self.store.get_memory(str(memory_id))
+            metadata = record.metadata if record is not None else {}
+            envelope = (
+                metadata.get("document") or metadata.get("obsidian")
+                if isinstance(metadata, dict) else {}
+            )
+            branch = envelope.get("branch") if isinstance(envelope, dict) else ""
+            return _stable_source_key(
+                destination_vault_id, str(item["relative_path"]), branch=str(branch or "")
+            )
+
+        def _rewrite_import_memory_source(
+            memory_id: Optional[str], *, source_id: str, vault_id: str,
+        ) -> None:
+            if not memory_id:
+                return
+            row = c.execute(
+                "SELECT metadata FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return
+            metadata = _loads(row["metadata"], {})
+            if not isinstance(metadata, dict):
+                return
+            envelope_key = "document" if isinstance(metadata.get("document"), dict) else "obsidian"
+            envelope = metadata.get(envelope_key)
+            if not isinstance(envelope, dict):
+                return
+            envelope["source_id"] = source_id
+            envelope["vault_id"] = vault_id
+            c.execute(
+                "UPDATE memories SET metadata=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), memory_id),
+            )
+
+        source_vaults = [dict(row) for row in c.execute(
+            "SELECT * FROM source_vaults WHERE workspace_id=? ORDER BY id", (wid_src,)
+        )]
+        for source_vault in source_vaults:
+            source_vault_id = str(source_vault["id"])
+            mapped_repo = _new_repo(source_vault.get("repo_id"))
+            target_vault = c.execute(
+                "SELECT * FROM source_vaults WHERE kind=? AND root_digest=? "
+                "AND workspace_id=? AND repo_id IS ? AND session_id IS ?",
+                (
+                    source_vault["kind"], source_vault["root_digest"], wid_dst,
+                    mapped_repo, source_vault.get("session_id"),
+                ),
+            ).fetchone()
+            if target_vault is None:
+                c.execute(
+                    "UPDATE source_vaults SET workspace_id=?, repo_id=? WHERE id=?",
+                    (wid_dst, mapped_repo, source_vault_id),
+                )
+                continue
+
+            target_vault = dict(target_vault)
+            target_vault_id = str(target_vault["id"])
+            source_items = [dict(row) for row in c.execute(
+                "SELECT * FROM source_imports WHERE vault_id=? ORDER BY source_key, id",
+                (source_vault_id,),
+            )]
+            for source_item in source_items:
+                destination_source_key = _source_key_for_destination(
+                    source_item, target_vault_id,
+                )
+                target_item = c.execute(
+                    "SELECT * FROM source_imports WHERE vault_id=? AND source_key=?",
+                    (target_vault_id, destination_source_key),
+                ).fetchone()
+                if target_item is None:
+                    c.execute(
+                        "UPDATE source_imports SET vault_id=?, source_key=? WHERE id=?",
+                        (target_vault_id, destination_source_key, source_item["id"]),
+                    )
+                    continue
+
+                target_item = dict(target_item)
+                # Job rows have already moved to the destination workspace. Preserve
+                # their source references before the losing source_imports row is
+                # removed by its foreign-key cascade.
+                c.execute(
+                    "UPDATE source_import_items SET source_id=? WHERE source_id=?",
+                    (target_item["id"], source_item["id"]),
+                )
+                source_seen = float(source_item.get("last_seen_at") or 0.0)
+                target_seen = float(target_item.get("last_seen_at") or 0.0)
+                if source_seen >= target_seen:
+                    _rewrite_import_memory_source(
+                        str(source_item["memory_id"] or "") or None,
+                        source_id=str(target_item["id"]), vault_id=target_vault_id,
+                    )
+                    c.execute(
+                        "UPDATE source_imports SET relative_path=?, memory_id=?, "
+                        "subject_key=?, content_sha256=?, canonical_sha256=?, "
+                        "file_size=?, file_mtime_ns=?, importer_version=?, "
+                        "last_seen_job_id=?, state=?, first_imported_at=?, "
+                        "last_imported_at=?, last_seen_at=?, missing_at=?, last_error=? "
+                        "WHERE id=?",
+                        (
+                            source_item["relative_path"], source_item["memory_id"],
+                            source_item["subject_key"], source_item["content_sha256"],
+                            source_item["canonical_sha256"], source_item["file_size"],
+                            source_item["file_mtime_ns"], source_item["importer_version"],
+                            source_item["last_seen_job_id"], source_item["state"],
+                            source_item["first_imported_at"], source_item["last_imported_at"],
+                            source_item["last_seen_at"], source_item["missing_at"],
+                            source_item["last_error"], target_item["id"],
+                        ),
+                    )
+                c.execute("DELETE FROM source_imports WHERE id=?", (source_item["id"],))
+            c.execute("DELETE FROM source_vaults WHERE id=?", (source_vault_id,))
+
         # Export proofs and remote-erasure markers survive memory re-homing so the
         # next sync can still converge. Their repository owner follows the same
         # collision map as the memories themselves.
@@ -5463,8 +5590,9 @@ class MemoryService:
     def copy_workspace(self, source: str, new_name: Optional[str] = None, *,
                        actor: str = "user") -> dict:
         """Duplicate ``source`` into a brand-new workspace: repos (+ their code graph),
-        entities, edges, memories (with vectors, full-text and cross-memory links) and
-        sessions/events are all cloned under fresh ids, leaving ``source`` untouched.
+        entities, edges, memories (with vectors, full-text and cross-memory links),
+        source-import manifests, and sessions/events are all cloned under fresh ids,
+        leaving ``source`` untouched.
         This is the copy counterpart to ``merge_workspaces`` — merge moves rows in place
         (ids survive), copy inserts parallel rows with new ids so the two workspaces are
         fully independent afterwards (editing the copy never touches the original).
@@ -5614,6 +5742,33 @@ class MemoryService:
         memory_remap = {
             memory["id"]: ids.new_id("memory") for memory in source_memories
         }
+        source_vaults = [dict(row) for row in c.execute(
+            "SELECT * FROM source_vaults WHERE workspace_id=? ORDER BY id",
+            (wid_src,),
+        )]
+        vault_remap = {
+            vault["id"]: ids.new_id("vault") for vault in source_vaults
+        }
+        source_imports = [dict(row) for row in c.execute(
+            "SELECT source_imports.* FROM source_imports "
+            "JOIN source_vaults ON source_vaults.id=source_imports.vault_id "
+            "WHERE source_vaults.workspace_id=? ORDER BY source_imports.id",
+            (wid_src,),
+        )]
+        source_import_remap = {
+            item["id"]: ids.new_id("source") for item in source_imports
+        }
+        copy_reference_remap = {
+            **memory_remap, **vault_remap, **source_import_remap,
+        }
+
+        def _remap_copy_text(raw: Any) -> str:
+            text = str(raw or "")
+            for old_id, new_id in sorted(
+                copy_reference_remap.items(), key=lambda pair: len(str(pair[0])), reverse=True,
+            ):
+                text = text.replace(str(old_id), str(new_id))
+            return text
 
         def _remap_json_memory_ids(raw):
             try:
@@ -5643,18 +5798,13 @@ class MemoryService:
                 if isinstance(item, list):
                     return [walk(child) for child in item]
                 if isinstance(item, str):
-                    return memory_remap.get(item, item)
+                    return _remap_copy_text(item)
                 return item
 
             return json.dumps(walk(value), ensure_ascii=False, separators=(",", ":"))
 
         def _remap_memory_ids_in_text(raw: Any) -> str:
-            text = str(raw or "")
-            return re.sub(
-                r"mem_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}",
-                lambda match: memory_remap.get(match.group(0), match.group(0)),
-                text,
-            )
+            return _remap_copy_text(raw)
 
         for m in source_memories:
             # This historical row may predate capture-time secret blocking. Never
@@ -5679,7 +5829,7 @@ class MemoryService:
                  m["surprise"], m["stability"], m["confidence"],
                  m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
                  m["valid_to_recorded_at"], m["ingested_at"], m["expired_at"],
-                 m["subject_key"], m["claim_kind"], m["pinned"], m["sensitivity"],
+                 _remap_copy_text(m["subject_key"]), m["claim_kind"], m["pinned"], m["sensitivity"],
                  _remap_json_memory_ids(m["provenance"]), m["sort_order"]))
             fts_row = c.execute(
                 "SELECT title, content, keywords FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
@@ -5834,11 +5984,52 @@ class MemoryService:
                  _remap_json_memory_ids(ev["refs"]),
                  ev["interaction_level"], ev["ts"]))
 
+        # 9) Source-import identities and current per-document manifests. Job history
+        # is process-local and intentionally omitted from workspace copies, but the
+        # manifest itself must follow the copied memories so a later local re-import
+        # remains idempotent. Clear last_seen_job_id because the referenced job is not
+        # cloned; the next import creates a fresh job and refreshes that field.
+        for vault in source_vaults:
+            c.execute(
+                "INSERT INTO source_vaults("
+                "id, kind, root_digest, display_name, workspace_id, repo_id, session_id, "
+                "scope, memory_type, importer_version, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    vault_remap[vault["id"]], vault["kind"], vault["root_digest"],
+                    vault["display_name"], wid_dst, _new_repo(vault.get("repo_id")),
+                    session_remap.get(vault.get("session_id")),
+                    vault["scope"], vault["memory_type"], vault["importer_version"],
+                    vault["created_at"], vault["updated_at"],
+                ),
+            )
+        for item in source_imports:
+            new_source_id = source_import_remap[item["id"]]
+            old_memory_id = item.get("memory_id")
+            c.execute(
+                "INSERT INTO source_imports("
+                "id, vault_id, source_key, relative_path, memory_id, subject_key, "
+                "content_sha256, canonical_sha256, file_size, file_mtime_ns, "
+                "importer_version, last_seen_job_id, state, first_imported_at, "
+                "last_imported_at, last_seen_at, missing_at, last_error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    new_source_id, vault_remap[item["vault_id"]], item["source_key"],
+                    item["relative_path"], memory_remap.get(old_memory_id),
+                    _remap_copy_text(item["subject_key"]),
+                    item["content_sha256"], item["canonical_sha256"], item["file_size"],
+                    item["file_mtime_ns"], item["importer_version"], None, item["state"],
+                    item["first_imported_at"], item["last_imported_at"],
+                    item["last_seen_at"], item["missing_at"], item["last_error"],
+                ),
+            )
+
         self.store.audit(actor, "workspace_copy", wid_dst,
                          f"{src} -> {dst} ({len(memory_remap)} memories)")
         c.commit()
         return {"source": src, "workspace": dst, "id": wid_dst,
-               "memories_copied": len(memory_remap)}
+               "memories_copied": len(memory_remap),
+               "sources_copied": len(source_vaults)}
 
     def update_memory(
         self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
@@ -6633,6 +6824,41 @@ class MemoryService:
             memories = all_memories
         memory_ids = {str(row["id"]) for row in memories}
 
+        all_source_vaults = [dict(row) for row in conn.execute(
+            "SELECT * FROM source_vaults WHERE workspace_id=? ORDER BY id",
+            (wid,),
+        ).fetchall()]
+        if principal_scoped:
+            source_vaults = [
+                row for row in all_source_vaults
+                if (
+                    str(row.get("scope") or "workspace") != "session"
+                    or str(row.get("session_id") or "") in session_ids
+                )
+            ]
+        else:
+            source_vaults = all_source_vaults
+        source_vault_ids = {str(row["id"]) for row in source_vaults}
+        if source_vault_ids:
+            source_imports = [dict(row) for row in conn.execute(
+                "SELECT * FROM source_imports WHERE vault_id IN ("
+                + ",".join("?" for _ in source_vault_ids)
+                + ") ORDER BY vault_id, source_key, id",
+                sorted(source_vault_ids),
+            ).fetchall()]
+        else:
+            source_imports = []
+        # Job rows are intentionally omitted from portability exports, so a manifest
+        # entry cannot retain a dangling last_seen_job_id reference. Current source
+        # hashes, paths, and memory associations remain resumable on the next import.
+        for source_import in source_imports:
+            source_import["last_seen_job_id"] = None
+            if (
+                source_import.get("memory_id")
+                and str(source_import["memory_id"]) not in memory_ids
+            ):
+                source_import["memory_id"] = None
+
         all_entities = [dict(row) for row in conn.execute(
             "SELECT * FROM entities WHERE workspace_id=? ORDER BY id", (wid,)
         ).fetchall()]
@@ -6888,12 +7114,14 @@ class MemoryService:
             *(str(row.get("id") or "") for row in memory_entities),
             *(str(row.get("id") or "") for row in code_edges),
             *(str(row.get("id") or "") for row in code_memory_links),
+            *source_vault_ids,
+            *(str(row.get("id") or "") for row in source_imports),
         }
         typed_reference = re.compile(
-            r"^(?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt)_[A-Za-z0-9_-]+$"
+            r"^(?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt|vlt|src)_[A-Za-z0-9_-]+$"
         )
         embedded_reference = re.compile(
-            r"(?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt)_[A-Za-z0-9_-]+"
+            r"(?:ws|repo|ses|mem|ent|edg|sym|evt|aud|dev|rcpt|vlt|src)_[A-Za-z0-9_-]+"
         )
         dropped = object()
 
@@ -6991,6 +7219,16 @@ class MemoryService:
             incidence["provenance"] = scrub_json(incidence.get("provenance"), {})
         for event in events:
             event["refs"] = scrub_json(event.get("refs"), [])
+        for source_import in source_imports:
+            source_import["subject_key"] = embedded_reference.sub(
+                lambda match: (
+                    "[redacted]"
+                    if match.group(0) not in allowed_reference_ids
+                    else match.group(0)
+                ),
+                str(source_import.get("subject_key") or ""),
+            )
+            source_import["last_error"] = str(source_import.get("last_error") or "")
         for item in audit:
             item["detail"] = embedded_reference.sub(
                 lambda match: (
@@ -7005,6 +7243,8 @@ class MemoryService:
             "repos": repos,
             "sessions": sessions,
             "memories": memories,
+            "source_vaults": source_vaults,
+            "source_imports": source_imports,
             "entities": entities,
             "edges": edges,
             "edge_supports": edge_supports,
@@ -7031,6 +7271,8 @@ class MemoryService:
                 "repos": ["id"],
                 "sessions": ["id"],
                 "memories": ["id"],
+                "source_vaults": ["id"],
+                "source_imports": ["vault_id", "source_key", "id"],
                 "entities": ["id"],
                 "edges": ["id"],
                 "edge_supports": [
@@ -7054,12 +7296,14 @@ class MemoryService:
             },
             "completeness": {
                 "durable_workspace_state": True,
+                "source_import_manifest": True,
                 "receipts": True,
                 "omitted_nonportable_or_regenerable_tables": [
                     "mem_fts",
                     "mem_vectors",
                     "mem_vec_ann",
                     "jobs",
+                    "source_import_items",
                     "graph_index_state",
                 ],
             },

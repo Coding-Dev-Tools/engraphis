@@ -4,6 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 
+from engraphis.core.documents import DocumentScan, parse_document
+from engraphis.core.interfaces import MemoryType, Scope
+from engraphis.document_import import DocumentImporter
 from engraphis.service import MemoryService, set_current_user
 
 
@@ -51,6 +54,34 @@ def test_default_workspace_export_is_v2_and_keeps_timestamped_compatibility_fiel
     assert exported["completeness"]["durable_workspace_state"] is True
     assert exported["completeness"]["receipts"] is True
     assert exported["receipt_verification"]["valid"] is True
+
+
+def test_workspace_export_includes_resumable_source_import_manifest():
+    service = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    workspace_id = service.store.get_or_create_workspace("acme")
+    scan = DocumentScan(root_path="", source_id="e" * 64)
+    scan.documents.append(parse_document(
+        b"# Exported note\nThe import lineage must travel with the workspace.\n",
+        "notes.md",
+    ))
+    report = DocumentImporter(service).import_scan(
+        scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+        scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_label="Exported notes", confirmed=True,
+    )
+
+    exported = service.export_workspace(workspace="acme", canonical=True)
+    source_item = service.store.list_source_import_items(vault_id=report["source_id"])[0]
+
+    assert exported["completeness"]["source_import_manifest"] is True
+    assert exported["counts"]["source_vaults"] == 1
+    assert exported["counts"]["source_imports"] == 1
+    assert exported["source_vaults"][0]["id"] == report["source_id"]
+    assert exported["source_imports"][0]["memory_id"] == source_item["memory_id"]
+    assert exported["source_imports"][0]["last_seen_job_id"] is None
 
 
 def test_canonical_digest_covers_graph_and_code_state():

@@ -9,7 +9,11 @@ import json
 
 import pytest
 
-from engraphis.core.interfaces import Edge, GraphLayer, Node, Scope, SearchFilter
+from engraphis.core.documents import DocumentScan, parse_document
+from engraphis.core.interfaces import (
+    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+)
+from engraphis.document_import import DocumentImporter
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -54,6 +58,19 @@ def _mem_ids(svc, name):
         return []
     return {r["id"] for r in svc.store.conn.execute(
         "SELECT id FROM memories WHERE workspace_id=?", (wid,))}
+
+
+def _import_one_document(svc, workspace: str, *, source_id: str = "d" * 64) -> dict:
+    workspace_id = svc.store.get_or_create_workspace(workspace)
+    scan = DocumentScan(root_path="", source_id=source_id)
+    scan.documents.append(parse_document(
+        b"# Imported note\nThis source must remain resumable.\n", "notes.md",
+    ))
+    return DocumentImporter(svc).import_scan(
+        scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+        scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_label="Imported notes", confirmed=True,
+    )
 
 
 # ── create_workspace ─────────────────────────────────────────────────────────
@@ -630,6 +647,75 @@ def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
     assert len(dup_supports) == 1
     assert dup_supports[0]["valid_to"] is not None
     assert dup_supports[0]["expired_at"] is not None
+
+
+# ── source lineage preserved by workspace merge/copy ─────────────────────────
+def test_merge_preserves_document_source_manifest_and_job_report():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    report = _import_one_document(svc, "source")
+    svc.create_workspace("target")
+
+    svc.merge_workspaces("source", "target")
+
+    sources = svc.list_document_sources("target")
+    assert [row["id"] for row in sources] == [report["source_id"]]
+    item = svc.store.list_source_import_items(vault_id=report["source_id"])[0]
+    assert item["memory_id"] in _mem_ids(svc, "target")
+    job = svc.get_document_import_job(report["job_id"], workspace="target")
+    assert job["state"] == "completed"
+    assert job["files"][0]["relative_path"] == "notes.md"
+
+
+def test_merge_collapses_duplicate_source_vaults_without_duplicate_paths():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    _import_one_document(svc, "source")
+    _import_one_document(svc, "target")
+
+    svc.merge_workspaces("source", "target")
+
+    target_id = svc._lookup_workspace("target")
+    vaults = svc.store.list_source_vaults(workspace_id=target_id, kind="documents")
+    assert len(vaults) == 1
+    assert svc.store.conn.execute(
+        "SELECT COUNT(*) FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (vaults[0]["id"], "notes.md"),
+    ).fetchone()[0] == 1
+
+
+def test_copy_preserves_document_source_manifest_and_remaps_memory_metadata():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    report = _import_one_document(svc, "source")
+
+    copied = svc.copy_workspace("source", new_name="copy")
+    assert copied["sources_copied"] == 1
+
+    sources = svc.list_document_sources("copy")
+    assert len(sources) == 1
+    assert sources[0]["id"] != report["source_id"]
+    copied_item = svc.store.list_source_import_items(vault_id=sources[0]["id"])[0]
+    copied_memory = svc.store.get_memory(copied_item["memory_id"])
+    assert copied_memory is not None
+    assert copied_memory.metadata["document"]["source_id"] == copied_item["id"]
+    assert copied_memory.subject_key == copied_item["subject_key"]
+    scan = DocumentScan(root_path="", source_id="d" * 64)
+    scan.documents.append(parse_document(
+        b"# Imported note\nThis source must remain resumable.\n", "notes.md",
+    ))
+    resumed = DocumentImporter(svc).import_scan(
+        scan, workspace_id=svc._lookup_workspace("copy"), repo_id=None,
+        session_id=None, scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_id=sources[0]["id"], source_label="Imported notes", confirmed=True,
+    )
+    assert resumed["counts"]["skipped"] == 1
 
 
 # ── copy_workspace ───────────────────────────────────────────────────────────
