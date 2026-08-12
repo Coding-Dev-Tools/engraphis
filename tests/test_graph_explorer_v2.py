@@ -3114,6 +3114,52 @@ def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoi
     ]
 
 
+def test_graph_entity_evidence_history_includes_closed_support_on_live_relation():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="live-history-source", name="Live History Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="live-history-target", name="Live History Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    current_memory = service.store.add_memory(MemoryRecord(
+        id="live-history-current", content="Current support.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, valid_from=0.0, ingested_at=0.0,
+    ))
+    closed_memory = service.store.add_memory(MemoryRecord(
+        id="live-history-closed", content="Closed support.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0,
+        valid_to_recorded_at=100.0, ingested_at=0.0,
+    ))
+    edge_id = service.store.upsert_edge(Edge(
+        id="live-history-edge", src=source, dst=target, relation="relates",
+        workspace_id=workspace_id, valid_from=0.0, ingested_at=0.0,
+    ))
+    service.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": current_memory},
+    )
+    service.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": closed_memory},
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, valid_to=100, "
+        "valid_to_recorded_at=100, ingested_at=0 "
+        "WHERE edge_id=? AND memory_id=?",
+        (edge_id, closed_memory),
+    )
+    service.store.conn.commit()
+
+    detail = service.graph_entity_evidence(
+        source, workspace="acme", include_history=True,
+        valid_at=150.0, known_at=150.0,
+    )
+
+    assert [item["memory_id"] for item in detail["evidence"]] == [closed_memory]
+
+
 def test_graph_scene_history_visibility_scopes_to_requested_repo():
     """Regression: visibility preclassification must apply the same repo scope
     as the subsequent edge/entity queries so unrelated-repo edges cannot
