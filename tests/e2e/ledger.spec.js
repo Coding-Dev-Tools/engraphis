@@ -50,11 +50,7 @@ async function mockApi(page, options = {}) {
   requests.contextSavingsQueries = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
-  const workspaceList = options.workspaces || [{
-    name: workspace,
-    memories: memories.length,
-    repos: ['agent-memory', 'data-stack', 'repo-before', 'repo-after'],
-  }];
+  const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
   const licenseState = options.license || license();
   let automationPolicy = options.automationPolicy || null;
   let documentPolls = 0;
@@ -163,7 +159,6 @@ async function mockApi(page, options = {}) {
           id: 'unlinked', label: 'Unlinked Note', repo_names: ['agent-memory'], topic: 'memory', valid_from: validFrom, gravity_mass: 1, visual_radius: 5, community_id: 'memory',
         }] : []),
         edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo, rest_length: 18, spring_strength: 0.25 }],
-        repos: ['agent-memory', 'data-stack', 'repo-before', 'repo-after'],
         communities: [{ id: 'memory', mass: 9 }, { id: 'storage', mass: 2 }],
         community_bridges: [{ source_community: 'memory', target_community: 'storage', physics_strength: 0.8 }],
         meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
@@ -417,14 +412,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260812-black-hole-direct-lanes-1');
+  expect(first.searchParams.get('v')).toBe('20260812-hierarchical-black-hole-orbits-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260812-black-hole-direct-lanes-1');
+  expect(second.searchParams.get('v')).toBe('20260812-hierarchical-black-hole-orbits-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 

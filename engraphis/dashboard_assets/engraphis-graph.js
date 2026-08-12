@@ -709,12 +709,17 @@
     const communityAnchors = new Map();
     const globalAnchor = (nodes || []).find(node => node && !node.ghost
       && node.anchor_role === 'global');
+    const blackHoleCommunities = new Set();
     const byId = new Map((nodes || []).filter(node => node && node.id !== undefined)
       .map(node => [String(node.id), node]));
     (nodes || []).forEach(node => {
-      if (!node || node.ghost
-        || (node.anchor_role !== 'global' && node.anchor_role !== 'community')) return;
+      if (!node || node.ghost) return;
       const key = communityKey(node);
+      if (globalAnchor && (node.__galaxyBlackHoleChild === true
+        || String(node.system_anchor_id || '') === String(globalAnchor.id))) {
+        blackHoleCommunities.add(key);
+      }
+      if (node.anchor_role !== 'global' && node.anchor_role !== 'community') return;
       const existing = communityAnchors.get(key);
       if (!existing || node.anchor_role === 'global') {
         communityAnchors.set(key, {
@@ -761,7 +766,10 @@
       const compatibilityCommunityRoot = root === node && !hasExplicitSystemAnchor && !declared
         && node.anchor_role !== 'global' && node.anchor_role !== 'community';
       const rootKey = compatibilityCommunityRoot ? communityKey(node) : String(root.id);
-      const key = globalAnchor && (rootIsGlobal || rootIsBlackHoleChild)
+      const followsBlackHoleCommunity = globalAnchor
+        && blackHoleCommunities.has(communityKey(node));
+      const key = globalAnchor && (rootIsGlobal || rootIsBlackHoleChild
+        || followsBlackHoleCommunity)
         ? String(globalAnchor.id) : rootKey;
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       let group = groups.get(key);
@@ -846,7 +854,8 @@
     const byId = new Map(values.map(node => [String(node.id), node]));
     const communityAnchors = new Map();
     values.forEach(node => {
-      if (!node || node.anchor_role !== 'community') return;
+      if (!node || (node.anchor_role !== 'community'
+        && node.__galaxyBlackHoleChild !== true)) return;
       const key = communityKey(node);
       const previous = communityAnchors.get(key);
       if (!previous || finitePositive(node.gravity_mass, 1, 1000)
@@ -1797,11 +1806,11 @@
     return stats;
   }
 
-  /* Permanent stellar-surface contact for each community's dominant node. Projection is
-     radial and bounded to the exact painted edge; velocity response removes only inward
-     normal motion in the star frame. Tangential velocity is untouched, so contact cannot
-     drain orbital phase or manufacture a repulsive slingshot. The global anchor has its own
-     stricter black-hole horizon and is intentionally excluded here. */
+  /* Permanent local-surface contact for every carrier hierarchy. Projection is radial and
+     bounded to the exact painted edge; velocity response removes only inward normal motion in
+     the parent frame. Tangential velocity is untouched, so contact cannot drain orbital phase
+     or manufacture a repulsive slingshot. The global anchor is included for direct black-hole
+     satellites; its separate event-horizon projection remains the stricter central boundary. */
   function applyGalaxySystemAnchorExclusion(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -5726,6 +5735,17 @@
         if (!packingPass.remainingOverlaps || packingPass.infeasiblePairs) break;
       }
     }
+    /* The annulus can clamp an individual member after the normal stellar closure. Reassert
+       the local painted boundary as the final positional constraint so the last frame cannot
+       leave a planet intersecting its immediate carrier. */
+    const finalStellarPass = applyGalaxySystemAnchorExclusion(bodies, {
+      padding: opts.systemAnchorExclusionPadding,
+      fixedNodeId: opts.fixedNodeId,
+    });
+    stellarPasses.push(finalStellarPass);
+    stellarAudit = galaxySystemAnchorClearance(bodies, {
+      padding: opts.systemAnchorExclusionPadding,
+    });
     const combinedSystemAnchorExclusion = combineGalaxySystemAnchorExclusions(stellarPasses);
     const systemPacking = {
       systems: systemPackingPasses.reduce((maximum, pass) => Math.max(maximum,

@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -6874,11 +6874,14 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
               system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
               x: 0, y: 0, vx: 0, vy: 0 },
             // Directly linked star intentionally has no system_anchor_id.
-            { id: 'core-star', anchor_role: 'community', community_id: 'core-satellite',
+            { id: 'core-star', community_id: 'core-satellite',
               gravity_mass: 8, radius: 5, x: 38, y: 0, vx: 0, vy: 0 },
             // Neither local metadata field is present: community-anchor inference is required.
             { id: 'core-planet', community_id: 'core-satellite',
               gravity_mass: 1, radius: 2.5, x: 50, y: 0, vx: 0, vy: 0 },
+            // A nested descendant must orbit its planet while the whole chain follows the hole.
+            { id: 'core-moon', community_id: 'core-satellite', system_anchor_id: 'core-planet',
+              gravity_mass: 0.2, radius: 1.5, x: 56, y: 0, vx: 0, vy: 0 },
             { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
               system_anchor_id: 'outer-star', gravity_mass: 8, radius: 5,
               x: 120, y: 18, vx: 0, vy: 0 },
@@ -6888,6 +6891,7 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
           const links = [
             { source: 'black-hole', target: 'core-star', relation: 'orbits' },
             { source: 'core-star', target: 'core-planet', relation: 'orbits' },
+            { source: 'core-planet', target: 'core-moon', relation: 'orbits' },
             { source: 'outer-star', target: 'outer-planet', relation: 'orbits' },
           ];
           I.markGalaxyBlackHoleChildren(nodes, links);
@@ -6916,9 +6920,11 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
           const groups = [...I.galaxyOrbitGroups(nodes).entries()]
             .map(([id, group]) => [id, group.nodes.map(node => node.id)]);
           const blackHole = nodes[0], coreStar = nodes[1], corePlanet = nodes[2];
-          const outerStar = nodes[3], outerPlanet = nodes[4];
-          const globalNodes = [coreStar, corePlanet, outerStar, outerPlanet];
-          const localPairs = [[corePlanet, coreStar], [outerPlanet, outerStar]];
+          const coreMoon = nodes[3];
+          const outerStar = nodes[4], outerPlanet = nodes[5];
+          const globalNodes = [coreStar, corePlanet, coreMoon, outerStar, outerPlanet];
+          const localPairs = [[corePlanet, coreStar], [coreMoon, corePlanet],
+            [outerPlanet, outerStar]];
           const globalPrevious = new Map(globalNodes.map(node => [node.id,
             Math.atan2(node.y - blackHole.y, node.x - blackHole.x)]));
           const localPrevious = new Map(localPairs.map(([node, star]) => [node.id,
@@ -6956,7 +6962,7 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
         assert abs(min(result["global"], key=abs)) > 0.1, result
         assert abs(min(result["local"], key=abs)) > 0.1, result
     core_group = next(group for group in report["kinematic"]["groups"] if group[0] == "black-hole")
-    assert set(core_group[1]) == {"black-hole", "core-star", "core-planet"}
+    assert set(core_group[1]) == {"black-hole", "core-star", "core-planet", "core-moon"}
 
 
 @requires_node
@@ -9175,7 +9181,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-direct-lanes-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader

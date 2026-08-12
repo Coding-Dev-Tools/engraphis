@@ -17,6 +17,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Explicit `orbits` links from the black hole now promote community anchors and their declared
   stellar children into the central orbital carrier group, so the Orbital speed control moves
   the connected nodes in both live and oversized Galaxy paths.
+- Every Galaxy body now receives both motion frames: its top-level system carrier orbits the
+  black hole, while the body follows its immediate star/planet carrier with cached local phase;
+  legacy community metadata and nested moons use the same hierarchy without phase rewinds.
 - Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
   with matching evidence, connector, payload, and full-loader ceilings; live-render safety
   thresholds remain unchanged so oversized scenes stay on the static/kinematic path.
