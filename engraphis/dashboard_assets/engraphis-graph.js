@@ -7979,6 +7979,11 @@
              so finishNodeDrag restores the body's pre-drag orbital phase. */
           if (event.type === 'pointercancel') dragReleaseVelocity = null;
           finishNodeDrag(current.node);
+          // The manual controller owns this gesture. Prevent force-graph's pointer-up handler
+          // from applying a second release/reheat after the node has been placed exactly at the
+          // pointer, which is especially visible when reduced motion disables camera settling.
+          event.preventDefault();
+          event.stopPropagation();
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
           // Our capture listener owns the direct click. Suppress force-graph's
