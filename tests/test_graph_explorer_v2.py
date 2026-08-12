@@ -556,6 +556,39 @@ def test_complete_scene_keeps_every_enabled_code_memory_connector():
     assert scene["meta"]["code_memory_connectors"] == 2
 
 
+def test_complete_connected_only_keeps_code_memory_only_endpoints():
+    entities = [
+        {
+            "id": "code:symbol", "canonical_id": "code:symbol",
+            "name": "repo:module.fn", "etype": "code_function", "repo_id": "repo",
+        },
+        {
+            "id": "isolated", "canonical_id": "isolated",
+            "name": "Isolated", "etype": "concept", "repo_id": "repo",
+        },
+    ]
+    memories = [{
+        "id": "memory", "title": "Function behavior", "mtype": "procedural",
+        "scope": "repo", "repo_id": "repo", "importance": 0.5,
+    }]
+    links = [{
+        "id": "code-link", "symbol_id": "symbol", "memory_id": "memory",
+        "relation": "documents", "confidence": 0.9,
+    }]
+
+    scene = build_graph_scene(
+        "w", entities, [], [], level="complete", connected_only=True,
+        memory_rows=memories, code_memory_link_rows=links,
+    )
+
+    assert {node["id"] for node in scene["nodes"]} == {"code:symbol", "memory"}
+    assert [(edge["id"], edge["source"], edge["target"])
+            for edge in scene["edges"]] == [
+        ("code-link", "memory", "code:symbol")
+    ]
+    assert scene["meta"]["code_memory_connectors"] == 1
+
+
 def test_community_bridges_keep_aggregate_evidence_for_physics():
     nodes = {
         "a": {"community_id": "ca"},
