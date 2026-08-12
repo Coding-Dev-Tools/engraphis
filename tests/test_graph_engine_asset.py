@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -2340,6 +2340,30 @@ def test_black_hole_adornment_is_bounded_and_does_not_change_hit_geometry() -> N
                         source.index("function applyChrome", source.index("function styleNode(node, ctx, scale)"))]
     assert "state.settings.mode === 'galaxy'" in style_node
     assert style_node.count("paintGalaxyAnchorAdornment(") == 2
+
+
+@requires_node
+def test_black_hole_adornment_keeps_a_live_orbital_spin_phase() -> None:
+    report = _run_node(
+        """
+        const spin = orbitalSpeed => {
+          const nodes = [{ id: 'bh', anchor_role: 'global', community_id: 'core',
+            x: 0, y: 0, vx: 0, vy: 0, gravity_mass: 64 }];
+          const start = I.galaxyBlackHoleSpinAngle(nodes[0]);
+          for (let step = 0; step < 30; step += 1) {
+            I.advanceGalaxyBlackHoleSpin(nodes, {
+              layoutSeed: 7331, orbitalSpeed, timestep: .032,
+            });
+          }
+          return I.galaxyBlackHoleSpinAngle(nodes[0]) - start;
+        };
+        const slow = spin(0), fast = spin(120);
+        emit({ slow, fast, ratio: Math.abs(fast / slow) });
+        """
+    )
+    assert abs(report["slow"]) > 0.1
+    assert abs(report["fast"]) > abs(report["slow"])
+    assert report["ratio"] == pytest.approx(3, rel=1e-9)
 
 
 @requires_node
@@ -8785,7 +8809,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-orbital-speed-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-black-hole-spin-1'")
     assert d3 < force_graph < renderer
     assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
