@@ -84,6 +84,23 @@ def test_file_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch, uri):
     assert Settings().db_path == uri
 
 
+def test_named_shared_memory_env_override_preserves_sqlite_identity(monkeypatch):
+    uri = "file:engraphis-shared?mode=memory&cache=shared"
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+
+    assert Settings().db_path == uri
+    first = sqlite3.connect(uri, uri=True)
+    second = sqlite3.connect(uri, uri=True)
+    try:
+        first.execute("CREATE TABLE shared_marker(value TEXT)")
+        first.execute("INSERT INTO shared_marker VALUES ('shared')")
+        first.commit()
+        assert second.execute("SELECT value FROM shared_marker").fetchone()[0] == "shared"
+    finally:
+        second.close()
+        first.close()
+
+
 def _sqlite(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))

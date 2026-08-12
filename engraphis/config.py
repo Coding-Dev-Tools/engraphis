@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
+from urllib.parse import parse_qsl
 
 from engraphis.private_state import (
     UnsafeStateFile,
@@ -634,6 +635,11 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
             if remainder.startswith(":memory:"):
                 return configured
             path_part, sep, query_part = remainder.partition("?")
+            if sep and dict(parse_qsl(query_part, keep_blank_values=True)).get("mode") == "memory":
+                # Named shared-memory URIs are identities, not filesystem paths. Anchoring
+                # their relative-looking name to the config directory would make separate
+                # connections open different databases and break SQLite's shared cache.
+                return configured
             if not path_part or path_part.startswith("/") or path_part.startswith("\\"):
                 return configured
             anchor = str((_CONFIG_ENV_PATH.parent / path_part).resolve())
