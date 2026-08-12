@@ -129,6 +129,7 @@
   const GRAPH_SPACETIME_TUNING = [
     { id: 'graph-gravitational-constant', key: 'gravitationalConstant', fallback: 100 },
     { id: 'graph-black-hole-mass', key: 'blackHoleMass', fallback: 160 },
+    { id: 'graph-local-gravitational-constant', key: 'localGravitationalConstant', fallback: 100 },
     { id: 'graph-space-damping', key: 'damping', fallback: 1, precision: 1 },
     { id: 'graph-spring-stiffness', key: 'springStiffness', fallback: 32 },
   ];
@@ -413,10 +414,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-live-spacetime-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260811-hierarchical-spacetime-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260811-live-spacetime-1'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260811-hierarchical-spacetime-1'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
@@ -2329,6 +2330,7 @@
     return {
       gravitationalConstant: controls.gravitationalConstant / 100,
       blackHoleMass: controls.blackHoleMass / 160,
+      localGravitationalConstant: controls.localGravitationalConstant / 100,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: controls.orbitPaused,
@@ -4191,8 +4193,14 @@
     saveGraphPreferences();
   }));
   GRAPH_SPACETIME_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
-    const value = setGraphSpacetimeControl(item, event.target.value);
-    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: value });
+    setGraphSpacetimeControl(item, event.target.value);
+    /* Controls use human-scale values (G=100, mass=160, spring=32), while the engine API is
+       normalized around 1. Apply the same conversion used during graph creation on every live
+       input event; passing the raw slider value would immediately clamp G to 8 and mass to 16. */
+    if (state.graphEngine) {
+      const settings = graphSpacetimeSettings();
+      state.graphEngine.setSettings({ [item.key]: settings[item.key] });
+    }
     clearGraphSavedView();
     saveGraphPreferences();
   }));

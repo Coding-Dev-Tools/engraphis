@@ -984,16 +984,181 @@ def test_spacetime_field_tuning_is_softened_precessing_and_preserves_local_frame
 
 
 @requires_node
+def test_hierarchical_center_and_star_g_have_exact_velocity_superposition() -> None:
+    """G_center moves the star carrier; G_star only changes the planet's local tangent."""
+    report = _run_node(
+        """
+        const make = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
+            gravity_mass: 10, radius: 5, x: 168, y: 24, vx: 0, vy: 0 },
+          { id: 'Pre-PR', community_id: 'users', system_anchor_id: 'Users', orbit_tier: 1,
+            gravity_mass: 1, radius: 2.5, x: 198, y: 24, vx: 0, vy: 0 },
+        ];
+        const run = (centerG, starG) => {
+          const nodes = make(), star = nodes[1], planet = nodes[2];
+          I.seedGalaxyOrbits(nodes, 118, 48, 32, false,
+            { gravitationalConstant: centerG, localGravitationalConstant: starG });
+          I.seedGalaxySystemOrbits(nodes, 118, 48, 40, false,
+            { gravitationalConstant: centerG, localGravitationalConstant: starG });
+          const local = { vx: planet.vx - star.vx, vy: planet.vy - star.vy };
+          const dx = planet.x - star.x, dy = planet.y - star.y;
+          return { carrier: { vx: star.vx, vy: star.vy }, local,
+            sumError: Math.hypot(planet.vx - (star.vx + local.vx),
+              planet.vy - (star.vy + local.vy)),
+            tangent: dx * local.vy - dy * local.vx,
+            radial: dx * local.vx + dy * local.vy,
+            localSpeed: Math.hypot(local.vx, local.vy),
+            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          };
+        };
+        emit({ base: run(1, 1), centerOnly: run(2, 1), starOnly: run(1, 2) });
+        """
+    )
+    assert all(item["finite"] for item in report.values())
+    for sample in report.values():
+        assert sample["sumError"] < 1e-12
+        assert abs(sample["tangent"]) > 1e-5
+        assert abs(sample["radial"]) < 1e-8
+    # A center-only change changes the black-hole carrier, while a star-only change leaves it.
+    assert report["centerOnly"]["carrier"] != pytest.approx(report["base"]["carrier"], abs=1e-8)
+    assert report["starOnly"]["carrier"] == pytest.approx(report["base"]["carrier"], abs=1e-10)
+    assert report["centerOnly"]["localSpeed"] == pytest.approx(report["base"]["localSpeed"], rel=1e-10)
+    assert report["starOnly"]["localSpeed"] > report["base"]["localSpeed"] * 1.35
+
+
+@requires_node
+def test_actual_scene_hierarchy_keeps_coding_dev_tools_global_and_community_stars_local() -> None:
+    """The served labels map to one black hole and separate Users/Pre-PR solar systems."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'Coding-Dev-Tools', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 80, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
+            gravity_mass: 10, radius: 5, x: 160, y: 20, vx: 0, vy: 0 },
+          { id: 'users-planet', community_id: 'users', system_anchor_id: 'Users', orbit_tier: 1,
+            gravity_mass: 1, radius: 2, x: 188, y: 20, vx: 0, vy: 0 },
+          { id: 'Pre-PR', anchor_role: 'community', community_id: 'pre-pr', system_anchor_id: 'Pre-PR',
+            gravity_mass: 9, radius: 5, x: -142, y: 34, vx: 0, vy: 0 },
+          { id: 'pre-pr-planet', community_id: 'pre-pr', system_anchor_id: 'Pre-PR', orbit_tier: 1,
+            gravity_mass: 1, radius: 2, x: -116, y: 34, vx: 0, vy: 0 },
+        ];
+        I.seedGalaxyOrbits(nodes, 71, 48, 32, false,
+          { gravitationalConstant: 1, localGravitationalConstant: 1 });
+        I.seedGalaxySystemOrbits(nodes, 71, 48, 40, false,
+          { gravitationalConstant: 1, localGravitationalConstant: 1 });
+        const byId = new Map(nodes.map(node => [node.id, node]));
+        const local = (starId, planetId) => {
+          const star = byId.get(starId), planet = byId.get(planetId);
+          const dx = planet.x - star.x, dy = planet.y - star.y;
+          const vx = planet.vx - star.vx, vy = planet.vy - star.vy;
+          return { anchor: star.system_anchor_id,
+            tangent: dx * vy - dy * vx, radial: dx * vx + dy * vy };
+        };
+        emit({ global: I.galaxyGlobalAnchor(nodes).id,
+          users: local('Users', 'users-planet'), prePr: local('Pre-PR', 'pre-pr-planet') });
+        """
+    )
+    assert report["global"] == "Coding-Dev-Tools"
+    for system, star_id in ((report["users"], "Users"), (report["prePr"], "Pre-PR")):
+        assert system["anchor"] == star_id
+        assert abs(system["tangent"]) > 1e-5
+        assert abs(system["radial"]) < 1e-8
+
+
+@requires_node
+def test_horizon_tides_are_bounded_local_and_leave_far_solar_frames_untouched() -> None:
+    """Only a warped near-horizon system receives the small star-relative tidal tensor."""
+    report = _run_node(
+        """
+        const make = radius => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar', system_anchor_id: 'star',
+            gravity_mass: 9, radius: 4, x: radius, y: 0, vx: 0, vy: 2 },
+          { id: 'radial-planet', community_id: 'solar', system_anchor_id: 'star', orbit_tier: 1,
+            gravity_mass: 1, radius: 2, x: radius + 12, y: 0, vx: 0, vy: 3 },
+          { id: 'tangent-planet', community_id: 'solar', system_anchor_id: 'star', orbit_tier: 2,
+            gravity_mass: 1, radius: 2, x: radius, y: 12, vx: -1, vy: 2 },
+        ];
+        const sample = radius => {
+          const nodes = make(radius);
+          const stats = I.applyGalaxySpacetimeAcceleration(nodes, {
+            gravity: 48, gravitationalConstant: 1, blackHoleMass: 1, softening: 16,
+            blackHoleExclusionPadding: 2.5, tidalStrengthFraction: .18,
+            tidalAccelerationCap: .16, frameDraggingFraction: .018,
+          });
+              const changes = nodes.map(node => stats.accelerations.get(node) || { ax: 0, ay: 0 });
+          return { stats, changes, warp: nodes.slice(1).map(node => node.__galaxySpacetimeWarp),
+            finite: nodes.every(node => [node.x,node.y,node.vx,node.vy].every(Number.isFinite)) };
+        };
+        emit({ near: sample(22), far: sample(180) });
+        """
+    )
+    near, far = report["near"], report["far"]
+    assert near["finite"] is far["finite"] is True
+    assert near["stats"]["tidalSystems"] == 1
+    assert near["stats"]["tidalPlanets"] == 2
+    assert 0 < near["stats"]["maximumTidalAcceleration"] <= .16
+    # The star has only the shared carrier acceleration; planets add distinct bounded tensors.
+    assert abs(near["changes"][1]["ax"]) + abs(near["changes"][1]["ay"]) > 0
+    assert near["changes"][2] != pytest.approx(near["changes"][1], abs=1e-8)
+    assert near["changes"][3] != pytest.approx(near["changes"][1], abs=1e-8)
+    assert near["changes"][2] != pytest.approx(near["changes"][3], abs=1e-8)
+    assert max(near["warp"]) > 0
+    assert far["stats"]["tidalSystems"] == far["stats"]["tidalPlanets"] == 0
+    assert far["stats"]["maximumTidalAcceleration"] == 0
+    assert max(far["warp"]) == 0
+
+
+@requires_node
+def test_slingshot_capture_preserves_authored_star_and_high_speed_release_escapes() -> None:
+    """Sub-escape drag releases enter a star orbit; genuine escape releases stay untouched."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'Coding-Dev-Tools', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
+            gravity_mass: 10, radius: 5, x: 80, y: 0, vx: 2, vy: -1 },
+          { id: 'users-planet', community_id: 'users', system_anchor_id: 'Users', orbit_tier: 1,
+            gravity_mass: 1, radius: 2, x: 105, y: 0, vx: 0, vy: 0 },
+        ];
+        const planet = nodes[2], before = { anchor: planet.system_anchor_id, community: planet.community_id };
+        const options = { gravity: 48, localGravitationalConstant: 1, softening: 16,
+          layoutSeed: 19, captureRadius: 120 };
+        const captured = I.galaxySlingshotCapture(planet, nodes, { vx: 2, vy: -1 }, options);
+        const escaped = I.galaxySlingshotCapture(planet, nodes, { vx: 100, vy: -1 }, options);
+        emit({ captured, escaped, before, after: { anchor: planet.system_anchor_id,
+          community: planet.community_id }, finite: [captured, escaped].every(value =>
+            [value.vx, value.vy, value.circularSpeed, value.escapeSpeed].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["before"] == report["after"] == {"anchor": "Users", "community": "users"}
+    captured, escaped = report["captured"], report["escaped"]
+    assert captured["eligible"] is True and captured["captured"] is True and captured["escaped"] is False
+    assert captured["reason"] == "authored-anchor" and captured["starId"] == "Users"
+    assert captured["radius"] == pytest.approx(25)
+    assert 0 < captured["circularSpeed"] < captured["escapeSpeed"]
+    assert escaped["eligible"] is True and escaped["captured"] is False and escaped["escaped"] is True
+    assert escaped["reason"] == "escape-velocity"
+    assert [escaped["vx"], escaped["vy"]] == pytest.approx([100, -1])
+
+
+@requires_node
 def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -> None:
     """The visual layer is one bounded canvas, not a hidden second graph implementation."""
     report = _run_spacetime_node(
         """
-        const calls = { arcs: 0, lines: 0, gradients: 0, linearGradients: 0 };
+        const calls = { arcs: 0, ellipses: 0, lines: 0, gradients: 0, linearGradients: 0 };
         const gradient = { addColorStop() {} };
         const ctx = {
           setTransform() {}, clearRect() {}, save() {}, restore() {}, beginPath() {},
           moveTo() { calls.lines++; }, lineTo() { calls.lines++; }, stroke() {}, fill() {},
-          arc() { calls.arcs++; },
+          arc() { calls.arcs++; }, ellipse() { calls.ellipses++; },
           createRadialGradient() { calls.gradients++; return gradient; },
           createLinearGradient() { calls.linearGradients++; return gradient; },
           set globalCompositeOperation(value) {}, set lineWidth(value) {},
@@ -1002,9 +1167,14 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
         const frames = [];
         globalThis.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
         globalThis.cancelAnimationFrame = () => {};
-        globalThis.matchMedia = () => ({ matches: false });
+        let reduceMotion = false;
+        globalThis.matchMedia = () => ({ matches: reduceMotion });
         globalThis.window = { devicePixelRatio: 1 };
-        globalThis.document = { createElement() { return {
+        const documentListeners = {};
+        globalThis.document = { hidden: false,
+          addEventListener(type, callback) { documentListeners[type] = callback; },
+          removeEventListener(type) { delete documentListeners[type]; },
+          createElement() { return {
           width: 0, height: 0, className: '', setAttribute() {}, remove() {},
           getContext() { return ctx; },
         }; } };
@@ -1021,6 +1191,10 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
             id: 'node-' + index, x: 32 + index, y: index % 19,
             vx: 1 + index / 10, vy: .5, radius: 2,
           })),
+          systemAnchors: Array.from({ length: 30 }, (_, index) => ({
+            id: 'star-' + index, x: 50 + index * 18, y: index % 4 * 12,
+            radius: 4, mass: 40 - index, orbitRadius: 26,
+          })),
           viewport: { x: 450, y: 300, zoom: 1 },
         });
         let current = snapshot(180);
@@ -1034,21 +1208,35 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
         frames.shift()(40); // samples the 160 fastest bodies
         frames.shift()(80); // paints their trails
         const small = { ...calls, canvasCount: container.children.length };
+        reduceMotion = true;
+        frames.shift()(96); // local wells stay visible; trails do not repaint under reduced motion
+        const reduced = { ...calls, queued: frames.length };
         current = snapshot(601);
+        reduceMotion = false;
         frames.shift()(120);
         const dense = { ...calls };
+        current = { ...snapshot(180), paused: true };
+        frames.shift()(160); // final static paint, then no idle orbit overlay rAF
+        const paused = { queued: frames.length, ellipses: calls.ellipses };
         overlay.destroy();
-        emit({ small, dense, childrenAfterDestroy: container.children.length,
-          listenerDetached: !listeners.engraphisgraphphysicschange });
+        emit({ small, reduced, dense, paused, childrenAfterDestroy: container.children.length,
+          listenerDetached: !listeners.engraphisgraphphysicschange,
+          visibilityDetached: !documentListeners.visibilitychange });
         """
     )
     assert report["small"]["canvasCount"] == 1
     assert report["small"]["arcs"] > 0 and report["small"]["lines"] > 0
+    # Both sampled frames paint the 24 highest-mass local stars, with two guide rings each.
+    assert report["small"]["ellipses"] == 24 * 2 * 2
+    # Reduced motion removes velocity blur, not the static local solar-system guide rings.
+    assert report["reduced"]["ellipses"] == report["small"]["ellipses"] + 24 * 2
     # One capped canvas pass renders at most the 160 selected velocity trails; a >600-node
     # graph clears them rather than paying a linear trail cost in the next paint.
     assert 0 < report["small"]["linearGradients"] <= 160
     assert report["dense"]["linearGradients"] == report["small"]["linearGradients"]
+    assert report["paused"]["queued"] == 0
     assert report["listenerDetached"] is True
+    assert report["visibilityDetached"] is True
 
 
 @requires_node
@@ -1061,14 +1249,18 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
         api.setData({ nodes: [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
             radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'Users', anchor_role: 'community', community_id: 'users', system_anchor_id: 'Users',
+            gravity_mass: 9, radius: 5, x: 92, y: 0, vx: 0, vy: 0 },
+          { id: 'users-planet', community_id: 'users', system_anchor_id: 'Users', orbit_tier: 1,
+            gravity_mass: 1, radius: 2, x: 118, y: 0, vx: 0, vy: 0 },
           { id: 'dragged', community_id: 'outer', gravity_mass: 2,
             radius: 4, x: 60, y: 0, vx: 0, vy: 0 },
         ], edges: [] });
         api.setSettings({ gravitationalConstant: 1.75, blackHoleMass: 3.5,
-          damping: .4, springStiffness: 2.25, orbitPaused: true });
+          localGravitationalConstant: 2.25, damping: .4, springStiffness: 2.25, orbitPaused: true });
         const paused = { state: JSON.parse(JSON.stringify(api.state().settings)), diagnostics: api.physicsDiagnostics(),
           snapshot: api.getPhysicsSnapshot() };
-        api.setSettings({ orbitPaused: false });
+        api.setSettings({ G_star: 1.4, orbitPaused: false });
         const node = store.graphData.nodes.find(item => item.id === 'dragged');
         store.screen2GraphCoords = (x, y) => ({ x, y });
         const event = (x, y, time) => ({ button: 0, isPrimary: true, pointerId: 7,
@@ -1086,12 +1278,30 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     diagnostics = report["paused"]["diagnostics"]
     assert state["gravitationalConstant"] == pytest.approx(1.75)
     assert state["blackHoleMass"] == pytest.approx(3.5)
+    assert state["localGravitationalConstant"] == pytest.approx(2.25)
     assert state["damping"] == pytest.approx(0.4)
     assert state["springStiffness"] == pytest.approx(2.25)
     assert state["orbitPaused"] is True
     assert diagnostics["orbitPaused"] is True and diagnostics["active"] is False
+    assert diagnostics["G_center"] == pytest.approx(1.75)
+    assert diagnostics["G_star"] == pytest.approx(2.25)
     assert report["paused"]["snapshot"]["paused"] is True
+    anchors = report["paused"]["snapshot"]["systemAnchors"]
+    assert len(anchors) == 1
+    assert {key: anchors[0][key] for key in ("id", "x", "y", "mass", "memberCount",
+                                              "systemOrbitRadius", "galacticOrbitRadius", "communityId")} == {
+        "id": "Users", "x": 92, "y": 0, "mass": 9, "memberCount": 2,
+        "systemOrbitRadius": 26, "galacticOrbitRadius": 92, "communityId": "users",
+    }
+    assert anchors[0]["radius"] > 0
+    snapshot_users = next(node for node in report["paused"]["snapshot"]["nodes"]
+                          if node["id"] == "Users")
+    snapshot_planet = next(node for node in report["paused"]["snapshot"]["nodes"]
+                           if node["id"] == "users-planet")
+    assert snapshot_users["isSystemAnchor"] is True and snapshot_users["anchorRole"] == "community"
+    assert snapshot_planet["systemAnchorId"] == "Users" and snapshot_planet["orbitTier"] == 1
     assert report["live"]["orbitPaused"] is False
+    assert report["live"]["G_star"] == pytest.approx(1.4)
     assert report["released"]["id"] == "dragged"
     assert 0 < report["released"]["speed"] <= 24
     assert report["node"].get("fx") is report["node"].get("fy") is None
@@ -8074,9 +8284,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-live-spacetime-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260811-hierarchical-spacetime-1'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260811-live-spacetime-1' in markup
+    assert '/v2-assets/ledger.js?v=20260811-hierarchical-spacetime-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

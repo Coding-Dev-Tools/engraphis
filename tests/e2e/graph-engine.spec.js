@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260811-live-spacetime-1';
+const stellarOrbitAssetVersion = '20260811-hierarchical-spacetime-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -523,6 +523,7 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
     return {
       star: { id: star.id, x: star.x, y: star.y,
         vx: Number(star.vx) || 0, vy: Number(star.vy) || 0,
+        warp: Number(star.__galaxySpacetimeWarp) || 0,
         mass: Number(star.gravity_mass) || 1,
         screenX: starPoint.x, screenY: starPoint.y,
         screenRadius: Math.abs(starEdge.x - starPoint.x) },
@@ -538,7 +539,8 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
       screenLocal: { ...screenLocal, radius: Math.hypot(screenLocal.x, screenLocal.y),
         angle: Math.atan2(screenLocal.y, screenLocal.x) },
       anchor: { id: anchor.id, x: anchor.x, y: anchor.y,
-        vx: Number(anchor.vx) || 0, vy: Number(anchor.vy) || 0 },
+        vx: Number(anchor.vx) || 0, vy: Number(anchor.vy) || 0,
+        radius: nodeRadius(anchor), warp: Number(anchor.__galaxySpacetimeWarp) || 0 },
       coreFollower: (() => {
         const node = nodes.find(candidate => candidate.id === 'core-star');
         return node ? { x: node.x, y: node.y,
@@ -1503,10 +1505,10 @@ for (const reducedMotion of [false, true]) {
       const evidence = {
         preference, elapsedMs: 5000,
         assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
-        before: { star: before.star, planet: before.planet, local: before.local,
+        before: { anchor: before.anchor, star: before.star, planet: before.planet, local: before.local,
           screenLocal: before.screenLocal, globalAngle: before.globalAngle,
           steps: before.diagnostics.steps, safety: before.safety },
-        after: { star: after.star, planet: after.planet, local: after.local,
+        after: { anchor: after.anchor, star: after.star, planet: after.planet, local: after.local,
           screenLocal: after.screenLocal, globalAngle: after.globalAngle,
           steps: after.diagnostics.steps, safety: after.safety },
         localTravel, screenTravel, globalTravel, screenChord, coRotatingSegments,
@@ -1552,6 +1554,12 @@ for (const reducedMotion of [false, true]) {
       expect(Math.max(...relativeKinetics), JSON.stringify(evidence))
         .toBeLessThan(Math.min(...relativeKinetics) * 2);
       expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
+      expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
+        .toBeLessThan(0.01);
+      /* Five seconds is sampled on a real wall-clock server, so OS scheduling changes the
+         exact step count. A 0.35-radian sweep is already >20 degrees and independently visible;
+         the stronger local threshold above proves the nested planet orbit at the same time. */
+      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.35);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
       expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
@@ -1591,6 +1599,53 @@ for (const reducedMotion of [false, true]) {
       expect(session.pageErrors).toEqual([]);
     });
 }
+
+test('served Ledger wires normalized spacetime controls, overlay, and orbit pause',
+  async ({ page }) => {
+    test.setTimeout(35_000);
+    const session = await openDashboard(page, { graphScene: blackHoleGalaxyScene });
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+    await expect(page.locator('#graph-canvas .graph-spacetime-overlay')).toHaveCount(1);
+    await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
+    await page.waitForFunction(() => window.__engraphisGraph
+      && window.__engraphisGraph.physicsDiagnostics().active
+      && window.__engraphisGraph.physicsDiagnostics().steps >= 5);
+
+    await page.evaluate(() => {
+      const values = {
+        'graph-gravitational-constant': '150',
+        'graph-local-gravitational-constant': '125',
+        'graph-black-hole-mass': '240',
+        'graph-space-damping': '2',
+        'graph-spring-stiffness': '64',
+      };
+      Object.entries(values).forEach(([id, value]) => {
+        const control = document.getElementById(id);
+        control.value = value;
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+    await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
+      .toMatchObject({ gravitationalConstant: 1.5, blackHoleMass: 1.5,
+        localGravitationalConstant: 1.25, damping: 2, springStiffness: 2, orbitPaused: false });
+
+    await page.locator('#graph-orbits-pause').click();
+    await page.waitForFunction(() => window.__engraphisGraph.state().settings.orbitPaused === true
+      && window.__engraphisGraph.physicsDiagnostics().active === false);
+    const pausedSteps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps))
+      .toBe(pausedSteps);
+    expect(await page.evaluate(() => window.__engraphisGraph.getPhysicsSnapshot().paused)).toBe(true);
+
+    await page.locator('#graph-orbits-pause').click();
+    await page.waitForFunction(steps => !window.__engraphisGraph.state().settings.orbitPaused
+      && window.__engraphisGraph.physicsDiagnostics().active
+      && window.__engraphisGraph.physicsDiagnostics().steps > steps, pausedSteps);
+    expect(session.pageErrors).toEqual([]);
+  });
 
 test('served Complete Galaxy uses the lightweight all-body orbit path instead of a frozen layout',
   async ({ page }, testInfo) => {
@@ -2033,7 +2088,7 @@ test('served primary dashboard keeps every solar system moving at the loose Grav
     expect(after.local.radius).toBeGreaterThan(before.local.radius * 0.7);
     expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
-    expect(after.anchor).toEqual({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
+    expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
     expect(after.diagnostics.blackHoleGravity).toBeGreaterThan(0);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
