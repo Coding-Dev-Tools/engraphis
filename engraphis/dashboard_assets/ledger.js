@@ -57,6 +57,8 @@
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const NOTICE_DURATION_MS = 3000;
+  let noticeTimer = null;
   const CLOUD_SYNC_PRIVACY_NOTICE = 'Cloud Sync encrypts eligible shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped memories stay local.';
   const EXTERNAL_LLM_PRIVACY_NOTICE = 'Memory text is sent to your configured LLM provider for processing under that provider’s terms. The provider must read that text to return extracted facts.';
   const truncate = (value, length = 260) => {
@@ -448,13 +450,28 @@
 
   function showNotice(message) {
     const text = String(message || '');
+    if (noticeTimer !== null) {
+      clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
     const textEl = byId('notice-text');
     if (textEl) textEl.textContent = text;
     const banner = byId('notice-banner');
     if (!banner) return;
     banner.textContent = text;
     banner.hidden = !text;
+    if (!text) {
+      banner.removeAttribute('data-tone');
+      return;
+    }
     banner.dataset.tone = /\b(could not|unavailable|failed|broken|error)\b/i.test(text) ? 'error' : 'info';
+    noticeTimer = setTimeout(() => {
+      noticeTimer = null;
+      if (banner.textContent !== text) return;
+      banner.textContent = '';
+      banner.hidden = true;
+      if (textEl) textEl.textContent = '';
+    }, NOTICE_DURATION_MS);
   }
 
   function updateReleaseUrl(value) {
