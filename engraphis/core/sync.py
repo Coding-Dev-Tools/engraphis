@@ -1407,11 +1407,15 @@ class SyncEngine:
                 rec.metadata, PoisoningDecision(True, reasons=merged_reasons)
             )
             rec.provenance = dict(rec.metadata["provenance"])
-            at = existing.valid_to if existing.valid_to is not None else now_ts()
-            # Preserve the locally governed interval rather than letting a peer's
-            # LWW timestamps reactivate or future-date a quarantined record.
+            # Preserve the locally governed start boundary rather than letting a peer's
+            # LWW timestamps reactivate or future-date a quarantined record. A peer
+            # overwrite closes an open quarantined interval at the sync boundary, which
+            # keeps the replaced payload out of ordinary retrieval while retaining its
+            # history for governed inspection.
             rec.valid_from = existing.valid_from
-            rec.valid_to = at
+            rec.valid_to = (
+                existing.valid_to if existing.valid_to is not None else now_ts()
+            )
             rec.valid_to_recorded_at = now_ts()
             rec.embedding = None
         if existing is not None:

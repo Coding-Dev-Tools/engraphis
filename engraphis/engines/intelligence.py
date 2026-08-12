@@ -71,7 +71,10 @@ def auto_categorize(content: str, title: str = "",
     """
     try:
         with LLMClient() as llm:
+            truncated = len(content) > 2000
             text = f"Title: {title}\n\nContent:\n{content[:2000]}"
+            if truncated:
+                text += "\n\n[content truncated for classification]"
             raw = llm.chat(
                 [{"role": "user", "content": text}],
                 system=_CLASSIFY_PROMPT,
@@ -130,11 +133,15 @@ def check_conflicts(content: str, namespace: str,
 
     try:
         with LLMClient() as llm:
+            truncated = len(content) > 1000
             existing_text = "\n\n".join([
                 f"[{m.get('document_id', '?')}] {m.get('title', '')}: {m.get('content', '')[:300]}"
                 for m in existing_memories[:10]
             ])
-            prompt = f"New memory:\n{content[:1000]}\n\nExisting memories in namespace '{namespace}':\n{existing_text}"
+            content_fragment = content[:1000]
+            if truncated:
+                content_fragment += "\n[content truncated for conflict check]"
+            prompt = f"New memory:\n{content_fragment}\n\nExisting memories in namespace '{namespace}':\n{existing_text}"
             raw = llm.chat(
                 [{"role": "user", "content": prompt}],
                 system=_CONFLICT_CHECK_PROMPT,
@@ -167,7 +174,8 @@ def _parse_json(raw: str) -> dict[str, Any]:
         if text.rstrip().endswith("```"):
             text = text.rsplit("```", 1)[0]
     # Try to extract JSON from the response
-    json_match = re.search(r'\{[\s\S]*\}', text)
+    # Non-greedy match to avoid spanning across multiple JSON objects or stray braces.
+    json_match = re.search(r'\{[\s\S]*?\}', text)
     if json_match:
         text = json_match.group(0)
     try:

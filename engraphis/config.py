@@ -823,12 +823,12 @@ class Settings:
         default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""),
                                                _env_int("ENGRAPHIS_PORT", 8700))
     )
-    # Optional server-side workspace binding — the hard multi-tenant isolation boundary.
-    # When non-empty, MemoryService refuses any read or write whose
-    # workspace is not in this comma-separated allow-list, so knowing or guessing a
-    # workspace name is not enough to reach it. Empty = unrestricted (single-tenant local).
+    # Kept as a compatibility attribute for callers that inspect Settings. Public
+    # entrypoints no longer read a process-wide workspace allow-list: workspace creation
+    # and selection are unrestricted by configuration. Deliberate tenant-bound services
+    # may still pass an allow-list directly to their service/store constructor.
     allowed_workspaces: list = field(
-        default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
+        default_factory=list
     )
     # The public package is always the customer runtime. Hosted service roles are private.
     service_mode: str = field(
@@ -1001,7 +1001,7 @@ def _parse_origins(raw: str, port: int = 8700) -> list:
 
 
 def _parse_csv(raw: str) -> list:
-    """Generic comma-separated allow-list. Empty -> [] (no restriction)."""
+    """Parse a comma-separated compatibility value without enabling a global binding."""
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 

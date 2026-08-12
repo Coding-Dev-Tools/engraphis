@@ -31,6 +31,9 @@ def _dependency_error() -> str:
 
 def _loopback_host(value: str) -> str:
     host = value.strip()
+    # Accept 'localhost' as a synonym for 127.0.0.1 — standard network tool behavior.
+    if host.lower() == "localhost":
+        return "127.0.0.1"
     try:
         if ipaddress.ip_address(host).is_loopback:
             return host

@@ -97,7 +97,6 @@ def create_app(
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
         embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
-        allowed_workspaces=settings.allowed_workspaces,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,

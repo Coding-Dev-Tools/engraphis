@@ -55,11 +55,13 @@ def test_http_mcp_cli_module_entrypoint_renders_help():
 def test_http_mcp_cli_rejects_non_loopback_host():
     from engraphis import mcp_http_cli
 
-    for host in ("0.0.0.0", "localhost"):
+    for host in ("0.0.0.0",):
         with pytest.raises(SystemExit) as exc:
             mcp_http_cli.main(["--host", host])
 
         assert exc.value.code == 2
+
+    assert mcp_http_cli._loopback_host("localhost") == "127.0.0.1"
 
 
 def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):

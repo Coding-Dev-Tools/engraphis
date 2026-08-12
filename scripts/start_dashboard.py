@@ -140,10 +140,23 @@ def _reuse_or_report_occupied_port(
     try:
         probe = urllib.request.Request(url.rstrip("/") + "/api/health")
         opener = urllib.request.build_opener(_NoRedirectHandler())
-        opener.open(probe, timeout=0.5)
-        is_web = True
-    except urllib.error.HTTPError:
-        is_web = True
+        response = opener.open(probe, timeout=0.5)
+        # Only treat as Engraphis if /api/health returns a valid JSON with expected keys.
+        # A 200 from an unrelated web server (nginx, Apache) is not an Engraphis dashboard.
+        try:
+            data = json.loads(response.read(4096))
+            is_web = isinstance(data, dict) and ("ok" in data or "status" in data)
+        except Exception:
+            is_web = False
+    except urllib.error.HTTPError as exc:
+        # An Engraphis dashboard with auth enabled may return 401/403 on /api/health.
+        # Non-Engraphis servers also return HTTP errors — distinguish by checking the
+        # response body for Engraphis-specific markers.
+        try:
+            body = exc.read(4096).decode("utf-8", errors="replace")
+            is_web = "engraphis" in body.lower() or "detail" in body
+        except Exception:
+            is_web = False
     except Exception:
         is_web = False
     if is_web:

@@ -381,8 +381,7 @@ def create_app() -> FastAPI:
         embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
-        rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        allowed_workspaces=settings.allowed_workspaces)
+        rerank_revision=getattr(settings, "rerank_revision", "") or None)
 
     def _discard_unbound_service() -> None:
         try:

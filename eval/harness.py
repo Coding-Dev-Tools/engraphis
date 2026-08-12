@@ -1164,9 +1164,10 @@ def main(argv: Optional[list[str]] = None) -> None:
             dataset_stem = Path(args.dataset).stem
             ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             out_file = out_dir / f"{dataset_stem}_{ts}.json"
-            out_file.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+            payload = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
+            out_file.write_text(payload, encoding="utf-8")
             latest = out_dir / f"{dataset_stem}_latest.json"
-            latest.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+            latest.write_text(payload, encoding="utf-8")
         except OSError as exc:
             ap.error(f"could not write to --output-dir: {exc}")
     if args.json or args.v2 or args.canonical:

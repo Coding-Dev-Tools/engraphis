@@ -176,7 +176,14 @@ class LLMClient:
                            max_tokens: int = 512,
                            thought_prompt: Optional[str] = None) -> dict[str, Any]:
         """Phase 2 thought synthesis — returns parsed JSON latent state."""
-        system = thought_prompt or _THOUGHT_SYSTEM_PROMPT
+        # Security: user-supplied thought_prompt is appended as guidance, never
+        # allowed to replace the system prompt entirely. This prevents prompt
+        # injection via the /memories/thoughts route.
+        if thought_prompt:
+            safe_suffix = thought_prompt.strip()[:500]
+            system = f"{_THOUGHT_SYSTEM_PROMPT}\n\nAdditional guidance: {safe_suffix}"
+        else:
+            system = _THOUGHT_SYSTEM_PROMPT
         raw = self.chat(
             [{"role": "user", "content": f"Memory context:\n\n{context}"}],
             system=system,
