@@ -1927,6 +1927,31 @@ def test_live_graph_excludes_edges_supported_only_by_session_memories():
     assert beta in {edge["source"] for edge in live["edges"]}
 
 
+def test_history_graph_excludes_session_supports_alongside_public_evidence():
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    session = service.start_session("acme", repo="web", goal="private graph")
+    private_id = service.store.add_memory(MemoryRecord(
+        id="mem_session_mixed", content="private graph relation",
+        workspace_id=workspace_id, repo_id=repo_id,
+        session_id=session["session_id"], scope=Scope.SESSION,
+    ))
+    service.store.add_edge_support(
+        "edge_ab", {"source": "manual", "memory_id": private_id},
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
+    )
+
+    relation = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert private_id not in relation["support_memory_ids"]
+    assert relation["support_count"] == 1
+
+
 def test_history_edge_metadata_counts_appended_ghost_relations():
     service, _alpha, _beta, _gamma = _seed_service()
     closed_at = time.time() + 10.0
