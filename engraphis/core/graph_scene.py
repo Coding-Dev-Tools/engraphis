@@ -802,6 +802,7 @@ def build_canonical_graph(
         repo_names = sorted({
             str(item["repo_name"]) for item in group if item.get("repo_name")
         }, key=lambda value: (value.casefold(), value))[:PUBLIC_REPO_NAME_LIMIT]
+        node_is_ghost = bool(group) and all(bool(item.get("ghost")) for item in group)
         nodes[canonical_id] = {
             "id": canonical_id,
             "canonical_id": canonical_id,
@@ -812,6 +813,9 @@ def build_canonical_graph(
             "repo_ids": repo_ids,
             "repo_names": repo_names,
             "aliases": sorted(labels, key=lambda item: (item.casefold(), item)),
+            # A canonical node remains live when any alias is live.  This preserves
+            # historical-only code symbols without replacing a live canonical node.
+            **({"ghost": True} if node_is_ghost else {}),
         }
 
     supports_by_edge: dict[str, list[dict]] = defaultdict(list)
@@ -1033,6 +1037,17 @@ def build_canonical_graph(
             "visual_radius": visual_radius,
             "anchor_eligible": bool(quality),
         })
+        if node.get("ghost"):
+            node.update({
+                "weighted_degree": 0.0,
+                "pagerank": 0.0,
+                "support_count": 0,
+                "entity_quality": 0.0,
+                "mass_score": 0.0,
+                "gravity_mass": 0.0,
+                "visual_radius": 0.0,
+                "anchor_eligible": False,
+            })
 
     components = _components(sorted(nodes), edges)
     communities = _louvain(sorted(nodes), edges)
@@ -1050,7 +1065,7 @@ def build_canonical_graph(
     for node_id, node in nodes.items():
         community_id = communities[node_id]
         role = "global" if node_id == global_id else (
-            "community" if community_anchors[community_id] == node_id else "none"
+            "community" if community_anchors.get(community_id) == node_id else "none"
         )
         affinity = 1.0 if node_id == global_id else _clamp(
             0.65 * node["mass_score"] + 0.35 * direct_core[node_id]
@@ -1744,7 +1759,11 @@ def _build_complete_scene(
             0.05,
             1.0,
         )
-        ghost = bool(row.get("ghost") or memory_rows_by_id[memory_id].get("ghost"))
+        ghost = bool(
+            row.get("ghost")
+            or memory_rows_by_id[memory_id].get("ghost")
+            or entity_nodes.get(symbol_id, {}).get("ghost")
+        )
         if not ghost:
             memory_degree[memory_id] += 1
         code_memory_edges.append({
