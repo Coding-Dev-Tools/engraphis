@@ -412,18 +412,18 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260813-carrier-frame-log-halo-7');
+  expect(first.searchParams.get('v')).toBe('20260813-inertial-hierarchy-orbits-9');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260813-carrier-frame-log-halo-7');
+  expect(second.searchParams.get('v')).toBe('20260813-inertial-hierarchy-orbits-9');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
-test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
+test('Ledger migrates Galaxy defaults and cannot restore zero orbital gravity', async ({ page }) => {
   const key = 'engraphis-ledger-graph-preferences-v1';
   const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
     localStorage.setItem(storageKey, JSON.stringify(value));
@@ -456,18 +456,28 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
+    spacetimeTuning: {
+      gravitationalConstant: 0, localGravitationalConstant: 0,
+      blackHoleMass: 20, damping: 0, springStiffness: 0,
+    },
     layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('60');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.physicsVersion).toBe(4);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
   expect(migrated.tuning.repel).toBe(60);
   expect(migrated.tuning.link).toBe(8);
   expect(migrated.tuning.gravity).toBe(0);
+  await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
+  await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
+  expect(migrated.spacetimeTuning).toMatchObject({
+    gravitationalConstant: 100, localGravitationalConstant: 100,
+    blackHoleMass: 20, damping: 0, springStiffness: 0,
+  });
   expect(migrated.layers).toEqual({
     temporal: false, entity: true, causal: false, semantic: true, code: false,
   });
@@ -480,18 +490,56 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(2);
+  expect(custom.physicsVersion).toBe(4);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
-  // Once versioned, 48 is a deliberate user selection rather than the retired default.
+  // Version three already distinguished 48 as a deliberate selection; preserve it while
+  // advancing the profile through the version-four zero-speed repair.
   await writePreferences({
-    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    physicsVersion: 3, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    spacetimeTuning: { gravitationalConstant: 0, localGravitationalConstant: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
-  expect((await readPreferences()).tuning.repel).toBe(48);
+  await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
+  await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
+  const current = await readPreferences();
+  expect(current.physicsVersion).toBe(4);
+  expect(current.tuning.repel).toBe(48);
+  expect(current.spacetimeTuning).toMatchObject({
+    gravitationalConstant: 100, localGravitationalConstant: 100,
+  });
+
+  // Reproduce a profile loaded by the first gravity-recovery build: gravity was already
+  // repaired and versioned, but the old zero orbital speed survived that earlier reload.
+  await writePreferences({
+    physicsVersion: 3, preset: 'galaxy', tuning: { repel: 0, gravity: 48 },
+    spacetimeTuning: { gravitationalConstant: 100, localGravitationalConstant: 100 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  const partiallyMigrated = await readPreferences();
+  expect(partiallyMigrated.physicsVersion).toBe(4);
+  expect(partiallyMigrated.tuning.repel).toBe(60);
+  expect(partiallyMigrated.spacetimeTuning).toMatchObject({
+    gravitationalConstant: 100, localGravitationalConstant: 100,
+  });
+
+  // Galaxy controls may be made gentler, but can no longer be saved at a frozen zero.
+  await page.evaluate(() => {
+    ['graph-gravitational-constant', 'graph-local-gravitational-constant'].forEach(id => {
+      const control = document.getElementById(id);
+      control.value = '0';
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+  await expect(page.locator('#graph-gravitational-constant')).toHaveValue('20');
+  await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('20');
+  expect((await readPreferences()).spacetimeTuning).toMatchObject({
+    gravitationalConstant: 20, localGravitationalConstant: 20,
+  });
 });
 
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {

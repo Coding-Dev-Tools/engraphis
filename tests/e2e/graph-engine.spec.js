@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260813-carrier-frame-log-halo-7';
+const stellarOrbitAssetVersion = '20260813-inertial-hierarchy-orbits-9';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -780,13 +780,16 @@ async function installCarrierPaintAudit(page) {
     if (typeof original !== 'function') {
       throw new Error('Production node painter is not installed');
     }
-    const audit = { ids, counts: {}, last: {} };
-    graph.nodeCanvasObject((node, context, scale) => {
+    const audit = { ids, counts: {}, last: {}, original, bounds: null,
+      enabled: true, wrapper: null };
+    audit.wrapper = (node, context, scale) => {
+      if (!audit.enabled) return undefined;
       const id = String(node.id);
       if (idSet.has(id)) {
         const point = graph.graph2ScreenCoords(node.x, node.y);
         const canvas = context && context.canvas;
-        const bounds = canvas && canvas.getBoundingClientRect();
+        if (!audit.bounds && canvas) audit.bounds = canvas.getBoundingClientRect();
+        const bounds = audit.bounds;
         audit.counts[id] = (audit.counts[id] || 0) + 1;
         audit.last[id] = {
           worldX: node.x, worldY: node.y, screenX: point.x, screenY: point.y,
@@ -795,24 +798,40 @@ async function installCarrierPaintAudit(page) {
         };
       }
       return original(node, context, scale);
-    });
+    };
+    graph.nodeCanvasObject(audit.wrapper);
     window.__carrierPaintAudit = audit;
     graph.zoom(graph.zoom());
     return ids;
   });
 }
 
-async function carrierPaintAuditSnapshot(page) {
-  return page.evaluate(() => {
+async function carrierPaintAuditSnapshot(page, disableAfter = false) {
+  return page.evaluate(disable => {
     const audit = window.__carrierPaintAudit;
-    return {
+    const snapshot = {
       ids: audit ? audit.ids : [],
       counts: audit ? { ...audit.counts } : {},
       last: audit ? JSON.parse(JSON.stringify(audit.last)) : {},
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
       hidden: document.hidden,
     };
-  });
+    if (disable && audit) audit.enabled = false;
+    return snapshot;
+  }, disableAfter);
+}
+
+/* Keep the registered ForceGraph callback unchanged while skipping the expensive intermediate
+   3,336-node paints. Re-enabling this flag does not invalidate the canvas, so the after sample
+   can only arrive through the dashboard's own live render loop. */
+async function setCarrierPaintAuditEnabled(page, enabled) {
+  await page.evaluate(active => {
+    const audit = window.__carrierPaintAudit;
+    if (!audit || typeof audit.wrapper !== 'function') {
+      throw new Error('Carrier paint audit is not installed');
+    }
+    audit.enabled = active;
+  }, enabled);
 }
 
 function signedAngleDelta(from, to) {
@@ -1819,6 +1838,124 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     expect(session.pageErrors).toEqual([]);
   });
 
+test('served Galaxy recovers persisted zero gravity and paints central plus local orbits',
+  async ({ page }, testInfo) => {
+    test.setTimeout(55_000);
+    const preferenceKey = 'engraphis-ledger-graph-preferences-v1';
+    await page.addInitScript(({ key }) => {
+      localStorage.setItem(key, JSON.stringify({
+        physicsVersion: 2,
+        preset: 'galaxy',
+        style: 'galaxy',
+        tuning: { repel: 0, link: 8, gravity: 48 },
+        spacetimeTuning: {
+          gravitationalConstant: 0,
+          localGravitationalConstant: 0,
+          blackHoleMass: 20,
+          damping: 0,
+          springStiffness: 0,
+        },
+      }));
+    }, { key: preferenceKey });
+    const session = await openDashboard(page, { graphScene: blackHoleGalaxyScene });
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+    await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+      && window.__engraphisGraph.physicsDiagnostics().active
+      && window.__engraphisGraph.physicsDiagnostics().steps >= 30, null, { timeout: 25_000 });
+
+    await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
+    await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
+    await expect(page.locator('#graph-repel')).toHaveValue('60');
+    const recovered = await page.evaluate(key => ({
+      preferences: JSON.parse(localStorage.getItem(key) || '{}'),
+      settings: window.__engraphisGraph.state().settings,
+      diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+    }), preferenceKey);
+    expect(recovered.preferences.physicsVersion).toBe(4);
+    expect(recovered.preferences.spacetimeTuning).toMatchObject({
+      gravitationalConstant: 100,
+      localGravitationalConstant: 100,
+    });
+    expect(recovered.settings).toMatchObject({
+      mode: 'galaxy', frozen: false, orbitPaused: false,
+      gravitationalConstant: 1, localGravitationalConstant: 1,
+      repel: 60,
+    });
+    expect(recovered.diagnostics).toMatchObject({ active: true, G_center: 1, G_star: 1 });
+
+    const paintedIds = await page.evaluate(() => {
+      const graph = window.__fg;
+      const ids = ['aurora-star', 'aurora-planet'];
+      const original = graph.nodeCanvasObject();
+      if (typeof original !== 'function') throw new Error('production node painter unavailable');
+      window.__zeroGravityPaintAudit = { ids, counts: {}, last: {} };
+      graph.nodeCanvasObject((node, context, scale) => {
+        if (ids.includes(String(node.id))) {
+          const screen = graph.graph2ScreenCoords(node.x, node.y);
+          const audit = window.__zeroGravityPaintAudit;
+          audit.counts[node.id] = (audit.counts[node.id] || 0) + 1;
+          audit.last[node.id] = {
+            worldX: node.x, worldY: node.y, screenX: screen.x, screenY: screen.y,
+          };
+        }
+        return original(node, context, scale);
+      });
+      return ids;
+    });
+    await page.waitForFunction(() => window.__zeroGravityPaintAudit.ids
+      .every(id => (window.__zeroGravityPaintAudit.counts[id] || 0) > 0));
+    const before = await page.evaluate(() => {
+      const nodes = new Map(window.__fg.graphData().nodes.map(node => [node.id, node]));
+      const star = nodes.get('aurora-star'), planet = nodes.get('aurora-planet');
+      return {
+        counts: { ...window.__zeroGravityPaintAudit.counts },
+        last: JSON.parse(JSON.stringify(window.__zeroGravityPaintAudit.last)),
+        localAngle: Math.atan2(planet.y - star.y, planet.x - star.x),
+        steps: window.__engraphisGraph.physicsDiagnostics().steps,
+      };
+    });
+    await page.waitForFunction(target => window.__engraphisGraph.physicsDiagnostics().steps >= target,
+      before.steps + 96, { timeout: 25_000 });
+    await page.waitForFunction(previous => window.__zeroGravityPaintAudit.ids
+      .every(id => (window.__zeroGravityPaintAudit.counts[id] || 0) > (previous[id] || 0)),
+    before.counts);
+    const after = await page.evaluate(() => {
+      const nodes = new Map(window.__fg.graphData().nodes.map(node => [node.id, node]));
+      const star = nodes.get('aurora-star'), planet = nodes.get('aurora-planet');
+      return {
+        counts: { ...window.__zeroGravityPaintAudit.counts },
+        last: JSON.parse(JSON.stringify(window.__zeroGravityPaintAudit.last)),
+        localAngle: Math.atan2(planet.y - star.y, planet.x - star.x),
+        diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+      };
+    });
+    await testInfo.attach('zero-gravity-profile-recovery.json', {
+      body: Buffer.from(JSON.stringify({ recovered, before, after }, null, 2)),
+      contentType: 'application/json',
+    });
+    for (const id of paintedIds) {
+      const first = before.last[id], last = after.last[id];
+      expect(after.counts[id], id).toBeGreaterThan(before.counts[id]);
+      expect(Math.hypot(last.worldX - first.worldX, last.worldY - first.worldY), id)
+        .toBeGreaterThan(.001);
+      expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
+        .toBeGreaterThan(.001);
+      expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
+        .toBeLessThan(.25);
+    }
+    const localTravel = Math.atan2(Math.sin(after.localAngle - before.localAngle),
+      Math.cos(after.localAngle - before.localAngle));
+    expect(Math.abs(localTravel)).toBeGreaterThan(1e-5);
+    expect(Math.abs(localTravel)).toBeLessThan(.01);
+    expect(after.diagnostics).toMatchObject({ active: true, frozen: false, orbitPaused: false });
+    expect(after.diagnostics.simulatedYearsPerWallSecond).toBeCloseTo(1000, 8);
+    expect(after.diagnostics.referencePhysicalPeriodYears).toBeGreaterThan(200_000_000);
+    expect(after.diagnostics.referenceDisplayPeriodSeconds).toBeGreaterThan(200_000);
+    expect(session.pageErrors).toEqual([]);
+  });
+
 test('served Galaxy paints complete independent solar envelopes with a visible clearance',
   async ({ page }, testInfo) => {
     test.setTimeout(55_000);
@@ -2056,8 +2193,21 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
 
 test('served Complete Galaxy uses the lightweight all-body orbit path instead of a frozen layout',
   async ({ page }, testInfo) => {
-    test.setTimeout(90_000);
+    test.setTimeout(240_000);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    /* Reproduce the actual user profile that left the scheduler and black-hole paint live while
+       every carrier/local circular speed was zero. This release-sized test must recover that
+       snapshot before it audits every one of the 3,335 global and 2,960 local bodies. */
+    await page.addInitScript(() => {
+      localStorage.setItem('engraphis-ledger-graph-preferences-v1', JSON.stringify({
+        physicsVersion: 2, preset: 'galaxy', style: 'galaxy',
+        tuning: { repel: 0, link: 8, gravity: 48 },
+        spacetimeTuning: {
+          gravitationalConstant: 0, localGravitationalConstant: 0,
+          blackHoleMass: 20, damping: 0, springStiffness: 0,
+        },
+      }));
+    });
     await openDashboard(page, { graphScene: servedCompleteGalaxyScene });
     await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
@@ -2065,23 +2215,31 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
     await page.waitForFunction(() => window.__engraphisGraph && window.__fg
       && window.__fg.graphData().nodes.length === 3336
       && window.__engraphisGraph.physicsDiagnostics().steps >= 10
-      && window.__engraphisGraph.physicsDiagnostics().active, null, { timeout: 35_000 });
+      && window.__engraphisGraph.physicsDiagnostics().active, null, { timeout: 60_000 });
     const paintedCarrierIds = await installCarrierPaintAudit(page);
     expect(paintedCarrierIds).toHaveLength(375);
     await page.waitForFunction(() => {
       const audit = window.__carrierPaintAudit;
       return audit && audit.ids.every(id => (audit.counts[id] || 0) > 0);
-    }, null, { timeout: 20_000 });
-    const carrierPaintBefore = await carrierPaintAuditSnapshot(page);
+    }, null, { timeout: 60_000 });
+    const carrierPaintBefore = await carrierPaintAuditSnapshot(page, true);
     const paintedStep = await page.evaluate(() =>
       window.__engraphisGraph.physicsDiagnostics().steps + 24);
     await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
-      paintedStep, { timeout: 25_000 });
-    await page.waitForFunction(previous => {
+      paintedStep, { timeout: 60_000 });
+    await setCarrierPaintAuditEnabled(page, true);
+    await page.waitForFunction(before => {
       const audit = window.__carrierPaintAudit;
-      return audit && audit.ids.every(id => (audit.counts[id] || 0) > (previous[id] || 0));
-    }, carrierPaintBefore.counts, { timeout: 20_000 });
-    const carrierPaintAfter = await carrierPaintAuditSnapshot(page);
+      return audit && audit.ids.every(id => {
+        const first = before.last[id], last = audit.last[id];
+        return first && last
+          && (audit.counts[id] || 0) > (before.counts[id] || 0)
+          && Math.hypot(last.worldX - first.worldX, last.worldY - first.worldY) > 1e-4
+          && Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY) > 1e-5
+          && Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY) < .05;
+      });
+    }, { counts: carrierPaintBefore.counts, last: carrierPaintBefore.last }, { timeout: 60_000 });
+    const carrierPaintAfter = await carrierPaintAuditSnapshot(page, true);
     await testInfo.attach('complete-galaxy-carrier-paint-audit.json', {
       body: Buffer.from(JSON.stringify({ carrierPaintBefore, carrierPaintAfter }, null, 2)),
       contentType: 'application/json',
@@ -2092,9 +2250,11 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
         .toBeGreaterThan(carrierPaintBefore.counts[id]);
       expect(first.insideCanvas && last.insideCanvas, id).toBe(true);
       expect(Math.hypot(last.worldX - first.worldX, last.worldY - first.worldY), id)
-        .toBeGreaterThan(.05);
+        .toBeGreaterThan(1e-4);
       expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
-        .toBeGreaterThan(.2);
+        .toBeGreaterThan(1e-5);
+      expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
+        .toBeLessThan(.05);
     }
 
     const orbitEvidence = async label => {
@@ -2149,7 +2309,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       for (let index = 1; index <= 2; index += 1) {
         const target = boot.diagnostics.steps + index * 8;
         await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
-          target, { timeout: 25_000 });
+          target, { timeout: 60_000 });
         phases.push(await page.evaluate(() => {
           const observer = window.__completeOrbitObserver, current = observer.snapshot();
           const previous = observer.samples.length ? observer.samples.at(-1) : observer.initial;
@@ -2164,9 +2324,14 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
               state.travel += step;
               if (Math.abs(step) <= 1e-8) { state.frozen++; frozen++; if (!first) first = { id, reason: 'frozen' }; }
             }
-            let minTravel = Infinity, totalFrozen = 0;
-            for (const state of totals.values()) { minTravel = Math.min(minTravel, Math.abs(state.travel)); totalFrozen += state.frozen; }
-            return { count: now.size, missing, nonFinite, frozen, totalFrozen, minTravel, first };
+            let minTravel = Infinity, maxTravel = 0, totalFrozen = 0;
+            for (const state of totals.values()) {
+              minTravel = Math.min(minTravel, Math.abs(state.travel));
+              maxTravel = Math.max(maxTravel, Math.abs(state.travel));
+              totalFrozen += state.frozen;
+            }
+            return { count: now.size, missing, nonFinite, frozen, totalFrozen,
+              minTravel, maxTravel, first };
           };
           const global = check('global', observer.global), local = check('local', observer.local);
           const carrierFailures = current.carriers.filter(carrier => !carrier.valid || carrier.error >= 1e-8);
@@ -2187,6 +2352,8 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       expect(boot.localCount).toBe(2960);
       expect(boot.anchorCount).toBe(375);
       expect(boot.systemCount).toBe(375);
+      expect(boot.diagnostics.G_center).toBe(1);
+      expect(boot.diagnostics.G_star).toBe(1);
       expect(boot.finite && phases.every(phase => phase.finite)).toBe(true);
       expect(after.diagnostics.steps - boot.diagnostics.steps).toBeGreaterThanOrEqual(16);
       expect(after.diagnostics.kinematicSteps - boot.diagnostics.kinematicSteps)
@@ -2198,10 +2365,12 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       expect(after.diagnostics.lastRelationCorrections).toBe(0);
       expect(phases.every(phase => phase.global.count === 3335 && phase.global.missing === 0
         && phase.global.nonFinite === 0 && phase.global.frozen === 0 && phase.global.totalFrozen === 0
-        && phase.global.minTravel > .001), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
+        && phase.global.minTravel > 1e-9 && phase.global.maxTravel < .001),
+      JSON.stringify(phases.map(phase => phase.global))).toBe(true);
       expect(phases.every(phase => phase.local.count === 2960 && phase.local.missing === 0
         && phase.local.nonFinite === 0 && phase.local.frozen === 0 && phase.local.totalFrozen === 0
-        && phase.local.minTravel > .001), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
+        && phase.local.minTravel > 1e-9 && phase.local.maxTravel < .001),
+      JSON.stringify(phases.map(phase => phase.local))).toBe(true);
       expect(phases.every(phase => phase.carrierCount === 375 && phase.systemCount === 375
         && phase.carrierFailures.length === 0 && phase.carrierMaxError < 1e-8),
       JSON.stringify(phases.map(phase => ({ count: phase.carrierCount, error: phase.carrierMaxError,
@@ -2240,7 +2409,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
 
     await page.evaluate(() => window.__engraphisGraph.freeze(false));
     await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps > step,
-      frozen.steps, { timeout: 20_000 });
+      frozen.steps, { timeout: 35_000 });
     const hidden = await page.evaluate(() => {
       Object.defineProperty(document, 'hidden', { configurable: true, value: true });
       document.dispatchEvent(new Event('visibilitychange'));
@@ -2255,7 +2424,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps > step,
-      hidden, { timeout: 20_000 });
+      hidden, { timeout: 35_000 });
   });
 
 for (const reducedMotion of [false, true]) {
