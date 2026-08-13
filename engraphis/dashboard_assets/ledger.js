@@ -417,10 +417,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-6'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
@@ -2488,7 +2488,12 @@
       flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
       labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
       tuning: graphTuningSettings(),
-      spacetimeTuning: graphSpacetimeControlSettings(),
+      /* Pause is a session action, like Freeze. Persist the numeric spacetime tuning without
+         silently reopening a future dashboard with every orbit stopped. */
+      spacetimeTuning: GRAPH_SPACETIME_TUNING.reduce((settings, item) => {
+        settings[item.key] = number(byId(item.id).value);
+        return settings;
+      }, {}),
       minDegree: number(byId('graph-min-degree').value),
       depth: number(byId('graph-depth').value),
       showUnlinked: state.graphShowUnlinked,
@@ -2543,9 +2548,14 @@
       ...effectiveTuning,
     });
     const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
-    state.graphOrbitPaused = savedSpacetimeTuning && savedSpacetimeTuning.orbitPaused === true;
-    syncGraphSpacetimeTuning(savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
-      ? savedSpacetimeTuning : {});
+    /* Pause orbits is deliberately session-only. Old snapshots may contain orbitPaused=true;
+       ignore it so a fresh dashboard always starts with live galactic motion. */
+    state.graphOrbitPaused = false;
+    syncGraphSpacetimeTuning({
+      ...(savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
+        ? savedSpacetimeTuning : {}),
+      orbitPaused: false,
+    });
 
     const savedMin = Number(graphPreference('minDegree', number(byId('graph-min-degree').value)));
     const minDegree = Number.isFinite(savedMin) ? Math.max(0, Math.min(12, Math.round(savedMin))) : 1;

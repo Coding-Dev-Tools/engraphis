@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6"
+        "/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6"
+        "/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1326,6 +1326,7 @@ def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion(
     assert report["afterCarrier"] == pytest.approx(report["beforeCarrier"], abs=1e-12)
     assert report["planetSpeed"] <= 50 + 1e-12
     assert report["localSpeed"] <= 32 + 1e-12
+    assert report["guard"]["systems"] == 1
 
 
 @requires_node
@@ -1531,8 +1532,8 @@ def test_arbitrary_global_label_and_community_stars_keep_nested_orbits() -> None
 
 
 @requires_node
-def test_horizon_tides_are_bounded_local_and_leave_far_solar_frames_untouched() -> None:
-    """Only a warped near-horizon system receives the small star-relative tidal tensor."""
+def test_horizon_warp_is_carrier_only_and_never_adds_planet_black_hole_physics() -> None:
+    """Near-horizon effects translate a complete solar system without a per-planet tide."""
     report = _run_node(
         """
         const make = radius => [
@@ -1561,14 +1562,12 @@ def test_horizon_tides_are_bounded_local_and_leave_far_solar_frames_untouched() 
     )
     near, far = report["near"], report["far"]
     assert near["finite"] is far["finite"] is True
-    assert near["stats"]["tidalSystems"] == 1
-    assert near["stats"]["tidalPlanets"] == 2
-    assert 0 < near["stats"]["maximumTidalAcceleration"] <= .16
-    # The star has only the shared carrier acceleration; planets add distinct bounded tensors.
+    assert near["stats"]["tidalSystems"] == near["stats"]["tidalPlanets"] == 0
+    assert near["stats"]["maximumTidalAcceleration"] == 0
+    # Every descendant inherits exactly the star's black-hole-frame acceleration.
     assert abs(near["changes"][1]["ax"]) + abs(near["changes"][1]["ay"]) > 0
-    assert near["changes"][2] != pytest.approx(near["changes"][1], abs=1e-8)
-    assert near["changes"][3] != pytest.approx(near["changes"][1], abs=1e-8)
-    assert near["changes"][2] != pytest.approx(near["changes"][3], abs=1e-8)
+    assert near["changes"][2] == pytest.approx(near["changes"][1], abs=1e-12)
+    assert near["changes"][3] == pytest.approx(near["changes"][1], abs=1e-12)
     assert max(near["warp"]) > 0
     assert far["stats"]["tidalSystems"] == far["stats"]["tidalPlanets"] == 0
     assert far["stats"]["maximumTidalAcceleration"] == 0
@@ -2268,6 +2267,187 @@ def test_black_hole_composite_field_is_mass_aware_differential_and_linear_cost()
     assert report["rigidInner"] == pytest.approx([0, 0], abs=1e-12)
     assert report["many"]["traversals"] == 600
     assert report["many"]["systems"] == 599
+
+
+@requires_node
+def test_cored_log_halo_has_flat_outer_rotation_and_caps_each_carrier_independently() -> None:
+    """The shared carrier law is flat outside the halo core and never globally downscales."""
+    report = _run_node(
+        """
+        const model = {
+          gravitationalConstant: 1,
+          coreMass: 0,
+          haloMass: Math.SQRT2 * 100,
+          coreSoftening: 10,
+          haloScale: 100,
+          accelerationCap: 1e9,
+        };
+        const samples = [500, 1000, 2000].map(radius => {
+          const curve = I.galaxyCarrierOrbitCurve(model, radius);
+          return { radius, speed: curve.circularSpeed, omega: curve.omega };
+        });
+        const atScale = I.galaxyCarrierOrbitCurve(model, 100);
+        const neutralTarget = I.galaxyCarrierTargetSpeed(model, 1000, 60);
+        const capped = I.galaxyCarrierOrbitCurve({ ...model, accelerationCap: .001 }, 20);
+        const uncapped = I.galaxyCarrierOrbitCurve(model, 2000);
+        emit({ samples, atScale, neutralTarget, capped, uncapped });
+        """
+    )
+    speeds = [sample["speed"] for sample in report["samples"]]
+    omegas = [sample["omega"] for sample in report["samples"]]
+    assert max(speeds) / min(speeds) < 1.02
+    assert omegas[0] > omegas[1] > omegas[2] > 0
+    # v0²=1 and r=a gives v²=.5, exactly matching the old Plummer speed at the handoff.
+    assert report["atScale"]["circularSpeed"] == pytest.approx(math.sqrt(.5), rel=1e-12)
+    # Neutral presentation speed is the actual circular speed, with no hidden visual boost.
+    assert report["neutralTarget"] == pytest.approx(speeds[1], rel=1e-12)
+    assert report["capped"]["acceleration"] == pytest.approx(.001, rel=1e-12)
+    # A cap sampled for one inner carrier does not scale an unrelated outer carrier.
+    assert report["uncapped"]["capScale"] == 1
+
+
+@requires_node
+def test_direct_black_hole_star_is_one_rigid_carrier_with_local_descendant_physics() -> None:
+    """A directly linked star owns its planets; only that complete frame orbits the black hole."""
+    report = _run_node(
+        """
+        const make = () => [
+          { id: 'bh', anchor_role: 'global', community_id: 'core', gravity_mass: 64,
+            radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'bh', gravity_mass: 9, radius: 4,
+            x: 90, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            gravity_mass: 1, radius: 2, x: 102, y: 0, vx: 0, vy: 0 },
+          { id: 'moon', community_id: 'solar', system_anchor_id: 'planet',
+            gravity_mass: .2, radius: 1, x: 106, y: 0, vx: 0, vy: 0 },
+          // A same-community BH sibling is a separate carrier, never another child of `star`.
+          { id: 'peer', community_id: 'solar', system_anchor_id: 'bh',
+            gravity_mass: 2, radius: 2, x: -80, y: 0, vx: 0, vy: 0 },
+        ];
+        const galactic = make();
+        const field = I.galaxyBlackHoleField(galactic, {
+          gravity: 48, softening: 32, accelerationCap: 1e9,
+        });
+        I.applyGalaxyBlackHoleGravity(galactic, {
+          gravity: 48, softening: 32, accelerationCap: 1e9,
+        });
+        const seeded = make().filter(node => node.id !== 'peer');
+        I.seedGalaxySystemOrbits(seeded, 311, 48, 32, false);
+        const local = make();
+        I.applyGalaxySystemAnchorGravity(local, {
+          gravity: 48, softening: 8, accelerationCap: 1e9,
+        });
+        emit({
+          systems: field.systems.map(item => ({ id: item.id, core: item.core,
+            carrier: item.carrier.id, members: item.nodes.map(node => node.id) })),
+          galactic: galactic.map(node => [node.vx, node.vy]),
+          seededSingleCommunity: seeded.map(node => [node.vx, node.vy]),
+          local: local.map(node => [node.vx, node.vy]),
+        });
+        """
+    )
+    assert report["systems"] == [
+        {"id": "star", "core": True, "carrier": "star",
+         "members": ["star", "planet", "moon"]},
+        {"id": "peer", "core": True, "carrier": "peer", "members": ["peer"]},
+    ]
+    carrier_delta = report["galactic"][1]
+    assert math.hypot(*carrier_delta) > 0
+    assert report["galactic"][2] == pytest.approx(carrier_delta, abs=1e-12)
+    assert report["galactic"][3] == pytest.approx(carrier_delta, abs=1e-12)
+    assert math.hypot(*report["galactic"][4]) > 0
+    assert math.hypot(*report["seededSingleCommunity"][1]) > 0
+    assert report["seededSingleCommunity"][2] == pytest.approx(
+        report["seededSingleCommunity"][1], abs=1e-12
+    )
+    assert report["seededSingleCommunity"][3] == pytest.approx(
+        report["seededSingleCommunity"][1], abs=1e-12
+    )
+    # The star gets no second local black-hole pull; planet and moon use immediate parents.
+    assert report["local"][1] == pytest.approx([0, 0], abs=1e-12)
+    assert math.hypot(*report["local"][2]) > 0
+    assert math.hypot(*report["local"][3]) > 0
+    assert report["local"][4] == pytest.approx([0, 0], abs=1e-12)
+
+
+@requires_node
+def test_direct_black_hole_solar_system_gets_its_own_packed_carrier_envelope() -> None:
+    """Admission uses the runtime carrier hierarchy instead of folding the star into the hole."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'bh', anchor_role: 'global', community_id: 'core', gravity_mass: 64,
+            radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'direct-star', anchor_role: 'community', community_id: 'core',
+            system_anchor_id: 'bh', gravity_mass: 9, radius: 5,
+            x: 120, y: 0, vx: 2, vy: 1 },
+          { id: 'direct-planet', community_id: 'core', system_anchor_id: 'direct-star',
+            gravity_mass: 1, radius: 2, x: 138, y: 4, vx: 2, vy: 2 },
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star', gravity_mass: 8, radius: 5,
+            x: 120, y: 0, vx: -1, vy: 0 },
+          { id: 'outer-planet', community_id: 'outer', system_anchor_id: 'outer-star',
+            gravity_mass: 1, radius: 2, x: 140, y: 0, vx: -1, vy: 1 },
+        ];
+        const byId = id => nodes.find(node => node.id === id);
+        const directStar = byId('direct-star'), directPlanet = byId('direct-planet');
+        const beforeLocal = [directPlanet.x - directStar.x, directPlanet.y - directStar.y,
+          directPlanet.vx - directStar.vx, directPlanet.vy - directStar.vy];
+        const before = I.galaxySystemEnvelopes(nodes).map(system => ({
+          id: system.id, anchor: system.anchor.id, members: system.nodes.map(node => node.id),
+        })).sort((left, right) => left.id.localeCompare(right.id));
+        const admission = I.establishGalaxyCarrierLanes(nodes, { gap: 8, layoutSeed: 413 });
+        const after = I.galaxySystemEnvelopes(nodes).map(system => ({
+          id: system.id, anchor: system.anchor.id, members: system.nodes.map(node => node.id),
+        })).sort((left, right) => left.id.localeCompare(right.id));
+        const afterLocal = [directPlanet.x - directStar.x, directPlanet.y - directStar.y,
+          directPlanet.vx - directStar.vx, directPlanet.vy - directStar.vy];
+        emit({ before, after, admission, beforeLocal, afterLocal,
+          blackHole: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
+          directLane: directStar.__galaxyCarrierLaneRadius,
+          outerLane: byId('outer-star').__galaxyCarrierLaneRadius });
+        """
+    )
+    expected = [
+        {"id": "bh", "anchor": "bh", "members": ["bh"]},
+        {"id": "direct-star", "anchor": "direct-star",
+         "members": ["direct-star", "direct-planet"]},
+        {"id": "outer-star", "anchor": "outer-star",
+         "members": ["outer-star", "outer-planet"]},
+    ]
+    assert report["before"] == expected
+    assert report["after"] == expected
+    assert report["admission"]["assigned"] == 2
+    assert report["admission"]["moved"] == 2
+    assert report["directLane"] > 0
+    assert report["outerLane"] > 0
+    assert report["blackHole"] == [0, 0, 0, 0]
+    assert report["afterLocal"] == pytest.approx(report["beforeLocal"], abs=1e-12)
+
+
+@requires_node
+def test_envelopes_without_an_explicit_black_hole_keep_compatibility_systems_intact() -> None:
+    """A dominant fallback star is not a black hole and must retain its planet envelope."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'hub', anchor_role: 'community', community_id: 'solar', gravity_mass: 8,
+            radius: 5, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', gravity_mass: 1,
+            radius: 2, x: 20, y: 0, vx: 0, vy: 1 },
+          { id: 'other', anchor_role: 'community', community_id: 'other', gravity_mass: 4,
+            radius: 4, x: 80, y: 0, vx: 0, vy: 0 },
+        ];
+        emit(I.galaxySystemEnvelopes(nodes).map(system => ({
+          id: system.id, members: system.nodes.map(node => node.id),
+        })).sort((left, right) => left.id.localeCompare(right.id)));
+        """
+    )
+    assert report == [
+        {"id": "hub", "members": ["hub", "planet"]},
+        {"id": "other", "members": ["other"]},
+    ]
 
 
 @requires_node
@@ -4553,8 +4733,8 @@ def test_connected_galaxy_drag_keeps_followers_and_unrelated_systems_bounded() -
     assert report["finite"] is True
     assert report["dragAcceleration"] > 0
     assert report["dragPull"] > 0
-    assert report["maximumSpeed"] <= 24
-    assert report["releaseSpeed"] <= 24
+    assert report["maximumSpeed"] <= 24, report
+    assert report["releaseSpeed"] <= 24, report
     # Fixed geometry and the relation cap limit every cursor sample; neither link may run away.
     assert report["maximumFollowerStep"] <= 48
     assert report["maximumLinkDistance"] <= 180
@@ -6996,7 +7176,10 @@ def test_every_local_member_gets_a_live_coherent_orbit_about_its_inferred_star()
         # inheritance from the star's galaxy orbit. Its local radius remains visibly orbital.
         assert abs(track["initialRadial"]) < track["initialRadius"] * 1e-8, track
         assert track["minimumRadius"] > track["initialRadius"] * 0.9, track
-        assert track["maximumRadius"] < track["initialRadius"] * 1.12, track
+        # A direct black-hole body may be admitted to a wider collision-free core lane.
+        # Star-owned planets retain the stricter local-frame radius envelope.
+        maximum_factor = 1.25 if track["anchorId"] == "black-hole" else 1.12
+        assert track["maximumRadius"] < track["initialRadius"] * maximum_factor, track
 
 
 @requires_node
@@ -9323,9 +9506,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-8' in markup
+    assert '/v2-assets/ledger.js?v=20260813-live-carrier-frames-9' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

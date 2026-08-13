@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260812-hierarchical-black-hole-orbits-6';
+const stellarOrbitAssetVersion = '20260813-carrier-frame-log-halo-7';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -756,6 +756,61 @@ async function renderedAllGlobalOrbitSnapshot(page) {
       ghostIds: rendered.filter(node => node.ghost).map(node => String(node.id)).sort(),
       diagnostics: engine.physicsDiagnostics(),
       finite: rendered.every(node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+    };
+  });
+}
+
+/* Observe ForceGraph's real node painter, not an engine coordinate or whole-canvas checksum.
+   The wrapper delegates to the production painter exactly once, while recording every stellar
+   carrier and every direct black-hole child at the world/screen coordinate actually submitted
+   to the canvas. Background stars and black-hole disk spin cannot satisfy this oracle. */
+async function installCarrierPaintAudit(page) {
+  return page.evaluate(() => {
+    const graph = window.__fg;
+    const nodes = graph.graphData().nodes.filter(node => !node.ghost);
+    const blackHole = nodes.find(node => node.anchor_role === 'global');
+    const wanted = nodes.filter(node => node !== blackHole && (
+      node.anchor_role === 'community'
+      || String(node.system_anchor_id || '') === String(blackHole && blackHole.id)
+      || node.__galaxyBlackHoleChild === true
+    ));
+    const ids = wanted.map(node => String(node.id)).sort();
+    const idSet = new Set(ids);
+    const original = graph.nodeCanvasObject();
+    if (typeof original !== 'function') {
+      throw new Error('Production node painter is not installed');
+    }
+    const audit = { ids, counts: {}, last: {} };
+    graph.nodeCanvasObject((node, context, scale) => {
+      const id = String(node.id);
+      if (idSet.has(id)) {
+        const point = graph.graph2ScreenCoords(node.x, node.y);
+        const canvas = context && context.canvas;
+        const bounds = canvas && canvas.getBoundingClientRect();
+        audit.counts[id] = (audit.counts[id] || 0) + 1;
+        audit.last[id] = {
+          worldX: node.x, worldY: node.y, screenX: point.x, screenY: point.y,
+          insideCanvas: !bounds || (point.x >= 0 && point.y >= 0
+            && point.x <= bounds.width && point.y <= bounds.height),
+        };
+      }
+      return original(node, context, scale);
+    });
+    window.__carrierPaintAudit = audit;
+    graph.zoom(graph.zoom());
+    return ids;
+  });
+}
+
+async function carrierPaintAuditSnapshot(page) {
+  return page.evaluate(() => {
+    const audit = window.__carrierPaintAudit;
+    return {
+      ids: audit ? audit.ids : [],
+      counts: audit ? { ...audit.counts } : {},
+      last: audit ? JSON.parse(JSON.stringify(audit.last)) : {},
+      diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+      hidden: document.hidden,
     };
   });
 }
@@ -1733,6 +1788,9 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     await page.locator('#graph-orbits-pause').click();
     await page.waitForFunction(() => window.__engraphisGraph.state().settings.orbitPaused === true
       && window.__engraphisGraph.physicsDiagnostics().active === false);
+    const pausedPreference = await page.evaluate(() => JSON.parse(localStorage.getItem(
+      'engraphis-ledger-graph-preferences-v1') || '{}').spacetimeTuning || {});
+    expect(pausedPreference.orbitPaused).toBeUndefined();
     const pausedSteps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps);
     await page.waitForTimeout(250);
     expect(await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps))
@@ -1743,6 +1801,21 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     await page.waitForFunction(steps => !window.__engraphisGraph.state().settings.orbitPaused
       && window.__engraphisGraph.physicsDiagnostics().active
       && window.__engraphisGraph.physicsDiagnostics().steps > steps, pausedSteps);
+    /* A legacy snapshot may still contain the formerly persisted pause bit. Fresh navigation
+       must ignore it and start the galactic clock, just like the session-only Freeze control. */
+    await page.evaluate(() => {
+      const key = 'engraphis-ledger-graph-preferences-v1';
+      const snapshot = JSON.parse(localStorage.getItem(key) || '{}');
+      snapshot.spacetimeTuning = { ...(snapshot.spacetimeTuning || {}), orbitPaused: true };
+      localStorage.setItem(key, JSON.stringify(snapshot));
+    });
+    await page.reload();
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await page.waitForFunction(() => window.__engraphisGraph
+      && window.__engraphisGraph.state().settings.orbitPaused === false
+      && window.__engraphisGraph.physicsDiagnostics().active
+      && window.__engraphisGraph.physicsDiagnostics().steps > 2, null, { timeout: 25_000 });
+    await expect(page.locator('#graph-orbits-pause')).toHaveAttribute('aria-checked', 'false');
     expect(session.pageErrors).toEqual([]);
   });
 
@@ -1757,13 +1830,25 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
     await page.waitForFunction(() => window.__engraphisGraph && window.__fg
       && window.__fg.graphData().nodes.length === 542
       && window.__engraphisGraph.physicsDiagnostics().steps >= 12, null, { timeout: 35_000 });
+    const paintedIds = await installCarrierPaintAudit(page);
+    expect(paintedIds).toHaveLength(61);
+    await page.waitForFunction(() => {
+      const audit = window.__carrierPaintAudit;
+      return audit && audit.ids.every(id => (audit.counts[id] || 0) > 0);
+    }, null, { timeout: 20_000 });
+    const paintBefore = await carrierPaintAuditSnapshot(page);
     const before = await renderedSystemEnvelopeSnapshot(page);
-    const steps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps + 24);
+    const steps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps + 96);
     await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
       steps, { timeout: 25_000 });
+    await page.waitForFunction(previous => {
+      const audit = window.__carrierPaintAudit;
+      return audit && audit.ids.every(id => (audit.counts[id] || 0) > (previous[id] || 0));
+    }, paintBefore.counts, { timeout: 20_000 });
+    const paintAfter = await carrierPaintAuditSnapshot(page);
     const after = await renderedSystemEnvelopeSnapshot(page);
     await testInfo.attach('served-system-envelope-clearance.json', {
-      body: Buffer.from(JSON.stringify({ before, after }, null, 2)),
+      body: Buffer.from(JSON.stringify({ before, after, paintBefore, paintAfter }, null, 2)),
       contentType: 'application/json',
     });
     for (const snapshot of [before, after]) {
@@ -1772,6 +1857,19 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
       expect(snapshot.systems.every(system => system.members === 9)).toBe(true);
       expect(snapshot.overlaps).toBe(0);
       expect(snapshot.minimumClearance).toBeGreaterThanOrEqual(-.75);
+    }
+    expect(paintAfter.diagnostics.active).toBe(true);
+    expect(paintAfter.diagnostics.frozen).toBe(false);
+    expect(paintAfter.diagnostics.orbitPaused).toBe(false);
+    expect(paintAfter.hidden).toBe(false);
+    for (const id of paintedIds) {
+      const first = paintBefore.last[id], last = paintAfter.last[id];
+      expect(paintAfter.counts[id], id).toBeGreaterThan(paintBefore.counts[id]);
+      expect(first.insideCanvas && last.insideCanvas, id).toBe(true);
+      expect(Math.hypot(last.worldX - first.worldX, last.worldY - first.worldY), id)
+        .toBeGreaterThan(.1);
+      expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
+        .toBeGreaterThan(1);
     }
   });
 
@@ -1968,20 +2066,36 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       && window.__fg.graphData().nodes.length === 3336
       && window.__engraphisGraph.physicsDiagnostics().steps >= 10
       && window.__engraphisGraph.physicsDiagnostics().active, null, { timeout: 35_000 });
-    const paintedBefore = await page.evaluate(() => {
-      const canvas = document.querySelector('#graph-canvas canvas');
-      return canvas ? canvas.toDataURL('image/png') : '';
-    });
+    const paintedCarrierIds = await installCarrierPaintAudit(page);
+    expect(paintedCarrierIds).toHaveLength(375);
+    await page.waitForFunction(() => {
+      const audit = window.__carrierPaintAudit;
+      return audit && audit.ids.every(id => (audit.counts[id] || 0) > 0);
+    }, null, { timeout: 20_000 });
+    const carrierPaintBefore = await carrierPaintAuditSnapshot(page);
     const paintedStep = await page.evaluate(() =>
-      window.__engraphisGraph.physicsDiagnostics().steps + 8);
+      window.__engraphisGraph.physicsDiagnostics().steps + 24);
     await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
       paintedStep, { timeout: 25_000 });
-    const paintedAfter = await page.evaluate(() => {
-      const canvas = document.querySelector('#graph-canvas canvas');
-      return canvas ? canvas.toDataURL('image/png') : '';
+    await page.waitForFunction(previous => {
+      const audit = window.__carrierPaintAudit;
+      return audit && audit.ids.every(id => (audit.counts[id] || 0) > (previous[id] || 0));
+    }, carrierPaintBefore.counts, { timeout: 20_000 });
+    const carrierPaintAfter = await carrierPaintAuditSnapshot(page);
+    await testInfo.attach('complete-galaxy-carrier-paint-audit.json', {
+      body: Buffer.from(JSON.stringify({ carrierPaintBefore, carrierPaintAfter }, null, 2)),
+      contentType: 'application/json',
     });
-    expect(paintedBefore).not.toBe('');
-    expect(paintedAfter).not.toBe(paintedBefore);
+    for (const id of paintedCarrierIds) {
+      const first = carrierPaintBefore.last[id], last = carrierPaintAfter.last[id];
+      expect(carrierPaintAfter.counts[id], id)
+        .toBeGreaterThan(carrierPaintBefore.counts[id]);
+      expect(first.insideCanvas && last.insideCanvas, id).toBe(true);
+      expect(Math.hypot(last.worldX - first.worldX, last.worldY - first.worldY), id)
+        .toBeGreaterThan(.05);
+      expect(Math.hypot(last.screenX - first.screenX, last.screenY - first.screenY), id)
+        .toBeGreaterThan(.2);
+    }
 
     const orbitEvidence = async label => {
       /* Keep the 3,335 global and 2,960 local bodies in the page. Serializing six full object
