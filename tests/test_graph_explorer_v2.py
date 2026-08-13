@@ -2131,6 +2131,44 @@ def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
     assert code_edge["ghost"] is True
 
 
+def test_graph_scene_history_marks_live_code_memory_link_to_closed_symbol_ghost():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="", content="Live code note.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+    ))
+    symbol_id = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="closed", fqname="closed",
+        file="closed.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    link_id = service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id,
+        relation="documents", commit=False,
+    )
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=closed_at + 1.0,
+        known_at=closed_at + 1.0,
+    )
+
+    symbol = next(node for node in history["nodes"] if node["id"] == f"code:{symbol_id}")
+    link = next(edge for edge in history["edges"] if edge["id"] == link_id)
+    assert symbol["ghost"] is True
+    assert symbol["gravity_mass"] == 0.0
+    assert link["ghost"] is True
+    assert link["strength"] == 0.0
+    assert link["spring_strength"] == 0.0
+
+
 def test_graph_scene_history_honors_known_at_for_expired_code_rows():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
