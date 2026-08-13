@@ -5551,8 +5551,16 @@ class MemoryService:
                             source_item["last_error"], target_item["id"],
                         ),
                     )
-                elif source_memory_id != target_memory_id:
-                    _invalidate_import_memory(source_memory_id)
+                elif source_memory_id:
+                    # The source row is about to disappear with its vault. Preserve the
+                    # invalidated memory's durable lineage before closing it, just as the
+                    # source-wins path rewrites the surviving memory above.
+                    _rewrite_import_memory_source(
+                        source_memory_id,
+                        source_id=str(target_item["id"]), vault_id=target_vault_id,
+                    )
+                    if source_memory_id != target_memory_id:
+                        _invalidate_import_memory(source_memory_id)
                 c.execute("DELETE FROM source_imports WHERE id=?", (source_item["id"],))
             c.execute("DELETE FROM source_vaults WHERE id=?", (source_vault_id,))
 
