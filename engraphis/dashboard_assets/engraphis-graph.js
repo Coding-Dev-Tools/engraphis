@@ -568,7 +568,6 @@
     const values = Array.isArray(nodes) ? nodes : [];
     const anchor = galaxyGlobalAnchor(values);
     const connected = new Set();
-    const orbiting = new Set();
     const endpointId = endpoint => endpoint && typeof endpoint === 'object'
       ? endpoint.id : endpoint;
     (Array.isArray(links) ? links : []).forEach(link => {
@@ -576,22 +575,18 @@
       const target = endpointId(link && link.target);
       const anchorId = anchor ? String(anchor.id) : null;
       if (anchorId === null) return;
-      const relationValue = link && link.relation !== undefined
-        ? link.relation : link && link.label;
-      const isOrbitalRelation = String(relationValue || '').trim().toLowerCase()
-        .indexOf('orbit') === 0;
       if (String(source) === anchorId && target !== undefined && target !== null) {
         connected.add(String(target));
-        if (isOrbitalRelation) orbiting.add(String(target));
       } else if (String(target) === anchorId && source !== undefined && source !== null) {
         connected.add(String(source));
-        if (isOrbitalRelation) orbiting.add(String(source));
       }
     });
     values.forEach(node => {
       if (!node || node === anchor) return;
-      const isDirectChild = connected.has(String(node.id))
-        && (node.anchor_role !== 'community' || orbiting.has(String(node.id)));
+      /* The edge itself is the hierarchy declaration. Relation wording is evidence metadata,
+         not a physics opt-in: a semantic/related/causal edge directly touching the black hole
+         must carry its connected star/system into the black-hole orbital frame as well. */
+      const isDirectChild = connected.has(String(node.id));
       setGalaxyBlackHoleChild(node, isDirectChild);
     });
     return values;
@@ -2884,17 +2879,27 @@
       orbit.angle += direction * omega * timestep;
       setPhase(carrier, '__galaxyCoreLaneRadius', orbit.radius);
       setPhase(carrier, '__galaxyCoreLaneAngle', orbit.angle);
+      /* A community star directly attached to the black hole still participates in the same
+         global carrier contract as every other solar-system anchor. Mirror the compact core
+         phase under the ordinary global-orbit key so diagnostics, observers, and downstream
+         paint code never mistake a direct core system for a stationary star. */
+      if (carrier.anchor_role === 'community') {
+        setPhase(carrier, '__galaxyKinematicGlobalOrbit', {
+          anchorId: String(anchor.id), systemId: String(carrier.id),
+          radius: orbit.radius, angle: orbit.angle,
+        });
+      }
       const speed = omega * orbit.radius;
-       const carrierX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
-       const carrierY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
-       const carrierVx = -Math.sin(orbit.angle) * speed * direction;
-       const carrierVy = Math.cos(orbit.angle) * speed * direction;
-       moveNode(carrier, carrierX, carrierY, carrierVx, carrierVy);
-       const localMotion = advanceGalaxyKinematicLocalMembers(members, carrier, {
-         x: carrierX, y: carrierY, vx: carrierVx, vy: carrierVy,
-       }, Object.assign({}, opts, { localOrbitCache: '__galaxyKinematicCoreLocalOrbit' }));
-       satellites += localMotion.satellites;
-       const satelliteContact = nodeRadius(anchor) + nodeRadius(carrier)
+      const carrierX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
+      const carrierY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
+      const carrierVx = -Math.sin(orbit.angle) * speed * direction;
+      const carrierVy = Math.cos(orbit.angle) * speed * direction;
+      moveNode(carrier, carrierX, carrierY, carrierVx, carrierVy);
+      const localMotion = advanceGalaxyKinematicLocalMembers(members, carrier, {
+        x: carrierX, y: carrierY, vx: carrierVx, vy: carrierVy,
+      }, Object.assign({}, opts, { localOrbitCache: '__galaxyKinematicCoreLocalOrbit' }));
+      satellites += localMotion.satellites;
+      const satelliteContact = nodeRadius(anchor) + nodeRadius(carrier)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
       const satelliteOuter = galaxyEventHorizonOuterRadius(
         nodeRadius(anchor), satelliteContact, GALAXY_EVENT_HORIZON_INFLUENCE_SCALE);
@@ -4426,33 +4431,24 @@
         const relativeSpeed = Math.hypot(relativeVx, relativeVy);
         systemMaximum = Math.max(systemMaximum, relativeSpeed);
         if (relativeSpeed > limit) scale = Math.min(scale, limit / relativeSpeed);
-        /* A planet's local tangent rides on top of the star's galactic carrier velocity.
-           Bound that composition in the local frame before the global emergency guard, which
-           would otherwise scale every solar system and repeatedly erase orbital phase. One
-           common non-negative scale preserves all relative directions inside this system. */
-        if (anchor && Number.isFinite(absoluteLimit) && relativeSpeed > 1e-12
-          && Math.hypot(referenceVx, referenceVy) <= absoluteLimit + 1e-12) {
-          const a = relativeVx * relativeVx + relativeVy * relativeVy;
-          const b = 2 * (referenceVx * relativeVx + referenceVy * relativeVy);
-          const c = referenceVx * referenceVx + referenceVy * referenceVy
-            - absoluteLimit * absoluteLimit;
-          const discriminant = Math.max(0, b * b - 4 * a * c);
-          const maximumScale = Math.max(0, (-b + Math.sqrt(discriminant)) / (2 * a));
-          scale = Math.min(scale, maximumScale);
-        }
       });
       maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
-      /* A fast galactic carrier can exceed the absolute budget even when every planet's local
-         tangent is healthy. Translate the whole velocity frame inward before touching local
-         motion. This preserves every star-relative velocity exactly and prevents the later
-         scene-wide emergency scale from erasing orbital phase in unrelated systems. */
+      /* A planet's local tangent rides on top of the star's galactic carrier velocity. The
+         carrier is the primary orbit: preserve it whenever it is inside the emergency ceiling,
+         and clamp only the local frame to the remaining vector budget. The old implementation
+         did the reverse (scaled the carrier after local motion consumed the budget), which made
+         a solar system spin around its star while its star stopped orbiting the black hole. */
       let carrierAdjusted = false;
       if (anchor && Number.isFinite(absoluteLimit)) {
-        const retainedRelative = systemMaximum * scale;
-        const carrierAllowance = Math.max(0, absoluteLimit - retainedRelative);
         const carrierSpeed = Math.hypot(referenceVx, referenceVy);
-        if (carrierSpeed > carrierAllowance + 1e-12) {
-          const carrierScale = carrierSpeed > 1e-12 ? carrierAllowance / carrierSpeed : 0;
+        const carrierAllowance = Math.max(0, absoluteLimit - carrierSpeed);
+        if (systemMaximum > 1e-12) {
+          scale = Math.min(scale, carrierAllowance / systemMaximum);
+        }
+        /* Only an already-invalid carrier may be reduced. Supported galaxy lanes are well
+           below this ceiling, so this is an emergency guard rather than an orbital controller. */
+        if (carrierSpeed > absoluteLimit + 1e-12) {
+          const carrierScale = carrierSpeed > 1e-12 ? absoluteLimit / carrierSpeed : 0;
           const targetVx = referenceVx * carrierScale;
           const targetVy = referenceVy * carrierScale;
           const shiftX = targetVx - referenceVx;
@@ -4764,9 +4760,23 @@
       let dx = carrier.x - anchor.x, dy = carrier.y - anchor.y;
       let radius = Math.hypot(dx, dy);
       if (!(radius > 1e-9) || !(targetSpeed > 0)) return;
-      const laneRadius = Number(core
-        ? carrier.__galaxyCoreLaneRadius : carrier.__galaxyCarrierLaneRadius);
+      const laneRadiusKey = core ? '__galaxyCoreLaneRadius' : '__galaxyCarrierLaneRadius';
       const laneAngleKey = core ? '__galaxyCoreLaneAngle' : '__galaxyCarrierLaneAngle';
+      let laneRadius = Number(carrier[laneRadiusKey]);
+      /* A filtered/reloaded scene can reach the live integrator without the one-shot lane
+         admission pass having populated a radius cache.  Velocity-only support is not enough
+         in that case: the regular force field can leave a whole solar system visually wobbling
+         around its old point instead of carrying it around the black hole.  Admit the current
+         radius exactly once, then own that radius for the rest of the session.  It is a cached
+         painted extent, never a live measurement, so an escaping node cannot enlarge the lane. */
+      if (!(Number.isFinite(laneRadius) && laneRadius > 1e-9)
+        && opts.authoritativeCarrierPosition === true) {
+        laneRadius = radius;
+        if (laneRadius > 1e-9) {
+          setGalaxyKinematicPhase(carrier, laneRadiusKey, laneRadius);
+          setGalaxyKinematicPhase(carrier, laneAngleKey, Math.atan2(dy, dx));
+        }
+      }
       if (Number.isFinite(laneRadius) && laneRadius > 0) {
         radius = laneRadius;
         targetSpeed = core ? coreCircularSpeedAt(radius) : circularSpeedAt(radius);
@@ -4793,7 +4803,8 @@
           angle = Number.isFinite(currentAngle) ? currentAngle + advance : cachedAngle;
         }
         if (!Number.isFinite(angle)) angle = 0;
-        carrier[laneAngleKey] = angle;
+        setGalaxyKinematicPhase(carrier, laneAngleKey, angle);
+        setGalaxyKinematicPhase(carrier, laneRadiusKey, radius);
         const targetX = anchor.x + Math.cos(angle) * radius;
         const targetY = anchor.y + Math.sin(angle) * radius;
         const shiftX = targetX - carrier.x, shiftY = targetY - carrier.y;
@@ -7714,7 +7725,18 @@
        reduced motion on, flow off, or a settled graph. */
     function invalidate() {
       if (destroyed) return;
-      fg.nodeCanvasObject(fg.nodeCanvasObject());
+      /* `nodeCanvasObject` is a non-updating accessor in force-graph. Reinstalling the same
+         callback changes no vendor state, so a Galaxy frame could advance every coordinate
+         while the visible canvas stayed on its previous paint. The camera setter is the
+         supported redraw invalidation path: setting the current zoom marks `needsRedraw` and
+         leaves the camera transform byte-for-byte unchanged. Keep the callback fallback for
+         embedders whose graph stub does not expose a readable zoom value. */
+      const currentZoom = typeof fg.zoom === 'function' ? fg.zoom() : NaN;
+      if (Number.isFinite(currentZoom) && typeof fg.zoom === 'function') {
+        fg.zoom(currentZoom);
+      } else if (typeof fg.nodeCanvasObject === 'function') {
+        fg.nodeCanvasObject(fg.nodeCanvasObject());
+      }
     }
 
     function refreshColors() {
@@ -8026,6 +8048,10 @@
         /* Black-hole gravity and the supported carrier tangent advance a bounded orbit.
            Monotone inward projection destroys angular momentum and re-stacks clear lanes. */
         inwardConvergence: false,
+        /* Live Galaxy owns the carrier position phase even when a filtered payload skipped
+           one-shot lane admission. Low-level helper callers retain force-only semantics unless
+           they opt into this browser clock contract. */
+        authoritativeCarrierPosition: true,
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
         velocityDecay: GALAXY_VELOCITY_DECAY
           * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
