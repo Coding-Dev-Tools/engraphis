@@ -22,11 +22,13 @@ def test_read_only_factory_forwards_configured_vector_backend(monkeypatch):
     monkeypatch.setattr(MemoryService, "create", create)
     monkeypatch.setattr(settings, "vector_backend", "auto")
     monkeypatch.setattr(settings, "embed_dim", 768)
+    monkeypatch.setattr(settings, "allowed_workspaces", ["acme"])
 
     create_read_only_app()
 
     assert captured["vector_backend"] == "auto"
     assert captured["embed_dim"] == 768
+    assert captured["allowed_workspaces"] == ["acme"]
     assert captured["read_only"] is True
 
 

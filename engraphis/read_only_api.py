@@ -101,6 +101,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
         extractor=settings.extractor,
+        allowed_workspaces=settings.allowed_workspaces,
         read_only=True,
     )
 
