@@ -8265,7 +8265,10 @@ class MemoryService:
         prune_entities = bool(
             clean_memory_types or lower_time is not None or upper_time is not None
         )
-        evidence_filter = not include_history
+        # Every support must have public memory metadata before it reaches the graph
+        # builder.  In history mode the metadata query deliberately retains closed
+        # public memories, while still excluding session-scoped memories.
+        evidence_filter = True
         allow_supportless = not (
             clean_memory_types or lower_time is not None or upper_time is not None
         )
@@ -8274,7 +8277,6 @@ class MemoryService:
             # their supports later is insufficient: build_canonical_graph can recover
             # provenance from an otherwise support-less edge when its endpoints are
             # also connected by public relations.
-            evidence_filter = True
             edge_sql += " AND ("
             if allow_supportless:
                 edge_sql += (
@@ -8317,7 +8319,6 @@ class MemoryService:
                 edge_params.append(upper_time)
             edge_sql += "))"
         if prune_entities and include_history:
-            evidence_filter = True
             edge_sql += " AND ("
             if allow_supportless:
                 edge_sql += (
