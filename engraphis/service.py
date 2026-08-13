@@ -5781,13 +5781,24 @@ class MemoryService:
             **memory_remap, **vault_remap, **source_import_remap,
         }
 
+        # Pre-compute the sorted replacement pairs once. The old code re-sorted the
+        # full remap dict on every invocation (tens of thousands of times for large
+        # workspaces). Use word-boundary-anchored regex to prevent substring false
+        # positives inside hashes, paths, or base64 blobs.
+        _sorted_copy_pairs = sorted(
+            copy_reference_remap.items(),
+            key=lambda pair: len(str(pair[0])), reverse=True,
+        )
+        _copy_pattern = re.compile(
+            r"\b((?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt|vlt|src)_[A-Za-z0-9_-]+)\b"
+        )
+        _copy_lookup = {str(old): str(new) for old, new in _sorted_copy_pairs}
+
         def _remap_copy_text(raw: Any) -> str:
-            text = str(raw or "")
-            for old_id, new_id in sorted(
-                copy_reference_remap.items(), key=lambda pair: len(str(pair[0])), reverse=True,
-            ):
-                text = text.replace(str(old_id), str(new_id))
-            return text
+            return _copy_pattern.sub(
+                lambda match: _copy_lookup.get(match.group(1), match.group(0)),
+                str(raw or ""),
+            )
 
         def _remap_json_memory_ids(raw):
             try:
