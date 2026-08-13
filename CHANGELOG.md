@@ -20,6 +20,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Every Galaxy body now receives both motion frames: its top-level system carrier orbits the
   black hole, while the body follows its immediate star/planet carrier with cached local phase;
   legacy community metadata and nested moons use the same hierarchy without phase rewinds.
+- Any direct black-hole edge now promotes its endpoint into the central orbital carrier group;
+  relation labels no longer suppress direct star/system motion.
 - Galaxy physics ticks now explicitly invalidate the canvas camera, so advancing orbital
   coordinates repaints visibly even when force-graph's automatic redraw loop is paused.
 - Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
