@@ -998,6 +998,46 @@ def test_copy_remaps_graph_evidence_history_and_event_references():
     assert json.loads(copied_event["refs"]) == [copied_first, copied_second]
 
 
+def test_copy_remaps_only_standalone_typed_ids_in_free_text():
+    svc = _svc()
+    first = svc.remember("First source fact.", workspace="a", scope="workspace")["id"]
+    second = svc.remember("Second source fact.", workspace="a", scope="workspace")["id"]
+    c = svc.store.conn
+    c.execute(
+        "UPDATE memories SET metadata=?, provenance=? WHERE id=?",
+        (
+            json.dumps({"exact": first, "embedded": f"{first}_suffix"}),
+            json.dumps({"exact": second, "embedded": f"{second}_suffix"}),
+            second,
+        ),
+    )
+
+    svc.copy_workspace("a", new_name="a2")
+
+    copied_workspace = _wsid(svc, "a2")
+    copied_rows = [dict(row) for row in c.execute(
+        "SELECT id, metadata, provenance FROM memories WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_second = next(
+        row for row in copied_rows
+        if json.loads(row["provenance"]).get("exact")
+    )
+    copied_meta = json.loads(copied_second["metadata"])
+    copied_provenance = json.loads(copied_second["provenance"])
+    copied_first = copied_meta["exact"]
+
+    assert copied_first != first
+    assert copied_meta == {
+        "exact": copied_first,
+        "embedded": f"{first}_suffix",
+    }
+    assert copied_provenance == {
+        "exact": copied_second["id"],
+        "embedded": f"{second}_suffix",
+    }
+
+
 def test_copy_clones_vectors_fts_links_entities_and_edges():
     svc = _svc()
     m1 = _remember_approved(
