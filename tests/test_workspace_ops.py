@@ -777,6 +777,58 @@ def test_merge_invalidates_duplicate_source_memory_when_content_differs():
     assert target_memory.valid_to is None
 
 
+def test_merge_rewrites_winning_duplicate_source_memory_metadata_before_vault_delete():
+    """A source-won collision must retain lineage in the surviving manifest."""
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    surviving = c.execute(
+        "SELECT id, vault_id, memory_id FROM source_imports "
+        "WHERE relative_path=?",
+        ("notes.md",),
+    ).fetchone()
+    assert surviving is not None
+    assert surviving["id"] == target_item["id"]
+    assert surviving["vault_id"] == target_report["source_id"]
+    assert surviving["memory_id"] == source_item["memory_id"]
+    assert c.execute(
+        "SELECT 1 FROM source_vaults WHERE id=?", (source_report["source_id"],)
+    ).fetchone() is None
+
+    winner = svc.store.get_memory(source_item["memory_id"])
+    loser = svc.store.get_memory(target_item["memory_id"])
+    assert winner is not None and loser is not None
+    assert winner.valid_to is None
+    assert loser.valid_to is not None
+    assert winner.metadata["document"]["source_id"] == target_item["id"]
+    assert winner.metadata["document"]["vault_id"] == target_report["source_id"]
+
+
 def test_merge_rewrites_rehomed_source_memory_provenance_for_disjoint_paths():
     svc = MemoryService.create(
         ":memory:", embed_dim=64, extractor="none",
