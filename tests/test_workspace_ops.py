@@ -829,6 +829,46 @@ def test_merge_rewrites_winning_duplicate_source_memory_metadata_before_vault_de
     assert winner.metadata["document"]["vault_id"] == target_report["source_id"]
 
 
+def test_merge_rewrites_invalidated_duplicate_source_memory_metadata_before_vault_delete():
+    """A target-won collision must preserve the displaced memory's lineage."""
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    displaced = svc.store.get_memory(source_item["memory_id"])
+    assert displaced is not None
+    assert displaced.valid_to is not None
+    assert displaced.metadata["document"]["source_id"] == target_item["id"]
+    assert displaced.metadata["document"]["vault_id"] == target_report["source_id"]
+    assert c.execute(
+        "SELECT 1 FROM source_vaults WHERE id=?", (source_report["source_id"],)
+    ).fetchone() is None
+
+
 def test_merge_rewrites_rehomed_source_memory_provenance_for_disjoint_paths():
     svc = MemoryService.create(
         ":memory:", embed_dim=64, extractor="none",

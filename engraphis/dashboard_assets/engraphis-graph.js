@@ -164,7 +164,12 @@
     return galaxyFallbackStellarGravityConstant(setting);
   }
   function defaultGalaxyStellarAccelerationCap(gravity) {
-    return defaultGalaxyAccelerationCap(galaxyStellarGravitySetting(gravity));
+    /* The local stellar clock is a uniform simulation-time transform: G scales by clock^2,
+       therefore its safety acceleration ceiling must scale by the same factor. Leaving this
+       cap on the unclocked value made close planets sub-circular even though their seed and
+       live force sampled the clocked gravitational parameter. */
+    return defaultGalaxyAccelerationCap(galaxyStellarGravitySetting(gravity))
+      * GALAXY_STELLAR_ORBIT_CLOCK * GALAXY_STELLAR_ORBIT_CLOCK;
   }
   function defaultGalaxySystemAccelerationCap(anchor, gravity) {
     if (anchor && anchor.anchor_role === 'global') {
@@ -173,7 +178,8 @@
     }
     return anchor && anchor.anchor_role === 'community'
       ? defaultGalaxyStellarAccelerationCap(gravity)
-      : defaultGalaxyAccelerationCap(gravity);
+      : defaultGalaxyAccelerationCap(gravity)
+        * GALAXY_STELLAR_ORBIT_CLOCK * GALAXY_STELLAR_ORBIT_CLOCK;
   }
   function galaxyAccelerationCapReference(gravity) {
     const raw = Number(gravity);
@@ -1389,8 +1395,43 @@
       gravitationalConstant: opts.gravitationalConstant,
       blackHoleMass: opts.blackHoleMass,
     });
-    if (!field.anchor || field.anchor.anchor_role !== 'global'
-      || !(field.gravitationalConstant > 0) || !field.systems.length) return nodes;
+    if (!field.anchor || field.anchor.anchor_role !== 'global') {
+      /* Compatibility embeds sometimes pass several independent communities without an
+         explicit black-hole node. Preserve their historical fallback frame: the heaviest
+         community is the stationary reference and each later community receives one bounded,
+         deterministic tangent. This branch is intentionally excluded from the live composite
+         field, which requires an authored global anchor. */
+      const centers = [...communityCenters(nodes).values()];
+      const fallbackAnchor = galaxyGlobalAnchor(nodes);
+      if (!fallbackAnchor || centers.length < 2) return nodes;
+      const fallbackConstant = galaxyFallbackStellarGravityConstant(gravity);
+      centers.forEach(center => {
+        if (center.nodes.includes(fallbackAnchor)) return;
+        const carrier = galaxySystemAnchor(center.nodes) || center.nodes[0];
+        const tagged = center.nodes.some(node => node.__galaxySystemOrbitSeeded === true);
+        if (tagged) return;
+        const dx = carrier.x - fallbackAnchor.x, dy = carrier.y - fallbackAnchor.y;
+        const radius = Math.hypot(dx, dy);
+        if (!(radius > 1e-9)) return;
+        const tangentX = -dy / radius * direction;
+        const tangentY = dx / radius * direction;
+        const soft = Math.max(0.1, Number(softening) || 40);
+        const denominator = Math.pow(radius * radius + soft * soft, 1.5);
+        const speed = Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT,
+          Math.sqrt(Math.max(0, fallbackConstant * fallbackAnchor.gravity_mass * radius
+            / Math.max(1e-9, denominator))));
+        center.nodes.forEach(node => {
+          node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * speed;
+          node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * speed;
+          setGalaxySystemOrbitSpeed(node, orbitalSpeed);
+          Object.defineProperty(node, '__galaxySystemOrbitSeeded', {
+            value: true, writable: true, configurable: true, enumerable: false,
+          });
+        });
+      });
+      return nodes;
+    }
+    if (!(field.gravitationalConstant > 0) || !field.systems.length) return nodes;
     field.systems.forEach(item => {
       if (item.radius <= 1e-9) return;
       const members = item.nodes;
@@ -1777,8 +1818,13 @@
         if (skipGlobalParent) return;
         const parentMass = finitePositive(parent.gravity_mass, 1, 1000);
         const parentGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+        const explicitLegacyGlobalPair = parent.anchor_role === 'global'
+          && opts.central === false && satellites.some(satellite =>
+            satellite.system_anchor_id !== undefined
+            && satellite.system_anchor_id !== null
+            && String(satellite.system_anchor_id) === String(parent.id));
         const parentGravity = galaxySystemGravityConstant(parent, opts.gravity)
-          * parentGravityMultiplier;
+          * parentGravityMultiplier * (explicitLegacyGlobalPair ? 1.1 : 1);
         satellites.sort((left, right) => Number(left.orbit_tier || 0)
           - Number(right.orbit_tier || 0) || String(left.id).localeCompare(String(right.id)));
         satellites.forEach(satellite => {
@@ -2579,8 +2625,20 @@
       * multiplier * finitePositive(star.gravity_mass, 1, 1000);
     const softening = Math.max(0.1, Number(opts.softening) || 8);
     const denominator = Math.pow(radius * radius + softening * softening, 1.5);
-    const inwardAcceleration = denominator > 0
+    const sampledInwardAcceleration = denominator > 0
       ? gravitationalParameter * radius / denominator : 0;
+    /* Capture must insert at a speed the live local solver can actually sustain. The force
+       path applies this same per-system acceleration ceiling; deriving release speed from the
+       uncapped field otherwise creates a nominally circular orbit that immediately decays. */
+    const explicitAccelerationCap = Number.isFinite(Number(opts.localAccelerationCap))
+      ? Math.max(0, Number(opts.localAccelerationCap))
+      : Number.isFinite(Number(opts.accelerationCap))
+        ? Math.max(0, Number(opts.accelerationCap)) : null;
+    const accelerationCap = explicitAccelerationCap !== null
+      ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(star, opts.gravity)
+        * Math.max(0.25, multiplier);
+    const inwardAcceleration = accelerationCap > 0
+      ? Math.min(sampledInwardAcceleration, accelerationCap) : sampledInwardAcceleration;
     const circularSpeed = Math.sqrt(Math.max(0, inwardAcceleration * radius));
     const escapeSpeed = circularSpeed * Math.SQRT2;
     const starVx = Number.isFinite(star.vx) ? star.vx : 0;
@@ -4492,6 +4550,7 @@
       repulsionPadding: opts.systemAnchorExclusionPadding,
       repulsionRange: opts.systemAnchorRepulsionRange,
       repulsionAcceleration: opts.systemAnchorRepulsionAcceleration,
+      authoritativeCarrierPosition: opts.authoritativeCarrierPosition,
     });
     if (opts.central !== false) {
       applyGalaxyBlackHoleGravity(bodies, {
@@ -5729,6 +5788,17 @@
         maximumRadialSpeed: 0, maximumVelocityCorrection: 0, corrected: 0,
         meanAngularVelocity: 0, maximumPositionCorrection: 0 }
       : supportGalaxyCarrierOrbits(bodies, opts);
+    /* All drag position projection finishes before packing, horizon, annulus and carrier
+       support. A late per-node pull would bypass those carrier-frame closures and could peel a
+       planet away from its star. The live acceleration sample remains active through the full
+       leapfrog step; these zero reports keep the aggregate diagnostics backward-compatible. */
+    const finalDragPositionGravity = { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
+    const secondFinalDragPositionGravity = {
+      applied: 0, maximumAcceleration: 0, maximumPull: 0,
+    };
+    const thirdFinalDragPositionGravity = {
+      applied: 0, maximumAcceleration: 0, maximumPull: 0,
+    };
     const finalSystemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
       absoluteLimit: speedLimit,
@@ -5822,11 +5892,18 @@
         || { systems: 0, interactions: 0, traversals: 0, approximations: 0,
           maximumAcceleration: 0, capScale: 1 },
       dragGravity: {
-        applied: Math.max(dragAcceleration.applied, dragPositionGravity.applied),
+        applied: Math.max(dragAcceleration.applied, dragPositionGravity.applied,
+          finalDragPositionGravity.applied, secondFinalDragPositionGravity.applied,
+          thirdFinalDragPositionGravity.applied),
         maximumAcceleration: Math.max(
-          dragAcceleration.maximumAcceleration, dragPositionGravity.maximumAcceleration
+          dragAcceleration.maximumAcceleration, dragPositionGravity.maximumAcceleration,
+          finalDragPositionGravity.maximumAcceleration,
+          secondFinalDragPositionGravity.maximumAcceleration,
+          thirdFinalDragPositionGravity.maximumAcceleration
         ),
-        maximumPull: dragPositionGravity.maximumPull,
+        maximumPull: Math.max(dragPositionGravity.maximumPull,
+          finalDragPositionGravity.maximumPull, secondFinalDragPositionGravity.maximumPull,
+          thirdFinalDragPositionGravity.maximumPull),
       },
     };
   }
@@ -6716,6 +6793,7 @@
     /* Mode restoration is a transactional hand-off: a same-task freeze must still expose the
        saved phase byte-for-byte after the render's safety projections. */
     let galaxyPhaseRestorePending = false;
+    let preserveGalaxyPhaseOnResume = false;
     let adj = Object.create(null), liveAdj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     let legacySizeBy = 'degree';
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
@@ -8423,9 +8501,10 @@
               { fixedNodeId: activeDragNode ? activeDragNode.id : null,
                 restorePhase: galaxyPhaseRestorePending,
                 coreOnly: true,
-                orbitalSpeed: state.settings.repel,
-                gravitationalConstant: state.settings.gravitationalConstant,
-                localGravitationalConstant: state.settings.localGravitationalConstant }
+                 orbitalSpeed: state.settings.repel,
+                 gravitationalConstant: state.settings.gravitationalConstant,
+                 localGravitationalConstant: state.settings.localGravitationalConstant,
+                 authoritativeCarrierPosition: true }
             );
           } else pinFullGraphLayout(data);
           fullLayoutDirty = false;
@@ -8461,7 +8540,8 @@
               restorePhase: galaxyPhaseRestorePending,
               orbitalSpeed: state.settings.repel,
               gravitationalConstant: state.settings.gravitationalConstant,
-              localGravitationalConstant: state.settings.localGravitationalConstant }
+              localGravitationalConstant: state.settings.localGravitationalConstant,
+              authoritativeCarrierPosition: true }
           );
           seedGalaxySystemOrbits(
             data.nodes, raw.meta && raw.meta.layout_seed,
@@ -8527,7 +8607,9 @@
       } else if (wasStatic && !staticFullLayout) {
         releasePinnedPositions(data);
       }
-      if (reused && galaxyMode && !staticFullLayout) {
+      const skipGalaxyReseed = preserveGalaxyPhaseOnResume;
+      preserveGalaxyPhaseOnResume = false;
+      if (reused && galaxyMode && !staticFullLayout && !skipGalaxyReseed) {
         markGalaxyBlackHoleChildren(data.nodes, data.links);
         seedGalaxyOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
@@ -8536,7 +8618,8 @@
             restorePhase: galaxyPhaseRestorePending,
             orbitalSpeed: state.settings.repel,
             gravitationalConstant: state.settings.gravitationalConstant,
-            localGravitationalConstant: state.settings.localGravitationalConstant }
+            localGravitationalConstant: state.settings.localGravitationalConstant,
+            authoritativeCarrierPosition: true }
         );
         seedGalaxySystemOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
@@ -9232,6 +9315,18 @@
         api.freeze(false);
         return;
       }
+      /* Gravity, size, and coupling controls change the sampled field or paint geometry on the
+         next fixed slice; they do not authorize a one-shot velocity rewrite in the same task.
+         Preserve the exact current phase while the scheduled clock absorbs the new setting. */
+      if (previousMode === 'galaxy' && state.settings.mode === 'galaxy'
+        && next.repel === undefined
+        && (next.gravity !== undefined || next.size !== undefined
+          || next.gravitationalConstant !== undefined || next.G_center !== undefined
+          || next.localGravitationalConstant !== undefined || next.G_star !== undefined
+          || next.blackHoleMass !== undefined || next.damping !== undefined
+          || next.springStiffness !== undefined)) {
+        preserveGalaxyPhaseOnResume = true;
+      }
       render(false, false);
       if (layoutChanged) schedulePhysicsUpdate();
     };
@@ -9463,6 +9558,7 @@
           return;
         }
         if (!staticFullLayout) raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
+        preserveGalaxyPhaseOnResume = true;
         render(false, false);
         scheduleGalaxyDynamics(true);
         return;
