@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1"
+        "/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1064,6 +1064,74 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
 
 
 @requires_node
+def test_any_direct_black_hole_link_promotes_a_complete_solar_system_to_the_core_frame() -> None:
+    """Direct BH edges are orbital hierarchy, even when their relation is not named orbit."""
+    report = _run_node(
+        """
+        const make = () => [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'linked-star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'linked-star', gravity_mass: 8, radius: 5,
+            x: 72, y: 0, vx: 0, vy: 0 },
+          { id: 'linked-planet', community_id: 'solar',
+            system_anchor_id: 'linked-star', gravity_mass: 1, radius: 2.5,
+            x: 88, y: 0, vx: 0, vy: 0 },
+          { id: 'free-star', anchor_role: 'community', community_id: 'free',
+            system_anchor_id: 'free-star', gravity_mass: 8, radius: 5,
+            x: -96, y: 0, vx: 0, vy: 0 },
+          { id: 'free-planet', community_id: 'free',
+            system_anchor_id: 'free-star', gravity_mass: 1, radius: 2.5,
+            x: -112, y: 0, vx: 0, vy: 0 },
+        ];
+        const delta = (next, previous) => Math.atan2(Math.sin(next - previous),
+          Math.cos(next - previous));
+        const run = kinematic => {
+          const nodes = make();
+          I.markGalaxyBlackHoleChildren(nodes, [
+            { source: 'black-hole', target: 'linked-star', relation: 'related' },
+          ]);
+          const options = {
+            layoutSeed: 1901, gravity: 48, softening: 32, centralSoftening: 40,
+            localSoftening: 40, orbitalSpeed: 48, timestep: .032,
+            includeMutualSystems: false, includeRelations: false,
+            includeOrbitalSeparation: false, includeSystemPacking: false,
+            includeBlackHoleExclusion: false, includeFarFieldConfinement: false,
+            includeCollisions: false, speedLimit: 48, localRelativeSpeedLimit: 48,
+          };
+          I.seedGalaxyOrbits(nodes, 1901, 48, 32, false, options);
+          I.seedGalaxySystemOrbits(nodes, 1901, 48, 40, false, options);
+          const linked = nodes[1], free = nodes[3];
+          let linkedTravel = 0, freeTravel = 0;
+          for (let step = 0; step < 120; step++) {
+            const linkedBefore = Math.atan2(linked.y, linked.x);
+            const freeBefore = Math.atan2(free.y, free.x);
+            if (kinematic) I.advanceGalaxyKinematicOrbits(nodes, options);
+            else I.integrateGalaxyLeapfrog(nodes, [], [], options);
+            linkedTravel += Math.abs(delta(Math.atan2(linked.y, linked.x), linkedBefore));
+            freeTravel += Math.abs(delta(Math.atan2(free.y, free.x), freeBefore));
+          }
+          return {
+            linkedTravel, freeTravel,
+            group: I.galaxyOrbitGroups(nodes).get('black-hole').nodes.map(node => node.id),
+            localDistance: Math.hypot(nodes[2].x - linked.x, nodes[2].y - linked.y),
+            finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+              .every(Number.isFinite)),
+          };
+        };
+        emit({ live: run(false), kinematic: run(true) });
+        """
+    )
+    for mode in ("live", "kinematic"):
+        result = report[mode]
+        assert result["finite"] is True
+        assert result["linkedTravel"] > 0.1, result
+        assert result["freeTravel"] > 0.1, result
+        assert result["localDistance"] > 10, result
+        assert set(result["group"]) == {"black-hole", "linked-star", "linked-planet"}
+
+
+@requires_node
 def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planets() -> None:
     report = _run_node(
         """
@@ -1184,6 +1252,80 @@ def test_carrier_support_adopts_post_contact_phase_without_snapback() -> None:
     assert report["after"] > 0.3
     assert abs(report["step"]) < 0.1
     assert report["laneAngle"] == pytest.approx(report["after"], abs=1e-12)
+
+
+@requires_node
+def test_live_carrier_support_rotates_without_a_preseeded_lane_cache() -> None:
+    """Filtered/reloaded live scenes must still visibly orbit instead of only gaining velocity."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 64, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 8, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            gravity_mass: 1, radius: 2, x: 135, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          orbitalSpeed: 60, layoutSeed: 19, timestep: .032,
+          authoritativeCarrierPosition: true,
+        };
+        const before = Math.atan2(nodes[1].y, nodes[1].x);
+        I.supportGalaxyCarrierOrbits(nodes, options);
+        const first = {
+          angle: Math.atan2(nodes[1].y, nodes[1].x),
+          radius: Math.hypot(nodes[1].x, nodes[1].y),
+          localDistance: Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y),
+        };
+        /* Simulate a force kick after the cache was admitted. The next support pass must
+           restore the original painted lane, not expand it to follow that escaped position. */
+        nodes[1].x += 80;
+        nodes[2].x += 80;
+        I.supportGalaxyCarrierOrbits(nodes, options);
+        emit({
+          before, first,
+          second: {
+            angle: Math.atan2(nodes[1].y, nodes[1].x),
+            radius: Math.hypot(nodes[1].x, nodes[1].y),
+            localDistance: Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y),
+          },
+          cachedRadius: nodes[1].__galaxyCarrierLaneRadius,
+        });
+        """
+    )
+    assert report["first"]["angle"] != pytest.approx(report["before"], abs=1e-12)
+    assert report["first"]["radius"] == pytest.approx(120, abs=1e-9)
+    assert report["second"]["radius"] == pytest.approx(report["cachedRadius"], abs=1e-9)
+    assert report["second"]["radius"] == pytest.approx(120, abs=1e-9)
+    assert report["second"]["localDistance"] == pytest.approx(report["first"]["localDistance"], abs=1e-9)
+
+
+@requires_node
+def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            gravity_mass: 8, x: 120, y: 0, vx: 0, vy: 18 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            gravity_mass: 1, x: 135, y: 0, vx: 0, vy: -30 },
+        ];
+        const beforeCarrier = { vx: nodes[0].vx, vy: nodes[0].vy };
+        const guard = I.stabilizeGalaxySystemVelocities(nodes, {
+          limit: 48, absoluteLimit: 50,
+        });
+        emit({ beforeCarrier, afterCarrier: { vx: nodes[0].vx, vy: nodes[0].vy },
+          planetSpeed: Math.hypot(nodes[1].vx, nodes[1].vy),
+          localSpeed: Math.hypot(nodes[1].vx - nodes[0].vx,
+            nodes[1].vy - nodes[0].vy), guard });
+        """
+    )
+    assert report["afterCarrier"] == pytest.approx(report["beforeCarrier"], abs=1e-12)
+    assert report["planetSpeed"] <= 50 + 1e-12
+    assert report["localSpeed"] <= 32 + 1e-12
 
 
 @requires_node
@@ -9181,9 +9323,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-1'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260812-hierarchical-black-hole-orbits-6'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-6' in markup
+    assert '/v2-assets/ledger.js?v=20260812-stable-orbit-lanes-8' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

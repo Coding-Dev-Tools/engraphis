@@ -1738,8 +1738,9 @@ def _build_complete_scene(
             continue
         if relations is not None and relation not in relations:
             continue
+        _raw_conf = row.get("confidence")
         confidence = _clamp(
-            _finite_float(row.get("confidence") or 1.0, 1.0),
+            _finite_float(_raw_conf if _raw_conf is not None else 1.0, 1.0),
             0.05,
             1.0,
         )
@@ -2408,9 +2409,12 @@ def build_graph_scene(
             ):
                 selected.add(node_id)
     chosen_communities = {nodes[node_id]["community_id"] for node_id in selected}
-    scene_edges = _selected_edges(graph, selected, level, edge_cap)
-    total_scene_edges = len(graph["edges"]) + len(ghost_relations)
     if include_history:
+        # Defer _selected_edges until after ghost filtering; calling it here
+        # would mutate the source graph's edge tier fields (backbone/primary)
+        # via _selected_edges's in-place tier promotion, and the result is
+        # discarded when the history branch re-invokes it with reduced capacity.
+        scene_edges: list[dict] = []
         ghost_relations = [
             edge for edge in ghost_relations
             if edge["source"] in selected and edge["target"] in selected
@@ -2451,6 +2455,13 @@ def build_graph_scene(
             if edge["id"] not in reserved_set
         )
         scene_edges = scene_edges[:edge_cap]
+    else:
+        scene_edges = _selected_edges(graph, selected, level, edge_cap)
+        ghost_relations = [
+            edge for edge in ghost_relations
+            if edge["source"] in selected and edge["target"] in selected
+        ]
+    total_scene_edges = len(graph["edges"]) + len(ghost_relations)
     communities = _community_summaries(graph, chosen_communities, selected)
     bridges = _bridges(graph, chosen_communities, 80)
 

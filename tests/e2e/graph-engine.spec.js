@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260812-hierarchical-black-hole-orbits-1';
+const stellarOrbitAssetVersion = '20260812-hierarchical-black-hole-orbits-6';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1968,6 +1968,20 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       && window.__fg.graphData().nodes.length === 3336
       && window.__engraphisGraph.physicsDiagnostics().steps >= 10
       && window.__engraphisGraph.physicsDiagnostics().active, null, { timeout: 35_000 });
+    const paintedBefore = await page.evaluate(() => {
+      const canvas = document.querySelector('#graph-canvas canvas');
+      return canvas ? canvas.toDataURL('image/png') : '';
+    });
+    const paintedStep = await page.evaluate(() =>
+      window.__engraphisGraph.physicsDiagnostics().steps + 8);
+    await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
+      paintedStep, { timeout: 25_000 });
+    const paintedAfter = await page.evaluate(() => {
+      const canvas = document.querySelector('#graph-canvas canvas');
+      return canvas ? canvas.toDataURL('image/png') : '';
+    });
+    expect(paintedBefore).not.toBe('');
+    expect(paintedAfter).not.toBe(paintedBefore);
 
     const orbitEvidence = async label => {
       /* Keep the 3,335 global and 2,960 local bodies in the page. Serializing six full object
