@@ -211,6 +211,10 @@
      whose physically sampled circular speed exceeds the retired 10-unit presentation cap to
      visibly orbit the black hole. */
   const GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT = 18;
+  /* Carrier support follows the same circular-speed law as the galactic field. Presentation
+     speed is controlled only by the explicit orbital-speed clock; no hidden visual boost is
+     allowed to make a carrier super-circular relative to the acceleration that governs it. */
+  const GALAXY_CARRIER_FRAME_SPEED_LIMIT = GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT;
   const GALAXY_DRAG_GRAVITY_TIME = 6;
   const GALAXY_DRAG_GRAVITY_SOFTENING = 12;
   const GALAXY_DRAG_GRAVITY_MAX_PULL = 36;
@@ -310,7 +314,7 @@
      tunnel through the painted edge between fixed steps. The constraint never adds an outward
      kick; deep corrections preserve angular momentum instead of manufacturing orbital speed. */
   const GALAXY_BLACK_HOLE_EXCLUSION_PADDING = 2.5;
-  /* The Plummer well keeps ordinary systems bound, but a finite visual galaxy also needs a
+  /* The cored-logarithmic halo keeps ordinary systems bound, but a finite visual galaxy also needs a
      dormant outer safety field. It starts well outside the seeded scene, adds a smooth
      inward acceleration only near that edge, then applies an exact last-resort boundary if a
      body still escapes. The cached radius never follows an escaped body outward. */
@@ -866,6 +870,10 @@
       let root = node;
       let current = node;
       let followedExplicitParent = false;
+      const nodeParentId = node.system_anchor_id === undefined
+        || node.system_anchor_id === null ? '' : String(node.system_anchor_id);
+      const directlyFollowsBlackHole = node.__galaxyBlackHoleChild === true
+        || nodeParentId === String(globalAnchor && globalAnchor.id);
       const visited = new Set();
       while (current && current.system_anchor_id !== undefined
         && current.system_anchor_id !== null) {
@@ -883,7 +891,10 @@
       /* Older/filtered payloads often retain the community anchor but omit the per-node
          system_anchor_id. In a black-hole carrier group, that omission must not turn every
          planet into an independent BH satellite: infer the local star from its community. */
-      if (!followedExplicitParent) {
+      /* Two direct black-hole children are peer galactic carriers even when an old payload gives
+         them the same community label. Community fallback is only for a descendant whose local
+         parent metadata is missing; it must never turn direct BH siblings into one solar frame. */
+      if (!followedExplicitParent && !directlyFollowsBlackHole) {
         const communityAnchor = communityAnchors.get(communityKey(node));
         if (communityAnchor && communityAnchor !== node) root = communityAnchor;
       }
@@ -892,6 +903,47 @@
       groups.get(key).push(node);
     });
     return [...groups.values()];
+  }
+
+  /* Resolve the one top-level carrier frame that the black hole is allowed to accelerate.
+     Ordinary communities already arrive as one galaxyOrbitGroups() entry. Direct black-hole
+     children share the global group, so split that group back into one carrier plus its complete
+     stellar descendant tree. A planet or moon therefore never becomes an independent galactic
+     particle merely because its star is directly linked to the black hole. */
+  function galaxyBlackHoleCarrierSystems(nodes, globalAnchor, groupedCenters) {
+    if (!globalAnchor) return [];
+    const centers = groupedCenters || galaxyOrbitGroups(nodes);
+    const coreKey = String(globalAnchor.id);
+    const systems = [];
+    const append = (members, center, core) => {
+      const values = (members || []).filter(node => node && node !== globalAnchor
+        && !node.ghost && Number.isFinite(node.x) && Number.isFinite(node.y));
+      if (!values.length) return;
+      const carrier = galaxySystemAnchor(values) || values[0];
+      if (!carrier || carrier === globalAnchor) return;
+      let mass = 0, x = 0, y = 0;
+      values.forEach(node => {
+        const nodeMass = finitePositive(node.gravity_mass, 1, 1000);
+        mass += nodeMass; x += node.x * nodeMass; y += node.y * nodeMass;
+      });
+      const normalizedCenter = core ? {
+        id: String(carrier.id), mass,
+        x: mass > 0 ? x / mass : carrier.x,
+        y: mass > 0 ? y / mass : carrier.y,
+        nodes: values,
+      } : center;
+      systems.push({
+        id: String(carrier.id), center: normalizedCenter,
+        carrier, nodes: values, core: core === true,
+      });
+    };
+    centers.forEach(center => {
+      if (center.id === coreKey) {
+        galaxyBlackHoleCoreSystems(center.nodes, globalAnchor)
+          .forEach(members => append(members, null, true));
+      } else append(center.nodes, center, false);
+    });
+    return systems;
   }
   function orderedGalaxySatellites(members, anchor) {
     return (members || []).filter(node => node !== anchor).map(node => {
@@ -1325,15 +1377,10 @@
         padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
       });
     }
-    const centers = [...communityCenters(nodes).values()];
     const direction = (seededHash(layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     /* Reduced motion is a paint/camera preference. The live solver still advances, so it must
        receive the same barycentric initial condition or whole systems contract radially without
        rotating around the black hole. */
-    if (centers.length < 2) {
-      return nodes;
-    }
-
     /* Use the same smooth black-hole field as the integrator, then add a small deterministic
        eccentric/radial perturbation. Systems are bound but not painted onto a rigid circular
        carousel; inner angular frequency remains higher than outer angular frequency. */
@@ -1342,11 +1389,12 @@
       gravitationalConstant: opts.gravitationalConstant,
       blackHoleMass: opts.blackHoleMass,
     });
-    if (!(field.gravitationalConstant > 0)) return nodes;
+    if (!field.anchor || field.anchor.anchor_role !== 'global'
+      || !(field.gravitationalConstant > 0) || !field.systems.length) return nodes;
     field.systems.forEach(item => {
       if (item.radius <= 1e-9) return;
-      const members = item.center.nodes;
-      const carrier = galaxySystemAnchor(members) || members[0];
+      const members = item.nodes;
+      const carrier = item.carrier;
       const tagged = members.some(node => node.__galaxySystemOrbitSeeded === true);
       const previousSpeed = Number(carrier.__galaxySystemOrbitSpeedMultiplier);
       const speedKnown = Number.isFinite(previousSpeed);
@@ -1379,7 +1427,7 @@
         return;
       }
       const tangentFactor = 0.92
-        + (seededHash(layoutSeed, 'system-speed:' + item.center.id) / 0x100000000) * 0.12;
+        + (seededHash(layoutSeed, 'system-speed:' + item.id) / 0x100000000) * 0.12;
       /* Start every system on a gentle settling spiral. A symmetric +/- phase can launch an
          outer system away from the well before gravity turns it around; a bounded inward kick
          gives the black-hole centre first claim on motion while preserving tangential rotation. */
@@ -1717,6 +1765,16 @@
         childrenByParent.get(parent).push(node);
       });
       childrenByParent.forEach((satellites, parent) => {
+        /* The live black-hole field owns an explicitly declared direct-BH carrier.  Legacy
+           payloads can still contain a global anchor with an unannotated local satellite; that
+           shape is a standalone two-body system and must retain its local circular well. */
+        const skipGlobalParent = parent.anchor_role === 'global'
+          && (opts.skipGlobalParent === true || (opts.allowGlobalParent !== true
+            && satellites.some(satellite => satellite.__galaxyBlackHoleChild === true
+              || (satellite.system_anchor_id !== undefined
+                && satellite.system_anchor_id !== null
+                && String(satellite.system_anchor_id) === String(parent.id)))));
+        if (skipGlobalParent) return;
         const parentMass = finitePositive(parent.gravity_mass, 1, 1000);
         const parentGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
         const parentGravity = galaxySystemGravityConstant(parent, opts.gravity)
@@ -1804,8 +1862,8 @@
   /* Permanent local-surface contact for every carrier hierarchy. Projection is radial and
      bounded to the exact painted edge; velocity response removes only inward normal motion in
      the parent frame. Tangential velocity is untouched, so contact cannot drain orbital phase
-     or manufacture a repulsive slingshot. The global anchor is included for direct black-hole
-     satellites; its separate event-horizon projection remains the stricter central boundary. */
+     or manufacture a repulsive slingshot. The global anchor is deliberately excluded here:
+     direct-BH carriers and their complete systems use the rigid event-horizon projection. */
   function applyGalaxySystemAnchorExclusion(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -1840,7 +1898,8 @@
          preserves nested moon trajectories and gives each local carrier its own clearance band. */
       const satellites = members.filter(node => node !== anchor).map(node => ({
         node, parent: galaxyLocalOrbitParent(node, members, anchor, byId) || anchor,
-      })).sort((left, right) => Number(left.node.orbit_tier || 0)
+      })).filter(item => item.parent.anchor_role !== 'global')
+        .sort((left, right) => Number(left.node.orbit_tier || 0)
         - Number(right.node.orbit_tier || 0) || String(left.node.id).localeCompare(String(right.node.id)));
       /* A bounded solve handles pathological dense payloads with 80+ bodies around one dominant
          node. Ordinary non-contact systems still exit after one O(n) scan; every penetration is
@@ -1941,6 +2000,10 @@
       const byId = new Map(members.map(node => [String(node.id), node]));
       members.filter(node => node !== anchor).forEach(node => {
         const parent = galaxyLocalOrbitParent(node, members, anchor, byId) || anchor;
+        /* `central:false` is the dependency-light legacy two-body contract where a caller may
+           label its only star `global` without enabling a galactic black-hole field. Production
+           Galaxy mode always enables the central field and therefore always takes this skip. */
+        if (parent.anchor_role === 'global' && opts.central !== false) return;
         const clearance = Math.hypot(node.x - parent.x, node.y - parent.y)
           - bodyRadius(parent) - bodyRadius(node) - padding;
         minimumClearance = minimumClearance === null
@@ -2185,11 +2248,47 @@
     return data[target];
   }
 
-  /* A galaxy is not a collection of peer point masses: its dominant evidence node is the
-     black hole, its community is the dense bulge, and all remaining evidence supplies a
-     smooth halo. This Plummer composite is O(nodes + systems), continuous across system-rank
-     changes, and conservative in the black-hole frame. It also gives differential rotation:
-     omega² = G[M_core/(r²+eps²)^(3/2) + M_halo/(r²+a²)^(3/2)]. */
+  /* Sample the shared galactic rotation curve at one carrier radius. The compact source keeps a
+     softened Kepler term; the distributed evidence halo uses a cored logarithmic potential:
+       Phi_halo = .5 v0² ln(r² + a²),  v_halo² = v0² r² / (r² + a²).
+     Calibrating v0² = G M_halo / (sqrt(2) a) exactly matches the former Plummer halo speed at
+     r=a, while producing the observed approximately flat outer rotation curve of disk galaxies.
+     The safety cap is per carrier, so one close system can never weaken every outer orbit. */
+  function galaxyCarrierOrbitCurve(field, radius) {
+    const r = Math.max(0, Number(radius) || 0);
+    const gravitationalConstant = Math.max(0, Number(field && field.gravitationalConstant) || 0);
+    const coreMass = Math.max(0, Number(field && field.coreMass) || 0);
+    const haloMass = Math.max(0, Number(field && field.haloMass) || 0);
+    const coreSoftening = Math.max(0.1, Number(field && field.coreSoftening) || 40);
+    const haloScale = Math.max(0.1, Number(field && field.haloScale) || coreSoftening * 2);
+    const coreDenominator = Math.pow(r * r + coreSoftening * coreSoftening, 1.5);
+    const haloVelocitySquared = haloMass > 0
+      ? gravitationalConstant * haloMass / (Math.SQRT2 * haloScale) : 0;
+    let omegaSquared = gravitationalConstant * coreMass / coreDenominator
+      + haloVelocitySquared / (r * r + haloScale * haloScale);
+    const rawAcceleration = Math.max(0, omegaSquared) * r;
+    const accelerationCap = Math.max(0, Number(field && field.accelerationCap) || 0);
+    const capScale = accelerationCap > 0 && rawAcceleration > accelerationCap
+      ? accelerationCap / rawAcceleration : 1;
+    omegaSquared = Math.max(0, omegaSquared) * capScale;
+    const omega = Math.sqrt(omegaSquared);
+    return {
+      omegaSquared, omega, circularSpeed: omega * r,
+      haloVelocitySquared, rawAcceleration,
+      acceleration: omegaSquared * r, capScale,
+    };
+  }
+
+  function galaxyCarrierTargetSpeed(field, radius, orbitalSpeed) {
+    const multiplier = galaxyOrbitalSpeedMultiplier(orbitalSpeed);
+    return Math.min(GALAXY_CARRIER_FRAME_SPEED_LIMIT * multiplier,
+      galaxyCarrierOrbitCurve(field, radius).circularSpeed
+        * multiplier);
+  }
+
+  /* A galaxy is not a collection of peer point masses. The black hole and smooth evidence halo
+     act once on each top-level solar-system carrier. Every planet and moon inherits that rigid
+     frame translation, then receives only its immediate local parent's stellar physics. */
   function galaxyBlackHoleField(nodes, options) {
     const opts = options || {};
     const centers = galaxyOrbitGroups(nodes);
@@ -2197,7 +2296,6 @@
     if (!anchor) return {
       anchor: null, systems: [], coreMass: 0, haloMass: 0, haloScale: 0, traversals: 0
     };
-    const coreKey = String(anchor.id);
     const totalMass = [...centers.values()].reduce((sum, center) => sum + center.mass, 0);
     /* The singular center term is sourced by the actual dominant evidence node. Other stars
        in its community remain part of the smooth bulge/halo instead of inflating black-hole
@@ -2209,17 +2307,12 @@
     /* Black-hole mass tuning changes only the compact central source. It must not create or
        consume halo evidence mass; the scene's remaining authored mass stays invariant. */
     const haloMass = Math.max(0, totalMass - baseCoreMass);
-    const external = [...centers.values()].filter(center => center.id !== coreKey).map(center => ({
-      center,
-      dx: anchor.x - center.x,
-      dy: anchor.y - center.y,
-      radius: Math.hypot(center.x - anchor.x, center.y - anchor.y),
-    }));
+    const carriers = galaxyBlackHoleCarrierSystems(nodes, anchor, centers);
     const coreSoftening = Math.max(0.1, Number(opts.softening) || 40);
-    const hintedRadii = external.map(item => {
-      const hint = item.center.nodes.map(node => Number(node.galactic_radius))
+    const hintedRadii = carriers.map(item => {
+      const hint = item.nodes.map(node => Number(node.galactic_radius))
         .find(value => Number.isFinite(value) && value > 0);
-      return hint || item.radius;
+      return hint || Math.hypot(item.carrier.x - anchor.x, item.carrier.y - anchor.y);
     });
     const initialMedianRadius = linearMedian(hintedRadii);
     const explicitScale = Number(opts.haloScale);
@@ -2229,7 +2322,7 @@
         : Number.isFinite(cachedScale) && cachedScale > 0 ? cachedScale
           : initialMedianRadius * 0.65);
     /* The halo is part of the scene's potential, not a rubber band fitted to the current
-       positions. Recomputing it after every inward step shrinks the Plummer radius, deepens
+       positions. Recomputing it after every inward step shrinks the halo radius, deepens
        the next step, and creates runaway collapse/ejection. Cache the seed scale on the
        black-hole node; it is non-enumerable, so exports and a fresh setData payload stay clean. */
     if (!(Number.isFinite(cachedScale) && cachedScale > 0)
@@ -2248,33 +2341,27 @@
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
         * Math.max(0.25, Math.min(8,
           gravitationalConstantMultiplier * Math.max(1, blackHoleMassMultiplier))));
-    const systems = external.map(item => {
-      const coreDenominator = Math.pow(
-        item.radius * item.radius + coreSoftening * coreSoftening, 1.5
-      );
-      const haloDenominator = Math.pow(
-        item.radius * item.radius + haloScale * haloScale, 1.5
-      );
-      const omegaSquared = gravitationalConstant * (
-        coreMass / coreDenominator + (haloMass > 0 ? haloMass / haloDenominator : 0)
-      );
-      const omega = Math.sqrt(Math.max(0, omegaSquared));
-      return { ...item, omega, circularSpeed: omega * item.radius,
-        ax: item.dx * omegaSquared, ay: item.dy * omegaSquared };
+    const haloVelocitySquared = haloMass > 0
+      ? gravitationalConstant * haloMass / (Math.SQRT2 * haloScale) : 0;
+    const model = {
+      coreMass, haloMass, haloScale, coreSoftening, gravitationalConstant,
+      accelerationCap, haloVelocitySquared,
+    };
+    const systems = carriers.map(item => {
+      const dx = anchor.x - item.carrier.x;
+      const dy = anchor.y - item.carrier.y;
+      const radius = Math.hypot(dx, dy);
+      const curve = galaxyCarrierOrbitCurve(model, radius);
+      return { ...item, dx, dy, radius, ...curve,
+        ax: dx * curve.omegaSquared, ay: dy * curve.omegaSquared };
     });
     const maximumAcceleration = systems.reduce(
       (maximum, item) => Math.max(maximum, Math.hypot(item.ax, item.ay)), 0
     );
-    const capScale = accelerationCap > 0 && maximumAcceleration > accelerationCap
-      ? accelerationCap / maximumAcceleration : 1;
-    if (capScale < 1) systems.forEach(item => {
-      item.ax *= capScale;
-      item.ay *= capScale;
-      item.omega *= Math.sqrt(capScale);
-      item.circularSpeed *= Math.sqrt(capScale);
-    });
+    const capScale = systems.reduce((minimum, item) => Math.min(minimum, item.capScale), 1);
     return {
       anchor, systems, baseCoreMass, coreMass, haloMass, haloScale, totalMass,
+      coreSoftening, haloVelocitySquared, accelerationCap, maximumAcceleration, capScale,
       gravitationalConstant, gravitationalConstantMultiplier,
       blackHoleMassMultiplier,
       gravitySetting: galaxyBlackHoleGravitySetting(opts.gravity, explicitGlobal),
@@ -2285,7 +2372,7 @@
 
   function applyGalaxyBlackHoleGravity(nodes, options) {
     const field = galaxyBlackHoleField(nodes, options);
-    field.systems.forEach(item => item.center.nodes.forEach(node => {
+    field.systems.forEach(item => item.nodes.forEach(node => {
       node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + item.ax;
       node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + item.ay;
     }));
@@ -2313,11 +2400,10 @@
     } catch (error) { /* Frozen compatibility payloads still receive the physical field. */ }
   }
 
-  /* Bounded weak-field frame dragging plus a smooth near-horizon acceleration band. External
-     solar systems receive one rigid carrier acceleration, so a star's planets keep their local
-     orbit exactly; core-community bodies are sampled independently around the fixed black hole.
-     The strict painted horizon remains an impenetrable numerical boundary, preventing a
-     singular acceleration while the warp value lets paint fade/lens an approaching body. */
+  /* Bounded weak-field frame dragging plus a smooth near-horizon acceleration band. Every
+     top-level carrier system receives one rigid acceleration, including a star directly linked
+     to the black hole. Its planets and moons inherit the frame and never receive an independent
+     black-hole kick. The strict painted horizon remains an impenetrable numerical boundary. */
   function applyGalaxySpacetimeAcceleration(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -2348,7 +2434,6 @@
         ? Number(opts.eventHorizonInwardAcceleration)
         : GALAXY_EVENT_HORIZON_INWARD_ACCELERATION);
     const direction = Number(opts.frameDraggingDirection) < 0 ? -1 : 1;
-    const coreKey = String(anchor.id);
     const bodyRadius = node => finitePositive(
       node.radius, evidenceNodeRadius(node, 3), 160
     );
@@ -2389,72 +2474,14 @@
       else stats.systems++;
       return warp;
     };
-    const centers = galaxyOrbitGroups(bodies);
-    centers.forEach(center => {
-      if (center.id === coreKey) {
-        center.nodes.forEach(node => {
-          if (node === anchor) return;
-          const dx = node.x - anchor.x, dy = node.y - anchor.y;
-          const distance = Math.hypot(dx, dy);
-          const denominator = Math.pow(distance * distance
-            + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
-          const gravityAcceleration = denominator > 0
-            ? field.gravitationalConstant * field.coreMass * distance / denominator : 0;
-          accelerate([node], dx, dy,
-            anchorRadius + bodyRadius(node) + padding, gravityAcceleration, 'core');
-        });
-        return;
-      }
-      const item = field.systems.find(candidate => candidate.center.id === center.id);
-      if (!item) return;
-      /* Galactic and stellar distances are deliberately two visual scales on one canvas. A
-         wide outer planet must not make its otherwise distant star count as near-horizon. Use
-         the dominant star as the rigid system carrier, then give every member the same weak
-         precession/decay delta so the local solar orbit remains exact. */
-      const carrier = galaxySystemAnchor(center.nodes) || center.nodes[0];
-      const carrierDx = carrier.x - anchor.x, carrierDy = carrier.y - anchor.y;
-      const warp = accelerate(center.nodes, carrierDx, carrierDy,
+    field.systems.forEach(item => {
+      const carrier = item.carrier;
+      if (!carrier || !item.nodes.length) return;
+      const carrierDx = carrier.x - anchor.x;
+      const carrierDy = carrier.y - anchor.y;
+      accelerate(item.nodes, carrierDx, carrierDy,
         anchorRadius + bodyRadius(carrier) + padding,
-        Math.hypot(item.ax, item.ay), 'system');
-      /* The shared carrier acceleration above preserves the local solar frame. Inside the
-         bounded horizon band, add only the differential part of the black-hole field to
-         planets: T·s = GM/r³ [3(n·s)n - s]. The community star remains the inertial carrier;
-         ordinary far systems have warp=0 and are byte-for-behaviour unchanged. */
-      if (!(warp > 0) || carrier.anchor_role !== 'community') return;
-      const carrierDistance = Math.hypot(carrierDx, carrierDy);
-      if (!(carrierDistance > 1e-9)) return;
-      const unitX = carrierDx / carrierDistance, unitY = carrierDy / carrierDistance;
-      const tidalFraction = Math.max(0, Number.isFinite(Number(opts.tidalStrengthFraction))
-        ? Number(opts.tidalStrengthFraction) : GALAXY_TIDAL_STRENGTH_FRACTION);
-      const tidalCap = Math.max(0, Number.isFinite(Number(opts.tidalAccelerationCap))
-        ? Number(opts.tidalAccelerationCap) : GALAXY_TIDAL_ACCELERATION_CAP);
-      const softenedRadiusSquared = carrierDistance * carrierDistance
-        + Math.max(0.1, Number(opts.softening) || 8) ** 2;
-      const tensorScale = field.gravitationalConstant * field.coreMass
-        / Math.pow(softenedRadiusSquared, 1.5) * tidalFraction * warp;
-      let systemApplied = false;
-      center.nodes.forEach(node => {
-        if (node === carrier || node.id === opts.fixedNodeId
-          || node.anchor_role === 'community' || node.anchor_role === 'global') return;
-        const offsetX = node.x - carrier.x, offsetY = node.y - carrier.y;
-        const projection = offsetX * unitX + offsetY * unitY;
-        let ax = tensorScale * (3 * projection * unitX - offsetX);
-        let ay = tensorScale * (3 * projection * unitY - offsetY);
-        const magnitude = Math.hypot(ax, ay);
-        if (tidalCap > 0 && magnitude > tidalCap) {
-          const scale = tidalCap / magnitude;
-          ax *= scale; ay *= scale;
-        }
-        const existing = stats.accelerations.get(node) || { ax: 0, ay: 0 };
-        stats.accelerations.set(node, { ax: existing.ax + ax, ay: existing.ay + ay });
-        const applied = Math.hypot(ax, ay);
-        if (applied > 0) {
-          stats.tidalPlanets++;
-          stats.maximumTidalAcceleration = Math.max(stats.maximumTidalAcceleration, applied);
-          systemApplied = true;
-        }
-      });
-      if (systemApplied) stats.tidalSystems++;
+        Math.hypot(item.ax, item.ay), item.core ? 'core' : 'system');
     });
     return stats;
   }
@@ -2467,7 +2494,8 @@
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
-    const anchor = galaxyGlobalAnchor(bodies);
+    const field = galaxyBlackHoleField(bodies, opts);
+    const anchor = field.anchor;
     const rate = Math.max(0, Number.isFinite(Number(opts.eventHorizonDecayRate))
       ? Number(opts.eventHorizonDecayRate) : GALAXY_EVENT_HORIZON_DECAY_RATE);
     const timestep = Math.max(0, Number(opts.timestep) || 1);
@@ -2476,27 +2504,18 @@
     if (!anchor || anchor.anchor_role !== 'global' || !(rate > 0) || !(timestep > 0)) return stats;
     const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
     const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
-    const coreKey = String(anchor.id);
-    galaxyOrbitGroups(bodies).forEach(center => {
-      const members = center.id === coreKey
-        ? center.nodes.filter(node => node !== anchor).map(node => [node])
-        : [center.nodes];
-      members.forEach(group => {
-        if (!group.length) return;
+    field.systems.forEach(item => {
+        const group = item.nodes;
+        const carrier = item.carrier;
+        if (!group.length || !carrier) return;
         const warp = group.reduce((maximum, node) => Math.max(maximum,
           Number(node.__galaxySpacetimeWarp) || 0), 0);
         if (!(warp > 0)) return;
-        let mass = 0, x = 0, y = 0, vx = 0, vy = 0;
-        group.forEach(node => {
-          const nodeMass = finitePositive(node.gravity_mass, 1, 1000);
-          mass += nodeMass; x += node.x * nodeMass; y += node.y * nodeMass;
-          vx += (Number.isFinite(node.vx) ? node.vx : 0) * nodeMass;
-          vy += (Number.isFinite(node.vy) ? node.vy : 0) * nodeMass;
-        });
-        if (!(mass > 0)) return;
-        x /= mass; y /= mass; vx = vx / mass - anchorVx; vy = vy / mass - anchorVy;
-        const dx = x - anchor.x, dy = y - anchor.y, distance = Math.hypot(dx, dy);
+        const dx = carrier.x - anchor.x, dy = carrier.y - anchor.y;
+        const distance = Math.hypot(dx, dy);
         if (!(distance > 1e-9)) return;
+        const vx = (Number.isFinite(carrier.vx) ? carrier.vx : 0) - anchorVx;
+        const vy = (Number.isFinite(carrier.vy) ? carrier.vy : 0) - anchorVy;
         const unitX = dx / distance, unitY = dy / distance;
         const tangentX = -unitY, tangentY = unitX;
         const tangentSpeed = vx * tangentX + vy * tangentY;
@@ -2510,7 +2529,6 @@
         stats.nodes += group.length;
         stats.maximumWarp = Math.max(stats.maximumWarp, warp);
         stats.maximumVelocityRemoved = Math.max(stats.maximumVelocityRemoved, Math.abs(removed));
-      });
     });
     return stats;
   }
@@ -2601,7 +2619,6 @@
      black-hole sweep without feeding any energy back into the evidence simulation. */
   function integrateGalaxyGhostOrbits(nodes, options) {
     const opts = options || {};
-    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const ghosts = (nodes || []).filter(node => node && node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -2637,14 +2654,8 @@
         angle = (seededHash(opts.layoutSeed, 'ghost-orbit:' + String(node.id)) / 0x100000000)
           * Math.PI * 2;
       }
-      const coreDenominator = Math.pow(radius * radius + centralSoftening * centralSoftening, 1.5);
-      const haloDenominator = Math.pow(radius * radius + field.haloScale * field.haloScale, 1.5);
-      const omegaSquared = field.gravitationalConstant * (
-        field.coreMass / coreDenominator
-        + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
-      );
-      const omega = Math.min(Math.sqrt(Math.max(0, omegaSquared)) * orbitalSpeed,
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed / Math.max(1e-6, radius));
+      const omega = galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed)
+        / Math.max(1e-6, radius);
       angle += direction * omega * timestep;
       node.x = anchor.x + Math.cos(angle) * radius;
       node.y = anchor.y + Math.sin(angle) * radius;
@@ -2754,7 +2765,6 @@
 
   function advanceGalaxyKinematicOrbits(nodes, options) {
     const opts = options || {};
-    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const empty = { bodies: bodies.length, systems: 0, satellites: 0,
@@ -2772,8 +2782,6 @@
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const envelope = galaxyFarFieldEnvelope(bodies, opts);
-    const centers = galaxyOrbitGroups(bodies);
-    const coreKey = String(anchor.id);
     const nodeRadius = node => finitePositive(node.radius,
       finitePositive(node.visual_radius, 3, 160), 160);
     const setPhase = (node, name, value) => {
@@ -2789,14 +2797,8 @@
       if (Number.isFinite(node.fx)) node.fx = x;
       if (Number.isFinite(node.fy)) node.fy = y;
     };
-    const angularFrequency = radius => {
-      const coreDenominator = Math.pow(radius * radius + centralSoftening * centralSoftening, 1.5);
-      const haloDenominator = Math.pow(radius * radius + field.haloScale * field.haloScale, 1.5);
-      return Math.sqrt(Math.max(0, field.gravitationalConstant * (
-        field.coreMass / coreDenominator
-        + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
-      ))) * orbitalSpeed;
-    };
+    const angularFrequency = radius => galaxyCarrierTargetSpeed(
+      field, radius, opts.orbitalSpeed) / Math.max(1e-6, radius);
     const boundedRadius = (radius, extent) => {
       const inner = nodeRadius(anchor) + Math.max(0, extent)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
@@ -2805,9 +2807,9 @@
     };
     let systems = 0, satellites = 0;
     field.systems.forEach(item => {
-      const members = item.center.nodes;
+      const members = item.nodes;
       if (!members.length || members.some(node => node.id === opts.fixedNodeId)) return;
-      const star = galaxySystemAnchor(members);
+      const star = item.carrier;
       if (!star) return;
       /* The star, rather than the changing system COM, owns both hierarchy frames. Its cached
          black-hole phase is unaffected by the current distribution of planets, and its local
@@ -2815,23 +2817,36 @@
       const extent = members.reduce((maximum, node) => Math.max(maximum,
         Math.hypot(node.x - star.x, node.y - star.y) + nodeRadius(node)), 0);
       const starRadius = Math.hypot(star.x - anchor.x, star.y - anchor.y);
-      let orbit = star.__galaxyKinematicGlobalOrbit;
-      if (!orbit || orbit.anchorId !== String(anchor.id) || orbit.systemId !== String(item.center.id)) {
-        orbit = setPhase(star, '__galaxyKinematicGlobalOrbit', {
-          anchorId: String(anchor.id), systemId: String(item.center.id),
-          radius: boundedRadius(starRadius, extent),
+      const orbitCache = item.core
+        ? '__galaxyKinematicCoreOrbit' : '__galaxyKinematicGlobalOrbit';
+      let orbit = star[orbitCache];
+      if (!orbit || orbit.anchorId !== String(anchor.id) || orbit.systemId !== String(item.id)) {
+        const seededRadius = item.core ? Number(star.__galaxyCoreLaneRadius) : NaN;
+        const initialRadius = Number.isFinite(seededRadius) && seededRadius > 0
+          ? seededRadius : starRadius;
+        orbit = setPhase(star, orbitCache, {
+          anchorId: String(anchor.id), systemId: String(item.id),
+          radius: boundedRadius(initialRadius, extent),
           angle: Math.atan2(star.y - anchor.y, star.x - anchor.x),
         });
       }
       orbit.radius = boundedRadius(Number(orbit.radius) || starRadius, extent);
       if (!Number.isFinite(orbit.angle)) {
-        orbit.angle = seededHash(opts.layoutSeed, 'kinematic-system:' + item.center.id)
+        orbit.angle = seededHash(opts.layoutSeed, 'kinematic-system:' + item.id)
           / 0x100000000 * Math.PI * 2;
       }
-      const omega = Math.min(angularFrequency(orbit.radius),
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed
-          / Math.max(1e-6, orbit.radius));
+      const omega = angularFrequency(orbit.radius);
       orbit.angle += direction * omega * timestep;
+      if (item.core) {
+        setPhase(star, '__galaxyCoreLaneRadius', orbit.radius);
+        setPhase(star, '__galaxyCoreLaneAngle', orbit.angle);
+        if (star.anchor_role === 'community') {
+          setPhase(star, '__galaxyKinematicGlobalOrbit', {
+            anchorId: String(anchor.id), systemId: String(item.id),
+            radius: orbit.radius, angle: orbit.angle,
+          });
+        }
+      }
       const targetX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
       const targetY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
       const globalSpeed = omega * orbit.radius;
@@ -2840,7 +2855,9 @@
       moveNode(star, targetX, targetY, globalVx, globalVy);
       const localMotion = advanceGalaxyKinematicLocalMembers(members, star, {
         x: targetX, y: targetY, vx: globalVx, vy: globalVy,
-      }, opts);
+      }, item.core ? Object.assign({}, opts, {
+        localOrbitCache: '__galaxyKinematicCoreLocalOrbit',
+      }) : opts);
       satellites += localMotion.satellites;
       const carrierContact = nodeRadius(anchor) + nodeRadius(star)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
@@ -2850,63 +2867,6 @@
         (carrierOuter - orbit.radius) / Math.max(1e-9, carrierOuter - carrierContact)));
       members.forEach(node => setGalaxySpacetimeWarp(node, galaxySmoothstep(systemWarp)));
       systems++;
-    });
-    /* Direct black-hole children are compact individual carriers. A community child keeps its
-       own planets in a local frame, while the child itself follows its admitted core lane; this
-       prevents a far authored coordinate from becoming the oversized kinematic radius. */
-    const core = centers.get(coreKey);
-    if (core) galaxyBlackHoleCoreSystems(core.nodes, anchor).forEach(members => {
-      if (!members.length || members.some(node => String(node.id) === String(opts.fixedNodeId))) return;
-      const carrier = galaxySystemAnchor(members) || members[0];
-      if (!carrier) return;
-      const extent = members.reduce((maximum, node) => Math.max(maximum,
-        Math.hypot(node.x - carrier.x, node.y - carrier.y) + nodeRadius(node)), 0);
-      let orbit = carrier.__galaxyKinematicCoreOrbit;
-      if (!orbit || orbit.anchorId !== String(anchor.id)) {
-        const seededRadius = Number(carrier.__galaxyCoreLaneRadius);
-        const carrierRadius = Number.isFinite(seededRadius) && seededRadius > 0
-          ? seededRadius : Math.hypot(carrier.x - anchor.x, carrier.y - anchor.y);
-        orbit = setPhase(carrier, '__galaxyKinematicCoreOrbit', {
-          anchorId: String(anchor.id), radius: boundedRadius(carrierRadius, extent),
-          angle: Math.atan2(carrier.y - anchor.y, carrier.x - anchor.x),
-        });
-      }
-      orbit.radius = boundedRadius(Number(orbit.radius) ||
-        Math.hypot(carrier.x - anchor.x, carrier.y - anchor.y), extent);
-      const omega = Math.min(angularFrequency(orbit.radius),
-        GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed
-          / Math.max(1e-6, orbit.radius));
-      orbit.angle += direction * omega * timestep;
-      setPhase(carrier, '__galaxyCoreLaneRadius', orbit.radius);
-      setPhase(carrier, '__galaxyCoreLaneAngle', orbit.angle);
-      /* A community star directly attached to the black hole still participates in the same
-         global carrier contract as every other solar-system anchor. Mirror the compact core
-         phase under the ordinary global-orbit key so diagnostics, observers, and downstream
-         paint code never mistake a direct core system for a stationary star. */
-      if (carrier.anchor_role === 'community') {
-        setPhase(carrier, '__galaxyKinematicGlobalOrbit', {
-          anchorId: String(anchor.id), systemId: String(carrier.id),
-          radius: orbit.radius, angle: orbit.angle,
-        });
-      }
-      const speed = omega * orbit.radius;
-      const carrierX = anchor.x + Math.cos(orbit.angle) * orbit.radius;
-      const carrierY = anchor.y + Math.sin(orbit.angle) * orbit.radius;
-      const carrierVx = -Math.sin(orbit.angle) * speed * direction;
-      const carrierVy = Math.cos(orbit.angle) * speed * direction;
-      moveNode(carrier, carrierX, carrierY, carrierVx, carrierVy);
-      const localMotion = advanceGalaxyKinematicLocalMembers(members, carrier, {
-        x: carrierX, y: carrierY, vx: carrierVx, vy: carrierVy,
-      }, Object.assign({}, opts, { localOrbitCache: '__galaxyKinematicCoreLocalOrbit' }));
-      satellites += localMotion.satellites;
-      const satelliteContact = nodeRadius(anchor) + nodeRadius(carrier)
-        + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
-      const satelliteOuter = galaxyEventHorizonOuterRadius(
-        nodeRadius(anchor), satelliteContact, GALAXY_EVENT_HORIZON_INFLUENCE_SCALE);
-      const warp = galaxySmoothstep(Math.max(0, Math.min(1,
-        (satelliteOuter - orbit.radius)
-          / Math.max(1e-9, satelliteOuter - satelliteContact))));
-      members.forEach(node => setGalaxySpacetimeWarp(node, warp));
     });
     const systemPacking = opts.includeSystemPacking === true
       ? applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
@@ -3893,9 +3853,22 @@
       node.radius, finitePositive(node.visual_radius,
         radiusFromGravityMass(node.gravity_mass), 80), 160
     );
-    return [...galaxyOrbitGroups(nodes).values()].map(center => {
-      const members = center.nodes.slice();
-      const anchor = galaxySystemAnchor(members);
+    const centers = galaxyOrbitGroups(nodes);
+    const globalAnchor = galaxyGlobalAnchor(nodes || []);
+    /* The packing model must use the same carrier hierarchy as the black-hole field. Otherwise
+       a directly linked star is folded into the fixed black-hole envelope during admission even
+       though runtime physics later treats that star and its descendants as an independent solar
+       system. Keep the black hole itself as one fixed, anchor-only envelope. */
+    const sources = globalAnchor && globalAnchor.anchor_role === 'global' ? [{
+      id: String(globalAnchor.id), nodes: [globalAnchor], anchor: globalAnchor,
+    }].concat(galaxyBlackHoleCarrierSystems(nodes, globalAnchor, centers).map(system => ({
+      id: system.id, nodes: system.nodes, anchor: system.carrier,
+    }))) : [...centers.values()].map(center => ({
+      id: center.id, nodes: center.nodes, anchor: galaxySystemAnchor(center.nodes),
+    }));
+    return sources.map(source => {
+      const members = source.nodes.slice();
+      const anchor = source.anchor || galaxySystemAnchor(members);
       if (!anchor) return null;
       const radius = members.reduce((outer, node) => Math.max(outer,
         Math.hypot(node.x - anchor.x, node.y - anchor.y) + bodyRadius(node)
@@ -3907,7 +3880,7 @@
         || (opts.respectFixedCoordinates !== false
           && Number.isFinite(node.fx) && Number.isFinite(node.fy)));
       return {
-        id: center.id, nodes: members, anchor,
+        id: source.id, nodes: members, anchor,
         x: anchor.x, y: anchor.y, radius, mass, fixed,
       };
     }).filter(Boolean).sort((left, right) =>
@@ -4242,7 +4215,6 @@
     const anchorX = anchor.x, anchorY = anchor.y;
     const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
     const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
-    const coreKey = communityKey(anchor);
     const radialUnit = (key, dx, dy) => {
       const distance = Math.hypot(dx, dy);
       if (distance > 1e-9) return { x: dx / distance, y: dy / distance, distance };
@@ -4303,50 +4275,48 @@
       return true;
     };
 
-    communityCenters(bodies).forEach(center => {
-      if (center.id === coreKey) {
-        center.nodes.forEach(node => {
-          if (node === anchor) return;
-          if (projectIndividualNode(node)) stats.coreNodes++;
-        });
-        return;
-      }
-
+    galaxyBlackHoleCarrierSystems(bodies, anchor).forEach(system => {
+      const members = system.nodes;
       /* A dragged node is a cursor-owned external source. Rigidly translating its entire
          community when that cursor touches the horizon creates positive feedback: restore
          puts only the source back at the cursor, while every follower retains the displacement
          and inflates the next system radius. Keep the horizon strict per painted member but
          never move those followers as a group. */
-      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
-        center.nodes.forEach(node => {
-          if (projectIndividualNode(node)) stats.fixedSystemNodes++;
+      if (members.some(node => node.id === opts.fixedNodeId)) {
+        members.forEach(node => {
+          if (!projectIndividualNode(node)) return;
+          if (system.core) stats.coreNodes++;
+          else stats.fixedSystemNodes++;
         });
         return;
       }
 
-      /* A circular envelope around the evidence-mass COM is conservative but exact as a
-         safety bound: once its near edge clears the black hole, every painted member does. */
-      const systemRadius = center.nodes.reduce((maximum, node) => Math.max(maximum,
-        Math.hypot(node.x - center.x, node.y - center.y) + bodyRadius(node)), 0);
-      const radial = radialUnit(center.id, center.x - anchorX, center.y - anchorY);
+      /* Contact uses the complete system envelope about its mass centre, then translates every
+         member rigidly. This conserves the group's angular phase without ever peeling a planet
+         away from a direct-BH star; the live galactic force still samples the star carrier. */
+      const systemRadius = members.reduce((maximum, node) => Math.max(maximum,
+        Math.hypot(node.x - system.center.x, node.y - system.center.y) + bodyRadius(node)), 0);
+      const radial = radialUnit(system.id,
+        system.center.x - anchorX, system.center.y - anchorY);
       const minimumDistance = anchorRadius + systemRadius + padding;
       const correction = minimumDistance - radial.distance;
       if (!(correction > 0) || !Number.isFinite(correction)) return;
       const shiftX = radial.x * correction, shiftY = radial.y * correction;
-      center.nodes.forEach(node => {
+      members.forEach(node => {
         node.x += shiftX;
         node.y += shiftY;
         if (Number.isFinite(node.fx)) node.fx += shiftX;
         if (Number.isFinite(node.fy)) node.fy += shiftY;
       });
       const velocity = stabilizeSystemContactVelocity(
-        center.nodes, radial.x, radial.y, radial.distance, minimumDistance
+        members, radial.x, radial.y, radial.distance, minimumDistance
       );
       stats.inwardVelocityRemoved += velocity.inward;
       stats.tangentialVelocityRemoved += velocity.tangential;
       stats.contacts++;
-      stats.systems++;
-      stats.repelledNodes += center.nodes.length;
+      if (system.core) stats.coreNodes += members.length;
+      else stats.systems++;
+      stats.repelledNodes += members.length;
       stats.correctedDistance += correction;
       stats.maximumShift = Math.max(stats.maximumShift, correction);
     });
@@ -4396,19 +4366,27 @@
       ? Number(opts.limit) : GALAXY_LOCAL_RELATIVE_SPEED_LIMIT);
     const absoluteLimit = Math.max(0.01, Number.isFinite(Number(opts.absoluteLimit))
       ? Number(opts.absoluteLimit) : Infinity);
-    const systems = new Map();
+    const compatibilitySystems = new Map();
     (nodes || []).forEach(node => {
       if (!node || node.ghost || !Number.isFinite(node.vx) || !Number.isFinite(node.vy)) return;
       const key = communityKey(node);
-      if (!systems.has(key)) systems.set(key, []);
-      systems.get(key).push(node);
+      if (!compatibilitySystems.has(key)) compatibilitySystems.set(key, []);
+      compatibilitySystems.get(key).push(node);
     });
+    const globalAnchor = galaxyGlobalAnchor(nodes);
+    const systems = globalAnchor && globalAnchor.anchor_role === 'global'
+      ? galaxyBlackHoleCarrierSystems(nodes, globalAnchor).map(system => system.nodes)
+      : [...compatibilitySystems.values()];
     let limitedSystems = 0, maximumRelativeSpeed = 0, minimumScale = 1;
     systems.forEach(members => {
       if (members.length < 2) return;
-      const anchor = members.find(node => node.anchor_role === 'global')
-        || members.find(node => node.id === opts.fixedNodeId)
-        || members.find(node => node.anchor_role === 'community');
+      const resolvedAnchor = galaxySystemAnchor(members);
+      const declaredIds = new Set(members.map(node => node.system_anchor_id)
+        .filter(value => value !== undefined && value !== null).map(String));
+      const anchor = members.find(node => node.id === opts.fixedNodeId)
+        || (resolvedAnchor && (resolvedAnchor.anchor_role === 'community'
+          || resolvedAnchor.__galaxyBlackHoleChild === true
+          || declaredIds.has(String(resolvedAnchor.id))) ? resolvedAnchor : null);
       let referenceVx = 0, referenceVy = 0;
       if (anchor) {
         referenceVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
@@ -4477,7 +4455,7 @@
       minimumScale = Math.min(minimumScale, scale);
     });
     return {
-      systems: systems.size, limitedSystems, maximumRelativeSpeed, minimumScale, limit,
+      systems: systems.length, limitedSystems, maximumRelativeSpeed, minimumScale, limit,
       absoluteLimit,
     };
   }
@@ -4504,7 +4482,9 @@
     const softening = Math.max(0.1, Number(opts.softening) || 8);
     const anchor = galaxyGlobalAnchor(bodies);
     const systemGravity = applyGalaxySystemAnchorGravity(bodies, {
-      gravity, softening, alpha: 1,
+      gravity, softening, alpha: 1, central: opts.central,
+      skipGlobalParent: opts.central !== false,
+      allowGlobalParent: opts.central === false,
       gravitationalConstant: opts.gravitationalConstant,
       localGravitationalConstant: opts.localGravitationalConstant,
       accelerationCap: opts.localAccelerationCap,
@@ -4535,9 +4515,9 @@
       })
       : { systems: 0, interactions: 0, traversals: 0, approximations: 0,
         maximumAcceleration: 0, capScale: 1 };
-    /* Sample the outer restoring field in both leapfrog kicks. External systems receive one
-       shared COM acceleration; anchor-community satellites receive their own radial sample so
-       neither population can drift through the finite painted edge. */
+    /* Sample the outer restoring field in both leapfrog kicks. Every carrier—including a
+       direct-black-hole star—translates its complete system rigidly, so no descendant can drift
+       through the finite painted edge or acquire an independent galactic force. */
     const farFieldGravity = opts.includeFarFieldConfinement === false
       ? { anchorId: null, envelopeRadius: 0, softRadius: 0,
         acceleratedSystems: 0, acceleratedCoreNodes: 0, acceleratedFixedFollowers: 0,
@@ -4703,12 +4683,11 @@
   /* Preserve the angular momentum that defines a galaxy after constraint projection and tiny
      numerical damping. Gravity remains the radial force; this is a bounded carrier-frame
      insertion controller that supplies only missing prograde tangent and removes radial lane
-     drift. Every member of an external solar system receives the same velocity delta, so no
-     star/planet relative orbit or link velocity is changed. Core children are independent
-     black-hole satellites and receive the same support one body at a time. */
+     drift. Every member of every solar system receives the same carrier velocity delta, so no
+     star/planet relative orbit or link velocity is changed. Direct black-hole children use the
+     same carrier curve; their stellar descendants are never supported one body at a time. */
   function supportGalaxyCarrierOrbits(nodes, options) {
     const opts = options || {};
-    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const field = galaxyBlackHoleField(bodies, opts);
@@ -4722,43 +4701,16 @@
     };
     if (!anchor || !(field.gravitationalConstant > 0)) return stats;
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
-    const centralSoftening = Math.max(0.1,
-      Number(opts.centralSoftening) || opts.softening || 40);
     const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
     const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
     const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
       ? null : String(opts.fixedNodeId);
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     let angularVelocitySum = 0;
-    const circularSpeedAt = radius => {
-      const coreDenominator = Math.pow(
-        radius * radius + centralSoftening * centralSoftening, 1.5);
-      const haloDenominator = Math.pow(
-        radius * radius + field.haloScale * field.haloScale, 1.5);
-      const omega = Math.sqrt(Math.max(0, field.gravitationalConstant * (
-        field.coreMass / coreDenominator
-        + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
-      )));
-      return Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed,
-        omega * radius * orbitalSpeed);
-    };
-    const coreCircularSpeedAt = radius => {
-      const localGravityMultiplier = galaxyLocalGravityMultiplier(anchor, opts);
-      const localGravity = galaxySystemGravityConstant(anchor, opts.gravity)
-        * localGravityMultiplier;
-      const denominator = Math.pow(
-        radius * radius + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
-      const rawAcceleration = denominator > 0
-        ? localGravity * finitePositive(anchor.gravity_mass, 1, 1000)
-          * radius / denominator : 0;
-      const acceleration = Math.min(defaultGalaxySystemAccelerationCap(anchor, opts.gravity)
-        * Math.max(0.25, localGravityMultiplier), rawAcceleration);
-      return Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed,
-        Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
-    };
-    const support = (group, carrier, targetSpeed, core) => {
+    const support = (group, carrier, core) => {
       let dx = carrier.x - anchor.x, dy = carrier.y - anchor.y;
       let radius = Math.hypot(dx, dy);
+      let targetSpeed = galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed);
       if (!(radius > 1e-9) || !(targetSpeed > 0)) return;
       const laneRadiusKey = core ? '__galaxyCoreLaneRadius' : '__galaxyCarrierLaneRadius';
       const laneAngleKey = core ? '__galaxyCoreLaneAngle' : '__galaxyCarrierLaneAngle';
@@ -4779,7 +4731,7 @@
       }
       if (Number.isFinite(laneRadius) && laneRadius > 0) {
         radius = laneRadius;
-        targetSpeed = core ? coreCircularSpeedAt(radius) : circularSpeedAt(radius);
+        targetSpeed = galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed);
         /* Contact and boundary projections run before carrier support.  Their positional
            correction is a legitimate phase change; restarting from the cached pre-contact
            angle would snap the body backward, then repeat that snap on every frame.  Reconcile
@@ -4794,10 +4746,12 @@
           const phaseError = Math.atan2(
             Math.sin(currentAngle - expectedAngle), Math.cos(currentAngle - expectedAngle));
           const correctionDistance = 2 * radius * Math.abs(Math.sin(phaseError * 0.5));
+          const expectedStepDistance = 2 * radius * Math.abs(Math.sin(advance * 0.5));
           /* Normal leapfrog drift is expected to land near the next cached phase. Only a
              materially displaced carrier represents an impact/boundary correction; adopt that
              phase once and do not add a second orbital step on top of it. */
           angle = correctionDistance > GALAXY_LANE_PHASE_CORRECTION_DISTANCE
+            + expectedStepDistance
             ? currentAngle : expectedAngle;
         } else {
           angle = Number.isFinite(currentAngle) ? currentAngle + advance : cachedAngle;
@@ -4848,34 +4802,20 @@
         ? supportedTangent : Math.min(stats.coreMinTangentialSpeed, supportedTangent);
       angularVelocitySum += supportedTangent / radius;
     };
-    const coreKey = String(anchor.id);
-    galaxyOrbitGroups(bodies).forEach(center => {
-      if (center.id === coreKey) {
-        galaxyBlackHoleCoreSystems(center.nodes, anchor).forEach(group => {
-          const carrier = galaxySystemAnchor(group) || group[0];
-          if (!carrier || (fixedNodeId !== null && group.some(node =>
-            String(node.id) === fixedNodeId))) return;
-          stats.eligible++;
-          stats.coreEligible++;
-          support(group, carrier,
-            coreCircularSpeedAt(Math.hypot(carrier.x - anchor.x, carrier.y - anchor.y)), true);
-        });
-        return;
-      }
-      if (center.nodes.some(node => node.anchor_role === 'global'
+    field.systems.forEach(item => {
+      if (!item.carrier || item.nodes.some(node => node.anchor_role === 'global'
         || (fixedNodeId !== null && String(node.id) === fixedNodeId))) return;
-      const carrier = galaxySystemAnchor(center.nodes) || center.nodes[0];
       stats.eligible++;
-      support(center.nodes, carrier,
-        circularSpeedAt(Math.hypot(carrier.x - anchor.x, carrier.y - anchor.y)), false);
+      if (item.core) stats.coreEligible++;
+      support(item.nodes, item.carrier, item.core);
     });
     stats.meanAngularVelocity = stats.eligible > 0
       ? angularVelocitySum / stats.eligible : 0;
     return stats;
   }
 
-  /* The black-hole Plummer field deliberately stays gentle at the outer edge so seeded
-     tangential motion remains legible.  This separate field is an equally smooth, *system*
+  /* The black-hole plus cored-log halo stays smooth at the outer edge so seeded tangential
+     motion remains legible. This separate field is an equally smooth, *system*
      level restoring term in the narrow outer band.  It is not fitted from live coordinates:
      the painted extent is derived once from scene hints and retained on the explicit global
      anchor, so one bad outward kick cannot make the galaxy's permitted radius grow with it. */
@@ -4889,11 +4829,12 @@
       anchor: null, centers: [], coreKey: null, envelopeRadius: 0, softRadius: 0,
     };
     if (!anchor) return empty;
-    const centers = [...galaxyOrbitGroups(bodies).values()];
+    const systems = galaxyBlackHoleCarrierSystems(bodies, anchor);
+    const centers = systems.map(system => system.center);
     const coreKey = String(anchor.id);
     const bodyRadius = node => finitePositive(node.radius, evidenceNodeRadius(node, 3), 160);
-    const systemRadius = center => center.nodes.reduce((maximum, node) => Math.max(maximum,
-      Math.hypot(node.x - center.x, node.y - center.y) + bodyRadius(node)), 0);
+    const systemRadius = system => system.nodes.reduce((maximum, node) => Math.max(maximum,
+      Math.hypot(node.x - system.carrier.x, node.y - system.carrier.y) + bodyRadius(node)), 0);
     const seededRadius = node => ['galactic_target_radius', 'galactic_radius', 'orbit_radius']
       .reduce((maximum, key) => {
         const value = Number(node[key]);
@@ -4902,39 +4843,19 @@
     const anchorRadius = bodyRadius(anchor);
     let hintedExtent = 0, observedExtent = 0, horizonExtent = anchorRadius;
     let hasHint = false;
-    centers.forEach(center => {
-      const extent = systemRadius(center);
-      const radial = Math.hypot(center.x - anchor.x, center.y - anchor.y);
-      const hint = center.nodes.reduce((maximum, node) => Math.max(maximum, seededRadius(node)), 0);
-      if (center.id === coreKey) {
-        center.nodes.forEach(node => {
-          if (node === anchor) return;
-          const radius = bodyRadius(node);
-          const nodeHint = seededRadius(node);
-          if (nodeHint > 0) {
-            hintedExtent = Math.max(hintedExtent, nodeHint + radius);
-            hasHint = true;
-          }
-          observedExtent = Math.max(observedExtent,
-            Math.hypot(node.x - anchor.x, node.y - anchor.y) + radius);
-          /* The eventual outer edge must leave enough radial room for both sides of this
-             satellite's painted body at the inner horizon. */
-          horizonExtent = Math.max(horizonExtent,
-            anchorRadius + radius * 2 + GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
-        });
-      } else {
-        /* A declared system orbit plus the real painted system radius is a hard geometric
-           seed. Include the radius even when a stale payload claims a tiny orbit. */
-        if (hint > 0) {
-          hintedExtent = Math.max(hintedExtent, hint + extent);
-          hasHint = true;
-        }
-        observedExtent = Math.max(observedExtent, radial + extent);
-        /* A rigid system that is just clear of the black hole extends one full system radius
-           again on its far side. Reserve that geometry before caching the finite envelope. */
-        horizonExtent = Math.max(horizonExtent,
-          anchorRadius + extent * 2 + GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
+    systems.forEach(system => {
+      const extent = systemRadius(system);
+      const radial = Math.hypot(system.carrier.x - anchor.x, system.carrier.y - anchor.y);
+      const hint = system.nodes.reduce((maximum, node) => Math.max(maximum, seededRadius(node)), 0);
+      /* A declared carrier orbit plus the complete painted system radius is a hard geometric
+         seed. This applies identically to ordinary and direct-black-hole carrier systems. */
+      if (hint > 0) {
+        hintedExtent = Math.max(hintedExtent, hint + extent);
+        hasHint = true;
       }
+      observedExtent = Math.max(observedExtent, radial + extent);
+      horizonExtent = Math.max(horizonExtent,
+        anchorRadius + extent * 2 + GALAXY_BLACK_HOLE_EXCLUSION_PADDING);
     });
     const configuredMinimum = Number.isFinite(Number(opts.farFieldMinimumRadius))
       ? Number(opts.farFieldMinimumRadius) : GALAXY_FAR_FIELD_MIN_RADIUS;
@@ -4971,7 +4892,7 @@
       ? Math.min(envelopeRadius, requestedBand)
       : Math.max(16, Math.min(32, envelopeRadius * (1 - softFraction)));
     return {
-      anchor, centers, coreKey, bodyRadius, systemRadius,
+      anchor, systems, centers, coreKey, bodyRadius, systemRadius,
       envelopeRadius, softRadius: Math.max(0, envelopeRadius - softBand),
     };
   }
@@ -5017,20 +4938,11 @@
       else stats.acceleratedSystems++;
       stats.maximumAcceleration = Math.max(stats.maximumAcceleration, magnitude);
     };
-    field.centers.forEach(center => {
-      if (center.id === field.coreKey) {
-        center.nodes.forEach(node => {
-          if (node === field.anchor || node.id === opts.fixedNodeId) return;
-          const dx = node.x - field.anchor.x, dy = node.y - field.anchor.y;
-          accelerate([node], node.id, dx, dy,
-            Math.hypot(dx, dy) + field.bodyRadius(node), 'core');
-        });
-        return;
-      }
-      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
+    field.systems.forEach(system => {
+      if (system.nodes.some(node => node.id === opts.fixedNodeId)) {
         /* Preserve the cursor-owned source exactly, but do not make its companions immune to
            the smooth outer well. They get their own radial sample until the hard cap is needed. */
-        center.nodes.forEach(node => {
+        system.nodes.forEach(node => {
           if (node.id === opts.fixedNodeId) return;
           const dx = node.x - field.anchor.x, dy = node.y - field.anchor.y;
           accelerate([node], node.id, dx, dy,
@@ -5038,9 +4950,10 @@
         });
         return;
       }
-      const dx = center.x - field.anchor.x, dy = center.y - field.anchor.y;
-      accelerate(center.nodes, center.id, dx, dy,
-        Math.hypot(dx, dy) + field.systemRadius(center), 'system');
+      const dx = system.carrier.x - field.anchor.x;
+      const dy = system.carrier.y - field.anchor.y;
+      accelerate(system.nodes, system.id, dx, dy,
+        Math.hypot(dx, dy) + field.systemRadius(system), system.core ? 'core' : 'system');
     });
     return stats;
   }
@@ -5128,37 +5041,13 @@
         tangential: Math.abs(tangentSpeed) * (1 - tangentScale),
       };
     };
-    field.centers.forEach(center => {
-      if (center.id === field.coreKey) {
-        center.nodes.forEach(node => {
-          if (node === field.anchor || node.id === opts.fixedNodeId) return;
-          const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
-          const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
-          const correction = unit.distance - targetDistance;
-          if (!(correction > 0)) return;
-          const appliedCorrection = reserveGalaxyBoundaryCorrection(opts, [node], correction);
-          if (!(appliedCorrection > 0)) return;
-          const boundedTargetDistance = unit.distance - appliedCorrection;
-          node.x = anchorX + unit.x * boundedTargetDistance;
-          node.y = anchorY + unit.y * boundedTargetDistance;
-          if (Number.isFinite(node.fx)) node.fx = node.x;
-          if (Number.isFinite(node.fy)) node.fy = node.y;
-          const velocity = stabilizeVelocity([node], unit.x, unit.y,
-            unit.distance, targetDistance);
-          stats.boundedCoreNodes++;
-          stats.correctedDistance += correction;
-          stats.maximumShift = Math.max(stats.maximumShift, correction);
-          stats.outwardVelocityRemoved += velocity.outward;
-          stats.tangentialVelocityRemoved += velocity.tangential;
-        });
-        return;
-      }
-      if (center.nodes.some(node => node.id === opts.fixedNodeId)) {
+    field.systems.forEach(system => {
+      if (system.nodes.some(node => node.id === opts.fixedNodeId)) {
         /* Pointer coordinates are an input target, not permission to paint outside the finite
            galaxy. Cap this stretched system one body at a time—including the source—so a long
            outward hold cannot create release-only geometry. The next pointer event supplies a
            fresh target; its final painted fx/fy remains on the outer annulus. */
-        center.nodes.forEach(node => {
+        system.nodes.forEach(node => {
           const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = unit.distance - targetDistance;
@@ -5181,15 +5070,16 @@
         });
         return;
       }
-      const unit = radial(center.id, center.x - anchorX, center.y - anchorY);
-      const radius = field.systemRadius(center);
+      const unit = radial(system.id,
+        system.carrier.x - anchorX, system.carrier.y - anchorY);
+      const radius = field.systemRadius(system);
       /* A compact system fits inside R after one COM translation. A just-released drag can
          leave a source at the cursor and companions at the cap, making q_s >= R; translating
          that stretched geometry by its COM would throw the already-safe follower hundreds of
          units. Resolve that impossible rigid fit member-by-member for this slice instead. */
       if (radius >= field.envelopeRadius - 1e-9) {
         let bounded = false;
-        center.nodes.forEach(node => {
+        system.nodes.forEach(node => {
           const memberUnit = radial(node.id, node.x - anchorX, node.y - anchorY);
           const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
           const correction = memberUnit.distance - targetDistance;
@@ -5217,19 +5107,20 @@
       const correction = unit.distance - targetDistance;
       if (!(correction > 0)) return;
       const appliedCorrection = reserveGalaxyBoundaryCorrection(
-        opts, center.nodes, correction, 'rigid'
+        opts, system.nodes, correction, 'rigid'
       );
       if (!(appliedCorrection > 0)) return;
       const shiftX = -unit.x * appliedCorrection, shiftY = -unit.y * appliedCorrection;
-      center.nodes.forEach(node => {
+      system.nodes.forEach(node => {
         node.x += shiftX;
         node.y += shiftY;
         if (Number.isFinite(node.fx)) node.fx += shiftX;
         if (Number.isFinite(node.fy)) node.fy += shiftY;
       });
-      const velocity = stabilizeVelocity(center.nodes, unit.x, unit.y,
+      const velocity = stabilizeVelocity(system.nodes, unit.x, unit.y,
         unit.distance, targetDistance);
       stats.boundedSystems++;
+      if (system.core) stats.boundedCoreNodes += system.nodes.length;
       stats.correctedDistance += correction;
       stats.maximumShift = Math.max(stats.maximumShift, correction);
       stats.outwardVelocityRemoved += velocity.outward;
@@ -5239,8 +5130,8 @@
        local deformation has made q_s > R, fitting it rigidly is mathematically impossible.
        Finish with a member-level cap so the public invariant remains every free painted node
        lies inside the cached envelope; normal systems never enter this branch. */
-    field.centers.forEach(center => {
-      center.nodes.forEach(node => {
+    field.systems.forEach(system => {
+      system.nodes.forEach(node => {
         if (node === field.anchor || node.id === opts.fixedNodeId) return;
         const unit = radial(node.id, node.x - anchorX, node.y - anchorY);
         const targetDistance = Math.max(0, field.envelopeRadius - field.bodyRadius(node));
@@ -5369,18 +5260,6 @@
     if (neutralPhase
       || !globalAnchor || !(field.gravitationalConstant > 0)) return stats;
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
-    const centralSoftening = Math.max(0.1,
-      Number(opts.centralSoftening) || Number(opts.softening) || 40);
-    const globalTargetSpeed = radius => {
-      const coreDenominator = Math.pow(radius * radius + centralSoftening * centralSoftening, 1.5);
-      const haloDenominator = Math.pow(radius * radius + field.haloScale * field.haloScale, 1.5);
-      const omega = Math.sqrt(Math.max(0, field.gravitationalConstant * (
-        field.coreMass / coreDenominator
-        + (field.haloMass > 0 ? field.haloMass / haloDenominator : 0)
-      )));
-      return Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed,
-        omega * radius * orbitalSpeed);
-    };
     const supportCarrier = (members, carrier) => {
       if (!carrier || carrier === globalAnchor) return;
       const dx = carrier.x - globalAnchor.x, dy = carrier.y - globalAnchor.y;
@@ -5394,7 +5273,8 @@
       const tangentX = -unitY, tangentY = unitX;
       const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
       const sign = Math.sign(currentTangent) || direction;
-      const desiredTangent = globalTargetSpeed(radius) * sign;
+      const desiredTangent = galaxyCarrierTargetSpeed(
+        field, radius, opts.orbitalSpeed) * sign;
       const delta = desiredTangent - currentTangent;
       members.forEach(node => {
         if (node.id === opts.fixedNodeId) return;
@@ -5403,13 +5283,11 @@
       });
       stats.systems++;
     };
-    const centers = galaxyOrbitGroups(bodies);
-    const coreKey = String(globalAnchor.id);
-    centers.forEach(center => {
-      const members = center.nodes;
-      const carrier = galaxySystemAnchor(members) || members[0];
-      if (center.id !== coreKey) supportCarrier(members, carrier);
-      const localAnchor = carrier && carrier.anchor_role === 'global' ? globalAnchor : carrier;
+    field.systems.forEach(item => {
+      const members = item.nodes;
+      const carrier = item.carrier;
+      supportCarrier(members, carrier);
+      const localAnchor = carrier;
       if (!localAnchor) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
       members.forEach(node => {
@@ -5845,7 +5723,12 @@
     /* Constraint projection can rotate a carrier's position without rotating its velocity.
        Reconcile the final carrier tangent once, after packing and annulus closure, then compose
        the unchanged local planet velocities against that supported star frame. */
-    const carrierOrbitSupport = supportGalaxyCarrierOrbits(bodies, opts);
+    const carrierOrbitSupport = opts.central === false
+      ? { anchorId: null, eligible: 0, supported: 0, coreEligible: 0, coreSupported: 0,
+        minTangentialSpeed: null, coreMinTangentialSpeed: null,
+        maximumRadialSpeed: 0, maximumVelocityCorrection: 0, corrected: 0,
+        meanAngularVelocity: 0, maximumPositionCorrection: 0 }
+      : supportGalaxyCarrierOrbits(bodies, opts);
     const finalSystemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
       absoluteLimit: speedLimit,
@@ -9843,6 +9726,7 @@
       galaxySystemAnchorClearance,
       combineGalaxySystemAnchorExclusions,
       applyGalaxyCentralGravity, applyGalaxyMutualSystemGravity, galaxyGlobalAnchor,
+      galaxyBlackHoleCarrierSystems, galaxyCarrierOrbitCurve, galaxyCarrierTargetSpeed,
       galaxyBlackHoleField, applyGalaxyBlackHoleGravity, integrateGalaxyGhostOrbits,
       applyGalaxySpacetimeAcceleration, applyGalaxyEventHorizonDecay,
       galaxySlingshotCapture,
