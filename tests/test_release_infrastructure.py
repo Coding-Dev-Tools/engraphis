@@ -297,7 +297,7 @@ def test_release_builds_one_portable_open_core_wheel():
     assert release.count("python -m build") == 2
     assert "python -m build --outdir dist-repeat" not in release
     assert 'builder: ["a", "b"]' in release
-    assert "python:3.11-slim@sha256:a630a63c" in release
+    assert "github-hosted:ubuntu-latest/python-3.11" in release
     assert "Compare independent distribution builders" in release
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
