@@ -843,9 +843,9 @@ def _resolve_import_root(raw_path: str) -> Path:
             "ENGRAPHIS_IMPORT_ROOTS)")
     folder = Path(safe_path)
     if not folder.exists():
-        raise ValidationError(f"path not found: {raw_path}")
+        raise ValidationError("path not found")
     if not folder.is_dir():
-        raise ValidationError(f"not a directory: {raw_path}")
+        raise ValidationError("not a directory")
     return folder
 
 

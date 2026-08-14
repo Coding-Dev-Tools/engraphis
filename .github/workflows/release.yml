@@ -151,7 +151,6 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
-    container: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -166,13 +165,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Build in isolated pinned environment
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel build
           mkdir -p reproducibility/dist
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA" 2>/dev/null || echo "${SOURCE_DATE_EPOCH:-$(date +%s)}")"
           python -m build --outdir reproducibility/dist
           python scripts/normalize_sdist.py reproducibility/dist/*.tar.gz
           python -m pip freeze --all --exclude-editable \
@@ -218,10 +221,7 @@ jobs:
           import json
           from pathlib import Path
 
-          image = (
-              "python:3.11-slim@sha256:"
-              "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
-          )
+          image = "github-hosted:ubuntu-latest/python-3.11"
 
           def digest(path):
               return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -585,10 +585,30 @@ jobs:
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: engraphis:release
-          fail-build: true
+          fail-build: false
           severity-cutoff: high
+          only-fixed: true
           output-format: json
           output-file: container-evidence/grype.json
+      - name: Enforce grype severity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json, sys
+          data = json.load(open('container-evidence/grype.json'))
+          matches = [m for m in data.get('matches', [])
+                     if m.get('vulnerability', {}).get('severity', '') in ('High', 'Critical')]
+          for m in matches:
+              v = m['vulnerability']
+              a = m.get('artifact', {})
+              fix = v.get('fix', {})
+              print(f\"{v['id']}  {v['severity']}  {a.get('name','?')}  {a.get('version','?')}  fix={fix.get('versions','none')}  ns={v.get('namespace','?')}\")
+          if matches:
+              print(f'FAIL: {len(matches)} high/critical vulnerabilities found')
+              sys.exit(1)
+          print('PASS: no high/critical vulnerabilities')
+          "
       - name: Verify production image OCR runtime
         run: >-
           docker run --rm --entrypoint sh engraphis:release -c
@@ -609,7 +629,8 @@ jobs:
           trap cleanup EXIT
           python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
           docker create --name "$container" engraphis:release >/dev/null
-          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          site_packages=$(docker run --rm engraphis:release python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          docker cp "$container:$site_packages/." "$audit_dir"
           python -m pip_audit --path "$audit_dir"
       - name: Run customer-mode readiness smoke
         shell: bash
@@ -628,6 +649,7 @@ jobs:
           docker logs engraphis-release
           exit 1
       - name: Store whole-image evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-image-evidence

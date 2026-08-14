@@ -29,10 +29,7 @@ _TAG = re.compile(r"v([0-9]+\.[0-9]+(?:\.[0-9]+)?)\Z")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _PACKAGE_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s]+)\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_BUILDER_IMAGE = (
-    "python:3.11-slim@sha256:"
-    "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
-)
+_BUILDER_IMAGE = "github-hosted:ubuntu-latest/python-3.11"
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",
     "pip": "26.2",

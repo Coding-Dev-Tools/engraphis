@@ -404,9 +404,9 @@ def import_folder(req: FolderImportReq):
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
     if not folder.exists():
-        raise HTTPException(404, f"Path not found: {req.path}")
+        raise HTTPException(404, "Path not found")
     if not folder.is_dir():
-        raise HTTPException(400, f"Not a directory: {req.path}")
+        raise HTTPException(400, "Not a directory")
 
     namespace = req.namespace
     if namespace is None:
