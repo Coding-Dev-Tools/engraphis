@@ -991,6 +991,39 @@ def test_correct_wrong_workspace_raises_validation_error():
         s.correct(out["id"], "tampered", workspace="beta")
 
 
+def test_correct_translates_engine_value_error_to_validation_error():
+    """A ValueError from the engine must surface as ValidationError, not escape.
+
+    ``_writable_scope`` deliberately raises for a session-scoped record with no
+    session ("silently widening a session-private memory ... is a worse outcome
+    than an explicit error"). ``correct`` caught only ``KeyError``, so that
+    intentional, explicit error escaped the service layer and reached callers as
+    an opaque internal error — while ``retire``/``promote``/``merge``/
+    ``secure_erase`` all translate both.
+    """
+    s = _svc()
+    out = s.remember("A fact worth correcting.", workspace="acme")
+
+    def _boom(*a, **k):
+        raise ValueError("session scope requires session_id")
+
+    s.engine.correct = _boom
+    with pytest.raises(ValidationError, match="session scope requires"):
+        s.correct(out["id"], "replacement", workspace="acme")
+
+
+def test_pin_translates_engine_value_error_to_validation_error():
+    s = _svc()
+    out = s.remember("A fact worth pinning.", workspace="acme")
+
+    def _boom(*a, **k):
+        raise ValueError("cannot pin an expired memory")
+
+    s.engine.pin = _boom
+    with pytest.raises(ValidationError, match="cannot pin"):
+        s.pin(out["id"], workspace="acme")
+
+
 def test_promote_repo_memory_to_workspace():
     s = _svc()
     source = s.remember(
