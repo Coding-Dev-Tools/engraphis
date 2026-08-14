@@ -1,5 +1,5 @@
 # Engraphis — self-hosted AI memory engine. Local-first; you bring the LLM.
-FROM python:3.11-slim-bookworm@sha256:2e32f7d302adc1c37428355c1e646897c0c53f4fd60b6a551245fb90ee129f91 AS base
+FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1 AS base
 
 # ENGRAPHIS_HOST is deliberately NOT set here: docker-entrypoint.sh chooses IPv6 for a
 # Railway deployment (which injects RAILWAY_SERVICE_NAME) and 0.0.0.0 for ordinary Docker.
@@ -25,6 +25,7 @@ WORKDIR /app
 # gosu lets the entrypoint drop from root to the non-root app user after fixing volume
 # permissions (see docker-entrypoint.sh). Installed here for good layer caching.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends gosu tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
