@@ -24,7 +24,9 @@ import unicodedata
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol, cast
+from urllib.parse import parse_qs, unquote, urlsplit
+
 
 import numpy as np
 
@@ -81,6 +83,41 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+
+def _is_memory_database_path(path: str) -> bool:
+    """Detect SQLite memory databases including named shared-memory URIs.
+
+    Handles ``:memory:``, ``file::memory:``, and ``file:name?mode=memory``
+    (with any query parameter order).
+    """
+    text = str(path or "")
+    if not text or text == ":memory:":
+        return True
+    if not text.startswith("file:"):
+        return False
+    parsed = urlsplit(text.replace("\\", "/"))
+    uri_path = unquote(parsed.path)
+    if uri_path == ":memory:":
+        return True
+    query = parse_qs(parsed.query)
+    return "memory" in query.get("mode", [])
+
+
+def _physical_sqlite_path(path: str) -> str:
+    """Return the filesystem path represented by a regular SQLite file URI."""
+    text = str(path)
+    if not text.startswith("file:"):
+        return text
+    parsed = urlsplit(text.replace("\\", "/"))
+    if parsed.scheme != "file" or not parsed.path:
+        raise ValueError("file database URI must include a path")
+    uri_path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        uri_path = f"//{parsed.netloc}{uri_path}"
+    from urllib.request import url2pathname
+    return str(Path(url2pathname(uri_path)).expanduser())
+
+_SQLITE_CONNECT_TIMEOUT_SECONDS = 120.0
 _LLM_CONSOLIDATION_REPAIR_STATE_KEY = "__schema_v11_llm_consolidation_trust_repair"
 _LLM_CONSOLIDATION_REPAIR_STATE_VALUE = "complete"
 _LLM_EXTRACTION_REPAIR_STATE_KEY = "__schema_v12_llm_extraction_trust_repair"
@@ -1075,10 +1112,18 @@ class Store:
         :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
         callable is rejected before it can be invoked.
         """
-        self.path = path
+        # Keep named shared-memory URIs intact for lifecycle bookkeeping.  A URI such
+        # as ``file:shared?mode=memory&cache=shared`` is a logical SQLite database,
+        # not a filesystem path named ``shared``; reducing it here would let migration
+        # backups or secure-erase discovery create/inspect unrelated disk files.
+        self.path = (
+            path if _is_memory_database_path(path)
+            else _physical_sqlite_path(path) if str(path).startswith("file:")
+            else path
+        )
         self._connect = connect
         self.read_only = bool(read_only)
-        if self.read_only and path == ":memory:":
+        if self.read_only and _is_memory_database_path(path):
             raise ValueError("read-only Store requires an existing database file")
         read_only_path: Optional[str] = None
         if self.read_only:
@@ -1090,8 +1135,8 @@ class Store:
                     "open_read_only(path) method"
                 )
             read_only_path = self._preflight_read_only_path(path)
-        if path != ":memory:" and not self.read_only:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        if not _is_memory_database_path(path) and not self.read_only:
+            Path(_physical_sqlite_path(path)).parent.mkdir(parents=True, exist_ok=True)
         raw_conn = self._open_connection(read_only_path or path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
@@ -1150,10 +1195,21 @@ class Store:
                 return self._connect.open_read_only(path)  # type: ignore[attr-defined]
             return self._connect(path)
         if self.read_only:
-            uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
-            conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+            uri = Path(_physical_sqlite_path(path)).resolve().as_uri() + "?mode=ro&immutable=1"
+            conn = sqlite3.connect(
+                uri, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
+                check_same_thread=False,
+            )
+        elif str(path).startswith("file:"):
+            # Preserve all SQLite URI options, including mode=ro/rw and immutable.
+            conn = sqlite3.connect(
+                path, uri=True, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
+                check_same_thread=False,
+            )
         else:
-            conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            conn = sqlite3.connect(
+                path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS, check_same_thread=False,
+            )
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1166,7 +1222,7 @@ class Store:
         refused because an immutable connection would skip recovery and silently
         expose an incomplete snapshot.
         """
-        candidate = Path(path)
+        candidate = Path(_physical_sqlite_path(path))
         try:
             info = os.lstat(candidate)
         except OSError:
@@ -1658,10 +1714,78 @@ class Store:
 
     @staticmethod
     def _logical_digest(conn) -> str:
+        # ``iterdump()`` asks SQLite to read every table, including optional virtual
+        # tables whose extension is not loaded on the short-lived backup connection
+        # (for example sqlite-vec's ``vec0`` table during Store startup).  A serialized
+        # main database avoids that module lookup on Python builds that expose it.
+        serialize = getattr(conn, "serialize", None)
+        if callable(serialize):
+            payload = bytearray(cast(Callable[[], bytes], serialize)())
+            # SQLite may advance the change-counter, schema-cookie, and
+            # version-valid-for header fields while materializing an online backup.
+            # They describe the file image's write history, not its logical contents.
+            for offset in (24, 40, 92):
+                if len(payload) >= offset + 4:
+                    payload[offset:offset + 4] = b"\x00" * 4
+            digest = hashlib.sha256()
+            digest.update(payload)
+            return digest.hexdigest()
+
+        # Python 3.9/3.10 and several SQLCipher adapters do not expose serialize().
+        # Keep this fallback extension-agnostic: hash schema metadata and ordinary
+        # table rows directly, while recording (but never querying) virtual tables.
+        # ``iterdump()`` is deliberately not used here because it invokes each virtual
+        # table's module even when the verifier only needs an equality check.
         digest = hashlib.sha256()
-        for statement in conn.iterdump():
-            digest.update(statement.encode("utf-8"))
-            digest.update(b"\n")
+        schema_rows = conn.execute(
+            "SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_master "
+            "ORDER BY type, name, tbl_name"
+        ).fetchall()
+        virtual_tables: set[str] = set()
+        for row in schema_rows:
+            object_type = str(row[0] or "")
+            name = str(row[1] or "")
+            table_name = str(row[2] or "")
+            sql = str(row[3] or "")
+            digest.update(
+                (object_type + "\x00" + name + "\x00" + table_name + "\x00"
+                 + sql + "\n").encode("utf-8")
+            )
+            if object_type == "table" and re.search(
+                r"\bcreate\s+virtual\s+table\b", sql, re.IGNORECASE,
+            ):
+                virtual_tables.add(name)
+
+        def quote_identifier(value: str) -> str:
+            return '"' + value.replace('"', '""') + '"'
+
+        for row in schema_rows:
+            if str(row[0] or "") != "table":
+                continue
+            table_name = str(row[1] or "")
+            if table_name in virtual_tables:
+                continue
+            columns = conn.execute(
+                "PRAGMA table_info(" + quote_identifier(table_name) + ")"
+            ).fetchall()
+            digest.update(("TABLE\x00" + table_name + "\x00").encode("utf-8"))
+            if not columns:
+                continue
+            expressions = ", ".join(
+                "quote(" + quote_identifier(str(column[1])) + ")"
+                for column in columns
+            )
+            order_by = ", ".join(
+                quote_identifier(str(column[1])) for column in columns
+            )
+            for values in conn.execute(
+                "SELECT " + expressions + " FROM " + quote_identifier(table_name)
+                + " ORDER BY " + order_by
+            ).fetchall():
+                digest.update(
+                    ("\x00".join(str(value) for value in values) + "\n")
+                    .encode("utf-8")
+                )
         return digest.hexdigest()
 
     def _cleanup_v4_backup_temps(self, backup_path: str) -> None:
@@ -1674,12 +1798,25 @@ class Store:
             return
         changed = False
         for entry in entries:
-            if not pattern.fullmatch(entry.name):
+            stage_match = pattern.fullmatch(entry.name)
+            sidecar_match = re.fullmatch(
+                r"^%s\.tmp-[0-9]+-[0-9]+-[0-9]+-(?:journal|wal|shm)$"
+                % re.escape(stable.name),
+                entry.name,
+            )
+            if not stage_match and not sidecar_match:
                 continue
             try:
                 info = os.lstat(str(entry))
                 if not stat.S_ISREG(info.st_mode):
                     continue
+                # A sidecar without its randomized stage is residue from a failed
+                # attempt. If the stage still exists, leave both alone: another
+                # process may still be writing that private snapshot.
+                if sidecar_match:
+                    stage = entry.with_name(entry.name.rsplit("-", 1)[0])
+                    if stage.exists():
+                        continue
                 if getattr(info, "st_nlink", 1) == 1:
                     entry.unlink()
                     changed = True
@@ -1712,7 +1849,7 @@ class Store:
         Preserve the legacy v4/v5 names and use the target schema version for newer
         backups.
         """
-        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+        if not self.path or _is_memory_database_path(self.path):
             raise RuntimeError("schema migration requires a durable pre-migration backup")
         backup_version = max(4, min(SCHEMA_VERSION, previous_version + 1))
         backup_path = f"{self.path}.pre-migration-v{backup_version}.bak"
@@ -1801,9 +1938,23 @@ class Store:
                     os.unlink(temp_path)
             except OSError:
                 pass
+            for suffix in ("-journal", "-wal", "-shm"):
+                try:
+                    sidecar = temp_path + suffix
+                    if os.path.exists(sidecar):
+                        os.unlink(sidecar)
+                except OSError:
+                    pass
+            lowered = str(exc).casefold()
+            if "locked" in lowered or "busy" in lowered:
+                reason = "the database is busy"
+            elif "no such module" in lowered:
+                reason = "an optional SQLite extension could not be loaded"
+            else:
+                reason = "backup verification failed"
             raise RuntimeError(
                 f"schema v{backup_version} migration aborted: could not create and verify the "
-                "pre-migration backup"
+                f"pre-migration backup ({reason})"
             ) from exc
 
     def _execute_script_transactional(self, script: str) -> None:
@@ -2020,7 +2171,15 @@ class Store:
             self.conn.execute(f"DROP TABLE temp.{name}")
 
     # ── schema ──────────────────────────────────────────────────────────────
-    def init_schema(self) -> None:
+    def _schema_migration_state(self) -> tuple[int, bool]:
+        """Read schema state and cache the shape repairs needed by ``_apply_schema``.
+
+        This is intentionally repeatable. A second process can inspect an old schema,
+        wait for the first process to finish its migration, and then acquire the writer
+        lock with stale observations. Re-reading the state under that lock lets it
+        recognize the completed migration instead of creating a second backup or
+        replaying transforms against the now-current database.
+        """
         objects = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','view','index','trigger') "
             "AND name NOT LIKE 'sqlite_%'"
@@ -2094,10 +2253,20 @@ class Store:
             or tombstones_need_export_class
             or sync_exports_need_table
         )
+        return previous_version, needs_backup
+
+    def init_schema(self) -> None:
+        # Capture the pre-lock view as well. A competing process may read the old
+        # version before it waits on BEGIN IMMEDIATE; the authoritative view is still
+        # re-read below after that wait completes.
+        self._schema_migration_state()
         try:
             # Reserve the writer before the snapshot. This is read/locking state only;
             # every schema/data transform remains inside the transaction below.
+            # Re-read after waiting: another process may have completed the whole
+            # migration while this connection was waiting on BEGIN IMMEDIATE.
             self.conn.execute("BEGIN IMMEDIATE")
+            previous_version, needs_backup = self._schema_migration_state()
             if needs_backup:
                 self._backup_before_v4_migration(previous_version=previous_version)
             self._apply_schema(previous_version)
@@ -3745,7 +3914,7 @@ class Store:
         """When this Store is bound to a workspace allow-list, refuse to create or
         retrieve a workspace outside it. This is the hard isolation boundary applied
         at the persistence layer so no caller (including a future sync path) can
-        bypass ENGRAPHIS_WORKSPACES by going directly to Store instead of through
+        bypass an explicit service binding by going directly to Store instead of through
         MemoryService."""
         if self.allowed_workspaces is not None and name not in self.allowed_workspaces:
             raise ValueError(f"workspace '{name}' is not permitted on this instance")
@@ -4669,6 +4838,10 @@ class Store:
         norm = float(np.linalg.norm(v.astype(np.float64, copy=False)))
         if norm > 0:
             v = v / norm
+            # Pin back to float32 after division. NumPy 1.24-1.26 value-based promotion
+            # can widen to float64 when the Python float norm is not losslessly
+            # representable in float32, corrupting tobytes() byte count downstream.
+            v = v.astype(np.float32, copy=False)
         self.conn.execute(
             "INSERT OR REPLACE INTO mem_vectors(id, dim, vector, model) VALUES (?,?,?,?)",
             (memory_id, int(v.shape[0]), v.tobytes(), model),
@@ -4891,9 +5064,19 @@ class Store:
         """Include deterministic sync-conflict successors in one erase operation."""
         if not cls._has_table(conn, "memories"):
             return [memory_id]
+        primary = conn.execute(
+            "SELECT id, workspace_id, repo_id FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        if primary is None:
+            return [memory_id]
         rows = conn.execute(
-            "SELECT id, metadata, provenance FROM memories"
+            """SELECT id, workspace_id, repo_id, metadata, provenance
+               FROM memories
+               WHERE workspace_id IS ? AND repo_id IS ?""",
+            (primary["workspace_id"], primary["repo_id"]),
         ).fetchall()
+        same_authority_ids = {str(row["id"]) for row in rows}
         parents: dict[str, set[str]] = {}
         for row in rows:
             metadata = _loads(row["metadata"], {})
@@ -4901,12 +5084,22 @@ class Store:
             metadata = metadata if isinstance(metadata, dict) else {}
             provenance = provenance if isinstance(provenance, dict) else {}
             sync_conflict = metadata.get("sync_conflict")
-            candidates = {provenance.get("conflict_of")}
-            if isinstance(sync_conflict, dict):
-                candidates.add(sync_conflict.get("memory_id"))
+            provenance_parent = provenance.get("conflict_of")
+            metadata_parent = (
+                sync_conflict.get("memory_id")
+                if isinstance(sync_conflict, dict) else None
+            )
+            # A caller-controlled pointer is only a valid erase lineage when it
+            # resolves to a memory in the primary's authoritative workspace/repo.
+            # If both persisted envelopes claim a parent, they must agree; otherwise
+            # an untrusted row could widen the destructive target set by smuggling a
+            # foreign ID through one of the two fields.
+            if provenance_parent and metadata_parent and provenance_parent != metadata_parent:
+                continue
+            candidates = {provenance_parent, metadata_parent}
             for parent in candidates:
                 parent_id = str(parent or "")
-                if parent_id:
+                if parent_id and parent_id in same_authority_ids:
                     parents.setdefault(parent_id, set()).add(str(row["id"]))
         targets = [memory_id]
         seen = {memory_id}
@@ -4916,6 +5109,15 @@ class Store:
                     seen.add(child)
                     targets.append(child)
         return targets
+
+    def secure_erase_target_ids(self, memory_id: str) -> list[str]:
+        """Return the local memory IDs covered by a secure erase without mutating state.
+
+        ``MemoryEngine`` uses this read-only view to coordinate deletion with an injected
+        external vector index.  The destructive operation accepts the same ordered IDs so
+        both stores cannot silently diverge when a sync-conflict successor is present.
+        """
+        return self._secure_erase_targets(self.conn, memory_id)
 
     @classmethod
     def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
@@ -4950,7 +5152,7 @@ class Store:
             name for name in (
                 "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
                 "memory_entities", "edge_supports", "edges", "entities", "mem_links",
-                "audit",
+                "source_imports", "source_import_items", "audit",
             ) if cls._has_table(conn, name)
         }
         incident_entities: list[str] = []
@@ -4968,8 +5170,17 @@ class Store:
             ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
             ("code_memory_links", "memory_id"), ("memory_entities", "memory_id"),
             ("edge_supports", "memory_id"),
+            ("source_imports", "memory_id"),
         ):
             if table in tables:
+                if table == "source_imports" and "source_import_items" in tables:
+                    # source_id uses ON DELETE SET NULL, so erase per-job paths before
+                    # deleting the manifest row that identifies them.
+                    conn.execute(
+                        "DELETE FROM source_import_items WHERE source_id IN "
+                        "(SELECT id FROM source_imports WHERE memory_id=?)",
+                        (memory_id,),
+                    )
                 conn.execute(f"DELETE FROM {table} WHERE {column}=?", (memory_id,))
         if "mem_links" in tables:
             conn.execute("DELETE FROM mem_links WHERE a=? OR b=?", (memory_id, memory_id))
@@ -5108,6 +5319,11 @@ class Store:
                 result["wal"] = "failed"
         return result
 
+    def run_secure_erase_maintenance(self) -> dict:
+        """Run physical cleanup after the secure-erase transaction has committed."""
+        durable = bool(self.path) and not _is_memory_database_path(self.path)
+        return self._checkpoint_and_vacuum(self.conn, durable=durable)
+
     def _recognised_local_backups(self) -> list[Path]:
         """Return recovery artefacts this Store created and can safely identify.
 
@@ -5115,7 +5331,7 @@ class Store:
         another process's encrypted backup location. Those remain an explicit operator
         obligation in the secure-erasure result and documentation.
         """
-        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+        if not self.path or _is_memory_database_path(self.path):
             return []
         primary = Path(self.path).resolve()
         parent = primary.parent
@@ -5145,7 +5361,10 @@ class Store:
                     continue
         return sorted(set(found), key=lambda value: str(value))
 
-    def secure_erase_memory(self, memory_id: str, *, actor: str = "user") -> dict:
+    def secure_erase_memory(
+            self, memory_id: str, *, actor: str = "user",
+            _target_ids: Optional[Iterable[str]] = None,
+            _defer_maintenance: bool = False) -> dict:
         """Irreversibly erase one memory plus local index copies and known backups.
 
         This is a breach-remediation operation, not the normal ``retire`` lifecycle.
@@ -5153,14 +5372,27 @@ class Store:
         state, audit details for that record, WAL contents when SQLite can checkpoint,
         and recognised local SQLite recovery backups. OS snapshots, copies, remote sync
         peers, and a process that already read the secret cannot be recalled or erased.
+
+        Physical maintenance is deferred when this method participates in an outer
+        transaction. Call :meth:`run_secure_erase_maintenance` after that transaction
+        commits; running ``VACUUM`` or a WAL checkpoint before then is invalid.
         """
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         try:
-            # Mint the origin before opening the erase transaction.  ``device_id`` may
-            # need to write sync metadata on a new database; keeping that write outside
-            # the destructive transaction means the deletion and terminal tombstone
-            # commit (or roll back) as one unit.
+            # Hold the write lock while the authoritative target set is read and erased.
+            # A vector-index coordinator may pass a snapshot from before its external
+            # delete, but a sync/write successor that commits before this boundary must
+            # be included in the same destructive operation.
+            if owns_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            # Mint the origin before opening the erase transaction. The device identity may
+                        # need to write sync metadata on a new database; keeping that write outside
+                        # the destructive transaction means the deletion and terminal tombstone
+                        # commit (or roll back) as one unit.
             device_id = self.device_id()
+            # Recompute under the transaction even when the engine supplies its earlier
+            # vector-index snapshot. Keep accepting ``_target_ids`` for API compatibility,
+            # but never let a stale or forged list widen the authoritative target set.
             targets = self._secure_erase_targets(self.conn, memory_id)
             current_rows = []
             for target_id in targets:
@@ -5202,8 +5434,11 @@ class Store:
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
             raise
-        durable = self.path not in (":memory:", "") and not self.path.startswith("file::memory:")
-        maintenance = self._checkpoint_and_vacuum(self.conn, durable=durable)
+        maintenance = (
+            {"secure_delete": True, "wal": "deferred", "vacuum": "deferred"}
+            if _defer_maintenance or not owns_transaction
+            else self.run_secure_erase_maintenance()
+        )
 
         backup_processed = 0
         backup_failed = 0
@@ -6188,7 +6423,13 @@ class Store:
             "SELECT s.id, s.edge_id, s.memory_id, s.source_kind, s.confidence, "
             "s.valid_from, s.valid_to, s.valid_to_recorded_at, "
             "s.ingested_at, s.expired_at, s.provenance "
-            "FROM edge_supports s JOIN edges e ON e.id=s.edge_id "
+            # Keep requested support IDs as the outer lookup. SQLite otherwise
+            # reorders this inner join to scan every workspace edge for *each* IN
+            # clause chunk, then probes its supports. Scene construction can pass
+            # tens of thousands of selected edge IDs, making that legal plan dominate
+            # load time. CROSS JOIN fixes only loop order; its ON predicate retains
+            # the exact inner-join and scope/temporal semantics.
+            "FROM edge_supports s CROSS JOIN edges e ON e.id=s.edge_id "
             "WHERE (s.valid_from IS NULL OR s.valid_from<=?) "
             "AND (s.valid_to IS NULL OR ?<s.valid_to "
             "OR (s.valid_to_recorded_at IS NOT NULL "
@@ -7858,10 +8099,33 @@ class Store:
         ).fetchall()
         return [_public_receipt_row(dict(row)) for row in rows]
 
+    @staticmethod
+    def _receipt_workspace_scope(
+        *, workspace_id: Optional[str], workspace_ids: Optional[Iterable[str]],
+    ) -> tuple[list[tuple[str, list[str]]], Optional[list[str]]]:
+        """Build bounded receipt predicates and retain the exact verification scope."""
+        if workspace_id is not None and workspace_ids is not None:
+            raise ValueError("workspace_id and workspace_ids are mutually exclusive")
+        if workspace_id is not None:
+            ids = [str(workspace_id)]
+            return [("workspace_id=?", ids)], ids
+        if workspace_ids is None:
+            return [("1=1", [])], None
+        ids = list(dict.fromkeys(str(value) for value in workspace_ids))
+        if not ids:
+            return [("1=0", [])], ids
+        scopes: list[tuple[str, list[str]]] = []
+        for start in range(0, len(ids), IN_CLAUSE_CHUNK):
+            chunk = ids[start:start + IN_CLAUSE_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            scopes.append((f"workspace_id IN ({placeholders})", chunk))
+        return scopes, ids
+
     def context_savings(
         self,
         *,
-        workspace_id: str,
+        workspace_id: Optional[str] = None,
+        workspace_ids: Optional[Iterable[str]] = None,
         repo_id: Optional[str] = None,
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
@@ -7872,8 +8136,10 @@ class Store:
         Token counts are kept separate by counter identity: a tokenizer change must not turn
         into a misleading cumulative total. Invalid, missing, and incomplete receipts remain
         visible only as counts; their payload is never reflected into this summary. The
-        workspace-wide receipt-chain validity is returned alongside any repo-scoped aggregate
-        so callers can distinguish useful local accounting from evidence eligible for audit.
+        receipt-chain validity is returned alongside the aggregate so callers can distinguish
+        useful local accounting from evidence eligible for audit. Pass ``workspace_ids`` when
+        the caller has an authorization-filtered set of workspaces; omit both workspace
+        arguments to aggregate the complete local history.
         """
         if from_ts is not None and not math.isfinite(float(from_ts)):
             raise ValueError("from_ts must be finite")
@@ -7886,23 +8152,53 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        verification = self.verify_receipts(workspace_id=workspace_id)
-        where = "workspace_id=?"
-        params: list[Any] = [workspace_id]
-        if repo_id is not None:
-            where += " AND repo_id=?"
-            params.append(repo_id)
-        if from_ts is not None:
-            where += " AND ts>=?"
-            params.append(float(from_ts))
-        if to_ts is not None:
-            where += " AND ts<?"
-            params.append(float(to_ts))
-        rows = self.conn.execute(
-            "SELECT id, repo_id, ts, payload, prev_hash, receipt_hash "
-            "FROM operation_receipts WHERE " + where,
-            params,
-        ).fetchall()
+        workspace_scopes, scoped_workspace_ids = self._receipt_workspace_scope(
+            workspace_id=workspace_id, workspace_ids=workspace_ids,
+        )
+        rows = []
+        for workspace_where, workspace_params in workspace_scopes:
+            where = workspace_where
+            params: list[Any] = list(workspace_params)
+            if repo_id is not None:
+                where += " AND repo_id=?"
+                params.append(repo_id)
+            if from_ts is not None:
+                where += " AND ts>=?"
+                params.append(float(from_ts))
+            if to_ts is not None:
+                where += " AND ts<?"
+                params.append(float(to_ts))
+            rows.extend(self.conn.execute(
+                "SELECT id, workspace_id, repo_id, ts, payload, prev_hash, receipt_hash "
+                "FROM operation_receipts WHERE " + where,
+                params,
+            ).fetchall())
+        has_active_filters = repo_id is not None or from_ts is not None or to_ts is not None
+        if has_active_filters and rows:
+            verification_ids = sorted({str(r["workspace_id"]) for r in rows if r["workspace_id"]})
+        elif scoped_workspace_ids is not None:
+            verification_ids = scoped_workspace_ids
+        else:
+            verification_ids = [
+                str(row["workspace_id"])
+                for row in self.conn.execute(
+                    "SELECT DISTINCT workspace_id FROM operation_receipts "
+                    "WHERE workspace_id IS NOT NULL"
+                ).fetchall()
+            ]
+        verifications = [
+            self.verify_receipts(workspace_id=scope_id)
+            for scope_id in verification_ids
+        ]
+        verification = {
+            "valid": all(item["valid"] for item in verifications),
+            "errors": [
+                {**error, "workspace_id": scope_id}
+                for scope_id, item in zip(verification_ids, verifications)
+                for error in item["errors"]
+            ],
+            "checked_count": len(verifications),
+        }
         totals = {
             "receipt_count": 0,
             "usage_receipt_count": 0,
@@ -8084,7 +8380,10 @@ class Store:
             if (
                 receipt.get("invalid_payload")
                 or receipt.get("scope_digest")
-                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+                != _receipt_scope_digest(
+                    workspace_id if workspace_id is not None else str(raw_row["workspace_id"] or ""),
+                    raw_row["repo_id"],
+                )
             ):
                 if release_version is None:
                     totals["receipt_count"] += 1
@@ -8163,7 +8462,9 @@ class Store:
 
 
     def context_savings_grouped(
-        self, *, workspace_id: str, repo_id: Optional[str] = None,
+        self, *, workspace_id: Optional[str] = None,
+        workspace_ids: Optional[Iterable[str]] = None,
+        repo_id: Optional[str] = None,
         group_by: str = "workspace",
         from_ts: Optional[float] = None,
         to_ts: Optional[float] = None,
@@ -8193,22 +8494,27 @@ class Store:
             if not normalized_release:
                 raise ValueError("release_version must be a semantic version")
             release_version = normalized_release
-        where = "workspace_id=?"
-        params: list[Any] = [workspace_id]
-        if repo_id is not None:
-            where += " AND repo_id=?"
-            params.append(repo_id)
-        if from_ts is not None:
-            where += " AND ts>=?"
-            params.append(float(from_ts))
-        if to_ts is not None:
-            where += " AND ts<?"
-            params.append(float(to_ts))
-        rows = self.conn.execute(
-            "SELECT id, ts, repo_id, actor, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
-            params,
-        ).fetchall()
-        import time as _time
+        workspace_scopes, scoped_workspace_ids = self._receipt_workspace_scope(
+            workspace_id=workspace_id, workspace_ids=workspace_ids,
+        )
+        rows = []
+        for workspace_where, workspace_params in workspace_scopes:
+            where = workspace_where
+            params: list[Any] = list(workspace_params)
+            if repo_id is not None:
+                where += " AND repo_id=?"
+                params.append(repo_id)
+            if from_ts is not None:
+                where += " AND ts>=?"
+                params.append(float(from_ts))
+            if to_ts is not None:
+                where += " AND ts<?"
+                params.append(float(to_ts))
+            rows.extend(self.conn.execute(
+                "SELECT id, workspace_id, ts, repo_id, actor, payload, prev_hash, receipt_hash "
+                "FROM operation_receipts WHERE " + where,
+                params,
+            ).fetchall())
         groups: dict[tuple[str, str], dict] = {}
 
         def _bucket() -> dict:
@@ -8237,7 +8543,10 @@ class Store:
             if (
                 receipt.get("invalid_payload")
                 or receipt.get("scope_digest")
-                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+                != _receipt_scope_digest(
+                    workspace_id if workspace_id is not None else str(raw_row["workspace_id"] or ""),
+                    raw_row["repo_id"],
+                )
             ):
                 continue
             metadata = receipt.get("metadata")
@@ -8270,19 +8579,18 @@ class Store:
             ):
                 continue
             if group_by == "workspace":
-                key = workspace_id
+                key = str(raw_row["workspace_id"] or "(none)")
             elif group_by == "repo":
                 key = str(raw_row["repo_id"] or "(none)")
             elif group_by == "agent":
                 key = str(raw_row["actor"] or "system")
             elif group_by == "day":
                 try:
-                    day = _time.strftime("%Y-%m-%d", _time.gmtime(float(raw_row["ts"])))
+                    day = time.strftime("%Y-%m-%d", time.gmtime(float(raw_row["ts"])))
                 except (TypeError, ValueError, OverflowError, OSError):
                     day = "unknown"
                 key = day
-            else:
-                key = workspace_id
+            # group_by is validated above; no fallback needed
             token_counter = str(usage.get("token_counter") or "unknown")
             grp = groups.setdefault((key, token_counter), _bucket())
             _add(grp, usage)

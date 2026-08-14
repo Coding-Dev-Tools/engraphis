@@ -1,5 +1,5 @@
 name: engraphis
-version: 1.6.1
+version: 1.7.0
 description: "Engraphis local memory provider with scoped recall and bounded turn history."
 pip_dependencies: []
 requires_env: []

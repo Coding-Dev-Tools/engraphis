@@ -28,7 +28,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
 
-from engraphis.core.interfaces import ResourceDocument
+from engraphis.core.interfaces import ResourceDocument, ResourceExtractor
+from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
 
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".rst", ".log", ".json", ".jsonl", ".csv", ".tsv",
@@ -107,10 +108,6 @@ def _base_metadata(name: str, data: bytes) -> dict:
         "resource_sha256": hashlib.sha256(data).hexdigest(),
     }
 
-
-def _is_reparse_point(info: os.stat_result) -> bool:
-    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & marker)
 
 
 def _snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
@@ -445,5 +442,5 @@ class LocalResourceExtractor:
         return self.extract_bytes(source.name, raw)
 
 
-def get_resource_extractor():
+def get_resource_extractor() -> ResourceExtractor:
     return LocalResourceExtractor()

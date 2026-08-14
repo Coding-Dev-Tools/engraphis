@@ -10,6 +10,8 @@ import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
+from pydantic import ValidationError  # noqa: E402
+
 from engraphis.routes import v2_api  # noqa: E402
 
 
@@ -113,6 +115,16 @@ def test_code_routes_forward_explicit_capacity(monkeypatch) -> None:
     assert calls["path"]["capacity"] == 321
     assert calls["impact"]["capacity"] == 654
     assert calls["export"]["capacity"] == 987
+
+
+@pytest.mark.parametrize("changed_files", [None, []])
+def test_code_impact_requires_at_least_one_changed_file(changed_files) -> None:
+    payload = {"workspace": "acme", "repo": "repo"}
+    if changed_files is not None:
+        payload["changed_files"] = changed_files
+
+    with pytest.raises(ValidationError):
+        v2_api._CodeImpactReq(**payload)
 
 
 def test_automation_get_does_not_bootstrap_or_write(monkeypatch) -> None:

@@ -393,7 +393,7 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
                     repo_id=repo_id,
                     mtype=mtype,
                     scope=Scope.REPO,
-                    title=f"trajectory:{trajectory_id}:state:{state_index}:part:{chunk_index}",
+                    title=f"trajectory:{trajectory_id}:state:{state_index}:{mtype}:part:{chunk_index}",
                     metadata={
                         "benchmark": "LongMemEval-V2",
                         "trajectory_id": trajectory_id,

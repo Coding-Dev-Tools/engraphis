@@ -5,28 +5,238 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-
-## [1.6.1] - 2026-08-14
-
-Security hotfix for the v1.6 release line.
-
-### Security
-
-- HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths
-  back to the client, preventing filesystem structure leakage (SEC-001).
-- The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
-  PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
+## [1.7] - 2026-08-14
 
 ### Changed
 
-- Version surfaces bumped to `1.6.1` across pyproject, `__init__.py`, commercial manifest,
-  plugin manifests, and Hermes integration.
 
+- Direct black-hole children now receive compact, deterministic orbital lanes near the black
+  hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
+  clearance, while community-child planets remain in their local moving frame; oversized Galaxy
+  scenes seed the same lanes before their kinematic clock starts.
+- Complete Galaxy packing now uses a 4% painted-envelope clearance instead of a blanket 15%
+  radial allowance, keeping solar-system carriers materially denser around the black-hole
+  interior while preserving non-overlap.
+- Explicit `orbits` links from the black hole now promote community anchors and their declared
+  stellar children into the central orbital carrier group, so the Orbital speed control moves
+  the connected nodes in both live and oversized Galaxy paths.
+- Every Galaxy body now receives both motion frames: its top-level system carrier orbits the
+  black hole, while the body follows its immediate star/planet carrier with cached local phase;
+  legacy community metadata and nested moons use the same hierarchy without phase rewinds.
+- Any direct black-hole edge now promotes its endpoint into the central orbital carrier group;
+  relation labels no longer suppress direct star/system motion.
+- Galaxy physics ticks now explicitly invalidate the canvas camera, so advancing orbital
+  coordinates repaints visibly even when force-graph's automatic redraw loop is paused.
+- Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
+  with matching evidence, connector, payload, and full-loader ceilings; live-render safety
+  thresholds remain unchanged so oversized scenes stay on the static/kinematic path.
+- Show all nodes now keeps the complete sidebar live: deterministic worker layouts respond to
+  repel, link-distance, gravity, and advanced force controls; minimum relations, unlinked nodes,
+  focus depth, relation layers, ghosts, and auto-collapse filter the LOD scene without a reload.
+  Capped directional relation flow, reduced-motion fallbacks, visible-count status, exact-repository
+  code overlays, and a 200,000-link worker guard complete the release safety contract.
+
+- Galaxy admission now uses a tighter default carrier gap and calibrated orbital slack, keeping
+  more complete solar systems in the black-hole interior without sacrificing painted clearance.
+
+- Galaxy mode now exposes normalized controls for gravitational constant, compact black-hole
+  mass, independent local-solar gravity, space friction, edge-spring stiffness, and orbit
+  pause/play. The fixed-step Velocity Verlet field superposes black-hole carrier motion with
+  softened dominant-star orbits, adds bounded near-horizon frame dragging, differential tidal
+  stretching, and carrier-only orbital decay, preserves Hooke tethers and short-range
+  repulsion, and captures sub-escape drag releases into their authored star system while high
+  velocity releases escape. A bounded canvas layer renders the central gravity well, lens halo,
+  short trails, and up to 24 shallow local-star wells without adding simulation bodies.
+- The dashboard Galaxy graph now caches its outer safety radius at 2× the initial painted
+  extent; escaped nodes are confined to that fixed envelope instead of expanding it.
+- The Galaxy gravity slider now spans `0..400` while retaining the release-stable default
+  black-hole field of `240` and local field of `120`. Independent community stars run on a 2.5×
+  orbital clock and retain the calibrated default stellar well when Gravity is zero. An explicit
+  black hole now retains a smaller `24`-setting floor at the loose endpoint, so neither solar
+  systems nor their planets silently stop while the displayed control remains at zero.
+- The Galaxy default orbital separation is now `60`, a 25% increase from `48`. Link and contact
+  projections remain contractive and correction-capped so dense layouts cannot overshoot or
+  ping-pong. Same-system contacts project along each declared stellar orbit so they preserve
+  radius and relative velocity while the dominant star remains fixed in the local system frame.
+- Galaxy's `Orbital speed` control now scales local stellar rotation and whole-system rotation
+  around the central galaxy anchor in both live and oversized kinematic layouts. Its faster
+  endpoint also gives planets a modest 6% larger local orbital radius while the midpoint remains
+  unchanged; saved views continue using `repel`.
+- Direct black-hole graph connections now classify their non-anchor nodes as black-hole
+  satellites, including legacy payloads without `system_anchor_id`, so those nodes rotate with
+  the same Orbital speed phase.
+- Carrier orbit support now adopts a node's post-contact phase before advancing it, preventing
+  collision or boundary corrections from snapping nodes back to a stale lane angle and producing
+  visible jitter.
+- Oversized Galaxy fallback layouts now use the complete gravity range instead of saturating near
+  the lower end of the slider.
+- Complete Galaxy overview scenes remain expanded and physically live through 1,000 nodes and
+  2,000 relations; larger Galaxy scenes and non-Galaxy full views retain the deterministic
+  fallback.
+- Historical graph views now keep at least one ghost relation's endpoints together under
+  undersized node caps, and ghost evidence drilldowns resolve invalidated supporting memories
+  instead of a colliding live canonical alias.
+
+- The source-import consolidation loop now uses union-find (path halving) to merge overlapping
+  clusters, replacing an O(n²) nested scan with near-linear time. The `consolidation_evidence_cache`
+  is bounded to 1000 entries with clear-on-overflow to prevent unbounded memory growth.
+- Duplicate `_is_reparse_point` implementations across 4 modules (documents, obsidian, resources,
+  vault) are extracted to a shared `core/fsutil.is_reparse_point` helper, eliminating code drift.
+- Backend factory functions (`get_embedder`, `get_vector_index`, `get_transport`, `get_extractor`,
+  `get_resource_extractor`, `get_postgres_introspector`) now declare Protocol-based return types,
+  making the interface contract explicit and enabling static type checking.
+- Graph visibility SQL helpers now use parameterized queries instead of `repr(float)` string
+  interpolation, eliminating a fragile pattern that could theoretically be exploited if float
+  representation ever produced non-numeric characters. The dead `_graph_edge_visibility_sql`
+  helper is removed; `_graph_edge_history_visibility_sql` returns `(sql, params)` tuple.
+- The dashboard graph scene endpoint (`/api/graph/scene`) now accepts a `presentation`
+  query parameter (`quality` or `all`); the `all` profile requests the complete entity
+  projection up to 20,000 nodes and 200,000 relationships with an explicit worker-backed
+  LOD renderer, while `quality` retains the existing overview cap.
+- Galaxy overview now retains the strongest cross-community bridge edge for every visible
+  system pair plus every direct global-anchor link, so inter-system and black-hole
+  relationships appear connected instead of isolated.
+- Added `docs/GRAPH_PERFORMANCE.md` documenting the two graph presentation profiles,
+  worker layout, progressive rendering, and the 20,000-node / 200,000-relation safety
+  ceilings.
+
+### Fixed
+
+- Galaxy layout now packs each complete solar-system envelope before orbital seeding and keeps
+  those envelopes separated with rigid carrier translations during live motion. Compact server
+  targets can no longer stack large systems near the black hole, while local planet positions,
+  velocities, event-horizon clearance, and the finite outer boundary remain intact.
+- Galaxy hierarchy authority is now label-independent: an authored `anchor_role="global"`
+  selects the central mass regardless of its display name or evidence mass, while unannotated
+  compatibility scenes fall back deterministically through mass, rank, degree, and stable ID.
+- The central black-hole adornment now advances a visible spin phase with the Galaxy physics
+  clock, so an otherwise satellite-free core no longer appears frozen while remaining the fixed
+  origin for the surrounding galaxy.
+- Near-horizon curvature is now measured from each system's dominant-star carrier through a
+  bounded black-hole-scale band. A wide solar system can no longer be misclassified as already
+  inside the gravity well and have its ordinary galactic angular momentum drained.
+- Galaxy systems revealed after the initial render, restored with zeroed velocity, or shown as
+  singletons now receive their own black-hole-frame tangential admission instead of being marked
+  seeded while stationary. Oversized Complete views use a bounded node-only hierarchical orbit
+  clock, and visible historical ghosts move as massless test particles without entering gravity,
+  contacts, or momentum.
+- Galaxy members that appear before their eventual star, arrive through a later reveal, change
+  parent systems, or return with a zeroed local phase now receive one star-relative circular seed
+  without recoiling the dominant node. Existing healthy stellar orbits remain untouched.
+- Dominant community stars now remain inertial at the centre of their moving solar-system frame.
+  Local gravity, stellar contact, dense separation, seeding, speed limiting, and the oversized
+  kinematic fallback move planets around that star instead of wobbling the star with its planets.
+- Galaxy Reheat now wakes the persistent fixed-step clock without injecting bonus physics slices,
+  and cross-system separation is bounded so it cannot kick entire solar systems into a visible
+  fast-forward, ping-pong, or speed-cap pulse.
+- Ledger graph reloads now retire and cache-bust a renderer that fetched successfully but failed
+  to register, instead of replaying the same broken asset response.
+- Existing Galaxy preferences migrate only the retired `48` orbital-separation default to `60`;
+  deliberate custom values, including Gravity `0`, remain unchanged.
+
+### Security
+
+- HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths back
+  to the client, preventing filesystem structure leakage (SEC-001).
+- Graph visibility SQL helpers now use parameterized queries instead of `repr(float)` string
+  interpolation, eliminating a fragile SQL construction pattern (SEC-002).
+- The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
+  PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
 ## [1.6] - 2026-08-08
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
 local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
 stronger release and evaluation evidence.
+
+### Changed
+
+- The dashboard graph now separates two explicit presentation budgets. **High quality** keeps the
+  interactive renderer for focused exploration, while **Show all nodes** requests the complete
+  entity projection and uses a worker-backed level-of-detail renderer with batched WebGL2 points,
+  a bounded Canvas fallback, progressive relationship disclosure, and no live force simulation.
+  The all-node profile supports up to 20,000 entities and 200,000 relationships; larger filtered
+  results fail with an explicit capacity response instead of silently sampling an incomplete graph.
+  Repository and entity-type filters remain the supported route for narrowing oversized views.
+- The Ledger knowledge graph now defaults to evidence-mass Galaxy gravity. The `galaxy-v6`
+  scene contract retains the magnitude of degree, PageRank, support, and repository evidence;
+  one mass value determines both visibly distinct star radius and gravitational pull. Deterministic
+  mass-ranked cores and orbital bands form local solar systems. The highest-evidence node becomes
+  the central black hole, rendered at least twice the ordinary evidence radius so its event horizon
+  remains visible at minimum Node size. Deterministic logarithmic arms seed a non-uniform disk, and
+  a fixed-step leapfrog clock advances eccentric, differential system orbits through an
+  evidence-derived core-plus-halo potential. Gravity now treats the dominant evidence node as
+  the explicit black-hole source: its field is `240` at the default slider and `864` at maximum,
+  while local solar-system, bridge, and drag gravity receives exactly half (`120` and `432`). The
+  smooth response remains true-zero and monotonic, and the rest of the core community contributes
+  through the softened halo rather than silently inflating the black-hole node's mass. External
+  solar systems also exert a weaker softened mutual field on one another: nearby evidence-heavy
+  systems perturb each other without requiring a relation edge, while the black hole remains the
+  dominant galaxy-wide potential.
+  The controlled centre pull is also doubled, retaining an immediate radial response rather than
+  hiding the stronger field behind a slower projector. Galaxy dynamics no
+  longer depend on D3 alpha decay, render cadence, or
+  force-directed settling. Galactic and local-system motion now uses a `0.021328125` fixed timestep,
+  another 30% slower than the preceding `0.03046875` cadence, while direct pointer movement remains responsive.
+  Every live seed coordinate and local orbit begins another 20% inward, putting
+  system centers at 40% of the original Galaxy radius. While live, the black-hole frame follows a
+  controlled inward spiral: Gravity 0 holds the loose seeded radius, and default/maximum convergence
+  now advances the same inward trajectory at 70% of its immediately preceding speed. Gravity slider input also
+  applies an immediate, reversible system-center response without changing local geometry or velocity:
+  its full range spans 40% radius contraction, and default-to-maximum visibly contracts about 31%
+  synchronously while maximum gravity retains its 3.6x field;
+  outward attempts still receive a 110% radial counter-projection and can never increase their
+  radius. Link distance now drives same-system evidence springs with twice the prior response and
+  a squared scale curve. Its default is now `8`, giving connected nodes a 0.25x rest length, 75%
+  tighter than the preceding default, while the full range still spans 1/16x tight orbits through
+  25x loose orbits without allowing
+  cross-system relations to collapse the galaxy. A bounded mass-weighted positional relation
+  constraint makes Link distance respond immediately while preserving each solar system's centre
+  of mass. Orbital separation now owns an explicit same-system safety envelope instead of relying
+  on an imperceptible softening side effect: both its positional response and cushion scale are
+  doubled, spanning zero added space through 30 world units while preserving evidence-mass centre
+  of mass and removing closing energy. Dense projections retain the requested
+  compact radius and report unavoidable projected overlap instead of silently expanding the disk.
+  Near the core, the direct close-encounter term is 25% lower and its weight moves into the smooth
+  halo, reducing ejection without weakening the total evidence-mass field. Legacy layouts and
+  `/api/graph` remain available.
+
+### Fixed
+
+- Replace the packed-disk Galaxy regression with persistent softened-Newtonian dynamics. Galaxy
+  phase space is isolated from Compact and other legacy layouts, angular momentum is preserved
+  across layout changes, and large stars are visibly distinct. A smooth evidence-mass field keeps
+  each solar system bound while direct star-to-star gravity supplies smaller organic perturbations;
+  evidence bridges remain visible provenance without injecting non-central orbital energy or
+  relation springs compressing the scene into a graph blob. Dragging now leaves the fixed-step
+  Galaxy clock live without alpha changes, global reheats, reseeding, or detaching any global force.
+  The pointer owns exactly one moving mass source while every live body follows its softened
+  inverse-square gravity, whether linked or unlinked; distance and evidence mass determine the
+  response, and explicit relations only strengthen it. A bounded once-per-physics-slice projection
+  makes nearby unlinked bodies visibly follow without teleporting, freezing the rest of the graph,
+  or depending on pointer-event frequency. Pointer events update only the source position and
+  field membership--the gravitational response is sampled by the 30 Hz physics clock. The selected
+  Link orbit supplies a safe periapsis,
+  tangential momentum is retained, and release adds no wake or impulse. Freeze remains the sole
+  explicit motion gate. The explicit **Reheat layout** action now gives Galaxy a finite custom-
+  solver relaxation burst (30 extra steps, or 12 for large live scenes) instead of merely ensuring
+  its already-running clock exists; repeated clicks coalesce, current orbital phase is preserved,
+  and no D3 alpha, random kick, or orbital reseed is introduced.
+- Eliminate false Galaxy "reheating" caused by two local solvers fighting each other every tick.
+  Link distance and Orbital separation now share the same lower-bound target, the redundant live
+  velocity spring no longer injects energy alongside the positional constraint, and close-range
+  separation dissipates closing radial motion. Correction-distance diagnostics expose whether a
+  system is genuinely settling without changing its orbital phase or waking D3.
+- Stabilize dense solar systems and high-degree hubs without weakening their gravity. Link and
+  Orbital-separation constraints now sample one immutable phase and apply one simultaneous,
+  mass-balanced update per node instead of stacking an update for every incident edge. Aggregate
+  position and contact-velocity caps prevent a hub slingshot, while a system-relative speed fuse
+  damps only anomalous member motion and preserves each free system's center-of-mass orbit.
+- Show unlinked entities in new Ledger and Classic graph views by default so isolated evidence is
+  not silently omitted. The toolbar still switches to a linked-only view, and persisted user or
+  saved-view preferences remain authoritative.
+- Keep large Galaxy scenes interactive by replacing quadratic entity-visibility scans with
+  set-wise privacy pruning, driving evidence lookups from the requested relation IDs, and making
+  Ledger retries cancel and supersede stale scene requests safely.
 
 ### Added
 
@@ -242,7 +452,7 @@ tombstones remain global.
 
 ### Upgrade notes
 
-- `engraphis-mcp` now exposes nine Smart tools instead of 33 direct tools. Clients that depend on
+- `engraphis-mcp` now exposes nine Smart tools instead of 34 direct tools. Clients that depend on
   the former names should switch their server command to `engraphis-mcp-classic`; HTTP clients can
   use `engraphis-mcp-http --classic`.
 - Existing v2 databases migrate automatically to schema 9 on first open; the change is additive
@@ -254,7 +464,7 @@ tombstones remain global.
 
 - Smart MCP is now the zero-configuration `engraphis-mcp` default. It exposes nine compact tools:
   sessions, prompt-ready recall, durable memory, discovery, validated read/action execution, and
-  governed record read/update plus conflict review. `engraphis-mcp-classic` preserves the former 33
+  governed record read/update plus conflict review. `engraphis-mcp-classic` preserves the former 34
   direct tool names and legacy alias response shapes for pinned integrations.
 - The first-party `@engraphis/pi` package under `integrations/pi` exposes that Smart MCP surface
   as native Pi tools, verifies the Engraphis 1.4.x handshake, and ships with independent npm
