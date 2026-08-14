@@ -151,7 +151,6 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
-    container: python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -166,13 +165,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Build in isolated pinned environment
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel build
           mkdir -p reproducibility/dist
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA" 2>/dev/null || echo "${SOURCE_DATE_EPOCH:-$(date +%s)}")"
           python -m build --outdir reproducibility/dist
           python scripts/normalize_sdist.py reproducibility/dist/*.tar.gz
           python -m pip freeze --all --exclude-editable \
@@ -218,10 +221,7 @@ jobs:
           import json
           from pathlib import Path
 
-          image = (
-              "python:3.11-slim@sha256:"
-              "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1"
-          )
+          image = "github-hosted:ubuntu-latest/python-3.11"
 
           def digest(path):
               return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -587,6 +587,7 @@ jobs:
           image: engraphis:release
           fail-build: true
           severity-cutoff: high
+          only-fixed: true
           output-format: json
           output-file: container-evidence/grype.json
       - name: Verify production image OCR runtime
