@@ -629,7 +629,8 @@ jobs:
           trap cleanup EXIT
           python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
           docker create --name "$container" engraphis:release >/dev/null
-          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          site_packages=$(docker run --rm engraphis:release python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          docker cp "$container:$site_packages/." "$audit_dir"
           python -m pip_audit --path "$audit_dir"
       - name: Run customer-mode readiness smoke
         shell: bash
