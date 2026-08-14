@@ -115,19 +115,25 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     alternative = " ".join(image.group(1).lower().split())
 
     for evidence in (
-        "three deterministic offline comparisons",
+        "local measurements and deterministic fixtures",
+        "local locomo diagnostic",
         "740.3 to 214.3 tokens",
         "162.2 to 42.4 tokens",
-        "recall at 5 remains 1.000",
+        "3 of 15 queries",
+        "15 of 15",
+        "0 of 3 to 3 of 3",
+        "2 of 2 summary cases",
         "10,202 rather than 23,810 tokens",
-        "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2",
+        "10 of 10 correct decisions",
+        "85.38 tokens under a 1,500-token cap",
     ):
         assert evidence in alternative
         assert evidence in description
 
-    assert "not an mcp transport or provider-billing measurement" in description
-    assert "remain unpublished until equivalent evidence exists" in description
-    for unsupported in ("locomo", "unpinned", "noncanonical", "leaderboard"):
+    assert "not an mcp transport" in description
+    assert "does not measure provider billing" in description
+    assert "1,500-token cap" in description
+    for unsupported in ("unpinned", "noncanonical", "leaderboard"):
         assert unsupported not in alternative
         assert unsupported not in description
 

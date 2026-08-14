@@ -63,3 +63,6 @@ playwright-report
 *.log
 *.whl
 *.tar.gz
+# Test suites and evaluation harnesses — not needed in production images.
+tests/
+eval/

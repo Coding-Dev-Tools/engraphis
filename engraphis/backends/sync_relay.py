@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -28,6 +29,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from engraphis.hosted_client import build_pinned_https_opener
 from engraphis.private_state import UnsafeStateFile, atomic_private_text, read_private_text
+
+logger = logging.getLogger(__name__)
 
 MAX_RELAY_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_RELAY_NAMES_BYTES = 1024 * 1024
@@ -529,6 +532,12 @@ class RelayTransport:
         if not math.isfinite(timeout_value) or timeout_value <= 0:
             raise ValueError("relay timeout must be a positive finite number")
         self.timeout = min(timeout_value, 300.0)
+        if timeout_value > 300.0:
+            logger.warning(
+                "relay timeout capped at 300s (requested %.0fs); "
+                "increase server-side limit if syncs time out",
+                timeout_value,
+            )
 
     # ── HTTP plumbing ────────────────────────────────────────────────────────────────
     def _url(self, suffix: str) -> str:

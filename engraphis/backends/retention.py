@@ -10,7 +10,7 @@ import math
 import re
 from typing import Optional
 
-from engraphis.core.interfaces import MemoryType, RetentionDecision
+from engraphis.core.interfaces import MemoryType, RetentionDecision, RetentionSupervisor
 from engraphis.core.retention_policy import MAX_STABILITY_DAYS, MIN_STABILITY_DAYS
 
 _SCHEMA = {
@@ -91,7 +91,7 @@ class LLMRetentionSupervisor:
         )
 
 
-def get_retention_supervisor(mode: str = "none"):
+def get_retention_supervisor(mode: str = "none") -> Optional[RetentionSupervisor]:
     """Return the configured supervisor, or ``None`` for deterministic-only writes."""
     name = str(mode or "none").strip().lower()
     if name in ("", "none", "off", "disabled"):

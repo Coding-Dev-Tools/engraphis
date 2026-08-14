@@ -55,6 +55,49 @@ def test_schema_version(store):
     assert store.schema_version == SCHEMA_VERSION
 
 
+def test_store_preserves_regular_sqlite_uri_options(tmp_path):
+    path = tmp_path / "uri.db"
+    writable = Store(str(path))
+    writable.close()
+
+    readonly = Store(path.as_uri() + "?mode=ro&immutable=1", read_only=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            readonly.conn.execute("CREATE TABLE should_not_write(value TEXT)")
+    finally:
+        readonly.close()
+
+    missing = tmp_path / "missing.db"
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        Store(missing.as_uri() + "?mode=rw")
+    assert not missing.exists()
+
+
+def test_store_preserves_named_memory_uri_identity_for_maintenance(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    uri = "file:shared?mode=memory&cache=shared"
+    store = Store(uri)
+    try:
+        assert store.path == uri
+        assert store._recognised_local_backups() == []
+
+        with pytest.raises(RuntimeError, match="durable pre-migration backup"):
+            store._backup_before_v4_migration()
+
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "uri", [":memory:", "file::memory:", "file::memory:?cache=shared",
+             "file:shared?mode=memory&cache=shared"],
+)
+def test_read_only_store_rejects_memory_uris(uri):
+    with pytest.raises(ValueError, match="existing database file"):
+        Store(uri, read_only=True)
+
+
 def test_temporal_mutations_reject_inverted_intervals(store):
     workspace_id = store.get_or_create_workspace("intervals")
     memory_id = store.add_memory(MemoryRecord(
@@ -1722,6 +1765,46 @@ def test_get_memories_chunks_past_the_variable_limit(store, monkeypatch):
     assert len(calls) == 4                         # ceil(7 / 2)
 
 
+def test_edge_supports_scoped_lookup_drives_from_requested_edge_ids(store, monkeypatch):
+    """Large scene evidence batches must not rescan the workspace per IN chunk."""
+    from engraphis.core import store as store_mod
+
+    workspace_id = store.get_or_create_workspace("support-lookup")
+    other_workspace = store.get_or_create_workspace("other-support-lookup")
+    for index in range(5):
+        store.upsert_edge(Edge(
+            id=f"edge_{index}", src=f"source_{index}", dst=f"target_{index}",
+            relation="related", workspace_id=workspace_id,
+            provenance={"memory_id": f"mem_{index}"},
+        ))
+    store.upsert_edge(Edge(
+        id="other_edge", src="other_source", dst="other_target",
+        relation="related", workspace_id=other_workspace,
+        provenance={"memory_id": "mem_other"},
+    ))
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 2)
+    calls: list[str] = []
+    original = store_mod._SerializedConnection.execute
+
+    def capture_execute(connection, statement, *args, **kwargs):
+        if "FROM edge_supports s" in statement:
+            calls.append(statement)
+        return original(connection, statement, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod._SerializedConnection, "execute", capture_execute)
+
+    supports = store.edge_supports_in_scope(
+        ["edge_0", "edge_1", "edge_2", "edge_3", "edge_4", "other_edge"],
+        flt=SearchFilter(workspace_id=workspace_id),
+    )
+
+    assert [row["edge_id"] for row in supports] == [
+        "edge_0", "edge_1", "edge_2", "edge_3", "edge_4",
+    ]
+    assert len(calls) == 3
+    assert all("CROSS JOIN edges e ON e.id=s.edge_id" in statement for statement in calls)
+
+
 # ── regression: LIKE wildcards in the non-FTS5 lexical fallback ───────────────
 
 def test_fts_fallback_escapes_like_wildcards(store):
@@ -2579,6 +2662,45 @@ def test_secure_erase_classifies_content_free_tombstone_export(
     }
 
 
+def test_secure_erase_defers_maintenance_for_caller_owned_transaction(store):
+    wid = store.get_or_create_workspace("erase-outer-transaction")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_erase_outer_transaction", content="erasable record",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    store.conn.execute("BEGIN IMMEDIATE")
+
+    result = store.secure_erase_memory(memory_id)
+
+    assert result["maintenance"] == {
+        "secure_delete": True, "wal": "deferred", "vacuum": "deferred",
+    }
+    assert store.conn.in_transaction is True
+    store.conn.commit()
+    assert store.get_memory(memory_id) is None
+
+
+def test_secure_erase_rescans_successors_instead_of_trusting_stale_targets(store):
+    wid = store.get_or_create_workspace("erase-successor-race")
+    parent_id = store.add_memory(MemoryRecord(
+        id="mem_erase_parent", content="parent secret", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+    ))
+    successor_id = store.add_memory(MemoryRecord(
+        id="mem_erase_successor", content="successor secret", workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        provenance={"conflict_of": parent_id},
+    ))
+
+    store.secure_erase_memory(parent_id, _target_ids=[parent_id])
+
+    assert store.get_memory(parent_id) is None
+    assert store.get_memory(successor_id) is None
+    assert {row["id"] for row in store.list_memory_tombstones()} >= {
+        parent_id, successor_id,
+    }
+
+
 def test_tombstone_export_class_is_strict_and_monotonic(store):
     with pytest.raises(ValueError, match="export_class must be"):
         store.add_memory_tombstone(
@@ -2917,3 +3039,85 @@ def test_add_memory_advances_hlc_only_for_real_local_descriptive_overwrite(store
     assert lattice_only is not None
     assert lattice_only.stability == idempotent.stability
     assert lattice_only.modified_hlc == changed_clock
+
+def test_context_savings_handles_workspace_ids_above_sqlite_variable_limit(
+    store, monkeypatch
+):
+    """Large authorization scopes use bounded queries without leaking other workspaces."""
+    from engraphis.core import store as store_mod
+
+    def usage(source, context):
+        saved = source - context
+        return {
+            "source_tokens": source,
+            "context_tokens": context,
+            "saved_tokens": saved,
+            "budget_tokens": source,
+            "packed_count": 1,
+            "omitted_count": 0,
+            "token_counter": "engraphis.regex.v1",
+            "baseline_tokens": source,
+            "emitted_tokens": context,
+            "estimated_saved_tokens": saved,
+            "estimated_savings_ratio": saved / source,
+            "savings_basis": "packed_context",
+            "savings_confidence": "medium",
+            "savings_eligible": True,
+            "release_version": "1.5",
+        }
+
+    included_ids = []
+    for index in range(3):
+        workspace_id = store.get_or_create_workspace(f"authorized-{index}")
+        included_ids.append(workspace_id)
+        store.record_receipt(
+            "recall",
+            workspace_id=workspace_id,
+            metadata={"intent": "recall_context", "token_usage": usage(500, 300)},
+        )
+    unauthorized_id = store.get_or_create_workspace("unauthorized")
+    store.record_receipt(
+        "recall",
+        workspace_id=unauthorized_id,
+        metadata={"intent": "recall_context", "token_usage": usage(9_999, 1_111)},
+    )
+    authorized_ids = included_ids + [
+        f"authorized-empty-{index}" for index in range(1_097)
+    ]
+
+    original_execute = store_mod._SerializedConnection.execute
+
+    def bounded_execute(connection, *args, **kwargs):
+        params = args[1] if len(args) > 1 else kwargs.get("parameters", ())
+        assert len(params) <= 100, "receipt query exceeded the simulated SQLite limit"
+        return original_execute(connection, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 96)
+    monkeypatch.setattr(store_mod._SerializedConnection, "execute", bounded_execute)
+
+    result = store.context_savings(
+        workspace_ids=authorized_ids,
+        from_ts=0,
+        to_ts=9_999_999_999,
+        release_version="1.5",
+    )
+    assert result["receipt_count"] == len(included_ids)
+    assert result["savings_receipt_count"] == len(included_ids)
+    counter = result["by_token_counter"][0]
+    assert counter["source_tokens"] == 500 * len(included_ids)
+    assert counter["context_tokens"] == 300 * len(included_ids)
+    assert counter["saved_tokens"] == 200 * len(included_ids)
+
+    grouped = store.context_savings_grouped(
+        workspace_ids=authorized_ids,
+        group_by="workspace",
+        from_ts=0,
+        to_ts=9_999_999_999,
+        release_version="1.5",
+    )
+    assert {row["group_key"] for row in grouped} == set(included_ids)
+    assert unauthorized_id not in {row["group_key"] for row in grouped}
+
+    assert store.context_savings(workspace_ids=[])["receipt_count"] == 0
+    deduped = store.context_savings(workspace_ids=included_ids + included_ids)
+    assert deduped["receipt_count"] == len(included_ids)

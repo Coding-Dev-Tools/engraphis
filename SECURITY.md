@@ -67,8 +67,9 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 ### 3. Scope isolation
 - Every read takes a `SearchFilter`; tools only return memories within requested `workspace`/`repo`
 - Every write targeting a memory by ID re-validates scope membership
-- **Hard workspace binding** (`ENGRAPHIS_WORKSPACES`): comma-separated allow-list makes
-  workspace a hard boundary; requests outside the list are refused before touching the store
+- Workspace creation is not controlled by a process-wide allow-list; each operation still
+  carries its explicit workspace/repo/session scope and authenticated personal workspaces
+  enforce their owner boundary
 
 ### 4. Secrets & data at rest
 - `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored and must never be logged. Gitignore is

@@ -9,7 +9,11 @@ import json
 
 import pytest
 
-from engraphis.core.interfaces import Edge, GraphLayer, Node, Scope, SearchFilter
+from engraphis.core.documents import DocumentScan, parse_document
+from engraphis.core.interfaces import (
+    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+)
+from engraphis.document_import import DocumentImporter
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -54,6 +58,22 @@ def _mem_ids(svc, name):
         return []
     return {r["id"] for r in svc.store.conn.execute(
         "SELECT id FROM memories WHERE workspace_id=?", (wid,))}
+
+
+def _import_one_document(
+    svc, workspace: str, *, source_id: str = "d" * 64,
+    content: bytes = b"# Imported note\nThis source must remain resumable.\n",
+) -> dict:
+    workspace_id = svc.store.get_or_create_workspace(workspace)
+    scan = DocumentScan(root_path="", source_id=source_id)
+    scan.documents.append(parse_document(
+        content, "notes.md",
+    ))
+    return DocumentImporter(svc).import_scan(
+        scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+        scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_label="Imported notes", confirmed=True,
+    )
 
 
 # ── create_workspace ─────────────────────────────────────────────────────────
@@ -632,6 +652,287 @@ def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
     assert dup_supports[0]["expired_at"] is not None
 
 
+# ── source lineage preserved by workspace merge/copy ─────────────────────────
+def test_merge_preserves_document_source_manifest_and_job_report():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    report = _import_one_document(svc, "source")
+    svc.create_workspace("target")
+
+    svc.merge_workspaces("source", "target")
+
+    sources = svc.list_document_sources("target")
+    assert [row["id"] for row in sources] == [report["source_id"]]
+    item = svc.store.list_source_import_items(vault_id=report["source_id"])[0]
+    assert item["memory_id"] in _mem_ids(svc, "target")
+    job = svc.get_document_import_job(report["job_id"], workspace="target")
+    assert job["state"] == "completed"
+    assert job["files"][0]["relative_path"] == "notes.md"
+
+
+def test_merge_collapses_duplicate_source_vaults_without_duplicate_paths():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    _import_one_document(svc, "source")
+    _import_one_document(svc, "target")
+
+    svc.merge_workspaces("source", "target")
+
+    target_id = svc._lookup_workspace("target")
+    vaults = svc.store.list_source_vaults(workspace_id=target_id, kind="documents")
+    assert len(vaults) == 1
+    assert svc.store.conn.execute(
+        "SELECT COUNT(*) FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (vaults[0]["id"], "notes.md"),
+    ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("source_seen", "target_seen", "displaced"),
+    [(1.0, 2.0, "source"), (2.0, 1.0, "target")],
+)
+def test_merge_invalidates_displaced_duplicate_source_memory(
+    source_seen, target_seen, displaced,
+):
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (source_seen, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (target_seen, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    source_memory = svc.store.get_memory(source_item["memory_id"])
+    target_memory = svc.store.get_memory(target_item["memory_id"])
+    assert source_memory is not None and target_memory is not None
+    if displaced == "source":
+        assert source_memory.valid_to is not None
+        assert target_memory.valid_to is None
+    else:
+        assert source_memory.valid_to is None
+        assert target_memory.valid_to is not None
+    assert c.execute(
+        "SELECT COUNT(*) FROM audit WHERE target=? AND action='invalidate'",
+        (source_item["memory_id"] if displaced == "source" else target_item["memory_id"],),
+    ).fetchone()[0] == 1
+
+
+def test_merge_invalidates_duplicate_source_memory_when_content_differs():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(
+        svc, "source", content=b"# Source note\nThe source snapshot.\n",
+    )
+    target_report = _import_one_document(
+        svc, "target", content=b"# Target note\nThe target snapshot.\n",
+    )
+    c = svc.store.conn
+    source_memory_id = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()[0]
+    target_memory_id = c.execute(
+        "SELECT memory_id FROM source_imports WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()[0]
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    source_memory = svc.store.get_memory(source_memory_id)
+    target_memory = svc.store.get_memory(target_memory_id)
+    assert source_memory is not None and target_memory is not None
+    assert source_memory.valid_to is not None
+    assert target_memory.valid_to is None
+
+
+def test_merge_rewrites_winning_duplicate_source_memory_metadata_before_vault_delete():
+    """A source-won collision must retain lineage in the surviving manifest."""
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    surviving = c.execute(
+        "SELECT id, vault_id, memory_id FROM source_imports "
+        "WHERE relative_path=?",
+        ("notes.md",),
+    ).fetchone()
+    assert surviving is not None
+    assert surviving["id"] == target_item["id"]
+    assert surviving["vault_id"] == target_report["source_id"]
+    assert surviving["memory_id"] == source_item["memory_id"]
+    assert c.execute(
+        "SELECT 1 FROM source_vaults WHERE id=?", (source_report["source_id"],)
+    ).fetchone() is None
+
+    winner = svc.store.get_memory(source_item["memory_id"])
+    loser = svc.store.get_memory(target_item["memory_id"])
+    assert winner is not None and loser is not None
+    assert winner.valid_to is None
+    assert loser.valid_to is not None
+    assert winner.metadata["document"]["source_id"] == target_item["id"]
+    assert winner.metadata["document"]["vault_id"] == target_report["source_id"]
+
+
+def test_merge_rewrites_invalidated_duplicate_source_memory_metadata_before_vault_delete():
+    """A target-won collision must preserve the displaced memory's lineage."""
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_report = _import_one_document(svc, "target")
+    c = svc.store.conn
+    source_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (source_report["source_id"], "notes.md"),
+    ).fetchone()
+    target_item = c.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path=?",
+        (target_report["source_id"], "notes.md"),
+    ).fetchone()
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (1.0, source_report["source_id"]),
+    )
+    c.execute(
+        "UPDATE source_imports SET last_seen_at=? WHERE vault_id=?",
+        (2.0, target_report["source_id"]),
+    )
+
+    svc.merge_workspaces("source", "target")
+
+    displaced = svc.store.get_memory(source_item["memory_id"])
+    assert displaced is not None
+    assert displaced.valid_to is not None
+    assert displaced.metadata["document"]["source_id"] == target_item["id"]
+    assert displaced.metadata["document"]["vault_id"] == target_report["source_id"]
+    assert c.execute(
+        "SELECT 1 FROM source_vaults WHERE id=?", (source_report["source_id"],)
+    ).fetchone() is None
+
+
+def test_merge_rewrites_rehomed_source_memory_provenance_for_disjoint_paths():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    source_report = _import_one_document(svc, "source")
+    target_id = svc.store.get_or_create_workspace("target")
+    scan = DocumentScan(root_path="", source_id="d" * 64)
+    scan.documents.append(parse_document(
+        b"# Target note\nA distinct source path.\n", "target.md",
+    ))
+    target_report = DocumentImporter(svc).import_scan(
+        scan, workspace_id=target_id, repo_id=None, session_id=None,
+        scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_label="Imported notes", confirmed=True,
+    )
+    source_item = svc.store.list_source_import_items(vault_id=source_report["source_id"])[0]
+
+    svc.merge_workspaces("source", "target")
+
+    target_vault = svc.store.list_source_vaults(workspace_id=target_id, kind="documents")[0]
+    rehomed = svc.store.conn.execute(
+        "SELECT id, memory_id FROM source_imports "
+        "WHERE vault_id=? AND relative_path='notes.md'",
+        (target_vault["id"],),
+    ).fetchone()
+    assert rehomed is not None
+    memory = svc.store.get_memory(source_item["memory_id"])
+    assert memory is not None
+    assert memory.metadata["document"]["source_id"] == rehomed["id"]
+    assert memory.metadata["document"]["vault_id"] == target_vault["id"]
+    assert target_report["source_id"] == target_vault["id"]
+
+
+def test_copy_preserves_document_source_manifest_and_remaps_memory_metadata():
+    svc = MemoryService.create(
+        ":memory:", embed_dim=64, extractor="none",
+        graph_extractor="none", retention_supervisor="none",
+    )
+    report = _import_one_document(svc, "source")
+
+    copied = svc.copy_workspace("source", new_name="copy")
+    assert copied["sources_copied"] == 1
+
+    sources = svc.list_document_sources("copy")
+    assert len(sources) == 1
+    assert sources[0]["id"] != report["source_id"]
+    copied_item = svc.store.list_source_import_items(vault_id=sources[0]["id"])[0]
+    copied_memory = svc.store.get_memory(copied_item["memory_id"])
+    assert copied_memory is not None
+    assert copied_memory.metadata["document"]["source_id"] == copied_item["id"]
+    assert copied_memory.subject_key == copied_item["subject_key"]
+    scan = DocumentScan(root_path="", source_id="d" * 64)
+    scan.documents.append(parse_document(
+        b"# Imported note\nThis source must remain resumable.\n", "notes.md",
+    ))
+    resumed = DocumentImporter(svc).import_scan(
+        scan, workspace_id=svc._lookup_workspace("copy"), repo_id=None,
+        session_id=None, scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+        source_id=sources[0]["id"], source_label="Imported notes", confirmed=True,
+    )
+    assert resumed["counts"]["skipped"] == 1
+
+
 # ── copy_workspace ───────────────────────────────────────────────────────────
 def test_copy_auto_names_and_leaves_source_untouched():
     svc = _svc()
@@ -735,6 +1036,46 @@ def test_copy_remaps_graph_evidence_history_and_event_references():
         (copied_workspace,),
     ).fetchone()
     assert json.loads(copied_event["refs"]) == [copied_first, copied_second]
+
+
+def test_copy_remaps_only_standalone_typed_ids_in_free_text():
+    svc = _svc()
+    first = svc.remember("First source fact.", workspace="a", scope="workspace")["id"]
+    second = svc.remember("Second source fact.", workspace="a", scope="workspace")["id"]
+    c = svc.store.conn
+    c.execute(
+        "UPDATE memories SET metadata=?, provenance=? WHERE id=?",
+        (
+            json.dumps({"exact": first, "embedded": f"{first}_suffix"}),
+            json.dumps({"exact": second, "embedded": f"{second}_suffix"}),
+            second,
+        ),
+    )
+
+    svc.copy_workspace("a", new_name="a2")
+
+    copied_workspace = _wsid(svc, "a2")
+    copied_rows = [dict(row) for row in c.execute(
+        "SELECT id, metadata, provenance FROM memories WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_second = next(
+        row for row in copied_rows
+        if json.loads(row["provenance"]).get("exact")
+    )
+    copied_meta = json.loads(copied_second["metadata"])
+    copied_provenance = json.loads(copied_second["provenance"])
+    copied_first = copied_meta["exact"]
+
+    assert copied_first != first
+    assert copied_meta == {
+        "exact": copied_first,
+        "embedded": f"{first}_suffix",
+    }
+    assert copied_provenance == {
+        "exact": copied_second["id"],
+        "embedded": f"{second}_suffix",
+    }
 
 
 def test_copy_clones_vectors_fts_links_entities_and_edges():

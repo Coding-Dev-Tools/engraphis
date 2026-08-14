@@ -788,12 +788,17 @@ def connect(token: object, *, control_url: Optional[str] = None,
     Returns the redacted summary -- it is safe to print.  Raises
     :class:`DeviceConnectError` for every failure, with copy the customer can act on and
     never containing the token.  Nothing is written unless the exchange succeeded.
+
+    Invoking this command is the explicit cloud opt-in.  A pure-local installation may
+    therefore use the shipped control-plane endpoint when no hosted environment variables
+    are present; ``control_url`` remains available for a self-hosted or test endpoint.
     """
 
     # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
     # masked by whatever the identity or storage pre-flight happens to hit on the way to
     # the same rejection inside ``post_connect``.
     timeout = _validated_timeout(timeout)
+
     normalized = normalize_connect_token(token)
     # Last check before the point of no return.  ``client_identity`` may have written its
     # file minutes or months ago, so a writable state directory then is no evidence of one

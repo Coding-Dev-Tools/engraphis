@@ -119,6 +119,8 @@ def test_authenticated_reverse_proxy_cannot_mint_local_write_attestation(
 
 
 def test_auth_metadata_points_team_to_cloud(monkeypatch, tmp_path):
+    # Activate hosted mode so the auth state reports team/cloud features.
+    monkeypatch.setenv("ENGRAPHIS_HOSTED_MODE", "true")
     with TestClient(
         _app(monkeypatch, tmp_path), client=("127.0.0.1", 50000)
     ) as client:
@@ -126,9 +128,11 @@ def test_auth_metadata_points_team_to_cloud(monkeypatch, tmp_path):
         assert state == {
             "enabled": False,
             "mode": "open",
+            "deployment_mode": "hosted",
             "user": None,
             "hosted_team": True,
             "cloud_url": state["cloud_url"],
+            "local_invitations": False,
         }
         assert client.post("/api/auth/setup", json={}).status_code == 404
 

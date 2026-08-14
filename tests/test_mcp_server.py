@@ -1075,6 +1075,14 @@ def test_receipt_tools(monkeypatch):
     assert savings["receipt_count"] == 1
     assert savings["savings_receipt_count"] == 0
     assert savings["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
+    global_savings = json.loads(srv.engraphis_context_savings(
+        from_ts=0, to_ts=9_999_999_999,
+    ))
+    assert global_savings["scope"] == {"workspace": "all"}
+    assert global_savings["workspace_count"] == 1
+    assert global_savings["receipt_count"] == 1
+    assert srv.engraphis_context_savings(workspace="").startswith("Error: workspace")
+    assert srv.engraphis_context_savings(workspace="   ").startswith("Error: workspace")
     verified = json.loads(srv.engraphis_verify_receipts(workspace="acme"))
     assert verified["valid"] is True
     exported = json.loads(srv.engraphis_export_receipts(workspace="acme"))

@@ -12,7 +12,7 @@ import math
 from typing import Any, Optional
 
 from engraphis.backends.model_source import validate_model_source
-from engraphis.core.interfaces import Candidate
+from engraphis.core.interfaces import Candidate, Reranker
 
 logger = logging.getLogger("engraphis")
 
@@ -79,7 +79,7 @@ def get_reranker(
     *,
     revision: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
-) -> object:
+) -> Reranker:
     """Return a cross-encoder reranker if a model is given and loads, else identity."""
     if model_name:
         # Policy errors stay outside the optional-loader fallback: strict mode must

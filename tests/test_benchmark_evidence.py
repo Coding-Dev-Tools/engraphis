@@ -281,38 +281,57 @@ def test_context_savings_visual_uses_only_registered_measurements(
     timed_recalls = performance["run"]["timed_recalls"]
 
     for evidence in (
-        "Give your agent more room to think",
-        "Public evidence is checksum-bound",
-        "offline-fixtures-v1.json",
-        "No external or model-dependent number is published without the same evidence",
+        "What the memory system changes",
+        "Long project history sent to the model*",
+        "Local LoCoMo diagnostic · 10 conversations · 1,986 questions",
+        "Replay everything · 49,915,394 tokens",
+        "Engraphis · 891,857 tokens",
+        "98.21% lower*",
+        "Cross-session handoff",
+        "3 / 15 satisfied",
+        "15 / 15 satisfied",
+        "Intent-layered graph routing",
+        "0 / 3 top-1",
+        "3 / 3 top-1",
+        "Two-hop graph recall",
+        "One-hop graph · 0 / 3 found",
+        "Personalized PageRank · 3 / 3 found",
+        "Consolidation-aware ranking",
+        "Baseline digest top-1 · 0 / 2",
+        "With consolidation bonus · 2 / 2",
         f"Whole documents · {whole['mean_context_tokens']:.1f} tokens",
-        f"Focused chunks · {chunked['mean_context_tokens']:.1f} tokens",
-        f"{chunking['context_reduction_pct']:.1f}% less",
-        f"Whole document · {whole['mean_evidence_tokens']:.1f} tokens",
-        f"Useful chunk · {chunked['mean_evidence_tokens']:.1f} tokens",
-        "73.9% less",
-        "Recall payload proxy",
-        f"{payload_samples} payload samples · {timed_recalls} timed recalls",
-        "JSON shape · not MCP transport",
+        f"Structure-aware chunks · {chunked['mean_context_tokens']:.1f} tokens",
+        f"{chunking['context_reduction_pct']:.1f}% lower",
+        f"Smallest evidence: {whole['mean_evidence_tokens']:.1f} → {chunked['mean_evidence_tokens']:.1f} tokens · 73.9% lower",
+        "Serialized recall payload proxy",
+        f"{payload_samples} samples · {timed_recalls} timed recalls",
+        "Recall@5 · hit@5 · answer-token recall: 1.000",
         f"Full proxy · {context['full_serialized_payload_tokens']:,} tokens",
         f"Compact proxy · {context['compact_serialized_payload_tokens']:,} tokens",
-        f"{100 * context['serialized_payload_savings_ratio']:.2f}% less",
-        "Evidence pending",
-        f"{context['mean_tokens']:.2f} average · {context['max_tokens']} max",
-        "percentages are not additive",
-        "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2",
-        "4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537",
+        f"{100 * context['serialized_payload_savings_ratio']:.2f}% lower",
+        "35 / 35",
+        "10 / 10 · 8 / 8",
+        "9.66% lower",
+        f"{context['mean_tokens']:.2f} avg · {context['max_tokens']} max",
+        "Local deterministic fixtures",
     ):
         assert evidence in visual
 
     for unsupported in (
-        "49,915,394",
-        "891,857",
-        "98.21% less",
+        "Public evidence is checksum-bound",
+        "offline-fixtures-v1.json",
+        "No external or model-dependent number is published without the same evidence",
+        "Evidence pending",
+        "No external or model-dependent number is published",
+        "808.8",
+        "218.4",
+        "17,172",
+        "7,663",
         "Repeated memories · 230 tokens",
         "47.8% less",
         "53× more evidence",
         "97.72% less total",
+        "87.7 average · 106 max",
     ):
         assert unsupported not in visual
 
@@ -320,7 +339,7 @@ def test_context_savings_visual_uses_only_registered_measurements(
         float(value)
         for value in re.findall(r'font-size="([^"]+)"', visual)
     }
-    assert {12.5, 13.2, 14.3, 17.6, 18.7, 20.0, 24.0, 25.3, 29.7, 33.0} == text_sizes
+    assert {12.5, 13.2, 14.3, 17.4, 18.7, 20.0, 22.0, 24.0, 33.0} == text_sizes
 
 
 def test_public_numeric_evidence_registry_is_complete_and_live(

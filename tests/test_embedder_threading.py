@@ -68,6 +68,31 @@ def test_warmup_returns_true_on_success():
     assert emb_mod._model is fake_model
 
 
+def test_chunk_text_preserves_source_when_overlap_fills_budget():
+    from engraphis.engines.embedder import chunk_text
+
+    chunks = chunk_text(
+        "abcdefghij klmnopqrst uvwxyz ABCDEFGHIJ KLMNOPQRST UVWXYZ",
+        chunk_size=20,
+        overlap=8,
+    )
+
+    assert len(chunks) > 1
+    assert chunks[1].endswith("klmnopqrst uvwxyz")
+    assert all(len(chunk) <= 20 for chunk in chunks)
+
+
+def test_chunk_text_preserves_source_when_overlap_requires_rechunking():
+    from engraphis.engines.embedder import chunk_text
+
+    source = "leadword suffix-marker " + " ".join(f"w{index:02d}" for index in range(24))
+    chunks = chunk_text(source, chunk_size=20, overlap=8)
+
+    recovered = " ".join(chunks)
+    assert all(token in recovered.split() for token in source.split())
+    assert all(len(chunk) <= 20 for chunk in chunks)
+
+
 def test_warmup_returns_false_on_failure():
     """warmup() returns False (never raises) when model loading fails."""
     import engraphis.engines.embedder as emb_mod

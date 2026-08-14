@@ -31,7 +31,7 @@ def main(argv=None) -> None:
         description="Run the Engraphis MCP server over stdio - plugs Engraphis into "
                     "Claude Code, Cursor, Cline, Zed, and any MCP-capable client.",
         epilog="Configuration comes from the environment / .env (ENGRAPHIS_DB_PATH, "
-               "ENGRAPHIS_WORKSPACES, ...). Generate a client config with: engraphis-init",
+               "ENGRAPHIS_PORT, ...). Generate a client config with: engraphis-init",
     )
     ap.parse_args(argv)
     error = _dependency_error()

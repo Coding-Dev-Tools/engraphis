@@ -66,6 +66,48 @@ def test_env_override_wins(monkeypatch):
     assert Settings().db_path == "/custom/spot.db"
 
 
+def test_relative_env_override_is_anchored_to_trusted_config(monkeypatch, tmp_path):
+    trusted = tmp_path / "home" / ".engraphis" / "config.env"
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", trusted)
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", "data/engraphis.db")
+    assert Settings().db_path == str((trusted.parent / "data/engraphis.db").resolve())
+
+
+def test_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", ":memory:")
+    assert Settings().db_path == ":memory:"
+
+
+@pytest.mark.parametrize("uri", ["file::memory:", "file::memory:?cache=shared"])
+def test_file_memory_env_override_remains_a_sqlite_memory_uri(monkeypatch, uri):
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+    assert Settings().db_path == uri
+
+
+def test_named_shared_memory_env_override_preserves_sqlite_identity(monkeypatch):
+    uri = "file:engraphis-shared?mode=memory&cache=shared"
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+
+    assert Settings().db_path == uri
+    first = sqlite3.connect(uri, uri=True)
+    second = sqlite3.connect(uri, uri=True)
+    try:
+        first.execute("CREATE TABLE shared_marker(value TEXT)")
+        first.execute("INSERT INTO shared_marker VALUES ('shared')")
+        first.commit()
+        assert second.execute("SELECT value FROM shared_marker").fetchone()[0] == "shared"
+    finally:
+        second.close()
+        first.close()
+
+
+def test_absolute_windows_file_uri_preserves_path_and_query(monkeypatch):
+    uri = "file:C:/Users/Alice/engraphis.db?mode=rw"
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", uri)
+
+    assert Settings().db_path == uri
+
+
 def _sqlite(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -132,6 +174,69 @@ def test_windows_migration_lock_uses_native_blocking_mode(tmp_path, monkeypatch)
         pass
 
     assert calls == [(msvcrt.LK_LOCK, 1), (msvcrt.LK_UNLCK, 1)]
+
+
+def test_migration_lock_does_not_change_permissions_on_existing_parent(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(config.os, "chmod", lambda *args: calls.append(args))
+
+    with config._migration_lock(tmp_path / "engraphis.db"):
+        pass
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [":memory:", "file::memory:", "file::memory:?cache=shared",
+     "file:engraphis-shared?mode=memory&cache=shared"],
+)
+def test_migration_lock_skips_in_memory_uris(tmp_path, monkeypatch, uri):
+    monkeypatch.chdir(tmp_path)
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("in-memory SQLite targets must not create migration locks")
+
+    monkeypatch.setattr(config.os, "open", unexpected_open)
+    with config._migration_lock(Path(uri)):
+        pass
+    assert list(tmp_path.iterdir()) == []
+
+def test_service_creation_with_named_shared_memory_uri_creates_no_file(tmp_path, monkeypatch):
+    """Named SQLite memory URIs (file:name?mode=memory) must stay in-memory.
+
+    Regression: _is_memory_database_path previously missed mode=memory query
+    parameters, causing _physical_database_path to strip the URI to a disk
+    filename and create an unexpected file.
+    """
+    from engraphis.service import MemoryService
+
+    monkeypatch.chdir(tmp_path)
+    uri = "file:test-shared?mode=memory&cache=shared"
+
+    # Service creation must succeed without creating any files
+    service = MemoryService.create(uri, extractor="none", graph_extractor="none")
+    service.remember("Test fact.", workspace="test", repo="demo")
+
+    # No database file should exist in the working directory
+    assert list(tmp_path.iterdir()) == [], (
+        f"Named memory URI created unexpected files: {list(tmp_path.iterdir())}"
+    )
+
+    # Service must be functional (proves the database opened correctly)
+    hits = service.recall("test", workspace="test")
+    assert len(hits) >= 1
+    service.close()
+
+
+def test_migration_lock_uses_file_uri_physical_path(tmp_path):
+    target = tmp_path / "data" / "engraphis.db"
+
+    with config._migration_lock(Path(target.as_uri())):
+        pass
+
+    assert (target.parent / ".engraphis.db.migration.lock").is_file()
+    assert not (tmp_path / "file:").exists()
 
 
 def test_windows_migration_lock_retries_expected_crt_contention(monkeypatch):

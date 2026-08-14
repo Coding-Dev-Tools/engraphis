@@ -381,8 +381,7 @@ def create_app() -> FastAPI:
         embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
-        rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        allowed_workspaces=settings.allowed_workspaces)
+        rerank_revision=getattr(settings, "rerank_revision", "") or None)
 
     def _discard_unbound_service() -> None:
         try:
@@ -456,13 +455,23 @@ def create_app() -> FastAPI:
 
     @app.get("/api/auth/state", include_in_schema=False)
     def local_auth_state():
-        """Describe the local token gate without exposing hosted Team endpoints."""
+        """Describe the local token gate and deployment mode.
+
+        In local mode, hosted URLs are suppressed to prevent accidental org joins.
+        The ``deployment_mode`` field lets the dashboard UI show a clear indicator.
+        """
+        from engraphis.config import deployment_mode, is_local_mode
+        mode = deployment_mode()
+        local = is_local_mode()
+        cloud_url = "" if local else licensing.upgrade_url("team")
         return {
             "enabled": bool(settings.api_token),
             "mode": "local-token" if settings.api_token else "open",
+            "deployment_mode": mode,
             "user": None,
-            "hosted_team": True,
-            "cloud_url": licensing.upgrade_url("team"),
+            "hosted_team": not local,
+            "cloud_url": cloud_url,
+            "local_invitations": local,
         }
 
     @app.post("/api/auth/session", include_in_schema=False)

@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from engraphis import __version__  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.core.interfaces import Scope  # noqa: E402
 from engraphis.inspector import create_app  # noqa: E402
@@ -116,6 +117,30 @@ def test_graph_endpoint_rejects_workspace_outside_the_binding():
     c = TestClient(create_app(svc))
     r = c.get("/api/graph", params={"workspace": "beta"})
     assert r.status_code == 400
+
+
+def test_context_savings_endpoint_forwards_history_filters(client):
+    c, _ = client
+    response = c.get(
+        "/api/context-savings",
+        params={
+            "workspace": "acme",
+            "repo": "backend",
+            "from_ts": 0,
+            "to_ts": 9_999_999_999,
+            "release_version": __version__,
+            "format": "csv",
+            "group_by": "day",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == {"workspace": "acme", "repo": "backend"}
+    assert body["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
+    assert body["release_version"] == __version__
+    assert body["format"] == "engraphis-context-savings/1"
+    assert body["group_by"] == "day"
+    assert body["csv"].startswith("group_key,token_counter,")
 
 
 def test_why_supersedes_and_timeline_endpoints(client):
