@@ -585,11 +585,30 @@ jobs:
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: engraphis:release
-          fail-build: true
+          fail-build: false
           severity-cutoff: high
           only-fixed: true
           output-format: json
           output-file: container-evidence/grype.json
+      - name: Enforce grype severity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json, sys
+          data = json.load(open('container-evidence/grype.json'))
+          matches = [m for m in data.get('matches', [])
+                     if m.get('vulnerability', {}).get('severity', '') in ('High', 'Critical')]
+          for m in matches:
+              v = m['vulnerability']
+              a = m.get('artifact', {})
+              fix = v.get('fix', {})
+              print(f\"{v['id']}  {v['severity']}  {a.get('name','?')}  {a.get('version','?')}  fix={fix.get('versions','none')}  ns={v.get('namespace','?')}\")
+          if matches:
+              print(f'FAIL: {len(matches)} high/critical vulnerabilities found')
+              sys.exit(1)
+          print('PASS: no high/critical vulnerabilities')
+          "
       - name: Verify production image OCR runtime
         run: >-
           docker run --rm --entrypoint sh engraphis:release -c
@@ -629,6 +648,7 @@ jobs:
           docker logs engraphis-release
           exit 1
       - name: Store whole-image evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-image-evidence
