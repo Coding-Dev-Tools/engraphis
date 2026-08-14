@@ -116,7 +116,7 @@
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 4;
+  const GRAPH_PHYSICS_VERSION = 2;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
@@ -417,7 +417,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260813-astronomical-galaxy-clock-10'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2262,8 +2262,7 @@
       if (size.value === 'evidence_mass') size.value = size.dataset.legacyValue || 'degree';
     }
     const labels = galaxy
-      ? ['Galactic time scale · ≈216M-year reference orbit',
-        'Link distance · tight ↔ loose', 'Gravity strength · loose ↔ tight']
+      ? ['Orbital speed', 'Link distance · tight ↔ loose', 'Gravity strength · loose ↔ tight']
       : ['Repel force', 'Link distance', 'Centre gravity'];
     ['graph-repel-label', 'graph-link-label', 'graph-gravity-label'].forEach((id, index) => {
       const label = byId(id);
@@ -2536,24 +2535,12 @@
     const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
     const legacyPhysics = hasSavedPreferences
       && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < GRAPH_PHYSICS_VERSION);
-    const legacyRepelDefault = hasSavedPreferences
-      && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < 3);
     const effectiveTuning = savedTuning && typeof savedTuning === 'object'
       ? { ...savedTuning } : {};
     /* Version-one preferences persisted the retired Galaxy default as if it were a custom
        choice. Migrate only that exact old default; a deliberate Gravity 0 or any custom
        spacing/style/layer remains untouched. Once versioned, a later user-selected 48 stays 48. */
-    if (legacyRepelDefault && preset === 'galaxy' && Number(effectiveTuning.repel) === 48) {
-      effectiveTuning.repel = 60;
-    }
-    /* Version three repaired zero gravitational multipliers, but an already-open affected
-       profile could be saved between those repairs with gravity restored and the old orbital
-       speed still at zero. Upgrade that exact remaining legacy state independently of whether
-       gravity also needs repair during this load. Version-four profiles keep intentional speed
-       selections; zero is a slow 0.5x clock, not a physics-off switch. */
-    if (legacyPhysics && preset === 'galaxy'
-      && Object.prototype.hasOwnProperty.call(effectiveTuning, 'repel')
-      && !(Number(effectiveTuning.repel) > 0)) {
+    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.repel) === 48) {
       effectiveTuning.repel = 60;
     }
     syncGraphTuning({
@@ -2561,38 +2548,12 @@
       ...effectiveTuning,
     });
     const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
-    const effectiveSpacetimeTuning = savedSpacetimeTuning
-      && typeof savedSpacetimeTuning === 'object' ? { ...savedSpacetimeTuning } : {};
-    /* Galaxy is an orbital layout, so a persisted zero gravitational multiplier is not a
-       meaningful restorable state: the frame loop and black-hole paint keep animating while
-       every solar-system carrier and local orbit has exactly zero circular speed. Version two
-       allowed that false-live state to survive reloads. Recover affected profiles at the
-       calibrated defaults; the positive control minimum prevents the same silent freeze from
-       being saved again while still allowing a deliberately gentler field. */
-    let recoveredZeroGravity = false;
-    if (preset === 'galaxy') {
-      if (Object.prototype.hasOwnProperty.call(
-        effectiveSpacetimeTuning, 'gravitationalConstant')
-        && !(Number(effectiveSpacetimeTuning.gravitationalConstant) > 0)) {
-        effectiveSpacetimeTuning.gravitationalConstant = 100;
-        recoveredZeroGravity = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(
-        effectiveSpacetimeTuning, 'localGravitationalConstant')
-        && !(Number(effectiveSpacetimeTuning.localGravitationalConstant) > 0)) {
-        effectiveSpacetimeTuning.localGravitationalConstant = 100;
-        recoveredZeroGravity = true;
-      }
-    }
-    if (recoveredZeroGravity && !(Number(effectiveTuning.repel) > 0)) {
-      effectiveTuning.repel = 60;
-      setGraphTuningControl(GRAPH_TUNING.find(item => item.key === 'repel'), 60);
-    }
     /* Pause orbits is deliberately session-only. Old snapshots may contain orbitPaused=true;
        ignore it so a fresh dashboard always starts with live galactic motion. */
     state.graphOrbitPaused = false;
     syncGraphSpacetimeTuning({
-      ...effectiveSpacetimeTuning,
+      ...(savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
+        ? savedSpacetimeTuning : {}),
       orbitPaused: false,
     });
 
@@ -2625,7 +2586,7 @@
     state.graphIncludeCode = graphPreference('includeCode', false) === true;
     state.graphSavedView = graphPreference('savedView', 'schema', ['', ...Object.keys(GRAPH_SAVED_VIEWS)]);
     syncGraphSavedViews();
-    if (legacyPhysics || recoveredZeroGravity) saveGraphPreferences();
+    if (legacyPhysics) saveGraphPreferences();
   }
 
   function savedGraphView(id) {
