@@ -105,6 +105,382 @@ def test_graph_aggregates_session_visibility_once_before_selecting_entities():
     assert any("WITH edge_visibility AS" in statement for statement in statements)
 
 
+def test_graph_scene_prunes_entities_without_correlated_visibility_sql():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("edge0", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    statements = []
+    svc.store.conn.set_trace_callback(statements.append)
+    try:
+        scene = svc.graph_scene(workspace="acme")
+    finally:
+        svc.store.conn.set_trace_callback(None)
+
+    assert not ({ids["Alice"], ids["Acme Corp"]} & {
+        node["id"] for node in scene["nodes"]
+    })
+    entity_selects = [
+        statement for statement in statements
+        if "FROM entities entity WHERE workspace_id=" in statement
+    ]
+    assert entity_selects
+    assert all("visibility_edge" not in statement for statement in entity_selects)
+    visibility_selects = [
+        statement for statement in statements
+        if "FROM edges visibility_edge" in statement
+    ]
+    assert len(visibility_selects) == 1
+
+
+def test_graph_scene_does_not_merge_session_private_alias_into_public_canonical_node():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    for entity_id, name, canonical_id in (
+        ("public-alias", "Public Alias", "canonical-person"),
+        ("private-alias", "Private Alias", "canonical-person"),
+        ("public-target", "Public Target", "public-target"),
+        ("private-target", "Private Target", "private-target"),
+    ):
+        svc.store.conn.execute(
+            "INSERT INTO entities(id, workspace_id, name, etype, canonical_id, created_at) "
+            "VALUES (?,?,?,?,?,0)",
+            (entity_id, wid, name, "concept", canonical_id),
+        )
+    for edge_id, source, target in (
+        ("public-edge", "public-alias", "public-target"),
+        ("private-edge", "private-alias", "private-target"),
+    ):
+        svc.store.conn.execute(
+            "INSERT INTO edges(id, workspace_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?)",
+            (edge_id, wid, source, target, "related", "semantic"),
+        )
+    public_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="public evidence", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("public-edge", {"memory_id": public_memory})
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme")
+
+    canonical = next(node for node in scene["nodes"] if node["id"] == "canonical-person")
+    assert canonical["member_ids"] == ["public-alias"]
+    assert canonical["label"] == "Public Alias"
+    assert "private-alias" not in {
+        member for node in scene["nodes"] for member in node["member_ids"]
+    }
+
+
+def test_graph_scene_filters_session_only_edge_when_endpoints_are_public():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    for entity_id, name in (("source", "Source"), ("target", "Target")):
+        svc.store.conn.execute(
+            "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+            "VALUES (?,?,?,?,0)", (entity_id, wid, name, "concept"),
+        )
+    for edge_id, relation in (("public-edge", "publicly_related"),
+                              ("private-edge", "session_only_relation")):
+        svc.store.conn.execute(
+            "INSERT INTO edges(id, workspace_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?)",
+            (edge_id, wid, "source", "target", relation, "semantic"),
+        )
+    public_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="public evidence", workspace_id=wid, scope=Scope.WORKSPACE,
+    ))
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("public-edge", {"memory_id": public_memory})
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme")
+
+    assert {edge["id"] for edge in scene["edges"]} == {"public-edge"}
+    assert "session_only_relation" not in repr(scene)
+
+
+def test_graph_scene_cache_deadline_tracks_memory_and_connector_boundaries():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    first = _approve(svc, svc.remember(
+        "First cache boundary.", workspace="acme", scope="workspace",
+        valid_from=150.0,
+    ))
+    second = _approve(svc, svc.remember(
+        "Second cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+    svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=? WHERE a=? AND b=?",
+        (200.0, first["id"], second["id"]),
+    )
+    svc.store.conn.commit()
+    workspace_id = svc.store.get_or_create_workspace("acme")
+
+    assert svc._graph_scene_valid_until(workspace_id, 100.0) == 150.0
+
+    connector_svc = MemoryService.create(":memory:", graph_extractor="none")
+    connector_first = _approve(connector_svc, connector_svc.remember(
+        "Connector cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    connector_second = _approve(connector_svc, connector_svc.remember(
+        "Connector cache target.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    connector_svc.link(
+        connector_first["id"], connector_second["id"],
+        workspace="acme", relation="causes",
+    )
+    connector_svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=? WHERE a=? AND b=?",
+        (200.0, connector_first["id"], connector_second["id"]),
+    )
+    connector_svc.store.conn.commit()
+    connector_workspace_id = connector_svc.store.get_or_create_workspace("acme")
+    assert connector_svc._graph_scene_valid_until(connector_workspace_id, 100.0) == 200.0
+
+    ingestion_svc = MemoryService.create(":memory:", graph_extractor="none")
+    ingested_memory = _approve(ingestion_svc, ingestion_svc.remember(
+        "System-time cache boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    ingestion_svc.store.conn.execute(
+        "UPDATE memories SET ingested_at=? WHERE id=?",
+        (175.0, ingested_memory["id"]),
+    )
+    ingestion_svc.store.conn.commit()
+    ingestion_workspace_id = ingestion_svc.store.get_or_create_workspace("acme")
+    assert ingestion_svc._graph_scene_valid_until(ingestion_workspace_id, 100.0) == 175.0
+
+
+def test_graph_scene_cache_deadline_tracks_code_graph_boundaries():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    repo_id = svc.store.get_or_create_repo(wid, "repo")
+    now = time.time()
+    svc.store.conn.execute(
+        "INSERT INTO symbols(id, repo_id, name, valid_from) VALUES (?, ?, ?, ?)",
+        ("sym_future", repo_id, "future", now + 4.0),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO code_edges(id, repo_id, src, dst, relation, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("code_edge_future", repo_id, "sym_future", "sym_other", "calls", now + 2.0),
+    )
+    svc.store.conn.commit()
+
+    assert svc._graph_scene_valid_until(wid, now) == now + 2.0
+
+
+def test_graph_scene_cache_deadline_tracks_end_boundaries_before_expiration():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    memory = _approve(svc, svc.remember(
+        "Future validity end boundary.", workspace="acme", scope="workspace",
+        valid_from=0.0,
+    ))
+    wid = svc.store.get_or_create_workspace("acme")
+    now = time.time()
+    svc.store.conn.execute(
+        "UPDATE memories SET valid_to=?, valid_to_recorded_at=?, expired_at=? "
+        "WHERE id=?",
+        (now + 5.0, now + 2.0, now + 10.0, memory["id"]),
+    )
+    svc.store.conn.commit()
+
+    assert svc._graph_scene_valid_until(wid, now) == now + 2.0
+
+
+def test_graph_scene_repo_filter_keeps_workspace_wide_session_privacy():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    visible_repo = svc.store.get_or_create_repo(wid, "visible")
+    private_repo = svc.store.get_or_create_repo(wid, "private")
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('workspace-private', ?, NULL, 'Workspace Private', 'concept', 0)",
+        (wid,),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('private-target', ?, ?, 'Private Target', 'concept', 0)",
+        (wid, private_repo),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+        "VALUES ('visible-isolate', ?, ?, 'Visible Isolate', 'concept', 0)",
+        (wid, visible_repo),
+    )
+    svc.store.conn.execute(
+        "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+        "VALUES ('private-edge', ?, ?, 'workspace-private', 'private-target', "
+        "'related', 'semantic')",
+        (wid, private_repo),
+    )
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="private evidence", workspace_id=wid,
+        repo_id=private_repo, scope=Scope.SESSION,
+    ))
+    svc.store.add_edge_support("private-edge", {"memory_id": private_memory})
+    svc.store.conn.commit()
+
+    scene = svc.graph_scene(workspace="acme", repo="visible")
+
+    assert {node["label"] for node in scene["nodes"]} == {"Visible Isolate"}
+
+
+def test_graph_scene_history_scopes_supports_to_requested_repo():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        repo_a = svc.store.get_or_create_repo(wid, "alpha")
+        svc.store.get_or_create_repo(wid, "beta")
+        svc.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?, ?, NULL, ?, 'concept', 0)",
+            [
+                ("history-source", wid, "History Source"),
+                ("history-target", wid, "History Target"),
+            ],
+        )
+        workspace_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_workspace", content="workspace evidence",
+            workspace_id=wid, scope=Scope.WORKSPACE,
+            valid_from=0.0, ingested_at=0.0,
+        ))
+        foreign_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_alpha", content="alpha evidence",
+            workspace_id=wid, repo_id=repo_a, scope=Scope.REPO,
+            valid_from=0.0, valid_to=100.0, ingested_at=0.0,
+        ))
+        edge_id = svc.store.upsert_edge(Edge(
+            id="history-repo-scope", src="history-source", dst="history-target",
+            relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
+        ))
+        svc.store.add_edge_support(edge_id, {"memory_id": workspace_memory})
+        svc.store.add_edge_support(edge_id, {"memory_id": foreign_memory})
+        svc.store.conn.execute(
+            "UPDATE edge_supports SET valid_to=100 WHERE edge_id=? AND memory_id=?",
+            (edge_id, foreign_memory),
+        )
+        svc.store.conn.commit()
+
+        scene = svc.graph_scene(
+            workspace="acme", repo="beta", as_of=150.0, include_history=True,
+        )
+        edge = next(item for item in scene["edges"] if item["id"] == edge_id)
+        assert workspace_memory in edge["support_memory_ids"]
+        assert foreign_memory not in edge["support_memory_ids"]
+    finally:
+        svc.close()
+
+
+def test_complete_history_marks_closed_support_connectors_as_ghosts():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        svc.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+            "VALUES (?, ?, ?, 'concept', 0)",
+            [("history-live-source", wid, "History Live Source"),
+             ("history-live-target", wid, "History Live Target")],
+        )
+        live_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_live", content="current evidence", workspace_id=wid,
+            scope=Scope.WORKSPACE, valid_from=0.0, ingested_at=0.0,
+        ))
+        closed_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_history_closed", content="closed evidence", workspace_id=wid,
+            scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0, ingested_at=0.0,
+        ))
+        edge_id = svc.store.upsert_edge(Edge(
+            id="history-live-edge", src="history-live-source", dst="history-live-target",
+            relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
+        ))
+        svc.store.add_edge_support(edge_id, {"memory_id": live_memory})
+        svc.store.add_edge_support(edge_id, {"memory_id": closed_memory})
+        svc.store.conn.execute(
+            "UPDATE edge_supports SET valid_to=100 WHERE edge_id=? AND memory_id=?",
+            (edge_id, closed_memory),
+        )
+        svc.store.conn.commit()
+
+        scene = svc.graph_scene(
+            workspace="acme", level="complete", as_of=150.0, include_history=True,
+        )
+        evidence = [edge for edge in scene["edges"]
+                    if edge["connector_kind"] == "evidence"]
+        live_evidence = [edge for edge in evidence if edge["source"] == live_memory]
+        closed_evidence = [edge for edge in evidence if edge["source"] == closed_memory]
+        assert live_evidence and all(not edge["ghost"] for edge in live_evidence)
+        assert len(closed_evidence) == 2
+        assert all(edge["ghost"] for edge in closed_evidence)
+        assert all(edge["strength"] == 0 for edge in closed_evidence)
+        assert all(edge["spring_strength"] == 0 for edge in closed_evidence)
+        relation = next(edge for edge in scene["edges"] if edge["id"] == edge_id)
+        assert relation["ghost"] is False
+    finally:
+        svc.close()
+
+
+def test_graph_scene_history_does_not_restore_filtered_support_from_provenance():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        repo_a = svc.store.get_or_create_repo(wid, "alpha")
+        svc.store.get_or_create_repo(wid, "beta")
+        svc.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?, ?, NULL, ?, 'concept', 0)",
+            [
+                ("provenance-source", wid, "Provenance Source"),
+                ("provenance-target", wid, "Provenance Target"),
+            ],
+        )
+        foreign_memory = svc.store.add_memory(MemoryRecord(
+            id="mem_provenance_alpha", content="alpha evidence",
+            workspace_id=wid, repo_id=repo_a, scope=Scope.REPO,
+            valid_from=0.0, valid_to=100.0, ingested_at=0.0,
+        ))
+        edge_id = svc.store.upsert_edge(Edge(
+            id="history-provenance-leak", src="provenance-source",
+            dst="provenance-target", relation="related", workspace_id=wid,
+            valid_from=0.0, ingested_at=0.0,
+            provenance={"memory_id": foreign_memory},
+        ))
+        svc.store.add_edge_support(edge_id, {"memory_id": foreign_memory})
+        svc.store.conn.execute(
+            "UPDATE edge_supports SET valid_to=100 WHERE edge_id=? AND memory_id=?",
+            (edge_id, foreign_memory),
+        )
+        svc.store.conn.commit()
+
+        scene = svc.graph_scene(
+            workspace="acme", repo="beta", as_of=150.0, include_history=True,
+        )
+
+        assert all(edge["id"] != edge_id for edge in scene["edges"])
+        assert foreign_memory not in repr(scene)
+    finally:
+        svc.close()
+
+
 def test_graph_full_mode_reports_the_available_node_count_without_truncation():
     svc = MemoryService.create(":memory:")
     _seed_entities(
@@ -467,6 +843,31 @@ def test_graph_memory_link_fallback_respects_empty_layer_filter():
     graph = svc.graph(workspace="acme", layers=[])
     assert graph["nodes"] == []
     assert graph["edges"] == []
+
+
+def test_graph_connected_only_excludes_unconnected_code_symbols():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Repo memory", workspace="w", repo="app")
+    _workspace_id, repo_id = svc._require_scope("w", "app")
+    symbol_ids = {}
+    for name in ("source", "target", "isolated"):
+        symbol_ids[name] = svc.store.upsert_symbol(
+            repo_id=repo_id, kind="function", name=name, fqname=name,
+            file=f"{name}.py", span="1:1",
+        )
+    svc.store.add_code_edge(
+        repo_id=repo_id, src=symbol_ids["source"], dst=symbol_ids["target"],
+        relation="calls",
+    )
+
+    graph = svc.graph(
+        workspace="w", repo="app", include_code=True,
+        connected_only=True, backfill=False,
+    )
+
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert {f"code:{symbol_ids['source']}", f"code:{symbol_ids['target']}"} <= node_ids
+    assert f"code:{symbol_ids['isolated']}" not in node_ids
 
 
 def test_graph_memory_link_fallback_samples_links_before_unrelated_memories():
@@ -1061,3 +1462,31 @@ def test_graph_as_of_omits_the_live_code_overlay():
     )
     assert f"code:{symbol_id}" not in {node["id"] for node in historical["nodes"]}
     assert historical["unified"] is False
+
+
+def test_graph_edge_history_visibility_sql_returns_params_tuple():
+    """SEC-002: _graph_edge_history_visibility_sql must return (sql, params) — never
+    interpolate floats into SQL text via repr()."""
+    from engraphis.service import _graph_edge_history_visibility_sql
+    result = _graph_edge_history_visibility_sql("edges", at=1000.0, known_at=2000.0)
+    assert isinstance(result, tuple) and len(result) == 2
+    sql, params = result
+    # SQL must use ? placeholders, not repr(float) literals
+    assert "1000.0" not in sql
+    assert "2000.0" not in sql
+    assert sql.count("?") == 6  # 6 anchor comparisons
+    assert params == [1000.0, 2000.0, 2000.0, 1000.0, 2000.0, 2000.0]
+
+
+def test_graph_edge_history_visibility_sql_uses_current_time_when_known_at_omitted():
+    """SEC-002: the known_at anchor falls back to time.time(), never to a hardcoded repr."""
+    from engraphis.service import _graph_edge_history_visibility_sql
+    import time
+    before = time.time()
+    sql, params = _graph_edge_history_visibility_sql("edges", at=500.0)
+    after = time.time()
+    assert "500.0" not in sql
+    assert params[0] == 500.0  # at anchor
+    # known_anchor slots: params[1], params[2], params[4], params[5] — all from time.time()
+    for slot in (1, 2, 4, 5):
+        assert before <= params[slot] <= after

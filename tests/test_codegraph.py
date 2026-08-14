@@ -363,14 +363,22 @@ def test_index_repo_accepts_normalized_language_alias(tmp_path):
 # latter skips the ENTIRE module when tree-sitter is absent, which silently dropped all
 # the dependency-free regex/ignore tests above from the offline numpy-only gate (exactly
 # the environment CI runs in). Guard only the AST tests so the offline ones always run.
-try:  # pragma: no cover - trivial availability probe
-    import tree_sitter_language_pack  # noqa: F401
+try:  # pragma: no cover - optional package and its grammars may be unavailable
+    import tree_sitter_language_pack
+
+    # The package is installed as an optional extra, but grammar binaries are fetched
+    # lazily. Treat an unavailable grammar like an unavailable optional extra so a
+    # transient certificate/network failure does not turn the full offline suite red;
+    # CompositeSymbolIndexer already guarantees the dependency-free fallback path.
+    tree_sitter_language_pack.get_parser("python")
     _HAS_TREE_SITTER = True
 except Exception:
     _HAS_TREE_SITTER = False
 
 _needs_tree_sitter = pytest.mark.skipif(
-    not _HAS_TREE_SITTER, reason="optional code-graph extra (tree-sitter) not installed")
+    not _HAS_TREE_SITTER,
+    reason="optional code-graph grammar (tree-sitter) is unavailable",
+)
 
 
 @_needs_tree_sitter

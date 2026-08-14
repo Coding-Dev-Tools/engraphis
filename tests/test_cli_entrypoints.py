@@ -156,11 +156,10 @@ def test_approval_cli_uses_configured_memory_service_factory(monkeypatch):
             "embed_revision": "a" * 40,
             "require_immutable_models": True,
             "embed_dim": 768,
-            "vector_backend": "sqlite-vec",
-            "rerank_model": "configured-reranker",
-            "rerank_revision": "b" * 40,
-            "allowed_workspaces": ["acme"],
-        },
+                "vector_backend": "sqlite-vec",
+                "rerank_model": "configured-reranker",
+                "rerank_revision": "b" * 40,
+            },
     )
     assert captured["approval"] == ("mem_pending", approve_memory.getpass.getuser(), "verified by owner")
     assert captured["closed"] is True
@@ -202,7 +201,6 @@ def test_operational_factories_forward_embedding_stack_settings(monkeypatch, mod
         "vector_backend": "sqlite-vec",
         "rerank_model": "configured-reranker",
         "rerank_revision": "b" * 40,
-        "allowed_workspaces": ["acme"],
     }
     if module in (cli, graph_cli):
         expected["extractor"] = "none"

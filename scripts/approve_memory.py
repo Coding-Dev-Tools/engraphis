@@ -35,7 +35,6 @@ def main() -> None:
         vector_backend=settings.vector_backend,
         rerank_model=settings.rerank_model or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        allowed_workspaces=settings.allowed_workspaces,
     )
     try:
         result = service.engine.approve_for_prompt(

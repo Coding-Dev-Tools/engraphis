@@ -322,7 +322,7 @@ def _local_service(db_path: str) -> MemoryService:
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
         embed_dim=settings.embed_dim or 384, vector_backend=settings.vector_backend,
-        rerank_model=None, allowed_workspaces=settings.allowed_workspaces,
+        rerank_model=None,
         extractor="none", graph_extractor="none", retention_supervisor="none",
     )
     if embed_model:

@@ -39,6 +39,7 @@ from engraphis.service import (
     MemoryService,
     MAX_CODE_QUERY_CAPACITY,
     ValidationError,
+    WorkspaceBindingError,
 )
 from engraphis.core.store import _escape_like
 from engraphis.core.textutil import jaccard, tokenize
@@ -127,7 +128,6 @@ def service() -> MemoryService:
                 vector_backend=settings.vector_backend,
                 rerank_model=getattr(settings, "rerank_model", "") or None,
                 rerank_revision=getattr(settings, "rerank_revision", "") or None,
-                allowed_workspaces=settings.allowed_workspaces,
             )
         return _service
 
@@ -183,7 +183,15 @@ def _run(fn, *a, **k):
             "resource": exc.resource,
             "count": exc.count,
             "limit": exc.limit,
-            "recommended_action": "narrow repository, time, type, or relation filters",
+            "recommended_action": (
+                "narrow by repository or entity type, or reduce the workspace graph"
+            ),
+        }) from None
+    except WorkspaceBindingError:
+        logger.info("dashboard request rejected by workspace binding")
+        raise HTTPException(status_code=403, detail={
+            "error": "workspace is not permitted by this instance's configuration",
+            "code": "workspace_not_permitted",
         }) from None
     except ValidationError:
         logger.info("dashboard request rejected")
@@ -300,6 +308,11 @@ def _require_ws(workspace: Optional[str] = None) -> str:
     if workspace is not None:
         try:
             return service()._clean_ws(workspace)
+        except WorkspaceBindingError:
+            logger.info("workspace request rejected by binding")
+            raise HTTPException(status_code=403, detail={
+                "error": "workspace is not permitted by this instance's configuration",
+            }) from None
         except (ValidationError, ValueError):
             logger.info("workspace request rejected")
             raise _invalid_request() from None
@@ -503,6 +516,7 @@ def health():
 
 @router.get("/bootstrap")
 def bootstrap():
+    from engraphis import __version__
     lic = get_license()
     current_service = service()
     wss = _run(current_service.list_workspaces).get("workspaces") or []
@@ -515,6 +529,24 @@ def bootstrap():
             wss,
             key=lambda item: (int(item.get("memories") or 0), str(item.get("name") or "")),
         ).get("name")
+    if current_service.allowed_workspaces is not None and not wss:
+        # A bound deployment must never fall back to a global aggregate when its
+        # allow-list has no visible workspace.  ``stats()`` correctly rejects that
+        # request for tenant isolation, but bootstrap is also the dashboard's empty
+        # state and must remain loadable so the operator can repair the binding.
+        bootstrap_stats = {
+            "workspace": None,
+            "memories": 0,
+            "by_type": {},
+            "total_rows": 0,
+            "workspaces": 0,
+            "sessions": 0,
+            "schema_version": getattr(current_service.store, "schema_version", None),
+            "prompt_eligibility": {},
+            "embedding": {},
+        }
+    else:
+        bootstrap_stats = _run(current_service.stats, workspace=scoped_stats_workspace)
     emb = None
     try:
         from engraphis.backends.embedder_deterministic import DeterministicEmbedder
@@ -528,9 +560,10 @@ def bootstrap():
     except Exception:  # noqa: BLE001
         pass
     return {
+        "version": __version__,
         "license": lic,
         "workspaces": wss,
-        "stats": _run(current_service.stats, workspace=scoped_stats_workspace),
+        "stats": bootstrap_stats,
         "embedder": emb,
         # Non-blocking best-known update snapshot; the dashboard renders an "update
         # available" banner from this and a background refresh warms the cache.
@@ -1012,7 +1045,7 @@ def workspaces_merge(req: _MergeWsReq):
 
 class _ImportFolderReq(BaseModel):
     workspace: str
-    path: str
+    path: str = Field(max_length=1024)
     file_pattern: str = "*.md"
     memory_type: str = "semantic"
     derive_facts: bool = False
@@ -1415,6 +1448,11 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
     ws = workspace or _require_ws()
     try:
         out = service().why(q, workspace=ws, k=k)
+    except WorkspaceBindingError:
+        logger.info("dashboard why request rejected by workspace binding")
+        raise HTTPException(status_code=403, detail={
+            "error": "workspace is not permitted by this instance's configuration",
+        }) from None
     except ValidationError:
         logger.info("dashboard why request rejected")
         raise _invalid_request() from None
@@ -1441,6 +1479,11 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
     ws = workspace or _default_ws()
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
+    except WorkspaceBindingError:
+        logger.info("dashboard timeline request rejected by workspace binding")
+        raise HTTPException(status_code=403, detail={
+            "error": "workspace is not permitted by this instance's configuration",
+        }) from None
     except ValidationError:
         logger.info("dashboard timeline request rejected")
         raise _invalid_request() from None
@@ -1562,7 +1605,9 @@ def context_savings(
     format: Optional[str] = None,
     group_by: Optional[str] = None,
 ):
-    ws = workspace or _require_ws()
+    ws = workspace.strip() if isinstance(workspace, str) else None
+    if isinstance(ws, str) and not ws:
+        raise _invalid_request()
     return _run(
         service().context_savings,
         workspace=ws,
@@ -1590,9 +1635,15 @@ def receipts_export(workspace: Optional[str] = None):
     ws = workspace or _require_ws()
     from fastapi.responses import JSONResponse
     body = _run(service().export_receipts, workspace=ws)
+    # Restrict filename to ASCII to avoid Latin-1 encoding crashes in response
+    # headers when workspace names contain non-Latin-1 characters (e.g., CJK).
+    safe_ws = "".join(
+        c if c.isascii() and (c.isalnum() or c in "-_.") else "_"
+        for c in (ws or "workspace")
+    ) or "workspace"
     fname = "engraphis-receipts-%s-%s.json" % (
-        (ws or "workspace").replace("/", "_"),
-        __import__("time").strftime("%Y%m%d"),
+        safe_ws,
+        time.strftime("%Y%m%d"),
     )
     return JSONResponse(body, headers={
         "Content-Disposition": 'attachment; filename="%s"' % fname,
@@ -2157,6 +2208,7 @@ def _graph_csv(value: Optional[str]) -> Optional[list[str]]:
 
 @router.get("/graph/scene")
 def graph_scene(workspace: Optional[str] = None, level: str = "overview",
+                presentation: str = Query(default="quality", max_length=16),
                 center_id: Optional[str] = None, system_id: Optional[str] = None,
                 seeds: Optional[str] = None, repo: Optional[str] = None,
                 layers: Optional[str] = None, relations: Optional[str] = None,
@@ -2171,38 +2223,100 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
                 min_support: int = Query(default=1, ge=0, le=1_000_000),
                 min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
                 include_code: bool = False, code_overlay: Optional[bool] = None,
+                connected_only: bool = False,
+                include_history: bool = False,
+                include_memory_nodes: bool = True,
                 include_weak_co_occurs: Optional[bool] = None,
                 include_weak_cooccurrence: Optional[bool] = None,
-                node_limit: Optional[int] = Query(default=None, ge=1, le=300),
-                edge_limit: Optional[int] = Query(default=None, ge=0, le=900)):
+                node_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+                edge_limit: Optional[int] = Query(default=None, ge=0, le=2000)):
     """Complete or focused evidence-backed graph scene with deterministic identity."""
     ws = workspace or _require_ws()
+    # ``full`` was the public Ledger value before graph scenes split the focused
+    # ``overview`` response from the canonical ``complete`` projection. Keep the alias
+    # at the HTTP boundary so a browser with a stale graph asset cannot turn a valid full
+    # graph request into the generic 400 "invalid request" response. Legacy full scenes
+    # excluded memory nodes; preserve that bounded projection even if the stale client omitted
+    # the newer ``include_memory_nodes=false`` flag. A repository-scoped code overlay may still
+    # add symbols within the same final-node ceiling. Ignore stale overview caps as well:
+    # complete scenes enforce their own safety ceiling and must not be sampled.
+    legacy_full = level.strip().lower() == "full"
+    presentation_value = presentation.strip().lower()
+    if presentation_value not in {"quality", "all"}:
+        raise HTTPException(status_code=400, detail={
+            "error": "presentation must be quality or all",
+            "recommended_action": "choose the High quality or All nodes · LOD profile",
+        })
+    all_presentation = presentation_value == "all"
+    scene_level = "complete" if legacy_full or all_presentation else level
+    if legacy_full or all_presentation:
+        include_memory_nodes = False
+        node_limit = None
+        edge_limit = None
     weak_cooccurrence = (
         include_weak_cooccurrence
         if include_weak_cooccurrence is not None else
         include_weak_co_occurs
         if include_weak_co_occurs is not None else
-        level.strip().lower() == "complete"
+        scene_level.strip().lower() == "complete"
     )
     code_enabled = include_code if code_overlay is None else code_overlay
-    if level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
+    if scene_level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
         # This is route-owned, parameter-only validation.  It keeps the precise dashboard
         # guidance without ever serializing a service exception.
         raise HTTPException(status_code=400, detail={
             "error": "complete scenes do not accept node_limit or edge_limit; "
                      "use graph filters instead of silently truncating the chart",
         })
-    return _run(
-        service().graph_scene, workspace=ws, level=level,
-        center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),
-        repo=repo, layers=_graph_csv(layers), relations=_graph_csv(relations),
-        entity_types=_graph_csv(entity_types), memory_types=_graph_csv(memory_types),
-        as_of=as_of, valid_at=valid_at, known_at=known_at,
-        time_from=time_from, time_to=time_to, depth=depth,
-        min_support=min_support, min_confidence=min_confidence,
-        include_weak_cooccurrence=weak_cooccurrence,
-        include_code=code_enabled, node_limit=node_limit, edge_limit=edge_limit,
-    )
+    graph_kwargs = {
+        "workspace": ws, "level": scene_level,
+        "presentation": "all" if all_presentation else "quality",
+        "center_id": center_id, "system_id": system_id, "seeds": _graph_csv(seeds),
+        "repo": repo, "layers": _graph_csv(layers), "relations": _graph_csv(relations),
+        "entity_types": _graph_csv(entity_types), "memory_types": _graph_csv(memory_types),
+        "as_of": as_of, "valid_at": valid_at, "known_at": known_at,
+        "time_from": time_from, "time_to": time_to, "depth": depth,
+        "min_support": min_support, "min_confidence": min_confidence,
+        "include_weak_cooccurrence": weak_cooccurrence,
+        "include_code": code_enabled, "connected_only": connected_only,
+        "include_history": include_history, "include_memory_nodes": include_memory_nodes,
+        "node_limit": node_limit, "edge_limit": edge_limit,
+    }
+
+    def run_scene():
+        def without_code_overlay(reason: str):
+            fallback_kwargs = {**graph_kwargs, "include_code": False}
+            scene = service().graph_scene(**fallback_kwargs)
+            meta = scene.get("meta")
+            if isinstance(meta, dict):
+                meta["degraded"] = True
+                meta["degraded_reason"] = reason
+                meta["requested_include_code"] = True
+                meta["include_code"] = False
+            return scene
+
+        try:
+            return service().graph_scene(**graph_kwargs)
+        except ValidationError as exc:
+            # Code overlay is optional evidence. A broad workspace can exceed the bounded
+            # code candidate budget, and older Ledger clients may request it without the
+            # repository filter that makes the query safe. Keep the entity graph usable and
+            # make the degraded state explicit instead of turning the whole scene into the
+            # generic 400 "invalid request" response.
+            if not (code_enabled and not repo and "code overlay" in str(exc).lower()
+                    and "filter" in str(exc).lower() and "repository" in str(exc).lower()):
+                raise
+            return without_code_overlay("code_overlay_requires_repository_filter")
+        except Exception as exc:  # noqa: BLE001 - optional overlay must not break the graph
+            if not code_enabled:
+                raise
+            logger.error(
+                "graph code overlay failed; serving the entity graph (%s)",
+                type(exc).__name__,
+            )
+            return without_code_overlay("code_overlay_failed")
+
+    return _run(run_scene)
 
 
 @router.get("/graph/suggest")
@@ -2249,14 +2363,19 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
 
 @router.get("/graph/entities/{canonical_id}/memories")
 def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
+                          repo: Optional[str] = None,
                           as_of: Optional[float] = None,
                           valid_at: Optional[float] = None,
-                          known_at: Optional[float] = None):
+                          known_at: Optional[float] = None,
+                          member_id: Optional[str] = None,
+                          include_history: bool = False):
     """Bounded evidence cards for one graph node, without rebuilding the full inspector."""
     ws = workspace or _require_ws()
     return _run(
         service().graph_entity_evidence, canonical_id, workspace=ws,
+        repo=repo,
         as_of=as_of, valid_at=valid_at, known_at=known_at,
+        member_id=member_id, include_history=include_history,
     )
 
 
@@ -2412,7 +2531,7 @@ def code_path(req: _CodePathReq):
 class _CodeImpactReq(BaseModel):
     workspace: str
     repo: str
-    changed_files: list[str]
+    changed_files: list[str] = Field(..., min_length=1, max_length=2_000)
     capacity: int = Field(
         default=DEFAULT_CODE_QUERY_CAPACITY, ge=1, le=MAX_CODE_QUERY_CAPACITY
     )
@@ -3585,8 +3704,7 @@ def _sync_all(svc) -> dict:
         if allowed_workspaces is None or row["name"] in allowed_workspaces
     ]
     engine = svc.engine
-    syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index,
-                        allowed_workspaces=settings.allowed_workspaces or None)
+    syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index)
     totals = {"added": 0, "updated": 0, "unchanged": 0, "links_added": 0}
     # Distinct OTHER devices we pulled from, deduped across workspaces: the same peer
     # pushes a bundle per workspace, so summing per-workspace counts would multiply one

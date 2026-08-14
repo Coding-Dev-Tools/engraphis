@@ -69,7 +69,12 @@ from engraphis.core.poisoning import (
     inspection_eligible,
     prompt_eligible,
 )
-from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.store import (
+    Store,
+    _is_memory_database_path,
+    memory_matches_filter,
+    now_ts,
+)
 from engraphis.core.textutil import jaccard, tokenize
 
 
@@ -217,10 +222,7 @@ class RecallEngine:
         config = arm_config or profile_config(selected_profile)
         capabilities = embedder_capabilities(self.embedder)
         vector_search_ready = bool(capabilities["semantic_support"])
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if vector_search_ready and persistent_store:
             fingerprint = embedding_space_fingerprint(self.embedder)
             vector_search_ready = bool(
@@ -505,6 +507,7 @@ class RecallEngine:
         score_details: dict[str, dict[str, Any]] = {}
         consolidated_ids: set[str] = set()
         consolidation_evidence_cache: dict[str, tuple[str, ...]] = {}
+        _CACHE_MAX = 1000
 
         def consolidation_evidence_for(record: MemoryRecord) -> tuple[str, ...]:
             cached = consolidation_evidence_cache.get(record.id)
@@ -514,6 +517,8 @@ class RecallEngine:
                 tuple(_consolidation_evidence(record, store=self.store, flt=flt))
                 if _consolidated_source(record) else ()
             )
+            if len(consolidation_evidence_cache) >= _CACHE_MAX:
+                consolidation_evidence_cache.clear()
             consolidation_evidence_cache[record.id] = evidence
             return evidence
         for mid, rec in recs.items():

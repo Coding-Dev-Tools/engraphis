@@ -191,7 +191,8 @@ def recall_master(*, namespace: Optional[str] = None, max_chunks: int = 10) -> d
 
     chunks = []
     for score, mem_id, mem in top:
-        reweight.reinforce(mem_id)
+        # recall_master is a read-only retention query; never reinforce.
+        # Reinforcement is opt-in via the regular recall() path only.
         chunks.append({
             "documentId": mem["document_id"],
             "title": mem["title"],

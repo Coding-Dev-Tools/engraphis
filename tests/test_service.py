@@ -84,6 +84,16 @@ def test_empty_configured_db_warns_about_populated_owner_db(tmp_path, monkeypatc
     assert "1 memories" in warning
 
 
+def test_memory_service_preserves_regular_sqlite_uri_options(tmp_path):
+    """URI modes must reach SQLite instead of being converted to a writable path."""
+    missing = tmp_path / "missing.db"
+    uri = missing.as_uri() + "?mode=rw"
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        MemoryService.create(uri, extractor="none", graph_extractor="none")
+    assert not missing.exists()
+
+
 def test_remember_batch_omitted_trusted_matches_single_write_safe_default():
     service = MemoryService.create(":memory:", graph_extractor="none")
 
@@ -168,6 +178,34 @@ def test_memory_health_binds_time_parameters_and_scopes_conflicts_to_workspace()
     assert sum(bucket["count"] for bucket in health["decay_distribution"]) == 1
     assert health["orphan_count"] == 1
     assert health["conflict_frequency"] == {"total": 1, "last_7d": 1}
+
+
+def test_memory_health_uses_current_bitemporal_visibility():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.remember(
+        "Visible health marker.", workspace="alpha", scope="workspace"
+    )
+    future_ingested = service.remember(
+        "Future ingestion marker.", workspace="alpha", scope="workspace"
+    )
+    future_expiring = service.remember(
+        "Future expiration marker.", workspace="alpha", scope="workspace"
+    )
+    now = time.time()
+    service.store.conn.execute(
+        "UPDATE memories SET ingested_at=? WHERE id=?",
+        (now + 3600, future_ingested["id"]),
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET expired_at=? WHERE id=?",
+        (now + 3600, future_expiring["id"]),
+    )
+    service.store.conn.commit()
+
+    health = service.memory_health(workspace="alpha")
+
+    assert sum(bucket["count"] for bucket in health["decay_distribution"]) == 2
+    assert health["orphan_count"] == 2
 
 
 def test_remember_then_recall_roundtrip():
@@ -831,6 +869,25 @@ def test_conflict_review_hides_another_callers_session_memory():
         set_current_user(None)
 
 
+def test_first_use_workspace_rechecks_personal_owner_after_atomic_race(monkeypatch):
+    service = MemoryService.create(':memory:')
+    try:
+        set_current_user({'id': 'usr_alice', 'email': 'alice@example.test', 'role': 'member'})
+        winner_id = service.store.create_workspace(
+            'raced', settings={'visibility': 'personal', 'owner': 'bob@example.test'},
+        )
+
+        def return_racing_winner(_name, *, settings=None):
+            del settings
+            return winner_id
+
+        monkeypatch.setattr(service.store, 'get_or_create_workspace', return_racing_winner)
+        with pytest.raises(ValidationError, match='personal folder of another user'):
+            service.remember('must not enter the raced workspace', workspace='raced')
+    finally:
+        set_current_user(None)
+
+
 def test_conflict_review_pages_past_ineligible_newer_rows_before_limit():
     service = MemoryService.create(":memory:")
     wid = service.store.get_or_create_workspace("acme")
@@ -1451,6 +1508,34 @@ def test_import_folder_missing_path_rejected(tmp_path, monkeypatch):
     with pytest.raises(ValidationError):
         s.import_folder(workspace="acme", path=str(tmp_path / "does-not-exist"))
 
+
+def test_import_folder_error_messages_do_not_echo_user_path(tmp_path, monkeypatch):
+    """SEC-001: import error messages must not echo the user-supplied path back to
+    the caller — leaking filesystem structure aids path-traversal reconnaissance."""
+    sentinel = "zzz-hostile-sentinel-zzz"
+    hostile = str(tmp_path / sentinel / "secret.md")
+    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
+    import pathlib
+    decoy_home = tmp_path / "decoy-home"
+    decoy_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", lambda: decoy_home)
+    s = _svc()
+    # Path traversal rejection — sentinel must not appear in the message.
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=hostile)
+    assert sentinel not in str(exc_info.value)
+    # "path not found" — sentinel must not appear.
+    allowed_but_gone = tmp_path / sentinel
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=str(allowed_but_gone))
+    assert sentinel not in str(exc_info.value)
+    # "not a directory" — sentinel must not appear.
+    blocker = tmp_path / sentinel
+    blocker.write_text("not a dir", encoding="utf-8")
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=str(blocker))
+    assert sentinel not in str(exc_info.value)
 
 def test_import_folder_path_traversal_blocked(tmp_path, monkeypatch):
     """A path outside the allowed roots (home dir / ENGRAPHIS_IMPORT_ROOTS) must be

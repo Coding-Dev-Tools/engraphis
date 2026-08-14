@@ -1,5 +1,5 @@
 const API=location.origin+'/api',TRIAL_DAYS=3;
-let WS=null, WORKSPACES=[], LIC=null;
+let WS=null, WORKSPACES=[], LIC=null, RELEASE_VERSION='';
 const TITLES={overview:'Overview',recall:'Recall',memories:'Memories','mem-editor':'Memory',proactive:'Proactive recall',why:'Why',timeline:'Timeline',audit:'Audit trail',graph:'Knowledge Graph',analytics:'Hosted Analytics',health:'Memory Health',consolidate:'Consolidate',automation:'Hosted Automation',workspaces:'Workspaces',team:'Team Cloud',settings:'Settings'};
 const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',health:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Operate',team:'Engine',settings:'Engine'};
 /* Per-view subtitle rendered in the topbar next to the view name. The body no longer
@@ -133,22 +133,25 @@ async function loadWorkspaceList(){const d=await api('/workspaces');WORKSPACES=d
 
 /* overview */
 function formatTokenCount(value){return Math.max(0,Math.round(Number(value)||0)).toLocaleString()}
-function savingsPercent(value){return Math.max(0,Math.min(100,Number(value)*100||0))}
-function savingsCount(value){return Math.max(0,Math.round(Number(value)||0))}
-function savingsNode(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n}
-function renderOverviewSavings(data,error){
- const el=document.getElementById('ov-savings');
- if(!el)return;
- el.replaceChildren();
- if(error){el.append(savingsNode('div','empty','Savings estimate unavailable.'));return}
- const e=(data&&data.estimated)||{},eligible=savingsCount(e.eligible_receipt_count),excluded=savingsCount(e.excluded_receipt_count)+savingsCount(e.unclassified_receipt_count)+savingsCount(e.invalid_estimate_count),saved=Number(e.saved_tokens)||0,ratio=Number(e.savings_ratio)||0,counters=Array.isArray(e.by_token_counter)?e.by_token_counter:[];
- if(!eligible){el.append(savingsNode('div','empty','No receipt-backed context savings yet.'),savingsNode('div','field-hint','Eligible deliveries will appear after adaptive context or context-delivery calls. '+excluded+' excluded or unclassified '+(excluded===1?'delivery':'deliveries')+'.'),savingsNode('div','field-hint','Measures estimated prompt-context reduction; it does not measure provider billing.'));return}
- const counter=counters.length===1?'Counter: '+(counters[0].token_counter||'unknown'):counters.length?counters.length+' token counters (kept separate)':'Counter: unknown',pct=savingsPercent(ratio),pctLabel=pct.toFixed(1);
- const hero=savingsNode('div','savings-hero'),total=savingsNode('div'),rate=savingsNode('div','savings-rate'),progress=document.createElement('progress');
- total.append(savingsNode('div','stat-val savings-number',formatTokenCount(saved)),savingsNode('div','savings-unit','tokens avoided'));rate.append(savingsNode('strong','',pctLabel+'%'),savingsNode('span','','estimated reduction'));hero.append(total,rate);progress.className='savings-progress';progress.max=100;progress.value=pct;progress.setAttribute('aria-label',pctLabel+'% estimated context reduction');
- el.append(hero,progress,savingsNode('div','savings-summary','Across '+eligible+' eligible context deliveries'),savingsNode('div','field-hint','Baseline '+formatTokenCount(e.baseline_tokens)+' → emitted '+formatTokenCount(e.emitted_tokens)+' · confidence: '+(e.confidence||'unknown')),savingsNode('div','field-hint',counter+(excluded?' · '+excluded+' excluded/unclassified':'')),savingsNode('div','field-hint','Measures estimated prompt-context reduction; it does not measure provider billing.'));
+async function loadOverview(){
+ try{
+  const st=await api('/stats?workspace='+encodeURIComponent(WS||''));
+  setViewDesc('overview',(st.memories||0)+' memories · '+(st.workspaces||0)+' workspaces');
+  const cards=[['Memories',st.memories],['Live rows',st.total_rows],['Workspaces',st.workspaces],['Sessions',st.sessions]];
+  document.getElementById('stat-grid').innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]!=null?c[1]:'—'}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');
+  document.getElementById('nav-mem-count').textContent=st.memories||'';
+  const bt=st.by_type||{},tot=Object.values(bt).reduce((a,b)=>a+b,0)||1;
+  document.getElementById('ov-types').innerHTML=Object.keys(bt).length?Object.entries(bt).map(([k,v])=>`<div data-csp-style="s62"><div data-csp-style="s63">${esc(k)}</div><progress class="overview-type-bar" max="${tot}" value="${Math.max(Number(v)||0,0)}" aria-label="${esc(k)}: ${v}"></progress><div data-csp-style="s66">${v}</div></div>`).join(''):'<div class="empty" data-csp-style="s67">No memories</div>';
+  loadOverviewAnalytics();
+ }catch(e){
+  const msg='Overview unavailable: '+e.message;
+  setViewDesc('overview',msg);
+  document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';
+  document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Memory types could not be loaded.</div>';
+  document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Analytics could not be loaded.</div>';
+  toast(msg,'err');
+ }
 }
-async function loadOverview(){try{const st=await api('/stats?workspace='+encodeURIComponent(WS||''));setViewDesc('overview',(st.memories||0)+' memories · '+(st.workspaces||0)+' workspaces');const cards=[['Memories',st.memories],['Live rows',st.total_rows],['Workspaces',st.workspaces],['Sessions',st.sessions]];document.getElementById('stat-grid').innerHTML=cards.map(c=>`<div class="stat"><div class="stat-val">${c[1]!=null?c[1]:'—'}</div><div class="stat-lbl">${c[0]}</div></div>`).join('');document.getElementById('nav-mem-count').textContent=st.memories||'';const bt=st.by_type||{};const tot=Object.values(bt).reduce((a,b)=>a+b,0)||1;document.getElementById('ov-types').innerHTML=Object.keys(bt).length?Object.entries(bt).map(([k,v])=>`<div data-csp-style="s62"><div data-csp-style="s63">${esc(k)}</div><progress class="overview-type-bar" max="${tot}" value="${Math.max(Number(v)||0,0)}" aria-label="${esc(k)}: ${v}"></progress><div data-csp-style="s66">${v}</div></div>`).join(''):'<div class="empty" data-csp-style="s67">No memories</div>';try{renderOverviewSavings(await api('/context-savings?workspace='+encodeURIComponent(WS||'')))}catch(_err){renderOverviewSavings(null,true)}loadOverviewAnalytics()}catch(e){const msg='Overview unavailable: '+e.message;setViewDesc('overview',msg);document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Memory types could not be loaded.</div>';document.getElementById('ov-savings').innerHTML='<div class="empty" data-csp-style="s10">Savings estimate could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Analytics could not be loaded.</div>';toast(msg,'err')}}
 async function loadOverviewAnalytics(){
  const el=document.getElementById('ov-analytics'),lock=document.getElementById('ov-lock');
  try{
@@ -423,11 +426,10 @@ async function doTimeline(){
 
 /* audit */
 async function loadAudit(){const el=document.getElementById('audit-body');el.innerHTML='<div class="spinner" data-csp-style="s108"></div>';try{const d=await api('/audit?workspace='+encodeURIComponent(WS||'')+'&limit=200');const rows=d.entries||d.audit||[];if(!rows.length){el.innerHTML='<div class="empty" data-csp-style="s105">No governance actions recorded.</div>';return}el.innerHTML='<div class="card" data-csp-style="s113">'+rows.map(r=>`<div class="audit-row"><span class="pill pill-accent" data-csp-style="s9">${esc(r.action||r.op||r.kind||'edit')}</span><span data-csp-style="s114">${esc(r.memory_id||r.target||r.detail||'')}</span><span data-csp-style="s101">${esc(r.actor||'')}</span><span data-csp-style="s101">${r.ts||r.at?fmtRel(r.ts||r.at):''}</span></div>`).join('')+'</div>'}catch(e){el.innerHTML='<div class="empty" data-csp-style="s105">'+esc(e.message)+'</div>'}}
-async function loadReceipts(){const el=document.getElementById('audit-body');el.innerHTML='<div class="spinner" data-csp-style="s108"></div>';try{const q='workspace='+encodeURIComponent(WS||'');const [d,v,s]=await Promise.all([api('/receipts?'+q+'&limit=500'),api('/receipts/verify?'+q),api('/context-savings?'+q)]);const rows=d.entries||[],counters=s.by_token_counter||[];const savings=counters.map(x=>`<div class="cfg-row"><span>${esc(x.token_counter||'unknown')}</span><span>${x.context_tokens||0} packed / ${x.source_tokens||0} retrieved-source tokens; ${x.saved_tokens||0} not injected (${((x.savings_ratio||0)*100).toFixed(1)}%)</span></div>`).join('');const savingCard=`<div class="card" data-csp-style="s115"><div class="card-head">Packed context efficiency</div><div data-csp-style="s90">${s.savings_receipt_count||0} packed recalls; this measures retrieved source versus injected context, grouped by token counter.</div>${savings||'<div class="field-hint">No complete context-usage receipts yet.</div>'}</div>`;el.innerHTML=savingCard+`<div class="card" data-csp-style="s115"><div class="card-head">Receipt chain <span class="pill ${v.valid?'pill-green':'pill-amber'}">${v.valid?'verified':'invalid'}</span></div><div data-csp-style="s90">${v.count||0} receipts · head <code>${esc((v.head||'').slice(0,24))}</code></div></div>`+(rows.length?'<div class="card" data-csp-style="s113">'+rows.map(r=>`<div class="audit-row"><span class="pill pill-accent" data-csp-style="s9">${esc(r.operation||'operation')}</span><span data-csp-style="s1"><code>${esc((r.hash||'').slice(0,20))}</code> · ${esc(r.status||'ok')} · ${r.target_count||0} target(s)</span><span data-csp-style="s101">${r.ts_ms?fmtRel(r.ts_ms/1000):''}</span></div>`).join('')+'</div>':'<div class="empty" data-csp-style="s105">No receipts yet.</div>')}catch(e){el.innerHTML='<div class="empty" data-csp-style="s105">'+esc(e.message)+'</div>'}}
 async function downloadReceipts(){try{const d=await api('/receipts/export?workspace='+encodeURIComponent(WS||''));const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='engraphis-receipts-'+(WS||'workspace')+'.json';a.click();URL.revokeObjectURL(a.href);toast('Privacy-safe receipts exported','ok')}catch(e){toast(e.message,'err')}}
 
 let SAVINGS_PRESET='all';
-function savingsPresetQuery(){const p=new URLSearchParams({workspace:WS||''});if(SAVINGS_PRESET==='current')p.set('release_version','1.6.1');if(SAVINGS_PRESET==='7d')p.set('from_ts',String(Date.now()/1000-604800));return p.toString()}
+function savingsPresetQuery(){const p=new URLSearchParams({workspace:WS||''});if(SAVINGS_PRESET==='current'&&RELEASE_VERSION)p.set('release_version',RELEASE_VERSION);if(SAVINGS_PRESET==='7d')p.set('from_ts',String(Date.now()/1000-604800));return p.toString()}
 function renderSavingsDetail(s){const e=(s&&s.estimated)||{},eligible=Number(e.eligible_receipt_count)||0,excluded=(Number(e.excluded_receipt_count)||0)+(Number(e.unclassified_receipt_count)||0)+(Number(e.invalid_estimate_count)||0),basisRows=(e.by_basis||[]).map(x=>'<div class="cfg-row"><span>'+esc((x.basis||'unclassified').replaceAll('_',' '))+' · '+esc(x.confidence||'unknown')+'</span><span>'+formatTokenCount(x.baseline_tokens)+' → '+formatTokenCount(x.emitted_tokens)+' · '+formatTokenCount(x.saved_tokens)+' saved ('+(x.receipt_count||0)+' delivery)</span></div>').join(''),counterRows=(e.by_token_counter||[]).map(x=>'<div class="cfg-row"><span>'+esc(x.token_counter||'unknown')+'</span><span>'+formatTokenCount(x.saved_tokens)+' saved · '+(x.receipt_count||0)+' eligible delivery</span></div>').join(''),preset=SAVINGS_PRESET==='current'?'Current release':SAVINGS_PRESET==='7d'?'Last 7 days':SAVINGS_PRESET==='since'?'Since tracking started':'All time';const buttons=['since','current','7d','all'].map(x=>'<button class="btn btn-ghost btn-sm'+(SAVINGS_PRESET===x?' active':'')+'" data-savings-preset="'+x+'">'+(x==='since'?'Since tracking started':x==='current'?'Current release':x==='7d'?'Last 7 days':'All time')+'</button>').join('');return '<div class="card" data-csp-style="s115"><div class="card-head">Estimated context saved</div><div class="cfg-row"><span>View</span><span>'+buttons+'</span></div>'+(eligible?'<div class="stat-val">'+formatTokenCount(e.saved_tokens)+' tokens</div><div data-csp-style="s90">Baseline '+formatTokenCount(e.baseline_tokens)+' → emitted '+formatTokenCount(e.emitted_tokens)+' · '+(Number(e.savings_ratio||0)*100).toFixed(1)+'% estimated reduction</div><div class="field-hint">'+eligible+' eligible deliveries · confidence: '+esc(e.confidence||'unknown')+' · range: '+preset+'</div>'+(basisRows||'<div class="field-hint">No basis breakdown available.</div>')+(counterRows?'<div class="field-hint">Token counters</div>'+counterRows:''):'<div class="empty">No eligible estimates in this range.</div>')+'<div class="field-hint">'+excluded+' excluded or unclassified delivery(s). Measures estimated prompt-context reduction; it does not measure provider billing.</div></div>'}
 async function loadReceipts(){const el=document.getElementById('audit-body');el.innerHTML='<div class="spinner" data-csp-style="s108"></div>';try{if(!window.__savingsPresetBound){window.__savingsPresetBound=true;document.addEventListener('click',function(ev){const button=ev.target.closest('[data-savings-preset]');if(!button)return;SAVINGS_PRESET=button.getAttribute('data-savings-preset')||'all';loadReceipts()})}const q='workspace='+encodeURIComponent(WS||''),sq=savingsPresetQuery();const [d,v,s]=await Promise.all([api('/receipts?'+q+'&limit=500'),api('/receipts/verify?'+q),api('/context-savings?'+sq)]);const rows=d.entries||[],packed=(s.by_token_counter||[]).map(x=>'<div class="cfg-row"><span>'+esc(x.token_counter||'unknown')+'</span><span>'+formatTokenCount(x.context_tokens)+' packed / '+formatTokenCount(x.source_tokens)+' source · '+formatTokenCount(x.saved_tokens)+' legacy saved</span></div>').join('');const packedCard='<div class="card" data-csp-style="s115"><div class="card-head">Packed context accounting</div><div data-csp-style="s90">Packing savings compare retrieved source tokens with emitted context. They are not added again to adaptive history savings.</div>'+(packed||'<div class="field-hint">No complete context-usage receipts yet.</div>')+'</div>';el.innerHTML=renderSavingsDetail(s)+packedCard+'<div class="card" data-csp-style="s115"><div class="card-head">Receipt chain <span class="pill '+(v.valid?'pill-green':'pill-amber')+'">'+(v.valid?'verified':'invalid')+'</span></div><div data-csp-style="s90">'+(v.count||0)+' receipts · head <code>'+esc((v.head||'').slice(0,24))+'</code></div></div>'+(rows.length?'<div class="card" data-csp-style="s113">'+rows.map(r=>'<div class="audit-row"><span class="pill pill-accent" data-csp-style="s9">'+esc(r.operation||'operation')+'</span><span data-csp-style="s1"><code>'+esc((r.hash||'').slice(0,20))+'</code> · '+esc(r.status||'ok')+' · '+(r.target_count||0)+' target(s)</span><span data-csp-style="s101">'+(r.ts_ms?fmtRel(r.ts_ms/1000):'')+'</span></div>').join('')+'</div>':'<div class="empty" data-csp-style="s105">No receipts yet.</div>')}catch(e){el.innerHTML='<div class="empty" data-csp-style="s105">'+esc(e.message)+'</div>'}}
 
@@ -567,7 +569,7 @@ async function exportWorkspace(){try{const d=await api('/export?workspace='+enco
 async function loadTeam(){const el=document.getElementById('team-body'),teamCta=hostedCta('team','team_tab');try{const st=await api('/auth/state');if(teamCta.href==='#'&&st&&st.cloud_url)teamCta.href=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.</div><div data-csp-style="s150">${ctaLinkHtml(teamCta,'btn btn-primary btn-sm','team_tab')}</div></div>`}
 /* health + settings */
 function connectionContext(){const host=(location.hostname||'').toLowerCase();return host==='localhost'||host==='127.0.0.1'||host==='::1'||host.endsWith('.localhost')?'Local engine':'Remote customer node'}
-async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}}
+async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}try{const auth=await api('/auth/state');const m=document.getElementById('deployment-mode-indicator');if(m){const isLocal=auth.deployment_mode==='local';m.textContent=isLocal?'LOCAL':'HOSTED';m.title=isLocal?'Local mode: no hosted cloud configured':'Hosted mode: connected to Engraphis Cloud';m.className='deployment-mode '+(isLocal?'mode-local':'mode-hosted');m.hidden=false}}catch(e){}}
 function loadSettings(){loadLicense();loadSyncStatus();loadHostedAgentAccess();loadLlmStatus();const s=document.getElementById('cfg-store');if(s)s.textContent=location.host;api('/info').then(function(d){var v=document.getElementById('cfg-version');if(v&&d&&d.version)v.textContent=d.version}).catch(function(){})}
 
 async function loadLlmStatus(){const el=document.getElementById('llm-body');if(!el)return;try{const st=await api('/llm/status');const ok=st.configured;const badge=ok?'<span class="pill pill-green" data-csp-style="s9">configured</span>':'<span class="pill pill-amber" data-csp-style="s9">not configured</span>';const keyLine=st.key_set?'API key set ✓':'<span data-csp-style="s160">No API key set</span>';let modelSel='<select class="select" id="llm-model" data-csp-style="s49" data-onchange="h128">';const models=(st.default_models||{});if(!Object.values(models).includes(st.model)){modelSel+='<option value="'+esc(st.model)+'" selected>'+esc(st.model)+' (current)</option>'}Object.entries(models).forEach(([p,m])=>{modelSel+='<option value="'+esc(m)+'"'+(m===st.model?' selected':'')+'>'+esc(m)+'</option>'});modelSel+='</select>';let provSel='<select class="select" id="llm-prov" data-csp-style="s49" data-onchange="h129">';['openai','anthropic','google','openrouter'].forEach(p=>{provSel+='<option value="'+p+'"'+(p===st.provider?' selected':'')+'>'+p+'</option>'});provSel+='</select>';el.innerHTML=`<div class="cfg-row" data-csp-style="s110"><span>Provider · Model</span><span>${badge}</span></div><div data-csp-style="s161">${provSel}${modelSel}</div><div class="cfg-row" data-csp-style="s162">${keyLine} · extractor: <code data-csp-style="s159">${esc(st.extractor)}</code></div><div data-csp-style="s163">Add this to your <code data-csp-style="s159">.env</code> and restart Engraphis:</div><div data-csp-style="s164"><textarea id="llm-snippet" class="input" readonly data-csp-style="s165">${esc(st.env_snippet)}</textarea><button class="btn btn-ghost btn-sm" data-csp-style="s166" data-onclick="h130">Copy</button></div><div class="cfg-row" data-csp-style="s110"><span>LLM extraction</span><span class="pill ${st.extractor_enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${st.extractor_enabled?'ON':'OFF'}</span></div><div class="field-hint" data-csp-style="s97">While ON, ingested memory content is sent to your LLM provider for schema-validated extraction. OFF disables extraction transfers only; retention supervision is configured separately.</div><div data-csp-style="s167"><button class="btn ${st.extractor_enabled?'btn-ghost':'btn-primary'} btn-sm" data-onclick="h150"${(st.extractor_enabled||!st.configured)?' disabled':''}>Turn on</button><button class="btn ${st.extractor_enabled?'btn-danger':'btn-ghost'} btn-sm" data-onclick="h151"${st.extractor_enabled?'':' disabled'}>Turn off</button></div><div data-csp-style="s167"><button class="btn btn-primary btn-sm" data-onclick="h131">Test connection</button><span id="llm-test-result" data-csp-style="s168"></span></div>`}catch(e){el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>'}}
@@ -595,7 +597,7 @@ const syncNowBase=syncNow;
 syncNow=async function(){if(!await confirmCloudTransfer('Sync shared workspaces','Cloud Sync sends eligible changes from your shared workspaces to Engraphis Cloud and receives authorized changes from your other installations; secret and session-scoped rows stay local.','Sync now',CLOUD_SYNC_PRIVACY_COPY))return;return syncNowBase()}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_FULL=false, GRAPH_SCOPE_BEFORE_FULL=null;
+let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_FULL=false, GRAPH_SCOPE_BEFORE_FULL=null, GRAPH_LOAD_REQUEST=0, GRAPH_LOAD_CONTROLLER=null;
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -733,6 +735,7 @@ function graphRenderEngine(data,fit,reheat){
   const created=!GRAPH_ENGINE;
   if(created){
    GRAPH_ENGINE=EngraphisGraph.create(element,{
+    renderMode:fullGraph?'all':'overview',
     reducedMotion:prefersReducedMotion,
     onNodeClick:node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.name||node.id)},
     onBackgroundClick:()=>graphSetHighlight(null),
@@ -750,7 +753,7 @@ function graphRenderEngine(data,fit,reheat){
   const isolated=document.getElementById('graph-show-iso'),showUnlinked=fullGraph||!!(isolated&&isolated.checked);
   GRAPH_ENGINE.apply(engine=>{
     engine.setSettings({...window.GSET});
-   if(typeof engine.setRenderMode==='function')engine.setRenderMode(fullGraph?'full':'overview');
+   if(typeof engine.setRenderMode==='function')engine.setRenderMode(fullGraph?'all':'overview');
    engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
    engine.setColorBy(typeof GCOLORBY!=='undefined'?GCOLORBY:'community');
    engine.setThemeColors(graphThemeTypeColors());
@@ -772,7 +775,7 @@ function graphRenderEngine(data,fit,reheat){
      null. Re-apply the parked state here so a renderer created against a hidden pane never
      starts a rAF that nothing will stop. */
   if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
-  graphSetSimulationStatus(window.GSET.frozen?'Layout frozen':'Adaptive layout',false);
+  graphSetSimulationStatus(fullGraph?'All nodes · settled LOD':(window.GSET.frozen?'Layout frozen':'Adaptive layout'),false);
   return true;
  }catch(error){
   graphEngineFallback(error);
@@ -793,6 +796,9 @@ function graphInvalidateData(){
  GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null
 }
 async function loadLegacyGraph(){
+ const request=++GRAPH_LOAD_REQUEST,targetFull=GRAPH_FULL;
+ const previousController=GRAPH_LOAD_CONTROLLER,controller=new AbortController();GRAPH_LOAD_CONTROLLER=controller;
+ if(previousController&&!previousController.signal.aborted)previousController.abort();
  graphInjectCss();graphInvalidateData();GRAPH=null;
  const empty=document.getElementById('graph-empty'),net=document.getElementById('graph-net'),nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');
  showAs(empty,true,'flex');empty.textContent='Loading graph…';graphSetLayoutStatus('Loading data',true);
@@ -805,13 +811,32 @@ async function loadLegacyGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked,graphLimit=GRAPH_FULL?20000:320,graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true');
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=targetFull||!!document.getElementById('graph-show-iso').checked;
  try{
-   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+'&limit='+graphLimit+graphScope+(repo?'&repo='+encodeURIComponent(repo):''));
+   const query=encodeURIComponent(WS||'')+(repo?'&repo='+encodeURIComponent(repo):'')+layerFilter;
+   let nextGraph;
+   if(targetFull){
+    /* The complete scene and its dedicated renderer are independent requests. Starting them
+       together avoids adding an asset round-trip after a potentially large scene response, and
+       awaiting both guarantees that complete data can never fall into the legacy ForceGraph. */
+    const [response]=await Promise.all([
+     api('/graph/scene?workspace='+query+'&level=complete&presentation=all&include_memory_nodes=false',{signal:controller.signal}),
+     loadGraphEngine(true)
+    ]);
+    const scene=response.scene||response;
+    nextGraph={nodes:(scene.nodes||[]).map(node=>({...node,id:node.id,label:node.label||node.name||node.id,degree:node.degree??node.weighted_degree??0,etype:node.etype||'entity'})),edges:(scene.edges||[]).map(edge=>({...edge,from:edge.from??edge.source??edge.src,to:edge.to??edge.target??edge.dst,label:edge.label||edge.relation||'related',layer:edge.layer||'semantic'})),meta:scene.meta||{}};
+   }else{
+    nextGraph=await api('/graph?workspace='+query+'&include_code='+(includeCode?'true':'false')+'&limit=1000&node_limit=1000&edge_limit=2000'+(showUnlinked?'':'&connected_only=true'),{signal:controller.signal});
+   }
+  if(request!==GRAPH_LOAD_REQUEST||targetFull!==GRAPH_FULL)return;
+  GRAPH=nextGraph;
   renderGraphSide();graphRender();
  }catch(error){
+  if(request!==GRAPH_LOAD_REQUEST||error.name==='AbortError')return;
   showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
  }finally{
+  if(request!==GRAPH_LOAD_REQUEST)return;
+  if(GRAPH_LOAD_CONTROLLER===controller)GRAPH_LOAD_CONTROLLER=null;
   if(net)net.setAttribute('aria-busy','false');
   if(!GRAPH){
    if(FG)FG.graphData({nodes:[],links:[]});
@@ -822,9 +847,10 @@ async function loadLegacyGraph(){
  }
 }
 function graphUpdateAllNodesControl(){
- const full=GRAPH_FULL,button=document.getElementById('graph-show-all'),isolated=document.getElementById('graph-show-iso');
- if(button){button.textContent=full?'Show responsive overview':'Show all nodes';button.setAttribute('aria-pressed',String(full));button.title=full?'Return to the responsive graph overview':'Load every node, including unconnected entities, for this graph view'}
+ const full=GRAPH_FULL,button=document.getElementById('graph-show-all'),isolated=document.getElementById('graph-show-iso'),includeCode=document.getElementById('graph-include-code');
+ if(button){button.textContent=full?'High quality':'Show all nodes';button.setAttribute('aria-pressed',String(full));button.title=full?'Return to the high-quality graph view':'Load every node, including unconnected entities, for this graph view'}
  if(isolated){isolated.disabled=full;isolated.title=full?'All nodes are already visible.':'Show entities that have no relations (unlinked nodes). Hidden by default to keep the graph readable.'}
+ if(includeCode){includeCode.disabled=full;includeCode.title=full?'Code overlay is available in High quality mode.':''}
 }
 function graphToggleAllNodes(){
  const isolated=document.getElementById('graph-show-iso');
@@ -835,6 +861,11 @@ function graphToggleAllNodes(){
 function graphData(){
  const _si=document.getElementById('graph-show-iso');const hideIso=!(_si&&_si.checked);
  if(GDATA_CACHE&&GDATA_CACHE.graph===GRAPH&&GDATA_CACHE.hideIso===hideIso)return GDATA_CACHE.data;
+ if(GRAPH_FULL){
+  /* The flat all-node worker accepts the scene's node and from/to edge shapes directly.
+     Avoid cloning and decorating up to 20k nodes and 200k relations for quality-only paint. */
+  const data={nodes:GRAPH.nodes||[],links:GRAPH.edges||[]};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
+ }
  let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
  const names=new Set(sourceNodes.map(node=>node.id));
  const nodes=sourceNodes.map(node=>({id:node.id,label:node.label||node.id,displayLabel:(node.label||node.id).length>30?(node.label||node.id).slice(0,29)+'…':(node.label||node.id),etype:node.etype,degree:node.degree||0,val:1+(node.degree||0)}));
@@ -1191,32 +1222,53 @@ function loadForceGraph(){
  });
  return FORCE_GRAPH_LOADING;
 }
-let GRAPH_ENGINE_LOADING=null;
-function loadGraphEngine(){
- if(typeof EngraphisGraph!=='undefined')return Promise.resolve();
- if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
- GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-  const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js?v=20260809-physics-guard';
-  /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
-     resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
-  script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
-  script.onerror=()=>reject(new Error('Graph engine could not load'));
-  document.head.appendChild(script);
- });
+let GRAPH_ENGINE_LOADING=null,ALL_GRAPH_ENGINE_LOADING=null;
+function loadAllGraphEngine(){
+ if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
+ if(!ALL_GRAPH_ENGINE_LOADING){
+  ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2';
+   script.onload=()=>{typeof EngraphisAllGraph==='undefined'?reject(new Error('All-node graph asset loaded without registering EngraphisAllGraph')):resolve()};
+   script.onerror=()=>reject(new Error('All-node graph asset could not load'));
+   document.head.appendChild(script);
+  });
+  ALL_GRAPH_ENGINE_LOADING.catch(()=>{});
+ }
+ return ALL_GRAPH_ENGINE_LOADING;
+}
+function loadGraphEngine(loadAll=false){
+ let engineReady;
+ if(typeof EngraphisGraph!=='undefined')engineReady=Promise.resolve();
+ else{
+  if(!GRAPH_ENGINE_LOADING){
+   GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+   script.src='/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3';
+    /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
+       resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
+    script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
+    script.onerror=()=>reject(new Error('Graph engine could not load'));
+    document.head.appendChild(script);
+   });
+   GRAPH_ENGINE_LOADING.catch(()=>{});
+  }
+  engineReady=GRAPH_ENGINE_LOADING;
+ }
  /* Mark the memoized promise handled. graphRender() can start this fetch on a pass that
     returns before attaching its own handler, and an unhandled rejection would print the exact
     console error this lazy-loading exists to remove. Callers still receive the rejection. */
- GRAPH_ENGINE_LOADING.catch(()=>{});
- return GRAPH_ENGINE_LOADING;
+ return loadAll?engineReady.then(()=>loadAllGraphEngine()):engineReady;
 }
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
  const graphFull=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
     `?graph-engine=next` deep link costs one round trip rather than two. */
- const enginePending=!GRAPH_ENGINE_FAILED&&(graphEngineEnabled()||graphFull)&&typeof EngraphisGraph==='undefined'?loadGraphEngine():null;
- if(typeof ForceGraph==='undefined'){
+ const engineMissing=typeof EngraphisGraph==='undefined'||(graphFull&&typeof EngraphisAllGraph==='undefined');
+ /* All mode owns a dedicated bounded renderer and must remain available after a quality-renderer
+    runtime failure. The quality failure latch only authorizes the small legacy overview. */
+ const enginePending=(graphFull||(!GRAPH_ENGINE_FAILED&&graphEngineEnabled()))&&engineMissing?loadGraphEngine(graphFull):null;
+ if(!graphFull&&typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   loadForceGraph().then(()=>graphRender(fit,reheat)).catch(error=>{
@@ -1234,6 +1286,11 @@ function graphRender(fit=true,reheat=true){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   enginePending.then(()=>graphRender(fit,reheat)).catch(error=>{
+   if(graphFull){
+    empty.textContent=error.message+'; return to High quality or reload the dashboard assets.';
+    graphSetLayoutStatus('All-node engine unavailable',false);
+    return;
+   }
    /* Latches GRAPH_ENGINE_FAILED, so the re-entry below takes the classic path and this
       cannot loop. */
    graphEngineFallback(error);
@@ -1242,8 +1299,14 @@ function graphRender(fit=true,reheat=true){
   return;
  }
  const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData();
+ if(graphFull){
+  if(graphRenderEngine(data,fit,reheat))return;
+  showAs(empty,true,'flex');
+  empty.textContent='All-node renderer unavailable; return to High quality or reload the dashboard assets.';
+  graphSetLayoutStatus('All-node engine unavailable',false);
+  return;
+ }
  if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;
- if(graphFull&&graphRenderEngine(data,fit,reheat))return;
  /* Read AFTER the opt-in attempt: a failing engine resets GACTIVE_DATA precisely so the
     classic renderer below rebuilds from scratch instead of assuming the canvas is current. */
  const dataChanged=GACTIVE_DATA!==data;
@@ -1447,14 +1510,14 @@ function graphSearch(){
 function closeEntityMems(){document.getElementById('mm-overlay').classList.remove('show')}
 async function graphNodeClick(name){const ov=document.getElementById('mm-overlay');ov.classList.add('show');document.getElementById('mm-title').textContent=name;document.getElementById('mm-meta').innerHTML='<span class="pill pill-accent">entity</span>';document.getElementById('mm-body').innerHTML='<div class="spinner" data-csp-style="s129"></div>';document.getElementById('mm-actions').innerHTML='';try{const d=await api('/memories?q='+encodeURIComponent(name)+'&workspace='+encodeURIComponent(WS||'')+'&limit=12');document.getElementById('mm-body').innerHTML=d.memories.length?('<div data-csp-style="s189">Memories mentioning this entity</div>'+d.memories.map(m=>`<div data-memory-id="${esc(m.id)}" data-csp-style="s190" data-onclick="h140"><div data-csp-style="s191">${esc(m.title||m.id)}</div><div data-csp-style="s90">${esc((m.content||'').slice(0,220))}</div></div>`).join('')):'<div class="empty" data-csp-style="s147">No memories mention this entity by name.</div>'}catch(e){document.getElementById('mm-body').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
 let GKEYINDEX=-1;
-let GNODEBYID=new Map(), GGRAPHNAMES=new Map(), GKEYNODES=[];
+let GNODEBYID=new Map(), GGRAPHNAMES=new Map(), GGRAPHSEARCHNAMES=new Map(), GKEYNODES=[];
 const GRAPH_EXPLORER_PAGE={nodes:80,edges:100};
-let GEXPLORER={graph:null,query:'',nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges}, GEXPLORER_TIMER=0;
+let GEXPLORER={graph:null,query:'',nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges,nodes:[],edges:[]}, GEXPLORER_TIMER=0;
 function renderGraphSide(){
  const graph=GRAPH;if(!graph)return;
  const types=graph.types||[],legend=document.getElementById('graph-legend');
  graphRenderLegend(graph);
- GNODEBYID=new Map((graph.nodes||[]).map(node=>[node.id,node]));GGRAPHNAMES=new Map((graph.nodes||[]).map(node=>[node.id,node.label||node.id]));GKEYNODES=(graph.nodes||[]).slice().sort((a,b)=>(b.degree||0)-(a.degree||0));
+ GNODEBYID=new Map((graph.nodes||[]).map(node=>[node.id,node]));GGRAPHNAMES=new Map((graph.nodes||[]).map(node=>[node.id,node.label||node.id]));GGRAPHSEARCHNAMES=new Map((graph.nodes||[]).map(node=>[node.id,String(node.label||node.id||'').toLowerCase()]));GKEYNODES=(graph.nodes||[]).slice().sort((a,b)=>(b.degree||0)-(a.degree||0));
  const top=(graph.top||[]).slice(0,8),maxDegree=Math.max(...top.map(item=>item.degree),1),topBox=document.getElementById('graph-top');
  topBox.innerHTML=top.length?top.map((item,index)=>{const type=(GNODEBYID.get(item.id)||{}).etype;return `<div class="gtop-row" title="${esc(item.name)} — ${item.degree} connection${item.degree===1?'':'s'}${type?' · '+esc(graphTypeLabel(type)):''}. Click to focus in the graph." data-onclick="h141" data-entity="${esc(item.id)}"><span class="gtop-rank">${index+1}</span><span class="gtop-dot" data-graph-node-type="${esc(type||'person_or_concept')}"></span><span class="gtop-name">${esc(item.name)}</span><progress class="graph-degree" data-graph-node-type="${esc(type||'person_or_concept')}" max="${maxDegree}" value="${Math.max(Number(item.degree)||0,0)}" aria-label="${item.degree} connections"></progress><span class="gtop-n">${item.degree}</span></div>`}).join(''):'<div class="empty" data-csp-style="s12">No connections</div>';
  const topCount=document.getElementById('graph-top-count');if(topCount)topCount.textContent=top.length===((graph.top||[]).length)?String(top.length):(top.length+' of '+(graph.top||[]).length);
@@ -1473,7 +1536,7 @@ function graphKeyboard(event){
  const node=nodes[GKEYINDEX],net=document.getElementById('graph-net');graphFocus(node.id);net.setAttribute('aria-label','Selected entity '+(node.label||node.id)+', '+(node.degree||0)+' relations. Press Enter to open. Use arrow keys to move.');
 }
 function syncGraphExplorerSelection(id){document.querySelectorAll('#graph-entity-list [data-entity]').forEach(button=>{const active=button.dataset.entity===id;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','true');else button.removeAttribute('aria-current')})}
-function graphQueueExplorer(query){clearTimeout(GEXPLORER_TIMER);GEXPLORER_TIMER=setTimeout(()=>renderGraphExplorer(query,true),120)}
+function graphQueueExplorer(query){clearTimeout(GEXPLORER_TIMER);GEXPLORER_TIMER=setTimeout(()=>renderGraphExplorer(query,true),GRAPH_FULL?280:120)}
 function graphExplorerMore(kind){
  if(kind==='nodes')GEXPLORER.nodeLimit+=GRAPH_EXPLORER_PAGE.nodes;else GEXPLORER.edgeLimit+=GRAPH_EXPLORER_PAGE.edges;
  renderGraphExplorer(GEXPLORER.query,false);
@@ -1482,8 +1545,13 @@ function renderGraphExplorer(query,reset=false){
  const nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');if(!nodesBox||!edgesBox)return;
  if(!GRAPH){nodesBox.innerHTML='<div class="empty" data-csp-style="s67">Graph data is loading.</div>';edgesBox.innerHTML='<div class="empty" data-csp-style="s67">Graph data is loading.</div>';return}
  const normalized=(query||'').trim().toLowerCase();
- if(reset||GEXPLORER.graph!==GRAPH||GEXPLORER.query!==normalized){GEXPLORER={graph:GRAPH,query:normalized,nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges}}
- const nodes=GKEYNODES,edges=GRAPH.edges||[],shownNodes=normalized?nodes.filter(node=>((node.label||node.id||'')+' '+(node.etype||'')).toLowerCase().includes(normalized)):nodes,shownEdges=normalized?edges.filter(edge=>((GGRAPHNAMES.get(edge.from)||edge.from||'')+' '+(edge.label||'')+' '+(GGRAPHNAMES.get(edge.to)||edge.to||'')+' '+(edge.layer||'')).toLowerCase().includes(normalized)):edges;
+ if(reset||GEXPLORER.graph!==GRAPH||GEXPLORER.query!==normalized){
+  const nodes=GKEYNODES,edges=GRAPH.edges||[];
+  const shownNodes=normalized?nodes.filter(node=>(GGRAPHSEARCHNAMES.get(node.id)||'').includes(normalized)||String(node.etype||'').toLowerCase().includes(normalized)):nodes;
+  const shownEdges=normalized?edges.filter(edge=>(GGRAPHSEARCHNAMES.get(edge.from)||'').includes(normalized)||(GGRAPHSEARCHNAMES.get(edge.to)||'').includes(normalized)||String(edge.label||'').toLowerCase().includes(normalized)||String(edge.layer||'').toLowerCase().includes(normalized)):edges;
+  GEXPLORER={graph:GRAPH,query:normalized,nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges,nodes:shownNodes,edges:shownEdges};
+ }
+ const shownNodes=GEXPLORER.nodes,shownEdges=GEXPLORER.edges;
  const nodePage=shownNodes.slice(0,GEXPLORER.nodeLimit),edgePage=shownEdges.slice(0,GEXPLORER.edgeLimit);
  document.getElementById('graph-explorer-node-count').textContent=nodePage.length+' of '+shownNodes.length;
  document.getElementById('graph-explorer-edge-count').textContent=edgePage.length+' of '+shownEdges.length;
@@ -1622,7 +1690,7 @@ function renderUpdateBanner(u){
  const btn=el.querySelector('.ub-dismiss');
  if(btn)btn.addEventListener('click',function(){try{localStorage.setItem('engraphis-update-dismissed',u.latest)}catch(e){}el.hidden=true;el.textContent=''});
 }
-async function boot(){try{const b=await api('/bootstrap');LIC=b.license;renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===401?'Local API token required.':'Boot failed: '+e.message;document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Dashboard data could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Dashboard data could not be loaded.</div>';toast(msg,'err')}}
+async function boot(){try{const b=await api('/bootstrap');LIC=b.license;RELEASE_VERSION=typeof b.version==='string'?b.version.trim():'';renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===401?'Local API token required.':'Boot failed: '+e.message;document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Dashboard data could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Dashboard data could not be loaded.</div>';toast(msg,'err')}}
 initTheme();
 initDashboard();
 boot();

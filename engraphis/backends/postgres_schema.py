@@ -14,7 +14,7 @@ import socket
 from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
-from engraphis.core.interfaces import SchemaSnapshot
+from engraphis.core.interfaces import SchemaIntrospector, SchemaSnapshot
 
 _SYSTEM_SCHEMAS = {"pg_catalog", "information_schema"}
 _MAX_ENTITIES = 20_000
@@ -403,5 +403,5 @@ class PostgresSchemaIntrospector:
         )
 
 
-def get_postgres_introspector():
+def get_postgres_introspector() -> SchemaIntrospector:
     return PostgresSchemaIntrospector()

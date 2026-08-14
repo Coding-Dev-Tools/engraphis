@@ -16,6 +16,8 @@
   <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
 
+**Grounded, not guessed.** Memory with receipts. Local by default. [Explore the proof gallery](https://github.com/Coding-Dev-Tools/engraphis/tree/main/docs/advertising) or [read the campaign guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/advertising/campaign.md).
+
 ---
 
 > **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
@@ -37,11 +39,12 @@ context Engraphis actually emitted, keeps token counters and release versions se
 labels adaptive history reductions separately from packing savings. Receipts without estimator
 metadata remain historical/unclassified. This measures estimated prompt-context reduction; it
 does not measure provider billing. The `/context-savings` API and
-`engraphis_context_savings` MCP tool accept optional `from_ts`, `to_ts`, and `release_version`
-filters.
+`engraphis_context_savings` MCP tool aggregate the complete history across all visible workspaces
+by default, or accept an explicit workspace plus optional `from_ts`, `to_ts`, and
+`release_version` filters.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart showing three deterministic offline comparisons. Structure-aware chunks reduce mean retrieved content from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens while Recall at 5 remains 1.000. A compact recall JSON-shape proxy uses 10,202 rather than 23,810 tokens. Evidence artifact SHA-256: c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of local measurements and deterministic fixtures, including a local LoCoMo diagnostic marked with an asterisk. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets, and two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline. Structure-aware chunks reduce context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,202 rather than 23,810 tokens. Grounded recall makes 10 of 10 correct decisions and packed context averages 85.38 tokens under a 1,500-token cap." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -154,7 +157,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 `server,mcp`), or set it to `none` for the base package only.
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
-> require the former 33 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> require the former 34 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
 > in the 1.4.0 release was version 9. Existing v7-to-v8 databases already contain `confidence`
 > and `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table
 > and performs a one-time entity-canonicalization repair, then migrates automatically on first
@@ -177,6 +180,12 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > per-job format/result metadata. The schema 16 migration persists each import job's optional session target
 > and requires source lineage and job-item attachments to remain in that exact session. See the
 > [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
+
+> **Upgrading to 1.7:** no schema migration required (schema 16 unchanged). This release hardens
+> security (removes path echoes in HTTP errors, eliminates `repr(float)` SQL interpolation, patches
+> pypdf CVEs), improves performance (union-find consolidation, bounded recall cache), and adds the
+> all-node LOD graph renderer (20,000 nodes, 200,000 relations, worker-backed). See the
+> [1.7 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#17---2026-08-14).
 
 ---
 
@@ -227,7 +236,9 @@ delegates configuration, startup health, browser opening, and process lifecycle 
 
 Inspect memories, supersession diffs, recall scores, timelines, links, consolidation, and audit
 records in the dashboard. The offline graph renderer is vendored, and the interface is keyboard-
-navigable with light and dark themes.
+navigable with light and dark themes. Graph exploration offers a focused **High quality** view and
+an explicit worker-backed **Show all nodes** view for complete entity projections up to 20,000
+nodes and 200,000 relationships; see the [graph performance profiles](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/GRAPH_PERFORMANCE.md).
 
 ---
 
@@ -566,7 +577,7 @@ when you are ready to evaluate the service boundary and billing options.
 | Memory engine + Smart MCP (Classic 34-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
-| Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
+| Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
 | Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
@@ -693,13 +704,12 @@ file. It never searches the working directory for `.env`, and explicit process v
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before trusted values load. Its bounded dependency-free parser performs no interpolation. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
-| `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
+| `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default; a relative value is resolved from the trusted `~/.engraphis/config.env` directory so launch CWD cannot select a different workspace database. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
 | `ENGRAPHIS_SERVICE_MODE` | `customer` | The public package supports only `customer`; hosted vendor, relay, compute, and worker roles are not distributed here |
 | `ENGRAPHIS_API_TOKEN` | Not set | Optional bearer credential for this single-user local customer node; never reuse a hosted credential |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
-| `ENGRAPHIS_WORKSPACES` | Not set | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_INDEX_ROOTS` | Working, home, and temporary directories | Optional path-separator-delimited absolute-path allow-list that replaces the default roots accepted by local code indexing |
 | `ENGRAPHIS_HTTP_INDEX_ROOT` | First `ENGRAPHIS_INDEX_ROOTS` entry, or current directory | Single root for dashboard and REST `POST /api/code/index`; submitted paths resolve beneath it. An explicit root (or fallback entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and CLI indexing continue to use `ENGRAPHIS_INDEX_ROOTS`. |
 | `ENGRAPHIS_DB_KEY` | Not set | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
