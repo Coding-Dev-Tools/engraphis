@@ -692,7 +692,7 @@
 
   function savingsQuery(workspace, preset = 'all') {
     const base = query(workspace);
-    if (preset === 'current') return `${base}&release_version=1.6`;
+    if (preset === 'current') return `${base}&release_version=1.6.1`;
     if (preset === '7d') return `${base}&from_ts=${encodeURIComponent(Date.now() / 1000 - 604800)}`;
     return base;
   }

@@ -5,6 +5,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+
+## [1.6.1] - 2026-08-14
+
+Security hotfix for the v1.6 release line.
+
+### Security
+
+- HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths
+  back to the client, preventing filesystem structure leakage (SEC-001).
+- The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
+  PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
+
+### Changed
+
+- Version surfaces bumped to `1.6.1` across pyproject, `__init__.py`, commercial manifest,
+  plugin manifests, and Hermes integration.
+
 ## [1.6] - 2026-08-08
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
