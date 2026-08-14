@@ -319,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260813-inertial-hierarchy-orbits-9"
+        "/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -334,7 +334,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260813-inertial-hierarchy-orbits-9"
+        "/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1325,9 +1325,7 @@ def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion(
     )
     assert report["afterCarrier"] == pytest.approx(report["beforeCarrier"], abs=1e-12)
     assert report["planetSpeed"] <= 50 + 1e-12
-    # The absolute emergency ceiling owns the galactic carrier. This already-valid
-    # star-relative edge must not be reduced merely because the two vectors oppose.
-    assert report["localSpeed"] == pytest.approx(48)
+    assert report["localSpeed"] <= 32 + 1e-12
     assert report["guard"]["systems"] == 1
 
 
@@ -1885,9 +1883,7 @@ def test_gravity_zero_keeps_the_loose_black_hole_orbit_floor_and_stellar_floor()
     assert report["telemetry"]["stellarGravity"] == 750
     assert report["telemetry"]["eligibleStellarAnchors"] == 1
     assert report["telemetry"]["fallbackAnchors"] == 0
-    # The global-parent edge is owned by the black-hole carrier field and is therefore not a
-    # sampled local well; telemetry reports only local parent fields that were actually applied.
-    assert report["telemetry"]["globalAnchors"] == 0
+    assert report["telemetry"]["globalAnchors"] == 1
     assert report["telemetry"]["stellarFloorActive"] is True
 
 
@@ -2311,399 +2307,6 @@ def test_cored_log_halo_has_flat_outer_rotation_and_caps_each_carrier_independen
 
 
 @requires_node
-def test_carrier_speed_ceiling_is_part_of_the_force_balanced_rotation_curve() -> None:
-    """The central acceleration and painted circular speed obey a*r=v² at the speed ceiling."""
-    report = _run_node(
-        """
-        const model = {
-          gravitationalConstant: 240, coreMass: 72, haloMass: 1200,
-          coreSoftening: 40, haloScale: 180, accelerationCap: 2.5,
-        };
-        const samples = [64, 180, 422].map(radius => {
-          const curve = I.galaxyCarrierOrbitCurve(model, radius);
-          return {
-            radius, speed: curve.circularSpeed, acceleration: curve.acceleration,
-            balance: curve.acceleration * radius - curve.circularSpeed ** 2,
-            speedCapScale: curve.speedCapScale,
-          };
-        });
-        emit({ samples });
-        """
-    )
-    assert all(sample["speed"] <= 18 + 1e-12 for sample in report["samples"])
-    assert all(abs(sample["balance"]) < 1e-9 for sample in report["samples"])
-    assert any(sample["speedCapScale"] < 1 for sample in report["samples"])
-
-
-@requires_node
-def test_astronomical_clock_reports_real_period_and_only_scales_elapsed_time() -> None:
-    """The UI clock compresses a 216M-year orbit without changing the physical field."""
-    report = _run_node(
-        """
-        const nodes = [
-          { id: 'bh', anchor_role: 'global', community_id: 'core',
-            gravity_mass: 64, radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'inner', anchor_role: 'community', community_id: 'inner',
-            system_anchor_id: 'inner', gravity_mass: 8, radius: 5,
-            x: 120, y: 0, vx: 0, vy: 0 },
-          { id: 'outer', anchor_role: 'community', community_id: 'outer',
-            system_anchor_id: 'outer', gravity_mass: 8, radius: 5,
-            x: 240, y: 0, vx: 0, vy: 0 },
-        ];
-        const options = displayClockSetting => ({
-          gravity: 48, gravitationalConstant: 1, blackHoleMass: 1,
-          softening: 40, displayClockSetting, wallClockSeconds: 1 / 30,
-        });
-        const samples = [0, 60, 120].map(setting =>
-          I.galaxyAstronomicalClock(nodes, options(setting)));
-        const field = I.galaxyBlackHoleField(nodes, options(60));
-        emit({ samples, field: field.systems.map(system => ({
-          radius: system.radius, speed: system.circularSpeed,
-          acceleration: system.acceleration,
-        })) });
-        """
-    )
-    samples = report["samples"]
-    assert all(sample["calibrated"] for sample in samples)
-    assert [sample["simulatedYearsPerWallSecond"] for sample in samples] == pytest.approx(
-        [500, 1000, 1500]
-    )
-    assert [sample["displayClockMultiplier"] for sample in samples] == pytest.approx(
-        [0.5, 1, 1.5]
-    )
-    assert [sample["referencePhysicalPeriodYears"] for sample in samples] == pytest.approx(
-        [216_400_033.1188212] * 3, rel=1e-12
-    )
-    assert samples[0]["timestep"] * 2 == pytest.approx(samples[1]["timestep"], rel=1e-12)
-    assert samples[2]["timestep"] == pytest.approx(samples[1]["timestep"] * 1.5, rel=1e-12)
-    assert samples[0]["referenceDisplayPeriodSeconds"] == pytest.approx(
-        samples[1]["referenceDisplayPeriodSeconds"] * 2, rel=1e-12
-    )
-    assert samples[2]["referenceDisplayPeriodSeconds"] == pytest.approx(
-        samples[1]["referenceDisplayPeriodSeconds"] / 1.5, rel=1e-12
-    )
-    # The clock setting never appears in the physical field itself.
-    assert all(system["speed"] > 0 and system["acceleration"] > 0
-               for system in report["field"])
-
-
-@requires_node
-def test_orbital_speed_is_a_force_balanced_time_scale_at_every_control_endpoint() -> None:
-    """Live acceleration scales by q² while circular carrier velocity scales by q."""
-    report = _run_node(
-        """
-        const trial = orbitalSpeed => {
-          const nodes = [
-            { id: 'bh', anchor_role: 'global', community_id: 'core', gravity_mass: 64,
-              radius: 10, x: 0, y: 0, vx: 0, vy: 0 },
-            { id: 'star', anchor_role: 'community', community_id: 'solar',
-              system_anchor_id: 'star', gravity_mass: 8, radius: 5,
-              x: 120, y: 0, vx: 0, vy: 0 },
-          ];
-          const options = {
-            gravity: 48, gravitationalConstant: 1, localGravitationalConstant: 1,
-            softening: 40, centralSoftening: 40, orbitalSpeed,
-            includeMutualSystems: false, includeRelations: false,
-            includeBridges: false, includeFarFieldConfinement: false,
-            includeSpacetime: false,
-          };
-          const field = I.galaxyBlackHoleField(nodes, options);
-          const target = I.galaxyCarrierTargetSpeed(field, 120, orbitalSpeed);
-          const accelerations = I.galaxyAccelerations(nodes, [], [], options);
-          const acceleration = Math.hypot(
-            accelerations.get(nodes[1]).ax, accelerations.get(nodes[1]).ay);
-          return { orbitalSpeed, q: I.galaxyOrbitalSpeedMultiplier(orbitalSpeed),
-            target, acceleration, balance: acceleration * 120 - target * target,
-            accelerationTimeScale: accelerations.accelerationTimeScale };
-        };
-        emit({ samples: [0, 60, 120].map(trial) });
-        """
-    )
-    assert [sample["q"] for sample in report["samples"]] == pytest.approx([0.5, 1, 1.5])
-    assert [sample["accelerationTimeScale"] for sample in report["samples"]] == pytest.approx(
-        [0.25, 1, 2.25]
-    )
-    assert all(abs(sample["balance"]) < 1e-9 for sample in report["samples"])
-
-
-@requires_node
-def test_nested_planet_moon_live_gravity_uses_inertial_parent_subtrees() -> None:
-    """A moon inherits its planet's star-frame acceleration, then adds only planet gravity."""
-    report = _run_node(
-        """
-        const fixture = () => [
-          { id: 'bh', anchor_role: 'global', community_id: 'core',
-            gravity_mass: 64, radius: 4, x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'star', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'star', gravity_mass: 10, radius: 2,
-            x: 120, y: 0, vx: 0, vy: 0 },
-          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-            orbit_tier: 1, gravity_mass: 2, radius: 1,
-            x: 150, y: 0, vx: 0, vy: 0 },
-          { id: 'moon', community_id: 'solar', system_anchor_id: 'planet',
-            orbit_tier: 2, gravity_mass: .2, radius: .5,
-            x: 160, y: 0, vx: 0, vy: 0 },
-        ];
-        const options = orbitalSpeed => ({
-          gravity: 48, gravitationalConstant: 1, localGravitationalConstant: 1,
-          softening: 8, centralSoftening: 40, orbitalSpeed, layoutSeed: 19,
-          includeMutualSystems: false, includeRelations: false, includeBridges: false,
-          includeFarFieldConfinement: false, includeSpacetime: false,
-          systemAnchorRepulsionAcceleration: 0,
-        });
-        const relativeSpeed = (child, parent) =>
-          Math.hypot(child.vx - parent.vx, child.vy - parent.vy);
-        const trial = orbitalSpeed => {
-          const nodes = fixture();
-          const accelerations = I.galaxyAccelerations(nodes, [], [], options(orbitalSpeed));
-          const starAcceleration = accelerations.get(nodes[1]);
-          const planetAcceleration = accelerations.get(nodes[2]);
-          const moonAcceleration = accelerations.get(nodes[3]);
-          const planetRelativeInward = -(planetAcceleration.ax - starAcceleration.ax);
-          const moonRelativeInward = -(moonAcceleration.ax - planetAcceleration.ax);
-          const controlled = fixture();
-          I.applyGalaxyOrbitalSpeedControl(controlled, options(orbitalSpeed));
-          const planetSpeed = relativeSpeed(controlled[2], controlled[1]);
-          const moonSpeed = relativeSpeed(controlled[3], controlled[2]);
-          return {
-            q: I.galaxyOrbitalSpeedMultiplier(orbitalSpeed),
-            planetRelativeInward, moonRelativeInward, planetSpeed, moonSpeed,
-            planetBalance: planetRelativeInward * 30 - planetSpeed ** 2,
-            moonBalance: moonRelativeInward * 10 - moonSpeed ** 2,
-          };
-        };
-        const orderTrial = (orbitalSpeed, shuffled) => {
-          const ordered = fixture();
-          const nodes = shuffled
-            ? [ordered[0], ordered[1], ordered[3], ordered[2]] : ordered;
-          I.applyGalaxyOrbitalSpeedControl(nodes, options(orbitalSpeed));
-          const byId = new Map(nodes.map(node => [node.id, node]));
-          const star = byId.get('star'), planet = byId.get('planet'), moon = byId.get('moon');
-          return {
-            planet: relativeSpeed(planet, star), moon: relativeSpeed(moon, planet),
-          };
-        };
-        emit({ samples: [0, 60, 120].map(trial),
-          orders: [0, 120].map(orbitalSpeed => ({
-            orbitalSpeed, ordered: orderTrial(orbitalSpeed, false),
-            shuffled: orderTrial(orbitalSpeed, true),
-          })) });
-        """
-    )
-    assert [sample["q"] for sample in report["samples"]] == pytest.approx([0.5, 1, 1.5])
-    assert all(sample["planetRelativeInward"] > 0 for sample in report["samples"])
-    assert all(sample["moonRelativeInward"] > 0 for sample in report["samples"])
-    assert all(abs(sample["planetBalance"]) < 1e-9 for sample in report["samples"])
-    assert all(abs(sample["moonBalance"]) < 1e-9 for sample in report["samples"])
-    for sample in report["orders"]:
-        assert sample["shuffled"] == pytest.approx(sample["ordered"], abs=1e-12)
-        assert sample["ordered"]["planet"] > 0
-        assert sample["ordered"]["moon"] > 0
-
-
-@requires_node
-def test_local_seed_kinematic_control_and_capture_share_the_orbital_clock() -> None:
-    """All local entry paths cap the neutral law first, then apply the same q time scale."""
-    report = _run_node(
-        """
-        const speedFixture = () => [
-          { id: 'bh', anchor_role: 'global', community_id: 'core',
-            gravity_mass: 64, radius: 2, x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'star', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'star', gravity_mass: 1000, radius: 1,
-            x: 500, y: 0, vx: 0, vy: 0 },
-          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-            gravity_mass: 1, radius: 1, x: 600, y: 0, vx: 0, vy: 0 },
-        ];
-        const localSpeed = nodes => Math.hypot(
-          nodes[2].vx - nodes[1].vx, nodes[2].vy - nodes[1].vy);
-        const speedTrial = orbitalSpeed => {
-          let nodes = speedFixture();
-          I.seedGalaxyOrbits(nodes, 1, 400, 1, false, {
-            orbitalSpeed, localGravitationalConstant: 8, layoutSeed: 1,
-          });
-          const seed = localSpeed(nodes);
-          nodes = speedFixture();
-          I.applyGalaxyOrbitalSpeedControl(nodes, {
-            gravity: 400, softening: 1, orbitalSpeed,
-            localGravitationalConstant: 8, gravitationalConstant: 1, layoutSeed: 1,
-          });
-          const controller = localSpeed(nodes);
-          nodes = speedFixture();
-          I.advanceGalaxyKinematicOrbits(nodes, {
-            gravity: 400, softening: 1, localSoftening: 1, orbitalSpeed,
-            localGravitationalConstant: 8, gravitationalConstant: 1,
-            timestep: .001, layoutSeed: 1,
-          });
-          return { q: I.galaxyOrbitalSpeedMultiplier(orbitalSpeed),
-            seed, controller, kinematic: localSpeed(nodes) };
-        };
-        const controllerVectorTrial = (orbitalSpeed, radialFactor, tangentFactor = 0) => {
-          const nodes = speedFixture();
-          const q = I.galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-          nodes[2].vx = radialFactor * q;
-          nodes[2].vy = tangentFactor * q;
-          I.applyGalaxyOrbitalSpeedControl(nodes, {
-            gravity: 400, softening: 1, orbitalSpeed,
-            localGravitationalConstant: 8, gravitationalConstant: 1, layoutSeed: 1,
-          });
-          const relativeX = nodes[2].vx - nodes[1].vx;
-          const relativeY = nodes[2].vy - nodes[1].vy;
-          return { q, radialFactor, tangentFactor, relativeX, relativeY,
-            speed: Math.hypot(relativeX, relativeY), limit: 48 * q };
-        };
-        const controllerEscapeTrial = (orbitalSpeed, radialFactor, tangentFactor) => {
-          const nodes = [
-            { id: 'bh', anchor_role: 'global', community_id: 'core',
-              gravity_mass: 64, radius: 2, x: 0, y: 0, vx: 0, vy: 0 },
-            { id: 'star', anchor_role: 'community', community_id: 'solar',
-              system_anchor_id: 'star', gravity_mass: 10, radius: 2,
-              x: 120, y: 0, vx: 0, vy: 0 },
-            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-              gravity_mass: 2, radius: 1, x: 150, y: 0, vx: 0, vy: 0 },
-          ];
-          const q = I.galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-          nodes[2].vx = radialFactor * q;
-          nodes[2].vy = tangentFactor * q;
-          I.applyGalaxyOrbitalSpeedControl(nodes, {
-            gravity: 48, softening: 8, orbitalSpeed,
-            localGravitationalConstant: 1, gravitationalConstant: 1, layoutSeed: 19,
-          });
-          return { q, radialFactor, tangentFactor,
-            relativeX: nodes[2].vx - nodes[1].vx,
-            relativeY: nodes[2].vy - nodes[1].vy };
-        };
-        const controllerBoundTrial = (orbitalSpeed, direction) => {
-          const nodes = [
-            { id: 'bh', anchor_role: 'global', community_id: 'core',
-              gravity_mass: 64, radius: 2, x: 0, y: 0, vx: 0, vy: 0 },
-            { id: 'star', anchor_role: 'community', community_id: 'solar',
-              system_anchor_id: 'star', gravity_mass: 10, radius: 2,
-              x: 120, y: 0, vx: 0, vy: 0 },
-            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-              gravity_mass: 2, radius: 1, x: 150, y: 0, vx: 0, vy: 0 },
-          ];
-          const q = I.galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-          const probe = I.galaxySlingshotCapture(nodes[2], nodes, { vx: 0, vy: 0 }, {
-            gravity: 48, localGravitationalConstant: 1, softening: 8,
-            orbitalSpeed, captureRadius: 200, layoutSeed: 19,
-          });
-          const threshold = probe.escapeSpeed;
-          nodes[2].vx = threshold * .99 * direction;
-          I.applyGalaxyOrbitalSpeedControl(nodes, {
-            gravity: 48, softening: 8, orbitalSpeed,
-            localGravitationalConstant: 1, gravitationalConstant: 1, layoutSeed: 19,
-          });
-          return { q, direction, threshold,
-            speed: Math.hypot(nodes[2].vx - nodes[1].vx, nodes[2].vy - nodes[1].vy) };
-        };
-        const captureFixture = () => [
-          { id: 'star', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'star', gravity_mass: 10, radius: 2,
-            x: 120, y: 0, vx: 0, vy: 0 },
-          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-            gravity_mass: 2, radius: 1, x: 150, y: 0, vx: 0, vy: 0 },
-        ];
-        const captureTrial = orbitalSpeed => {
-          const nodes = captureFixture();
-          const q = I.galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-          nodes[0].vy = 18 * q;
-          const result = I.galaxySlingshotCapture(nodes[1], nodes, { vx: 0, vy: 0 }, {
-            gravity: 48, localGravitationalConstant: 1, softening: 8,
-            orbitalSpeed, captureRadius: 200, layoutSeed: 19,
-          });
-          return { q, captured: result.captured, escaped: result.escaped,
-            reason: result.reason,
-            circularSpeed: result.circularSpeed, escapeSpeed: result.escapeSpeed,
-            insertionSpeed: Math.hypot(result.vx - nodes[0].vx, result.vy - nodes[0].vy) };
-        };
-        const guardTrial = (orbitalSpeed, edgeFactor) => {
-          const q = I.galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-          const fixture = () => [
-            { id: 'star', anchor_role: 'community', community_id: 'solar',
-              system_anchor_id: 'star', radius: 1, x: 0, y: 0, vx: 0, vy: 0 },
-            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-              orbit_tier: 1, radius: 1, x: 30, y: 0, vx: 0, vy: edgeFactor * q },
-            { id: 'moon', community_id: 'solar', system_anchor_id: 'planet',
-              orbit_tier: 2, radius: 1, x: 40, y: 0, vx: 0, vy: edgeFactor * 2 * q },
-          ];
-          const nodes = fixture();
-          const stats = I.stabilizeGalaxySystemVelocities(nodes, { limit: 48 * q });
-          const integrated = fixture();
-          const tick = I.integrateGalaxyLeapfrog(integrated, [], [], {
-            gravity: 0, gravitationalConstant: 0, localGravitationalConstant: 0,
-            central: false, softening: 8, orbitalSpeed,
-            includeMutualSystems: false, includeRelations: false,
-            includeOrbitalSeparation: false, includeFarFieldConfinement: false,
-            includeBlackHoleExclusion: false, includeSpacetime: false,
-            systemAnchorRepulsionAcceleration: 0, localRelativeSpeedLimit: 48 * q,
-            speedLimit: 48 * q, timestep: .001, velocityDecay: 0,
-            includeCollisions: false,
-          });
-          return { q, stats,
-            planet: Math.hypot(nodes[1].vx - nodes[0].vx, nodes[1].vy - nodes[0].vy),
-            moon: Math.hypot(nodes[2].vx - nodes[1].vx, nodes[2].vy - nodes[1].vy),
-            integratedPlanet: Math.hypot(integrated[1].vx - integrated[0].vx,
-              integrated[1].vy - integrated[0].vy),
-            integratedMoon: Math.hypot(integrated[2].vx - integrated[1].vx,
-              integrated[2].vy - integrated[1].vy),
-            tick };
-        };
-        emit({ speeds: [0, 60, 120].map(speedTrial),
-          controllerBudgets: [0, 120].map(speed => controllerVectorTrial(speed, 48)),
-          controllerEscapes: [0, 120].flatMap(speed => [
-            controllerEscapeTrial(speed, 24, 0),
-            controllerEscapeTrial(speed, -24, 0),
-            controllerEscapeTrial(speed, 0, 24),
-          ]),
-          controllerBounds: [0, 120].flatMap(speed => [
-            controllerBoundTrial(speed, 1), controllerBoundTrial(speed, -1),
-          ]),
-          captures: [0, 60, 120].map(captureTrial),
-          validGuards: [0, 60, 120].map(speed => guardTrial(speed, 48)),
-          hotGuards: [0, 60, 120].map(speed => guardTrial(speed, 60)) });
-        """
-    )
-    expected = [24, 48, 72]
-    for key in ("seed", "controller", "kinematic"):
-        assert [sample[key] for sample in report["speeds"]] == pytest.approx(expected)
-    for sample in report["controllerBudgets"]:
-        assert sample["speed"] <= sample["limit"] + 1e-9
-        assert sample["relativeX"] == pytest.approx(sample["limit"])
-        assert sample["relativeY"] == pytest.approx(0, abs=1e-12)
-    for sample in report["controllerEscapes"]:
-        assert sample["relativeX"] == pytest.approx(sample["radialFactor"] * sample["q"])
-        assert sample["relativeY"] == pytest.approx(sample["tangentFactor"] * sample["q"])
-    for sample in report["controllerBounds"]:
-        assert sample["speed"] <= sample["threshold"]
-        assert sample["speed"] > 0
-    base = report["captures"][1]
-    for index, q in enumerate((0.5, 1, 1.5)):
-        sample = report["captures"][index]
-        assert sample["q"] == pytest.approx(q)
-        assert sample["captured"] is True
-        assert sample["escaped"] is False
-        assert sample["reason"] == "authored-anchor"
-        assert sample["circularSpeed"] == pytest.approx(base["circularSpeed"] * q)
-        assert sample["escapeSpeed"] == pytest.approx(base["escapeSpeed"] * q)
-        assert sample["insertionSpeed"] == pytest.approx(base["insertionSpeed"] * q)
-        assert sample["insertionSpeed"] == pytest.approx(sample["circularSpeed"])
-    for collection in ("validGuards", "hotGuards"):
-        for sample in report[collection]:
-            expected_edge = 48 * sample["q"]
-            assert sample["planet"] == pytest.approx(expected_edge)
-            assert sample["moon"] == pytest.approx(expected_edge)
-            assert sample["integratedPlanet"] == pytest.approx(expected_edge, rel=1e-6)
-            assert sample["integratedMoon"] == pytest.approx(expected_edge, rel=1e-6)
-    assert all(sample["stats"]["limitedSystems"] == 0
-               for sample in report["validGuards"])
-    assert all(sample["tick"]["speedCapped"] is False
-               for sample in report["validGuards"])
-    assert all(sample["stats"]["limitedSystems"] == 1
-               for sample in report["hotGuards"])
-
-
-@requires_node
 def test_direct_black_hole_star_is_one_rigid_carrier_with_local_descendant_physics() -> None:
     """A directly linked star owns its planets; only that complete frame orbits the black hole."""
     report = _run_node(
@@ -2732,15 +2335,15 @@ def test_direct_black_hole_star_is_one_rigid_carrier_with_local_descendant_physi
         const seeded = make().filter(node => node.id !== 'peer');
         I.seedGalaxySystemOrbits(seeded, 311, 48, 32, false);
         const local = make();
-        const localStats = I.applyGalaxySystemAnchorGravity(local, {
-          gravity: 24, softening: 8, accelerationCap: 1e9,
+        I.applyGalaxySystemAnchorGravity(local, {
+          gravity: 48, softening: 8, accelerationCap: 1e9,
         });
         emit({
           systems: field.systems.map(item => ({ id: item.id, core: item.core,
             carrier: item.carrier.id, members: item.nodes.map(node => node.id) })),
           galactic: galactic.map(node => [node.vx, node.vy]),
           seededSingleCommunity: seeded.map(node => [node.vx, node.vy]),
-          local: local.map(node => [node.vx, node.vy]), localStats,
+          local: local.map(node => [node.vx, node.vy]),
         });
         """
     )
@@ -2766,10 +2369,6 @@ def test_direct_black_hole_star_is_one_rigid_carrier_with_local_descendant_physi
     assert math.hypot(*report["local"][2]) > 0
     assert math.hypot(*report["local"][3]) > 0
     assert report["local"][4] == pytest.approx([0, 0], abs=1e-12)
-    assert report["localStats"]["eligibleStellarAnchors"] == 1
-    assert report["localStats"]["fallbackAnchors"] == 1
-    assert report["localStats"]["globalAnchors"] == 0
-    assert report["localStats"]["stellarFloorActive"] is True
 
 
 @requires_node
@@ -7001,7 +6600,7 @@ def test_system_orbital_seed_preserves_barycentre_and_hierarchical_motion() -> N
 
 @requires_node
 def test_global_system_seed_uses_release_stable_speed_cap_with_an_external_anchor() -> None:
-    """High-field systems share one force-balanced speed cap in the fixed black-hole frame."""
+    """High-field systems orbit a fixed black-hole frame under the release-stable cap."""
     report = _run_node(
         """
         const nodes = [
@@ -7030,7 +6629,7 @@ def test_global_system_seed_uses_release_stable_speed_cap_with_an_external_ancho
         """
     )
     seed_limit = 18
-    assert report["fieldSpeeds"] == pytest.approx([seed_limit, seed_limit], abs=1e-12)
+    assert min(report["fieldSpeeds"]) > seed_limit
     # Symmetric east/west seeded systems preserve zero net carrier momentum.
     assert all(seed_limit * 0.9 < item["speed"] <= seed_limit * 1.01
                for item in report["relative"]), report
@@ -9907,9 +9506,9 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
                     source.index("function safeUrl", source.index("function ensureGraphAssets()"))]
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260813-inertial-hierarchy-orbits-9'")
+    renderer = loader.index("'/v2-assets/engraphis-graph.js?v=20260813-carrier-frame-log-halo-7'")
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260813-live-carrier-frames-10' in markup
+    assert '/v2-assets/ledger.js?v=20260813-live-carrier-frames-9' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)

@@ -337,36 +337,19 @@
      mutable nodes; the WeakMap wins when the anchor is frozen. */
   const galaxyFarFieldEnvelopeCache = typeof WeakMap === 'function' ? new WeakMap() : null;
   const galaxyBlackHoleSpinCache = typeof WeakMap === 'function' ? new WeakMap() : null;
-  const galaxyAstronomicalClockCache = typeof WeakMap === 'function' ? new WeakMap() : null;
-  /* Galaxy has its own physical clock. Graph coordinates are layout units, so treating one
-     solver unit as roughly one wall second made a solar system circle the galactic centre in
-     minutes. Calibrate the scene's median carrier to the Milky Way solar circle (8.2 kpc at
-     232.8 km/s, about 216.4 million years per orbit), then advance an explicitly compressed
-     astronomical clock. The default represents 1,000 simulated years per wall second: motion
-     remains mathematically live, but a carrier cannot sweep a visibly drastic arc in seconds.
-     The speed control changes only this time scale; it never changes a lane radius, gravity
-     field, circular velocity, or slingshot limit. */
+  /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
+     while a 0.032 leapfrog slice makes both levels of the hierarchy visibly rotate without
+     changing their circular initial conditions or force balance. This is a time-scale increase,
+     not an extra tangential kick: planets still orbit only their dominant star and whole systems
+     still orbit the black hole. Damping removes numerical noise over minutes rather than erasing
+     the seeded angular momentum during the opening animation. */
   const GALAXY_FRAME_INTERVAL_MS = 1000 / 30;
   const GALAXY_MOTION_RATE = 0.68;
-  const GALAXY_REFERENCE_RADIUS_KPC = 8.2;
-  const GALAXY_REFERENCE_CIRCULAR_SPEED_KM_S = 232.8;
-  const GALAXY_KPC_PER_KM_S_MYR = 977.792221680789;
-  const GALAXY_SIMULATED_MYR_PER_WALL_SECOND = 0.001;
-  const GALAXY_TIMESTEP_MINIMUM = 1e-8;
-  const GALAXY_TIMESTEP_MAXIMUM = 2;
-  const GALAXY_ASTRONOMICAL_TIMESTEP_MAXIMUM = 0.001;
-  const GALAXY_FIXED_TIMESTEP = 0.00001;
-  function galaxyFiniteTimestep(value, fallback) {
-    const raw = Number(value);
-    const safeFallback = Number.isFinite(Number(fallback))
-      ? Number(fallback) : GALAXY_FIXED_TIMESTEP;
-    return Math.max(GALAXY_TIMESTEP_MINIMUM, Math.min(GALAXY_TIMESTEP_MAXIMUM,
-      Number.isFinite(raw) && raw > 0 ? raw : safeFallback));
-  }
+  const GALAXY_FIXED_TIMESTEP = 0.032;
   /* The black hole remains the chart's fixed origin, but its visible accretion disk must not
      read as a frozen node when the central community has no separately painted satellites. */
   const GALAXY_BLACK_HOLE_SPIN_RATE = 1.2;
-  const GALAXY_MAX_SUBSTEPS = 1;
+  const GALAXY_MAX_SUBSTEPS = 3;
   /* Galaxy's fixed-step solver is persistent, so it has no cold alpha to reheat. Extra fixed
      slices would literally fast-forward physical time (up to 3x at a 60 Hz render cadence),
      making every system lurch despite adding no random impulse. Keep the public action and its
@@ -1049,7 +1032,7 @@
         const acceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawAcceleration) : rawAcceleration;
         const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          Math.sqrt(Math.max(0, acceleration * radius))) * orbitalSpeed;
+          Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
         const parentVx = Number.isFinite(parent.vx) ? parent.vx : 0;
         const parentVy = Number.isFinite(parent.vy) ? parent.vy : 0;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - parentVx;
@@ -1318,7 +1301,7 @@
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
         const omega = Math.sqrt(Math.max(0, inwardAcceleration / speedRadius));
         const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          omega * speedRadius) * orbitalSpeed;
+          omega * speedRadius * orbitalSpeed);
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
@@ -1436,7 +1419,7 @@
         const denominator = Math.pow(radius * radius + soft * soft, 1.5);
         const speed = Math.min(GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT,
           Math.sqrt(Math.max(0, fallbackConstant * fallbackAnchor.gravity_mass * radius
-            / Math.max(1e-9, denominator)))) * orbitalSpeed;
+            / Math.max(1e-9, denominator))));
         center.nodes.forEach(node => {
           node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * speed;
           node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * speed;
@@ -1754,11 +1737,8 @@
      independent wells, so a dense community cannot scramble itself through planet-to-planet
      gravity. The dominant star is the local inertial frame: the black-hole and inter-system
      fields translate it with the complete system, while only its planets receive this central
-     acceleration. Nested carriers remain legitimate immediate-parent wells: a planet's
-     star-relative acceleration translates that planet and its entire moon subtree, while the
-     planet-to-moon field adds only the moon's relative acceleration. That is the inertial-frame
-     hierarchy used by the recursive kinematic clock, rather than a collection of independent
-     world-space kicks. */
+     acceleration. That preserves every planet's sampled relative orbit without a fictitious
+     star wobble masking local phase. */
   function applyGalaxySystemAnchorGravity(nodes, options) {
     const opts = options || {};
     const bodies = (nodes || []).filter(node => node && !node.ghost
@@ -1804,7 +1784,19 @@
       const anchor = galaxySystemAnchor(members);
       if (!anchor) return;
       stats.anchors++;
+      if (anchor.anchor_role === 'community') {
+        stats.eligibleStellarAnchors++;
+        if (galaxyStellarGravitySetting(opts.gravity)
+          > galaxyAccelerationCapReference(opts.gravity)) stats.stellarFloorActive = true;
+      } else if (anchor.anchor_role === 'global') stats.globalAnchors++;
+      else stats.fallbackAnchors++;
+      const gravityMultiplier = galaxyLocalGravityMultiplier(anchor, opts);
+      const accelerationCap = explicitAccelerationCap !== null
+        ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(anchor, opts.gravity)
+          * Math.max(0.25, gravityMultiplier);
       const accelerations = new Map(members.map(node => [node, { ax: 0, ay: 0 }]));
+      let systemMaximumRepulsion = 0, systemMaximumSampledAttraction = 0;
+      let systemMaximumNetRepulsion = 0, systemMinimumSurfaceNetRepulsion = null;
       const byId = new Map(members.map(node => [String(node.id), node]));
       const childrenByParent = new Map();
       members.forEach(node => {
@@ -1813,24 +1805,6 @@
         if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
         childrenByParent.get(parent).push(node);
       });
-      const descendantsByNode = new Map(), resolvingDescendants = new Set();
-      const descendantsOf = node => {
-        if (descendantsByNode.has(node)) return descendantsByNode.get(node);
-        /* Authored parent metadata should be acyclic, but a malformed payload must not recurse
-           forever. The current node still receives its own edge field in that compatibility
-           case; the repeated ancestor is simply not traversed twice. */
-        if (resolvingDescendants.has(node)) return [node];
-        resolvingDescendants.add(node);
-        const descendants = [node];
-        (childrenByParent.get(node) || []).forEach(child => {
-          descendantsOf(child).forEach(descendant => {
-            if (!descendants.includes(descendant)) descendants.push(descendant);
-          });
-        });
-        resolvingDescendants.delete(node);
-        descendantsByNode.set(node, descendants);
-        return descendants;
-      };
       childrenByParent.forEach((satellites, parent) => {
         /* The live black-hole field owns an explicitly declared direct-BH carrier.  Legacy
            payloads can still contain a global anchor with an unannotated local satellite; that
@@ -1842,16 +1816,6 @@
                 && satellite.system_anchor_id !== null
                 && String(satellite.system_anchor_id) === String(parent.id)))));
         if (skipGlobalParent) return;
-        /* Telemetry describes the parent wells actually sampled, not merely the community
-           group's top node. Direct-BH payloads can group BH→star→planet together: the skipped
-           global edge is carrier physics, while the nested community star is still the local
-           stellar well and must be reported as such. */
-        if (parent.anchor_role === 'community') {
-          stats.eligibleStellarAnchors++;
-          if (galaxyStellarGravitySetting(opts.gravity)
-            > galaxyAccelerationCapReference(opts.gravity)) stats.stellarFloorActive = true;
-        } else if (parent.anchor_role === 'global') stats.globalAnchors++;
-        else stats.fallbackAnchors++;
         const parentMass = finitePositive(parent.gravity_mass, 1, 1000);
         const parentGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
         const explicitLegacyGlobalPair = parent.anchor_role === 'global'
@@ -1861,9 +1825,6 @@
             && String(satellite.system_anchor_id) === String(parent.id));
         const parentGravity = galaxySystemGravityConstant(parent, opts.gravity)
           * parentGravityMultiplier * (explicitLegacyGlobalPair ? 1.1 : 1);
-        const parentAccelerationCap = explicitAccelerationCap !== null
-          ? explicitAccelerationCap : defaultGalaxySystemAccelerationCap(parent, opts.gravity)
-            * Math.max(0.25, parentGravityMultiplier);
         satellites.sort((left, right) => Number(left.orbit_tier || 0)
           - Number(right.orbit_tier || 0) || String(left.id).localeCompare(String(right.id)));
         satellites.forEach(satellite => {
@@ -1880,11 +1841,9 @@
           if (!(denominator > 0) || !Number.isFinite(denominator)) return;
           const scale = parentGravity * alphaValue / denominator;
           const sampledAttraction = distance * scale * parentMass;
-          const edgeAcceleration = {
-            ax: dx * scale * parentMass,
-            ay: dy * scale * parentMass,
-          };
-          let outwardAcceleration = 0, netRepulsion = 0, surfaceContact = false;
+          const satelliteAcceleration = accelerations.get(satellite);
+          satelliteAcceleration.ax += dx * scale * parentMass;
+          satelliteAcceleration.ay += dy * scale * parentMass;
           /* Every local parent owns a painted clearance band. This keeps nested moons from
              colliding with their immediate carrier while preserving the global black-hole
              boundary as a separate constraint. */
@@ -1894,43 +1853,23 @@
             const pressureEdge = surfaceDistance + repulsionRange;
             if (distance < pressureEdge) {
               const depth = galaxySmoothstep((pressureEdge - distance) / repulsionRange);
-              outwardAcceleration = (sampledAttraction
+              const outwardAcceleration = (sampledAttraction
                 + repulsionAcceleration * alphaValue) * depth;
-              netRepulsion = outwardAcceleration - sampledAttraction;
+              const netRepulsion = outwardAcceleration - sampledAttraction;
               const unitX = dx / distance, unitY = dy / distance;
-              edgeAcceleration.ax -= unitX * outwardAcceleration;
-              edgeAcceleration.ay -= unitY * outwardAcceleration;
+              satelliteAcceleration.ax -= unitX * outwardAcceleration;
+              satelliteAcceleration.ay -= unitY * outwardAcceleration;
               stats.repulsions++;
+              systemMaximumRepulsion = Math.max(systemMaximumRepulsion, outwardAcceleration);
+              systemMaximumSampledAttraction = Math.max(
+                systemMaximumSampledAttraction, sampledAttraction);
+              systemMaximumNetRepulsion = Math.max(systemMaximumNetRepulsion, netRepulsion);
               if (distance <= surfaceDistance + 1e-9) {
                 stats.surfaceRepulsions++;
-                surfaceContact = true;
+                systemMinimumSurfaceNetRepulsion = systemMinimumSurfaceNetRepulsion === null
+                  ? netRepulsion : Math.min(systemMinimumSurfaceNetRepulsion, netRepulsion);
               }
             }
-          }
-          /* Bound this immediate-parent field before it becomes a shared inertial translation.
-             A star→planet acceleration belongs to the complete planet/moon subtree; a later
-             planet→moon edge adds the moon's relative term. Capping the accumulated world-space
-             vector would mix unrelated parent wells and disagree with hierarchical seeding. */
-          const edgeMagnitude = Math.hypot(edgeAcceleration.ax, edgeAcceleration.ay);
-          const edgeScale = parentAccelerationCap > 0 && edgeMagnitude > parentAccelerationCap
-            ? parentAccelerationCap / edgeMagnitude : 1;
-          descendantsOf(satellite).forEach(descendant => {
-            const acceleration = accelerations.get(descendant);
-            if (!acceleration) return;
-            acceleration.ax += edgeAcceleration.ax * edgeScale;
-            acceleration.ay += edgeAcceleration.ay * edgeScale;
-          });
-          stats.capScale = Math.min(stats.capScale, edgeScale);
-          stats.maximumRepulsion = Math.max(
-            stats.maximumRepulsion, outwardAcceleration * edgeScale);
-          stats.maximumSampledAttraction = Math.max(
-            stats.maximumSampledAttraction, sampledAttraction * edgeScale);
-          stats.maximumNetRepulsion = Math.max(
-            stats.maximumNetRepulsion, netRepulsion * edgeScale);
-          if (surfaceContact) {
-            const boundedSurfaceNet = netRepulsion * edgeScale;
-            stats.minimumSurfaceNetRepulsion = stats.minimumSurfaceNetRepulsion === null
-              ? boundedSurfaceNet : Math.min(stats.minimumSurfaceNetRepulsion, boundedSurfaceNet);
           }
           stats.satellites++;
         });
@@ -1942,11 +1881,25 @@
         const acceleration = accelerations.get(node);
         return Math.max(value, Math.hypot(acceleration.ax, acceleration.ay));
       }, 0);
-      stats.maximumAcceleration = Math.max(stats.maximumAcceleration, maximum);
+      const scale = accelerationCap > 0 && maximum > accelerationCap
+        ? accelerationCap / maximum : 1;
+      stats.maximumAcceleration = Math.max(stats.maximumAcceleration, maximum * scale);
+      stats.maximumRepulsion = Math.max(
+        stats.maximumRepulsion, systemMaximumRepulsion * scale);
+      stats.maximumSampledAttraction = Math.max(
+        stats.maximumSampledAttraction, systemMaximumSampledAttraction * scale);
+      stats.maximumNetRepulsion = Math.max(
+        stats.maximumNetRepulsion, systemMaximumNetRepulsion * scale);
+      if (systemMinimumSurfaceNetRepulsion !== null) {
+        const boundedSurfaceNet = systemMinimumSurfaceNetRepulsion * scale;
+        stats.minimumSurfaceNetRepulsion = stats.minimumSurfaceNetRepulsion === null
+          ? boundedSurfaceNet : Math.min(stats.minimumSurfaceNetRepulsion, boundedSurfaceNet);
+      }
+      stats.capScale = Math.min(stats.capScale, scale);
       members.forEach(node => {
         const acceleration = accelerations.get(node);
-        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + acceleration.ax;
-        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + acceleration.ay;
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + acceleration.ax * scale;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + acceleration.ay * scale;
       });
     });
     return stats;
@@ -2309,7 +2262,8 @@
       || opts.frozen === true || opts.orbitPaused === true) {
       return anchor ? galaxyBlackHoleSpinAngle(anchor) : 0;
     }
-    const timestep = galaxyFiniteTimestep(opts.timestep, GALAXY_FIXED_TIMESTEP);
+    const timestep = Math.max(0.001, Math.min(2,
+      Number(opts.timestep) || GALAXY_FIXED_TIMESTEP));
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const direction = (seededHash(opts.layoutSeed, 'black-hole-spin') & 1) ? 1 : -1;
     return setGalaxyBlackHoleSpinAngle(anchor,
@@ -2363,21 +2317,11 @@
     const capScale = accelerationCap > 0 && rawAcceleration > accelerationCap
       ? accelerationCap / rawAcceleration : 1;
     omegaSquared = Math.max(0, omegaSquared) * capScale;
-    /* Carrier phase is intentionally bounded by the global emergency speed ceiling. Apply that
-       same ceiling to the sampled central acceleration, not only to the later lane controller,
-       so the displayed circular orbit remains force-balanced: a(r) * r = v(r)^2. Without this
-       scale the constraint hid a 2.5x–7.4x inward-force mismatch in production-sized galaxies. */
-    const circularSpeedSquared = omegaSquared * r * r;
-    const speedCapSquared = GALAXY_CARRIER_FRAME_SPEED_LIMIT
-      * GALAXY_CARRIER_FRAME_SPEED_LIMIT;
-    const speedCapScale = circularSpeedSquared > speedCapSquared
-      ? speedCapSquared / circularSpeedSquared : 1;
-    omegaSquared *= speedCapScale;
     const omega = Math.sqrt(omegaSquared);
     return {
       omegaSquared, omega, circularSpeed: omega * r,
       haloVelocitySquared, rawAcceleration,
-      acceleration: omegaSquared * r, capScale, speedCapScale,
+      acceleration: omegaSquared * r, capScale,
     };
   }
 
@@ -2469,76 +2413,6 @@
       gravitySetting: galaxyBlackHoleGravitySetting(opts.gravity, explicitGlobal),
       floorActive: explicitGlobal && Number(opts.gravity) < GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       traversals: centers.size,
-    };
-  }
-
-  function galaxyAstronomicalClock(nodes, options) {
-    const opts = options || {};
-    const bodies = (nodes || []).filter(node => node && !node.ghost
-      && Number.isFinite(node.x) && Number.isFinite(node.y));
-    const anchor = galaxyGlobalAnchor(bodies);
-    const referencePhysicalPeriodMyr = 2 * Math.PI * GALAXY_REFERENCE_RADIUS_KPC
-      * GALAXY_KPC_PER_KM_S_MYR / GALAXY_REFERENCE_CIRCULAR_SPEED_KM_S;
-    let calibration = anchor && galaxyAstronomicalClockCache
-      ? galaxyAstronomicalClockCache.get(anchor) : null;
-    if (!calibration && anchor && anchor.anchor_role === 'global') {
-      const field = galaxyBlackHoleField(bodies, opts);
-      const radii = field.systems.map(system => Number(system.radius))
-        .filter(radius => Number.isFinite(radius) && radius > 1e-9);
-      const referenceRadius = linearMedian(radii);
-      const referenceCurve = referenceRadius > 0
-        ? galaxyCarrierOrbitCurve(field, referenceRadius) : null;
-      const referenceSpeed = referenceCurve
-        && Number.isFinite(referenceCurve.circularSpeed)
-        ? referenceCurve.circularSpeed : 0;
-      const graphTimeUnitMyr = referenceRadius > 0 && referenceSpeed > 0
-        ? GALAXY_REFERENCE_RADIUS_KPC / referenceRadius * referenceSpeed
-          * GALAXY_KPC_PER_KM_S_MYR / GALAXY_REFERENCE_CIRCULAR_SPEED_KM_S
-        : 1;
-      const physicalPeriods = field.systems.map(system => {
-        const radius = Number(system.radius);
-        const speed = Number(system.circularSpeed);
-        return radius > 0 && speed > 0
-          ? 2 * Math.PI * radius / speed * graphTimeUnitMyr : NaN;
-      }).filter(Number.isFinite);
-      calibration = {
-        calibrated: referenceRadius > 0 && referenceSpeed > 0,
-        referenceRadius, referenceSpeed, graphTimeUnitMyr,
-        referencePhysicalPeriodMyr,
-        minimumCarrierPhysicalPeriodMyr: physicalPeriods.length
-          ? Math.min(...physicalPeriods) : null,
-        maximumCarrierPhysicalPeriodMyr: physicalPeriods.length
-          ? Math.max(...physicalPeriods) : null,
-      };
-      if (galaxyAstronomicalClockCache) galaxyAstronomicalClockCache.set(anchor, calibration);
-    }
-    if (!calibration) {
-      calibration = {
-        calibrated: false, referenceRadius: 0, referenceSpeed: 0, graphTimeUnitMyr: 1,
-        referencePhysicalPeriodMyr,
-        minimumCarrierPhysicalPeriodMyr: null, maximumCarrierPhysicalPeriodMyr: null,
-      };
-    }
-    const displayClockSetting = Number.isFinite(Number(opts.displayClockSetting))
-      ? Number(opts.displayClockSetting) : GALAXY_ORBITAL_SEPARATION_BASE_SETTING;
-    const displayClockMultiplier = galaxyOrbitalSpeedMultiplier(displayClockSetting);
-    const simulatedMyrPerWallSecond = GALAXY_SIMULATED_MYR_PER_WALL_SECOND
-      * displayClockMultiplier;
-    const wallClockSeconds = Number.isFinite(Number(opts.wallClockSeconds))
-      ? Math.max(0, Number(opts.wallClockSeconds)) : GALAXY_FRAME_INTERVAL_MS / 1000;
-    const rawTimestep = wallClockSeconds * simulatedMyrPerWallSecond
-      / Math.max(1e-12, calibration.graphTimeUnitMyr);
-    const timestep = galaxyFiniteTimestep(
-      Math.min(GALAXY_ASTRONOMICAL_TIMESTEP_MAXIMUM, rawTimestep), GALAXY_FIXED_TIMESTEP);
-    return {
-      ...calibration,
-      displayClockSetting, displayClockMultiplier,
-      simulatedMyrPerWallSecond,
-      simulatedYearsPerWallSecond: simulatedMyrPerWallSecond * 1e6,
-      timestep,
-      referencePhysicalPeriodYears: calibration.referencePhysicalPeriodMyr * 1e6,
-      referenceDisplayPeriodSeconds: calibration.referencePhysicalPeriodMyr
-        / Math.max(1e-12, simulatedMyrPerWallSecond),
     };
   }
 
@@ -2765,8 +2639,7 @@
         * Math.max(0.25, multiplier);
     const inwardAcceleration = accelerationCap > 0
       ? Math.min(sampledInwardAcceleration, accelerationCap) : sampledInwardAcceleration;
-    const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
-    const circularSpeed = Math.sqrt(Math.max(0, inwardAcceleration * radius)) * orbitalSpeed;
+    const circularSpeed = Math.sqrt(Math.max(0, inwardAcceleration * radius));
     const escapeSpeed = circularSpeed * Math.SQRT2;
     const starVx = Number.isFinite(star.vx) ? star.vx : 0;
     const starVy = Number.isFinite(star.vy) ? star.vy : 0;
@@ -2783,15 +2656,14 @@
     let direction = Math.sign(-dy * relativeVx + dx * relativeVy);
     if (!direction) direction = (seededHash(opts.layoutSeed,
       'slingshot:' + String(node.id) + '|' + String(star.id)) & 1) ? 1 : -1;
-    const insertionSpeed = Math.min(
-      GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed, circularSpeed);
+    const insertionSpeed = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, circularSpeed);
     result.vx = starVx - unitY * insertionSpeed * direction;
     result.vy = starVy + unitX * insertionSpeed * direction;
-    /* The capture law is star-relative. Clamping this world-space vector after adding the
-       moving carrier velocity turns a valid circular tangent into a sub-circular fall whenever
-       star and planet travel in the same direction. Pointer sampling already bounds the input;
-       the hierarchical velocity guard bounds this immediate-parent edge without altering the
-       carrier frame. */
+    const absoluteSpeed = Math.hypot(result.vx, result.vy);
+    if (absoluteSpeed > GALAXY_SLINGSHOT_SPEED_LIMIT) {
+      const scale = GALAXY_SLINGSHOT_SPEED_LIMIT / absoluteSpeed;
+      result.vx *= scale; result.vy *= scale;
+    }
     result.captured = true;
     result.reason = explicitId ? 'authored-anchor' : 'authored-community';
     return result;
@@ -2817,7 +2689,7 @@
       return { ghosts: ghosts.length, advanced: 0 };
     }
     const envelope = galaxyFarFieldEnvelope(bodies, opts);
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const anchorRadius = finitePositive(anchor.radius,
       finitePositive(anchor.visual_radius, 3, 160), 160);
@@ -2865,7 +2737,7 @@
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const localSoftening = Math.max(0.1, Number(opts.localSoftening) || opts.softening || 40);
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const localOrbitCache = opts.localOrbitCache || '__galaxyKinematicLocalOrbit';
     const nodeRadius = node => finitePositive(node.radius,
       finitePositive(node.visual_radius, 3, 160), 160);
@@ -2965,7 +2837,7 @@
     const field = galaxyBlackHoleField(bodies, Object.assign({}, opts, { softening: centralSoftening }));
     const anchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
     if (!anchor || !(field.gravitationalConstant > 0)) return empty;
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const envelope = galaxyFarFieldEnvelope(bodies, opts);
     const nodeRadius = node => finitePositive(node.radius,
@@ -4034,7 +3906,7 @@
     const envelopePadding = Math.max(0, Number(opts.envelopePadding) || 0);
     const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
       ? null : String(opts.fixedNodeId);
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const bodyRadius = node => finitePositive(
       node.radius, finitePositive(node.visual_radius,
         radiusFromGravityMass(node.gravity_mass), 80), 160
@@ -4565,19 +4437,19 @@
       : [...compatibilitySystems.values()];
     let limitedSystems = 0, maximumRelativeSpeed = 0, minimumScale = 1;
     systems.forEach(members => {
-      if (!members.length) return;
+      if (members.length < 2) return;
       const resolvedAnchor = galaxySystemAnchor(members);
       const declaredIds = new Set(members.map(node => node.system_anchor_id)
         .filter(value => value !== undefined && value !== null).map(String));
-      const anchor = resolvedAnchor && (resolvedAnchor.anchor_role === 'community'
-        || resolvedAnchor.__galaxyBlackHoleChild === true
-        || declaredIds.has(String(resolvedAnchor.id))) ? resolvedAnchor : null;
-      let systemLimited = false;
-      if (!anchor) {
-        /* Unannotated compatibility communities have no parent tree to preserve. Retain their
-           historical mass-COM limiter; authored Galaxy systems take the hierarchical branch
-           below and are never flattened against one top-star velocity. */
-        let referenceVx = 0, referenceVy = 0;
+      const anchor = members.find(node => node.id === opts.fixedNodeId)
+        || (resolvedAnchor && (resolvedAnchor.anchor_role === 'community'
+          || resolvedAnchor.__galaxyBlackHoleChild === true
+          || declaredIds.has(String(resolvedAnchor.id))) ? resolvedAnchor : null);
+      let referenceVx = 0, referenceVy = 0;
+      if (anchor) {
+        referenceVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
+        referenceVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
+      } else {
         let totalMass = 0;
         members.forEach(node => {
           const mass = finitePositive(node.gravity_mass, 1, 1000);
@@ -4587,106 +4459,58 @@
         });
         referenceVx /= Math.max(1e-9, totalMass);
         referenceVy /= Math.max(1e-9, totalMass);
-        const frameSpeed = Math.hypot(referenceVx, referenceVy);
-        if (Number.isFinite(absoluteLimit) && frameSpeed > absoluteLimit + 1e-12) {
-          const frameScale = absoluteLimit / frameSpeed;
-          const shiftX = referenceVx * frameScale - referenceVx;
-          const shiftY = referenceVy * frameScale - referenceVy;
+      }
+      let systemMaximum = 0, scale = 1;
+      members.forEach(node => {
+        if (node === anchor) return;
+        const relativeVx = node.vx - referenceVx, relativeVy = node.vy - referenceVy;
+        const relativeSpeed = Math.hypot(relativeVx, relativeVy);
+        systemMaximum = Math.max(systemMaximum, relativeSpeed);
+        if (relativeSpeed > limit) scale = Math.min(scale, limit / relativeSpeed);
+      });
+      maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
+      /* A planet's local tangent rides on top of the star's galactic carrier velocity. The
+         carrier is the primary orbit: preserve it whenever it is inside the emergency ceiling,
+         and clamp only the local frame to the remaining vector budget. The old implementation
+         did the reverse (scaled the carrier after local motion consumed the budget), which made
+         a solar system spin around its star while its star stopped orbiting the black hole. */
+      let carrierAdjusted = false;
+      if (anchor && Number.isFinite(absoluteLimit)) {
+        const carrierSpeed = Math.hypot(referenceVx, referenceVy);
+        const carrierAllowance = Math.max(0, absoluteLimit - carrierSpeed);
+        if (systemMaximum > 1e-12) {
+          scale = Math.min(scale, carrierAllowance / systemMaximum);
+        }
+        /* Only an already-invalid carrier may be reduced. Supported galaxy lanes are well
+           below this ceiling, so this is an emergency guard rather than an orbital controller. */
+        if (carrierSpeed > absoluteLimit + 1e-12) {
+          const carrierScale = carrierSpeed > 1e-12 ? absoluteLimit / carrierSpeed : 0;
+          const targetVx = referenceVx * carrierScale;
+          const targetVy = referenceVy * carrierScale;
+          const shiftX = targetVx - referenceVx;
+          const shiftY = targetVy - referenceVy;
           members.forEach(node => {
             node.vx += shiftX;
             node.vy += shiftY;
           });
-          referenceVx *= frameScale;
-          referenceVy *= frameScale;
-          systemLimited = true;
-          minimumScale = Math.min(minimumScale, frameScale);
-        }
-        /* Without an authored parent tree, preserve the legacy common scale around the COM.
-           The ordinary absolute ceiling is also the strongest safe relative ceiling here;
-           there is no hierarchy that can distinguish a carrier from a local edge. */
-        const compatibilityLimit = Math.min(limit, absoluteLimit);
-        let scale = 1, systemMaximum = 0;
-        members.forEach(node => {
-          const relativeSpeed = Math.hypot(node.vx - referenceVx, node.vy - referenceVy);
-          systemMaximum = Math.max(systemMaximum, relativeSpeed);
-          if (relativeSpeed > compatibilityLimit) {
-            scale = Math.min(scale, compatibilityLimit / relativeSpeed);
-          }
-        });
-        maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
-        if (scale < 1 - 1e-12) {
-          members.forEach(node => {
-            node.vx = referenceVx + (node.vx - referenceVx) * scale;
-            node.vy = referenceVy + (node.vy - referenceVy) * scale;
-          });
-          systemLimited = true;
-          minimumScale = Math.min(minimumScale, scale);
-        }
-      } else {
-        /* The emergency absolute ceiling applies to the galactic carrier only. Local circular
-           velocities are parent-relative and can legitimately add along a deep hierarchy; a
-           flat world-space budget would halve two valid 48-unit planet/moon edges merely
-           because the moon happens to be 96 units from the top-star velocity. */
-        const carrierSpeed = Math.hypot(anchor.vx, anchor.vy);
-        if (Number.isFinite(absoluteLimit) && carrierSpeed > absoluteLimit + 1e-12) {
-          const carrierScale = absoluteLimit / carrierSpeed;
-          const shiftX = anchor.vx * carrierScale - anchor.vx;
-          const shiftY = anchor.vy * carrierScale - anchor.vy;
-          members.forEach(node => {
-            node.vx += shiftX;
-            node.vy += shiftY;
-          });
-          systemLimited = true;
+          referenceVx = targetVx;
+          referenceVy = targetVy;
+          carrierAdjusted = true;
           minimumScale = Math.min(minimumScale, carrierScale);
         }
-        const byId = new Map(members.map(node => [String(node.id), node]));
-        const childrenByParent = new Map();
-        members.forEach(node => {
-          if (node === anchor) return;
-          const parent = galaxyLocalOrbitParent(node, members, anchor, byId) || anchor;
-          if (parent === node) return;
-          if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
-          childrenByParent.get(parent).push(node);
-        });
-        const descendantsByNode = new Map(), resolving = new Set();
-        const descendantsOf = node => {
-          if (descendantsByNode.has(node)) return descendantsByNode.get(node);
-          if (resolving.has(node)) return [node];
-          resolving.add(node);
-          const descendants = [node];
-          (childrenByParent.get(node) || []).forEach(child => {
-            descendantsOf(child).forEach(descendant => {
-              if (!descendants.includes(descendant)) descendants.push(descendant);
-            });
-          });
-          resolving.delete(node);
-          descendantsByNode.set(node, descendants);
-          return descendants;
-        };
-        const edges = [];
-        childrenByParent.forEach((children, parent) => children.forEach(child => {
-          edges.push({ parent, child });
-        }));
-        edges.sort((left, right) => Number(left.child.orbit_tier || 0)
-          - Number(right.child.orbit_tier || 0)
-          || String(left.child.id).localeCompare(String(right.child.id)));
-        edges.forEach(({ parent, child }) => {
-          const relativeVx = child.vx - parent.vx, relativeVy = child.vy - parent.vy;
-          const relativeSpeed = Math.hypot(relativeVx, relativeVy);
-          maximumRelativeSpeed = Math.max(maximumRelativeSpeed, relativeSpeed);
-          if (!(relativeSpeed > limit + 1e-12)) return;
-          const edgeScale = limit / relativeSpeed;
-          const deltaX = relativeVx * edgeScale - relativeVx;
-          const deltaY = relativeVy * edgeScale - relativeVy;
-          descendantsOf(child).forEach(descendant => {
-            descendant.vx += deltaX;
-            descendant.vy += deltaY;
-          });
-          systemLimited = true;
-          minimumScale = Math.min(minimumScale, edgeScale);
-        });
       }
-      if (systemLimited) limitedSystems++;
+      if (!(scale < 1 - 1e-12) && !carrierAdjusted) return;
+      members.forEach(node => {
+        if (node === anchor) {
+          node.vx = referenceVx;
+          node.vy = referenceVy;
+          return;
+        }
+        node.vx = referenceVx + (node.vx - referenceVx) * scale;
+        node.vy = referenceVy + (node.vy - referenceVy) * scale;
+      });
+      limitedSystems++;
+      minimumScale = Math.min(minimumScale, scale);
     });
     return {
       systems: systems.length, limitedSystems, maximumRelativeSpeed, minimumScale, limit,
@@ -4705,14 +4529,6 @@
      familiar node shape makes deterministic tests and non-DOM embeds straightforward. */
   function galaxyAccelerations(nodes, links, bridges, options) {
     const opts = options || {};
-    /* Orbital speed is a playback-time transform, not an unpaired tangential kick. Advancing a
-       Newtonian system q times faster requires velocities to scale by q and every acceleration
-       sampled by the leapfrog clock to scale by q². Seeds, carrier support and the kinematic
-       fallback already use q-scaled circular speed; applying q² once to the combined live field
-       preserves a(r) * r = v(r)² for black-hole, stellar and nested moon orbits at every slider
-       position, while scaling secondary fields through the same physical clock. */
-    const orbitalTimeScale = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
-    const accelerationTimeScale = orbitalTimeScale * orbitalTimeScale;
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
     const saved = new Map(bodies.map(node => [node, {
@@ -4819,8 +4635,8 @@
       anchor.vy = 0;
     }
     const accelerations = new Map(bodies.map(node => [node, {
-      ax: (Number.isFinite(node.vx) ? node.vx : 0) * accelerationTimeScale,
-      ay: (Number.isFinite(node.vy) ? node.vy : 0) * accelerationTimeScale,
+      ax: Number.isFinite(node.vx) ? node.vx : 0,
+      ay: Number.isFinite(node.vy) ? node.vy : 0,
     }]));
     bodies.forEach(node => {
       const velocity = saved.get(node);
@@ -4832,8 +4648,6 @@
     accelerations.mutualGravity = mutualGravity;
     accelerations.farFieldGravity = farFieldGravity;
     accelerations.spacetime = spacetime;
-    accelerations.orbitalTimeScale = orbitalTimeScale;
-    accelerations.accelerationTimeScale = accelerationTimeScale;
     return accelerations;
   }
 
@@ -4866,7 +4680,8 @@
     const anchorX = Number.isFinite(anchor.x) ? anchor.x : 0;
     const anchorY = Number.isFinite(anchor.y) ? anchor.y : 0;
     const factor = galaxyInwardConvergenceFactor(opts.wallClockSeconds, opts.gravity);
-    const timestep = galaxyFiniteTimestep(opts.timestep, GALAXY_FIXED_TIMESTEP);
+    const timestep = Number.isFinite(Number(opts.timestep))
+      ? Math.max(0.001, Number(opts.timestep)) : GALAXY_FIXED_TIMESTEP;
     let applied = 0, outwardCandidates = 0, overrides = 0;
     communityCenters(bodies).forEach(center => {
       if (!center || center.nodes.includes(anchor)
@@ -4949,7 +4764,7 @@
     const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
     const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
       ? null : String(opts.fixedNodeId);
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     let angularVelocitySum = 0;
     const support = (group, carrier, core) => {
       let dx = carrier.x - anchor.x, dy = carrier.y - anchor.y;
@@ -5534,111 +5349,39 @@
       const localAnchor = carrier;
       if (!localAnchor) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
-      const childrenByParent = new Map();
       members.forEach(node => {
-        if (node === localAnchor) return;
-        const parent = galaxyLocalOrbitParent(node, members, localAnchor, byId) || localAnchor;
-        if (parent === node) return;
-        if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
-        childrenByParent.get(parent).push(node);
-      });
-      childrenByParent.forEach(children => children.sort((left, right) =>
-        Number(left.orbit_tier || 0) - Number(right.orbit_tier || 0)
-        || String(left.id).localeCompare(String(right.id))));
-      const descendantsByNode = new Map(), resolvingDescendants = new Set();
-      const descendantsOf = node => {
-        if (descendantsByNode.has(node)) return descendantsByNode.get(node);
-        if (resolvingDescendants.has(node)) return [node];
-        resolvingDescendants.add(node);
-        const descendants = [node];
-        (childrenByParent.get(node) || []).forEach(child => {
-          descendantsOf(child).forEach(descendant => {
-            if (!descendants.includes(descendant)) descendants.push(descendant);
-          });
-        });
-        resolvingDescendants.delete(node);
-        descendantsByNode.set(node, descendants);
-        return descendants;
-      };
-      const visited = new Set(), visiting = new Set();
-      const tuneChildren = parent => {
-        if (visiting.has(parent)) return;
-        visiting.add(parent);
-        (childrenByParent.get(parent) || []).forEach(node => {
-          if (visited.has(node)) return;
-          visited.add(node);
-          const dx = node.x - parent.x, dy = node.y - parent.y;
-          const radius = Math.hypot(dx, dy);
-          if (!(radius > 1e-9)) {
-            tuneChildren(node);
-            return;
-          }
-          const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
-          const localGravity = galaxySystemGravityConstant(parent, opts.gravity)
-            * localGravityMultiplier;
-          const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, opts.gravity)
-            * Math.max(0.25, localGravityMultiplier);
-          const anchorMass = finitePositive(parent.gravity_mass, 1, 1000);
-          const denominator = Math.pow(radius * radius
-            + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
-          const rawAcceleration = denominator > 0
-            ? localGravity * anchorMass * radius / denominator : 0;
-          const acceleration = Math.min(localAccelerationCap, rawAcceleration);
-          const baseSpeed = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-            Math.sqrt(Math.max(0, acceleration * radius)));
-          const unitX = dx / radius, unitY = dy / radius;
-          const tangentX = -unitY, tangentY = unitX;
-          const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
-            - (Number.isFinite(parent.vx) ? parent.vx : 0);
-          const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
-            - (Number.isFinite(parent.vy) ? parent.vy : 0);
-          const radialSpeed = relativeVx * unitX + relativeVy * unitY;
-          const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
-          const sign = Math.sign(currentTangent)
-            || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
-          const relativeSpeed = Math.hypot(relativeVx, relativeVy);
-          const naturalCircularSpeed = Math.sqrt(Math.max(0, acceleration * radius))
-            * orbitalSpeed;
-          const escapeSpeed = naturalCircularSpeed * Math.SQRT2;
-          /* A deliberately outward, super-escape release is no longer a bound orbit for this
-             controller to circularize. Gravity remains active, but the speed control must not
-             erase the person's slingshot trajectory by injecting a new tangent. */
-          const physicalEscapeLimit = escapeSpeed * (1 - 16 * Number.EPSILON);
-          const escaping = relativeSpeed >= physicalEscapeLimit;
-          if (escaping) {
-            tuneChildren(node);
-            return;
-          }
-          /* The emergency limit bounds the complete immediate-parent vector, not its radial and
-             tangential components independently. Preserve the current radial phase and spend
-             only the remaining q-scaled speed budget on the requested circular tangent. */
-          const edgeLimit = GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed;
-          const boundSpeedLimit = physicalEscapeLimit;
-          const totalBudget = Math.min(edgeLimit, boundSpeedLimit);
-          const tangentBudget = Math.sqrt(Math.max(0,
-            totalBudget * totalBudget - radialSpeed * radialSpeed));
-          const desiredTangent = Math.min(baseSpeed * orbitalSpeed, tangentBudget) * sign;
-          const delta = desiredTangent - currentTangent;
-          /* A parent-edge clock adjustment is a frame translation for the complete child
-             subtree. This preserves every deeper moon-relative velocity and makes the result
-             independent of scene serialization order. */
-          descendantsOf(node).forEach(descendant => {
-            if (descendant.id === opts.fixedNodeId) return;
-            descendant.vx = (Number.isFinite(descendant.vx) ? descendant.vx : 0)
-              + tangentX * delta;
-            descendant.vy = (Number.isFinite(descendant.vy) ? descendant.vy : 0)
-              + tangentY * delta;
-          });
-          stats.localSatellites++;
-          tuneChildren(node);
-        });
-        visiting.delete(parent);
-      };
-      tuneChildren(localAnchor);
-      /* Malformed/disconnected compatibility branches still receive a deterministic pass; the
-         recursion guard prevents a parent cycle from making the controller non-terminating. */
-      members.forEach(node => {
-        if (node !== localAnchor && !visited.has(node)) tuneChildren(node);
+        if (node === localAnchor || node.id === opts.fixedNodeId) return;
+        const parent = galaxyLocalOrbitParent(node, members, localAnchor, byId)
+          || localAnchor;
+        const dx = node.x - parent.x, dy = node.y - parent.y;
+        const radius = Math.hypot(dx, dy);
+        if (!(radius > 1e-9)) return;
+        const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+        const localGravity = galaxySystemGravityConstant(parent, opts.gravity)
+          * localGravityMultiplier;
+        const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, opts.gravity)
+          * Math.max(0.25, localGravityMultiplier);
+        const anchorMass = finitePositive(parent.gravity_mass, 1, 1000);
+        const denominator = Math.pow(radius * radius
+          + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
+        const rawAcceleration = denominator > 0
+          ? localGravity * anchorMass * radius / denominator : 0;
+        const acceleration = Math.min(localAccelerationCap, rawAcceleration);
+        const baseSpeed = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+          Math.sqrt(Math.max(0, acceleration * radius)));
+        const unitX = dx / radius, unitY = dy / radius;
+        const tangentX = -unitY, tangentY = unitX;
+        const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
+          - (Number.isFinite(parent.vx) ? parent.vx : 0);
+        const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
+          - (Number.isFinite(parent.vy) ? parent.vy : 0);
+        const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+        const sign = Math.sign(currentTangent)
+          || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
+        const delta = baseSpeed * orbitalSpeed * sign - currentTangent;
+        node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
+        node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
+        stats.localSatellites++;
       });
     });
     return stats;
@@ -5677,7 +5420,7 @@
       fixedNode.vx = 0;
       fixedNode.vy = 0;
     };
-    const timestep = galaxyFiniteTimestep(opts.timestep, 1);
+    const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const velocityDecay = Math.max(0, Math.min(0.99,
       Number.isFinite(Number(opts.velocityDecay)) ? Number(opts.velocityDecay) : 0.002));
     const speedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
@@ -6066,21 +5809,29 @@
       finalSystemVelocity.maximumRelativeSpeed);
     systemVelocity.minimumScale = Math.min(systemVelocity.minimumScale,
       finalSystemVelocity.minimumScale);
-    /* A descendant's world velocity is the sum of its galactic carrier and every legitimate
-       immediate-parent tangent. It may therefore exceed one edge's emergency ceiling without
-       any physical layer being unsafe. The hierarchical guard above already bounds the only
-       meaningful quantities: each top-level frame and each parent-relative edge. A later
-       scene-wide scale would flatten valid planet/moon clocks back into one inertial frame. */
+    bodies.forEach(node => {
+      maximumSpeed = Math.max(maximumSpeed, Math.hypot(node.vx, node.vy));
+    });
+    /* A single scale preserves total momentum and differential directions. Per-node clipping
+       looks safer, but quietly makes a heavy star push a light one without receiving the
+       matching reaction. */
+    const uncappedMaximumSpeed = maximumSpeed;
+    /* Leave a machine-epsilon margin so the common multiplication cannot round a capped
+       vector back above the caller's strict limit (for example 24.000000000000004). */
+    const strictSpeedLimit = speedLimit * (1 - 4 * Number.EPSILON);
+    const speedScale = uncappedMaximumSpeed > speedLimit
+      ? strictSpeedLimit / uncappedMaximumSpeed : 1;
     maximumSpeed = 0;
     let kinetic = 0;
     bodies.forEach(node => {
+      node.vx *= speedScale;
+      node.vy *= speedScale;
       maximumSpeed = Math.max(maximumSpeed, Math.hypot(node.vx, node.vy));
       const mass = finitePositive(node.gravity_mass, 1, 1000);
       kinetic += 0.5 * mass * (node.vx * node.vx + node.vy * node.vy);
     });
-    const uncappedMaximumSpeed = maximumSpeed;
     /* Ghosts are rendered history, not evidence mass. Advance their exact test-particle
-      phase only after live constraints complete, so they cannot
+       phase only after live constraints and the common speed scale complete, so they cannot
        trigger a contact/reheat or alter any live system's momentum. */
     const blackHoleSpinAngle = advanceGalaxyBlackHoleSpin(nodes, opts);
     const ghostOrbit = integrateGalaxyGhostOrbits(nodes, opts);
@@ -6114,7 +5865,7 @@
       ghostOrbit,
       maximumSpeed,
       uncappedMaximumSpeed,
-      speedCapped: systemVelocity.limitedSystems > 0,
+      speedCapped: speedScale < 1,
       convergence,
       relationConstraint,
       orbitalSeparation,
@@ -7166,9 +6917,10 @@
     }
 
     function galaxySoftening() {
-      /* Galactic time is not geometry. Keep the physical softening radius fixed at the
-         calibrated neutral layout while the time-scale slider changes only elapsed time. */
-      return Math.max(3, GALAXY_ORBITAL_SEPARATION_BASE_SETTING * 0.16);
+      const raw = Number(state.settings.repel);
+      const separation = Number.isFinite(raw) ? Math.max(0, Math.min(120, raw))
+        : PRESETS.galaxy.repel;
+      return Math.max(3, separation * 0.16);
     }
 
     /* Interactive evidence systems often contain several large stars at close range. Treating
@@ -8129,17 +7881,15 @@
 
     function galaxyIntegratorOptions() {
       const orbitScale = galaxyRelationOrbitScale(state.settings.link);
-      const orbitalSpeed = galaxyOrbitalSpeedMultiplier(
-        GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
-      /* The repurposed control owns only the astronomical display clock. Physical velocities,
-         gravity, contact cushions, and radii remain on the neutral force-balanced law. */
+      const orbitalSpeed = galaxyOrbitalSpeedMultiplier(state.settings.repel);
+      /* The repurposed control owns angular velocity; keep the physical contact cushion neutral. */
       const orbitalSeparationPadding = galaxyOrbitalSeparationPadding(
         GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
       const orbitalSeparationStrength = galaxyOrbitalSeparationStrength(
         GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
-      const integratorOptions = {
+      return {
         fixedNodeId: activeDragNode ? activeDragNode.id : null,
-        orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING,
+        orbitalSpeed: state.settings.repel,
         layoutSeed: raw.meta && raw.meta.layout_seed !== undefined ? raw.meta.layout_seed : 0,
         dragSource: activeDragNode,
         dragFollowers,
@@ -8251,7 +8001,7 @@
         farFieldSoftFraction: GALAXY_FAR_FIELD_SOFT_FRACTION,
         farFieldAcceleration: GALAXY_FAR_FIELD_ACCELERATION,
         farFieldMaxAcceleration: GALAXY_FAR_FIELD_MAX_ACCELERATION,
-        localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed,
+        localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
         timestep: GALAXY_FIXED_TIMESTEP,
         /* The render loop consumes one fixed 30 Hz physical slice per substep. Passing that
            wall-clock slice explicitly keeps convergence identical after a throttled render
@@ -8277,7 +8027,7 @@
         /* The legacy limit is derived from link distance (14.4 at Galaxy defaults) and can
            clamp an otherwise valid inner orbit. Common-scaling every body then strips angular
            momentum from the entire disk. The physical solver uses only the true emergency cap. */
-        speedLimit: MAX_NODE_SPEED * orbitalSpeed,
+        speedLimit: MAX_NODE_SPEED,
         /* The smooth local potential prevents singular packing. Even an energy-dissipating
            projection can repeatedly remap phase space in a densely overlapping real scene, so
            collision remains an optional helper rather than part of the persistent clock. */
@@ -8286,31 +8036,12 @@
         collisionStrength: 0.7,
         collisionIterations: 1,
       };
-      const data = fg.graphData() || {};
-      const astronomicalClock = galaxyAstronomicalClock(data.nodes || [], {
-        ...integratorOptions,
-        displayClockSetting: state.settings.repel,
-        wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
-      });
-      integratorOptions.timestep = astronomicalClock.timestep;
-      integratorOptions.astronomicalClock = astronomicalClock;
-      return integratorOptions;
     }
 
     function physicsDiagnostics() {
       const data = fg.graphData() || {};
       const orbitalSpeed = galaxyOrbitalSpeedMultiplier(state.settings.repel);
       const diagnosticAnchor = galaxyGlobalAnchor(data.nodes || []);
-      const astronomicalClock = galaxyAstronomicalClock(data.nodes || [], {
-        gravity: state.settings.gravity,
-        gravitationalConstant: galaxyPhysicsMultiplier(
-          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        blackHoleMass: galaxyPhysicsMultiplier(
-          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
-        softening: Math.max(36, galaxySoftening() * 5),
-        displayClockSetting: state.settings.repel,
-        wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
-      });
       return Object.assign(galaxyMotionDiagnostics(data.nodes || []), {
         mode: state.settings.mode,
         running,
@@ -8396,12 +8127,7 @@
           GALAXY_RELATION_CONSTRAINT_MAX_CORRECTION,
         orbitalSpeedSetting: state.settings.repel,
         orbitalSpeedMultiplier: orbitalSpeed,
-        orbitalRadiusMultiplier: galaxyOrbitalRadiusMultiplier(
-          GALAXY_ORBITAL_SEPARATION_BASE_SETTING),
-        astronomicalClock,
-        simulatedYearsPerWallSecond: astronomicalClock.simulatedYearsPerWallSecond,
-        referencePhysicalPeriodYears: astronomicalClock.referencePhysicalPeriodYears,
-        referenceDisplayPeriodSeconds: astronomicalClock.referenceDisplayPeriodSeconds,
+        orbitalRadiusMultiplier: galaxyOrbitalRadiusMultiplier(state.settings.repel),
         /* Compatibility diagnostics retain the old names for saved-view tooling. */
         orbitalSeparationSetting: state.settings.repel,
         orbitalSeparationPadding: galaxyOrbitalSeparationPadding(
@@ -8427,7 +8153,7 @@
         active: galaxyDynamicsEligible(),
         scheduled: galaxyFrame !== 0,
         frameIntervalMs: GALAXY_FRAME_INTERVAL_MS,
-        timestep: astronomicalClock.timestep,
+        timestep: GALAXY_FIXED_TIMESTEP,
         maxSubsteps: GALAXY_MAX_SUBSTEPS,
         reheatActivations: galaxyReheatActivations,
         reheatStepsRemaining: galaxyReheatStepsRemaining,
@@ -8449,7 +8175,6 @@
         lastOrbitalCorrectionDistance: galaxyLastOrbitalCorrection,
         lastLocalVelocityLimits: galaxyLastLocalVelocityLimits,
         localRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-        effectiveLocalRelativeSpeedLimit: GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
         systemOrbitSeedSpeedLimit: GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT,
         speedCapActivations: galaxySpeedCaps,
       });
@@ -8776,7 +8501,7 @@
               { fixedNodeId: activeDragNode ? activeDragNode.id : null,
                 restorePhase: galaxyPhaseRestorePending,
                 coreOnly: true,
-                 orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING,
+                 orbitalSpeed: state.settings.repel,
                  gravitationalConstant: state.settings.gravitationalConstant,
                  localGravitationalConstant: state.settings.localGravitationalConstant,
                  authoritativeCarrierPosition: true }
@@ -8813,7 +8538,7 @@
             state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
             { fixedNodeId: activeDragNode ? activeDragNode.id : null,
               restorePhase: galaxyPhaseRestorePending,
-              orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING,
+              orbitalSpeed: state.settings.repel,
               gravitationalConstant: state.settings.gravitationalConstant,
               localGravitationalConstant: state.settings.localGravitationalConstant,
               authoritativeCarrierPosition: true }
@@ -8823,7 +8548,7 @@
             state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
             { gravitationalConstant: state.settings.gravitationalConstant,
               blackHoleMass: state.settings.blackHoleMass,
-              orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING }
+              orbitalSpeed: state.settings.repel }
           );
         } else clearPinnedPositions(data);
         /* graphData() may paint synchronously. Enforce the event horizon after every layout
@@ -8891,7 +8616,7 @@
           state.settings.gravity, galaxyLiveSoftening(), reducedMotion,
           { fixedNodeId: activeDragNode ? activeDragNode.id : null,
             restorePhase: galaxyPhaseRestorePending,
-            orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING,
+            orbitalSpeed: state.settings.repel,
             gravitationalConstant: state.settings.gravitationalConstant,
             localGravitationalConstant: state.settings.localGravitationalConstant,
             authoritativeCarrierPosition: true }
@@ -8901,7 +8626,7 @@
           state.settings.gravity, Math.max(36, galaxySoftening() * 5), reducedMotion,
           { gravitationalConstant: state.settings.gravitationalConstant,
             blackHoleMass: state.settings.blackHoleMass,
-            orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING }
+            orbitalSpeed: state.settings.repel }
         );
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
@@ -9106,7 +8831,6 @@
         const insertion = galaxySlingshotCapture(node, data.nodes || [],
           dragReleaseVelocity, {
             gravity: state.settings.gravity,
-            orbitalSpeed: GALAXY_ORBITAL_SEPARATION_BASE_SETTING,
             localGravitationalConstant: state.settings.localGravitationalConstant,
             softening: galaxyLiveSoftening(),
             layoutSeed: raw.meta && raw.meta.layout_seed,
@@ -9313,10 +9037,8 @@
           const rawVx = (node.x - previousSample.x) / elapsed / GALAXY_SLINGSHOT_VELOCITY_SCALE;
           const rawVy = (node.y - previousSample.y) / elapsed / GALAXY_SLINGSHOT_VELOCITY_SCALE;
           const speed = Math.hypot(rawVx, rawVy);
-          const releaseSpeedLimit = GALAXY_SLINGSHOT_SPEED_LIMIT
-            * galaxyOrbitalSpeedMultiplier(GALAXY_ORBITAL_SEPARATION_BASE_SETTING);
-          const scale = speed > releaseSpeedLimit
-            ? releaseSpeedLimit / speed : 1;
+          const scale = speed > GALAXY_SLINGSHOT_SPEED_LIMIT
+            ? GALAXY_SLINGSHOT_SPEED_LIMIT / speed : 1;
           /* Low-pass two samples so a noisy final pointer event cannot create a release-only
              spike. The cap remains below the solver's emergency speed limit. */
           const sampled = { vx: rawVx * scale, vy: rawVy * scale };
@@ -9597,7 +9319,8 @@
          next fixed slice; they do not authorize a one-shot velocity rewrite in the same task.
          Preserve the exact current phase while the scheduled clock absorbs the new setting. */
       if (previousMode === 'galaxy' && state.settings.mode === 'galaxy'
-        && (next.repel !== undefined || next.gravity !== undefined || next.size !== undefined
+        && next.repel === undefined
+        && (next.gravity !== undefined || next.size !== undefined
           || next.gravitationalConstant !== undefined || next.G_center !== undefined
           || next.localGravitationalConstant !== undefined || next.G_star !== undefined
           || next.blackHoleMass !== undefined || next.damping !== undefined
@@ -10089,10 +9812,6 @@
       defaultGalaxyStellarAccelerationCap, defaultGalaxySystemAccelerationCap,
       galaxySceneWithinLiveLimit,
       galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier, galaxyOrbitalRadiusMultiplier,
-      galaxyAstronomicalClock,
-      galaxyReferenceRadiusKpc: GALAXY_REFERENCE_RADIUS_KPC,
-      galaxyReferenceCircularSpeedKmS: GALAXY_REFERENCE_CIRCULAR_SPEED_KM_S,
-      galaxySimulatedMyrPerWallSecond: GALAXY_SIMULATED_MYR_PER_WALL_SECOND,
       applyGalaxyOrbitalSpeedControl,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, galaxyOrbitGroups, ensureGalaxyPositions,
