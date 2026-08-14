@@ -68,7 +68,12 @@ from engraphis.core.resolve import (
     resolve,
 )
 from engraphis.core.secrets import reject_secrets
-from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.store import (
+    Store,
+    _is_memory_database_path,
+    memory_matches_filter,
+    now_ts,
+)
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 
@@ -918,10 +923,7 @@ class MemoryEngine:
         # pending evidence is stored passively and cannot reinforce or supersede it.
         trusted_write = prompt_eligible(provenance, write_metadata)
         text = f"{title}\n{content}" if title else content
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if not poisoning.quarantined and persistent_store:
             if not self.embedding_space:
                 raise RuntimeError(
@@ -2383,10 +2385,7 @@ class MemoryEngine:
         directly from ``Store.iter_vectors(..., include_invalid=True)`` instead.
         """
         semantic_ready = bool(getattr(self.embedder, "supports_semantic_search", False))
-        persistent_store = (
-            self.store.path != ":memory:"
-            and not self.store.path.startswith("file::memory:")
-        )
+        persistent_store = not _is_memory_database_path(self.store.path)
         if semantic_ready and persistent_store:
             # History helpers bypass RecallEngine's readiness gate and read the
             # portable vector mirror directly; never compare a query against a
@@ -2532,18 +2531,65 @@ class MemoryEngine:
         but do not leave the local SQLite copy intact if that backend is unavailable; the
         returned status explicitly reports that incomplete external cleanup.
         """
-        index_cleanup = "not_configured"
-        try:
-            self.index.delete([memory_id])
-            index_cleanup = "deleted"
-        except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
-            index_cleanup = "failed"
-        result = self.store.secure_erase_memory(memory_id, actor=actor)
+        with self._write_lock:
+            target_ids = self.store.secure_erase_target_ids(memory_id)
+            index_cleanup = "not_configured"
+
+            def delete_vectors(ids: list[str], *, in_store_transaction: bool = False) -> None:
+                if not ids:
+                    return
+                if in_store_transaction and vector_index_shares_store_transaction(
+                    self.index, self.store,
+                ):
+                    self.index.delete(ids, commit=False)
+                else:
+                    self.index.delete(ids)
+
+            try:
+                delete_vectors(target_ids)
+                index_cleanup = "deleted"
+            except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
+                index_cleanup = "failed"
+
+            # Serialize the final successor scan with the authoritative erase. Any
+            # successor that commits before BEGIN IMMEDIATE is acquired is included;
+            # a successor cannot commit between this scan and secure_erase_memory's
+            # destructive transaction. The external delete is intentionally performed
+            # while the Store transaction is held, so its final target set cannot go
+            # stale before the local rows are removed.
+            transaction_started = False
+            try:
+                if not self.store.conn.transaction_owned_by_current_thread():
+                    self.store.conn.execute("BEGIN IMMEDIATE")
+                    transaction_started = True
+                refreshed = self.store.secure_erase_target_ids(memory_id)
+                new_ids = set(refreshed) - set(target_ids)
+                cleanup_ids = list(new_ids) if index_cleanup == "deleted" else []
+                if cleanup_ids:
+                    try:
+                        delete_vectors(cleanup_ids, in_store_transaction=True)
+                    except Exception:  # noqa: BLE001
+                        index_cleanup = "partial"
+                target_ids = refreshed
+                result = self.store.secure_erase_memory(
+                    memory_id, actor=actor, _target_ids=target_ids,
+                    _defer_maintenance=transaction_started,
+                )
+                if transaction_started and self.store.conn.transaction_owned_by_current_thread():
+                    self.store.conn.commit()
+                    # Physical maintenance must run after the engine-owned transaction
+                    # commits; VACUUM is invalid while the erase transaction is active.
+                    result["maintenance"] = self.store.run_secure_erase_maintenance()
+            except BaseException:
+                if transaction_started and self.store.conn.transaction_owned_by_current_thread():
+                    self.store.conn.rollback()
+                raise
         result["vector_index_cleanup"] = index_cleanup
-        if index_cleanup == "failed":
+        if index_cleanup in {"failed", "partial"}:
             result["external_index_limitation"] = (
-                "The configured vector index did not confirm deletion; remediate that backend "
-                "separately before treating the secret as fully erased."
+                "The configured vector index did not confirm deletion of every "
+                "successor; remediate that backend separately before treating the "
+                "secret as fully erased."
             )
         return result
 

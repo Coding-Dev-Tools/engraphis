@@ -115,7 +115,7 @@ returned executor; the routine session, recall-context, and remember tools remai
 | Share the repo graph | `engraphis_export_code_graph` | Portable JSON + Markdown + self-contained HTML. |
 | Import a live DB schema | `engraphis_ingest_postgres_schema` | PostgreSQL tables/columns/constraints → memory + graph; DSN not stored. |
 | Privacy-safe audit | `engraphis_receipts` / `engraphis_verify_receipts` | Content-free hash chain; export with `engraphis_export_receipts`. |
-| Verify context savings | `engraphis_context_savings` | Aggregate scoped usage receipts without returning prompts or memory content. |
+| Verify context savings | `engraphis_context_savings` | Aggregate all visible usage receipts by default, or one workspace, without returning prompts or memory content. |
 | Store health | `engraphis_stats` | Counts by type/workspace; good for onboarding checks. |
 
 Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/TOOLS.md).

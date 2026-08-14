@@ -1,6 +1,7 @@
 """Unified local dashboard tests for the public open-core boundary."""
 import ast
 import io
+import re
 import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -14,11 +15,12 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
-from engraphis import cloud_features  # noqa: E402
+from engraphis import __version__, cloud_features  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.core.interfaces import MemoryType, Scope  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
+from engraphis.core.schema import SCHEMA_VERSION  # noqa: E402
 from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
 
@@ -77,26 +79,37 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'href="/"' in classic.text
         assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
         assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
+        assert 'id="graph-show-iso" data-onchange="h49" checked' in classic.text
         assert client.get("/v2-assets/ledger.css").status_code == 200
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/d3.min.js?v=20260727-final'" in ledger_js.text
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260809-physics-guard'" in ledger_js.text
-        assert "/v2-assets/ledger.css?v=20260809-physics-guard" in page.text
-        assert "/v2-assets/ledger.js?v=20260809-physics-guard" in page.text
+        assert re.search(
+            r"'/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+'", ledger_js.text
+        )
+        assert re.search(r"/v2-assets/ledger\.css\?v=[A-Za-z0-9._-]+", page.text)
+        assert re.search(r"/v2-assets/ledger\.js\?v=[A-Za-z0-9._-]+", page.text)
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js?v=20260809-csp" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260809-physics-guard" in classic_js.text
-        assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
-        assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
+        assert re.search(
+            r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
+        )
+        assert "presentation=all" in classic_js.text
+        assert "limit=1000&node_limit=1000&edge_limit=2000" in classic_js.text
+        assert "renderMode:fullGraph?'all':'overview'" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
+        assert bootstrap.json()["version"] == __version__
         assert bootstrap.json()["stats"]["memories"] >= 1
         savings = client.get("/api/context-savings", params={"workspace": "demo"})
         assert savings.status_code == 200
         assert savings.json()["format"] == "engraphis-context-savings/1"
+        global_savings = client.get("/api/context-savings")
+        assert global_savings.status_code == 200
+        assert global_savings.json()["scope"] == {"workspace": "all"}
+        assert global_savings.json()["workspace_count"] == 2
         filtered = client.get(
             "/api/context-savings",
             params={"workspace": "demo", "from_ts": 0, "to_ts": 9_999_999_999,
@@ -105,7 +118,88 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert filtered.status_code == 200
         assert filtered.json()["period"] == {"from_ts": 0, "to_ts": 9_999_999_999}
         assert "Estimated context saved" in page.text
-        assert 'class="content-section savings-overview-section" id="context-savings-summary"' in page.text
+        assert 'class="persistent-savings-summary manage-savings-summary" id="context-savings-persistent"' in page.text
+        assert 'class="content-section savings-overview-section" id="context-savings-summary"' not in page.text
+
+
+def test_legacy_workspace_binding_does_not_hide_dashboard_workspaces(monkeypatch, tmp_path):
+    """A legacy allow-list setting no longer changes dashboard bootstrap behavior."""
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "bound-empty.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "vector_backend", "numpy")
+    monkeypatch.setattr(settings, "allowed_workspaces", ["workspace-that-is-gone"])
+    monkeypatch.setattr(settings, "api_token", "")
+    from engraphis.dashboard_app import create_app
+
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+        response = client.get("/api/bootstrap")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspaces"] == []
+    assert payload["stats"]["workspace"] is None
+    assert payload["stats"]["memories"] == 0
+    assert payload["stats"]["total_rows"] == 0
+    assert payload["stats"]["workspaces"] == 0
+    assert payload["stats"]["sessions"] == 0
+    assert payload["stats"]["schema_version"] == SCHEMA_VERSION
+
+
+def test_dashboard_create_workspace_succeeds_when_unbound(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/api/workspaces/create",
+            json={
+                "workspace": "fresh-workspace",
+                "description": "Created from the dashboard",
+                "visibility": "personal",
+                "confirmed": False,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["workspace"] == "fresh-workspace"
+    assert response.json()["created"] is True
+
+
+def test_dashboard_ignores_legacy_workspace_binding_setting(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "legacy-binding.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "allowed_workspaces", ["default"])
+    monkeypatch.setattr(settings, "api_token", "")
+    from engraphis.dashboard_app import create_app
+
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+        assert client.app.state.service.allowed_workspaces is None
+        response = client.post(
+            "/api/workspaces/create",
+            json={"workspace": "created-after-legacy-binding", "description": ""},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["workspace"] == "created-after-legacy-binding"
+
+
+def test_dashboard_create_workspace_reports_binding_without_leaking_names(
+    monkeypatch, tmp_path
+):
+    with _client(monkeypatch, tmp_path) as client:
+        bound = client.app.state.service
+        bound.allowed_workspaces = frozenset({"demo"})
+        bound.store.allowed_workspaces = bound.allowed_workspaces
+        response = client.post(
+            "/api/workspaces/create",
+            json={"workspace": "new-tenant", "description": ""},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": {
+        "error": "workspace is not permitted by this instance's configuration",
+        "code": "workspace_not_permitted",
+    }}
+    assert "new-tenant" not in response.text
 
 
 def test_dashboard_memory_reads_use_the_active_store_for_memory_databases(monkeypatch):
@@ -747,21 +841,49 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         script = client.get("/v2-assets/ledger.js")
         assert 'id="graph-retry"' in page.text
         assert 'id="graph-full"' not in page.text
-        assert '>Show all nodes<' not in page.text
+        assert 'id="graph-show-all"' in page.text
         assert 'id="graph-show-unlinked"' in page.text
+        assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
         assert 'id="graph-tune-unlinked"' not in page.text
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
-        assert "const GRAPH_INITIAL_NODE_LIMIT = 320;" in script.text
-        assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
+        assert "const GRAPH_INITIAL_NODE_LIMIT = 1000;" in script.text
+        assert "const GRAPH_INITIAL_EDGE_LIMIT = 2000;" in script.text
+        assert "const GRAPH_ALL_NODE_LIMIT = 20_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
-        assert "&full=true" in script.text
+        assert "graphLoadRepo: ''" in script.text
+        assert "function graphLoadKey(" in script.text
+        assert "function isCurrentGraphLoad(request)" in script.text
+        assert "request.repo === (byId('graph-repo-filter').value || '').trim()" in script.text
+        assert "Filter by exact repository name…" in script.text
+        assert "candidate && !validatedGraphRepository(candidate)" in script.text
+        assert "function retryGraphLoad()" in script.text
+        assert "function releaseGraphAssetsAttempt(attempt)" in script.text
+        assert "function ensureGraphAllAsset()" in script.text
+        assert "function releaseGraphAllAssetsAttempt(attempt)" in script.text
+        assert "const assets = ensureGraphAssets(fullGraph);" in script.text
+        assert "if (!force && state.graphLoadPromise && state.graphLoadKey === key)" in script.text
+        assert "previousController.abort()" in script.text
+        assert "Promise.race([" in script.text
+        assert "timeoutPromise" in script.text
+        assert "/graph/scene?" in script.text
+        assert "&level=${level}" in script.text
+        assert "&include_memory_nodes=false" in script.text
+        assert "&presentation=all" in script.text
+        assert "renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview'" in script.text
+        assert "&include_history=true" in script.text
         assert "&connected_only=true" in script.text
+        assert "const repo = (byId('graph-repo-filter').value || '').trim();" in script.text
+        assert "repo ? `&repo=${encodeURIComponent(repo)}`" in script.text
+        assert "item.degree != null ? item.degree : item.weighted_degree" in script.text
         assert "style: 'cyber'" in script.text
-        assert "renderMode: targetMode" in script.text
+        assert "renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview'" in script.text
         assert "loadGraph({ force: true })" in script.text
+        assert "if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime" in script.text
+        assert "setAttribute('aria-busy', 'true')" in script.text
+        assert "setAttribute('aria-busy', 'false')" in script.text
 
 
 def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp_path):
@@ -773,6 +895,7 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             'data-graph-saved-view="schema"', 'data-graph-saved-view="people"',
             'data-graph-saved-view="code"', 'id="graph-save-view"',
             'id="graph-repel"', 'id="graph-depth"', 'id="graph-reset-tuning"',
+            'id="graph-gravity" type="range" min="0" max="400"',
             'data-graph-layer="code"',
         ):
             assert control in page.text
@@ -783,6 +906,49 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             "setSettings({ flowSpeed: speed })",
         ):
             assert behavior in script.text
+
+
+def test_code_overlay_scopes_only_to_known_repositories(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "function graphRepositoryNames()" in script.text
+        assert "function validatedGraphRepository(value)" in script.text
+        assert "workspace && Array.isArray(workspace.repos)" in script.text
+        assert "repositories: Array.isArray(scene.repos)" in script.text
+        assert "const validatedRepo = targetIncludeCode || fullGraph" in script.text
+        assert "const scopedRepo = validatedRepo" in script.text
+        assert "targetIncludeCode && targetRepo" not in script.text
+
+
+def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "graphScopeBeforeAll: null" not in script.text
+        assert "showUnlinked: state.graphShowUnlinked" in script.text
+        assert "includeCode: state.graphIncludeCode" in script.text
+        assert "minDegree: number(byId('graph-min-degree').value)" in script.text
+        assert "if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();" in script.text
+        assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in script.text
+        assert "scopeControl.disabled = full" not in script.text
+        assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text
+        assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in script.text
+        assert "function scheduleGraphRepositoryReload()" in script.text
+        assert "}, 250);" in script.text
+        assert "const indentation = state.graphMode === 'full' ? undefined : 2;" in script.text
+        assert "error.code === 'GRAPH_CAPACITY'" in script.text
+        assert "state.graphLoadRequest !== request.id" in script.text
+
+
+def test_graph_palette_notice_auto_dismisses_after_three_seconds(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "const NOTICE_DURATION_MS = 3000;" in script.text
+        assert "clearTimeout(noticeTimer);" in script.text
+        assert "noticeTimer = setTimeout(" in script.text
+        assert "banner.hidden = true;" in script.text
 
 
 def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
@@ -817,7 +983,7 @@ def test_graph_facts_and_search_use_the_atomic_node_reveal(monkeypatch, tmp_path
         assert "function revealGraphNode(id, label = 'Selected entity')" in ledger.text
         assert "revealGraphNode(item.id, item.name)" in ledger.text
         assert "function openGraphConnections(item)" in ledger.text
-        assert "function showGraphConnectionMemories(item)" in ledger.text
+        assert "function showGraphConnectionMemories(item, includeHistory = false)" in ledger.text
         assert "onNodeClick: item => openGraphConnections(item)" in ledger.text
         assert "api.reveal = id =>" in engine.text
         assert "function centerRenderedNode(id)" in engine.text
@@ -914,7 +1080,10 @@ def test_team_account_routes_are_not_in_public_runtime(monkeypatch, tmp_path):
         assert client.get("/api/auth/users").status_code == 404
         state = client.get("/api/auth/state").json()
         assert state["enabled"] is False
-        assert state["hosted_team"] is True
+        assert state["deployment_mode"] == "local"
+        assert state["hosted_team"] is False
+        assert state["cloud_url"] == ""
+        assert state["local_invitations"] is True
 
 
 def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path):

@@ -12,6 +12,7 @@ jobs:
   test:
     name: test + lint (full offline stack)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +52,7 @@ jobs:
   typecheck:
     name: core + backends typecheck (Python 3.11)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -68,6 +70,7 @@ jobs:
   encryption:
     name: encryption driver gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +97,7 @@ jobs:
   core-py39:
     name: core floor (numpy-only, Python 3.9)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -161,6 +165,7 @@ jobs:
   coverage:
     name: coverage gate (Python 3.11)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -178,6 +183,7 @@ jobs:
   hygiene:
     name: repo hygiene gate (no stray DBs/logs)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Reject stray runtime artifacts at repo root
@@ -192,6 +198,7 @@ jobs:
   pi-extension:
     name: Pi extension (${{ matrix.os }}, Python ${{ matrix.python-version }}, Node ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -229,6 +236,7 @@ jobs:
   browser-accessibility:
     name: browser accessibility smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -254,6 +262,7 @@ jobs:
     # pyproject.toml, or this workflow). No third-party actions — plain git diff.
     name: docker smoke — path gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
@@ -274,6 +283,7 @@ jobs:
   docker-smoke:
     name: docker build + health smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: docker-gate
     if: needs.docker-gate.outputs.run == 'true'
     steps:
@@ -344,6 +354,7 @@ jobs:
   build:
     name: build + install wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

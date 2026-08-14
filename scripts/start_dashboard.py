@@ -44,6 +44,22 @@ def _embed_model_from_environment() -> str:
     return _DEFAULT_EMBED_MODEL if configured is None else configured.strip()
 
 
+def _apply_runtime_settings(config_module, *, host: str, port: int) -> None:
+    """Keep the imported Settings snapshot aligned with launcher overrides.
+
+    ``dashboard_app`` imports the shared Settings instance, so update that object in
+    place after argparse resolves ``--host``/``--port``. Replacing the module global
+    would leave already-imported modules holding the stale snapshot, while leaving it
+    untouched makes CORS continue to allow the pre-override loopback port.
+    """
+    runtime_settings = config_module.settings
+    runtime_settings.host = host
+    runtime_settings.port = port
+    runtime_settings.cors_origins = config_module._parse_origins(
+        os.environ.get("ENGRAPHIS_CORS_ORIGINS", ""), port
+    )
+
+
 def _run_shortcut_install(silent: bool = False, icon: str = "") -> None:
     cmd = [sys.executable, "-m", "scripts.install_shortcuts"]
     if silent:
@@ -96,9 +112,16 @@ def _port_is_available(host: str, port: int) -> bool:
 
 
 def _is_engraphis_dashboard(url: str) -> bool:
-    """Check the loopback dashboard health route without trusting arbitrary content."""
+    """Check that an existing dashboard is actually ready to serve Ledger.
+
+    ``/api/health`` is intentionally a liveness probe and can remain ``200`` while a
+    service worker or the shared Store connection is wedged.  Reusing a process on that
+    signal made the launcher preserve a broken dashboard indefinitely.  Readiness is the
+    correct occupied-port identity check: it proves the DB and embedder checks completed
+    before we tell the caller that an existing dashboard is usable.
+    """
     request = urllib.request.Request(
-        url.rstrip("/") + "/api/health", headers={"Accept": "application/json"},
+        url.rstrip("/") + "/api/ready", headers={"Accept": "application/json"},
     )
     try:
         opener = urllib.request.build_opener(_NoRedirectHandler())
@@ -110,7 +133,12 @@ def _is_engraphis_dashboard(url: str) -> bool:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         return False
-    return isinstance(payload, dict) and payload.get("status") in {"ok", "healthy"}
+    return (
+        isinstance(payload, dict)
+        and payload.get("ready") is True
+        and isinstance(payload.get("checks"), dict)
+        and all(payload["checks"].get(key) is True for key in ("db", "embedder"))
+    )
 
 
 def _reuse_or_report_occupied_port(
@@ -125,10 +153,40 @@ def _reuse_or_report_occupied_port(
             except Exception:
                 pass
         return True
+    try:
+        probe = urllib.request.Request(url.rstrip("/") + "/api/health")
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        response = opener.open(probe, timeout=0.5)
+        # Only treat as Engraphis if /api/health returns a valid JSON with expected keys.
+        # A 200 from an unrelated web server (nginx, Apache) is not an Engraphis dashboard.
+        try:
+            data = json.loads(response.read(4096))
+            is_web = isinstance(data, dict) and ("ok" in data or "status" in data)
+        except Exception:
+            is_web = False
+    except urllib.error.HTTPError as exc:
+        # An Engraphis dashboard with auth enabled may return 401/403 on /api/health.
+        # Non-Engraphis servers also return HTTP errors — distinguish by checking the
+        # response body for Engraphis-specific markers.
+        try:
+            body = exc.read(4096).decode("utf-8", errors="replace")
+            is_web = "engraphis" in body.lower() or "detail" in body
+        except Exception:
+            is_web = False
+    except Exception:
+        is_web = False
+    if is_web:
+        parser.exit(
+            1,
+            "Error: Cannot start Engraphis WebUI because %s is already in use. "
+            "The existing Engraphis dashboard is not ready; restart that process "
+            "or choose another port with --port.\n" % url,
+        )
     parser.exit(
         1,
-        "Error: Cannot start Engraphis WebUI because %s is already in use. "
-        "Close the process using that address or choose another port with --port.\n" % url,
+        "Error: Cannot start Engraphis WebUI because the port is occupied by a "
+        "non-Engraphis service. Stop the other service or choose another port "
+        "with --port.\n",
     )
 
 
@@ -137,6 +195,15 @@ def _startup_error(exc: BaseException, db: str) -> str:
         return ("The server extra is required: pip install \"engraphis[server]\""
                 " (needs Python 3.10+)")
     if isinstance(exc, (sqlite3.Error, OSError)):
+        if isinstance(exc, sqlite3.OperationalError) and any(
+            marker in str(exc).casefold() for marker in ("locked", "busy")
+        ):
+            return (
+                "The Engraphis database is busy while another process is using it. "
+                "Close duplicate engraphis-dashboard/engraphis-mcp processes and retry; "
+                "the migration will not change the schema until its verified backup "
+                "is complete. Database: %s" % db
+            )
         return (
             "Could not open the Engraphis database at %s. Check that the path is a "
             "writable SQLite file, then run engraphis-init --check." % db
@@ -147,6 +214,12 @@ def _startup_error(exc: BaseException, db: str) -> str:
 
 
 def main(argv=None) -> None:
+    # Load the owner-private config before argparse snapshots its defaults.  Otherwise
+    # a desktop/CLI launch can overwrite trusted embed-model, host, and port
+    # values with built-in defaults before dashboard_app is imported, which can turn an
+    # offline install or an existing workspace into an apparent startup failure.
+    from engraphis import config as _config  # noqa: F401  # loads trusted config once
+
     ap = argparse.ArgumentParser(description="Start the Engraphis WebUI.")
     ap.add_argument("--host", default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"),
                     help="Bind host (default: $ENGRAPHIS_HOST, else 127.0.0.1).")
@@ -189,6 +262,7 @@ def main(argv=None) -> None:
     os.environ["ENGRAPHIS_EMBED_MODEL"] = _embed_model_from_environment()
     os.environ["ENGRAPHIS_HOST"] = args.host
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
+    _apply_runtime_settings(_config, host=args.host, port=args.port)
 
     try:
         from engraphis import __version__ as _engraphis_version

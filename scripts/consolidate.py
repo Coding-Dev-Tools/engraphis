@@ -40,7 +40,6 @@ def _service(db_path: str) -> MemoryService:
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        allowed_workspaces=settings.allowed_workspaces,
     )
 
 

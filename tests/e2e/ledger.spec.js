@@ -47,6 +47,8 @@ async function mockApi(page, options = {}) {
   requests.syncRuns = [];
   requests.details = [];
   requests.documentImports = [];
+  requests.contextSavingsQueries = [];
+  requests.graphQueries = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
@@ -139,10 +141,12 @@ async function mockApi(page, options = {}) {
     if (path === '/proactive') return ok({ workspace, memories });
     if (path === '/audit') return ok({ workspace, audit });
     if (path === '/receipts') return ok({ workspace, receipts });
-    if (path === '/graph') {
+    if (path === '/graph/scene') {
+      requests.graphQueries.push(Object.fromEntries(requestUrl.searchParams.entries()));
       if (typeof options.deferGraphRequest === 'function') {
         await options.deferGraphRequest(requestUrl);
       }
+      if (options.graphScene) return ok(options.graphScene);
       const asOf = Number(requestUrl.searchParams.get('as_of'));
       const includeUnlinked = requestUrl.searchParams.get('connected_only') !== 'true';
       // Make the historical payload depend on the server's selected-day anchor. A client
@@ -151,12 +155,15 @@ async function mockApi(page, options = {}) {
       const validTo = Number.isFinite(asOf) ? asOf - 0.5 : 200;
       return ok({
         nodes: [
-          { id: 'postgres', label: 'Postgres', repo: 'data-stack', topic: 'storage', valid_from: validFrom },
-          { id: 'engraphis', label: 'Engraphis', repo: 'agent-memory', topic: 'memory', valid_from: validFrom },
+          { id: 'postgres', label: 'Postgres', repo_names: ['data-stack'], topic: 'storage', valid_from: validFrom, gravity_mass: 2, visual_radius: 7, community_id: 'storage', x: -20, y: 10 },
+          { id: 'engraphis', label: 'Engraphis', repo_names: ['agent-memory'], topic: 'memory', valid_from: validFrom, gravity_mass: 8, visual_radius: 13, community_id: 'memory', anchor_role: 'global', x: 20, y: -10 },
         ].concat(includeUnlinked ? [{
-          id: 'unlinked', label: 'Unlinked Note', repo: 'agent-memory', topic: 'memory', valid_from: validFrom,
+          id: 'unlinked', label: 'Unlinked Note', repo_names: ['agent-memory'], topic: 'memory', valid_from: validFrom, gravity_mass: 1, visual_radius: 5, community_id: 'memory',
         }] : []),
-        edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo }],
+        edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo, rest_length: 18, spring_strength: 0.25 }],
+        communities: [{ id: 'memory', mass: 9 }, { id: 'storage', mass: 2 }],
+        community_bridges: [{ source_community: 'memory', target_community: 'storage', physics_strength: 0.8 }],
+        meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
         layers: [
           { layer: 'temporal', count: 15 }, { layer: 'entity', count: 26 },
           { layer: 'causal', count: 22 }, { layer: 'semantic', count: 21 }, { layer: 'code', count: 0 },
@@ -179,9 +186,12 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/health') return ok({ status: 'ok' });
-    if (path === '/context-savings') return ok({
+    if (path === '/context-savings') {
+      requests.contextSavingsQueries.push(Object.fromEntries(requestUrl.searchParams.entries()));
+      return ok({
       format: 'engraphis-context-savings/1',
-      scope: { workspace },
+      scope: { workspace: 'all' },
+      workspace_count: 2,
       period: { from_ts: null, to_ts: null },
       release_version: null,
       estimated: {
@@ -201,7 +211,8 @@ async function mockApi(page, options = {}) {
         }],
         by_token_counter: [{ token_counter: 'test-counter', receipt_count: 2, saved_tokens: 2048 }],
       },
-    });
+      });
+    }
     if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
       return ok({
@@ -304,23 +315,25 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   expect(response.headers()['content-security-policy']).not.toContain("'unsafe-inline'");
   await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
-  await expect(page.locator('#context-savings-summary')).toHaveClass(/savings-overview-section/);
-  expect(await page.locator('#context-savings-summary').evaluate(element => Boolean(element.closest('.view-column')))).toBe(true);
-  await expect(page.locator('#context-savings-summary-body .savings-number')).toHaveText('2,048');
-  await expect(page.locator('#context-savings-summary-body .savings-unit')).toHaveText('tokens avoided');
-  await expect(page.locator('#context-savings-summary-body .savings-rate-value')).toHaveText('50.0%');
-  await expect(page.locator('#context-savings-summary-body .savings-progress'))
-    .toHaveAttribute('aria-label', '50.0% estimated context reduction');
+  await expect(page.locator('#context-savings-summary')).toHaveCount(0);
+  await expect(page.locator('#context-savings-persistent')).not.toBeVisible();
+  expect(requests.contextSavingsQueries).toEqual([]);
   await expect(page.locator('#decision-list').getByText('Postgres 16 is the main database.'))
     .toBeVisible();
   await expect(page.locator('#proactive-list').getByText(/<img src=x onerror=/)).toBeVisible();
   expect(await page.evaluate(() => window.__ledgerXss)).toBeUndefined();
-  expect(requests).not.toContain('/graph');
+  expect(requests).not.toContain('/graph/scene');
   expect(assetRequests).toEqual([]);
 
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await expect(page.locator('#context-savings-persistent')).toBeVisible();
+  await expect(page.locator('#context-savings-persistent-value')).toHaveText('2,048');
+  await expect(page.locator('#context-savings-persistent-rate')).toHaveText('50.0% estimated reduction');
+  expect(requests.contextSavingsQueries.every(query => !Object.hasOwn(query, 'workspace'))).toBe(true);
+
   await page.locator('.nav-item[data-view="relations"]').click();
-  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
-  expect(requests).toContain('/graph');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  expect(requests).toContain('/graph/scene');
   expect(assetRequests).toEqual([
     '/v2-assets/vendor/d3.min.js',
     '/v2-assets/vendor/force-graph.min.js',
@@ -363,7 +376,7 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   await page.getByRole('button', { name: 'Reload data' }).click();
-  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(d3Attempts).toBe(2);
 
   await page.locator('#graph-search').fill('Engraphis');
@@ -378,6 +391,258 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await connection.focus();
   await page.keyboard.press('Enter');
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
+});
+
+test('Ledger enters All nodes from a loaded overview without losing its scope', async ({ page }) => {
+  const allAssetRequests = [];
+  page.on('request', request => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.endsWith('/v2-assets/engraphis-graph-all.js')) allAssetRequests.push(request.url());
+  });
+  const requests = await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  expect(allAssetRequests).toEqual([]);
+
+  await page.locator('#graph-show-unlinked').click();
+  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
+  await page.locator('#graph-repo-filter').fill('agent-memory');
+  await page.getByRole('tab', { name: 'Time' }).click();
+  await page.locator('#graph-as-of').fill('2026-08-14');
+  await page.getByRole('tab', { name: 'Explore' }).click();
+  await page.locator('[data-graph-layer="code"]').click();
+  await page.locator('#graph-show-all').click();
+
+  await expect(page.locator('#graph-show-all')).toHaveText('High quality');
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter by exact repository name…');
+  await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
+  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-flow')).toBeEnabled();
+  await expect(page.locator('[data-graph-layer="code"]')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+  expect(allAssetRequests).toHaveLength(1);
+  const allQuery = requests.graphQueries.find(item => item.presentation === 'all');
+  expect(allQuery).toBeTruthy();
+  expect(allQuery.repo).toBe('agent-memory');
+  expect(allQuery.include_code).toBe('true');
+  expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
+  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await expect(page.locator('[data-graph-color-choice="type"]')).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('#graph-flow').click();
+  await expect(page.locator('#graph-flow')).toHaveAttribute('aria-checked', 'false');
+  await page.locator('#graph-flow').click();
+  await page.locator('#graph-repel').fill('82');
+  await page.locator('#graph-link').fill('34');
+  await page.locator('#graph-gravity').fill('27');
+  await expect(page.locator('#graph-repel-output')).toHaveText('82');
+  await expect(page.locator('#graph-link-output')).toHaveText('34');
+  await expect(page.locator('#graph-gravity-output')).toHaveText('27');
+  await page.locator('#graph-tune-min-degree').fill('2');
+  await expect(page.locator('#graph-count')).toContainText('0 visible of 3 entities');
+  await page.locator('#graph-tune-min-degree').fill('1');
+  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.locator('[data-graph-palette-choice="ocean"]').click();
+  const persistedInAllMode = await page.evaluate(() => JSON.parse(
+    localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
+  ));
+  expect(persistedInAllMode.showUnlinked).toBe(false);
+  expect(persistedInAllMode.layers.code).toBe(true);
+  expect(persistedInAllMode.includeCode).toBe(true);
+  expect(persistedInAllMode.flow).toBe(true);
+  const allAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(allAccessibility.violations).toEqual([]);
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveText('Show all nodes');
+  await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
+  await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
+  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-flow')).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('[data-graph-layer="code"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  expect(allAssetRequests).toHaveLength(1);
+});
+
+test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', async ({ page }) => {
+  await mockApi(page, {
+    graphScene: {
+      nodes: [
+        {
+          id: 'black-hole', label: 'Black hole', gravity_mass: 64, visual_radius: 9,
+          community_id: 'core', anchor_role: 'global', system_anchor_id: 'black-hole',
+          orbit_tier: 0, galactic_radius: 0, x: 0, y: 0,
+        },
+        {
+          id: 'star', label: 'Star', gravity_mass: 12, visual_radius: 7,
+          community_id: 'star-system', anchor_role: 'community', system_anchor_id: 'star',
+          orbit_tier: 0, galactic_radius: 80, galactic_target_radius: 80, x: 80, y: 0,
+        },
+        {
+          id: 'planet', label: 'Planet', gravity_mass: 1, visual_radius: 3,
+          community_id: 'star-system', anchor_role: 'member', system_anchor_id: 'star',
+          orbit_tier: 1, galactic_radius: 80, x: 95, y: 0,
+        },
+      ],
+      edges: [
+        { from: 'black-hole', to: 'star', rest_length: 80, spring_strength: 0 },
+        { from: 'star', to: 'planet', rest_length: 15, spring_strength: 0 },
+      ],
+      communities: [{ id: 'core', mass: 64 }, { id: 'star-system', mass: 13 }],
+      community_bridges: [],
+      meta: { algorithm_version: 'galaxy-v6', layout_seed: 17, total_nodes: 3 },
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+});
+
+test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
+  await mockApi(page);
+  const rendererRequests = [];
+  await page.route('**/v2-assets/engraphis-graph.js*', async route => {
+    rendererRequests.push(route.request().url());
+    if (rendererRequests.length === 1) {
+      // A valid 200 response that never defines EngraphisGraph models a stale cached asset that
+      // fetched successfully but failed while executing. `onerror` cannot detect this case.
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/javascript',
+        body: 'window.__nonRegisteringGraphAsset = true;',
+      });
+    }
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
+  expect(rendererRequests).toHaveLength(1);
+  const first = new URL(rendererRequests[0]);
+  expect(first.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(first.searchParams.has('retry')).toBe(false);
+
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  expect(rendererRequests).toHaveLength(2);
+  const second = new URL(rendererRequests[1]);
+  expect(second.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(second.searchParams.get('retry')).toBe('1');
+});
+
+test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
+  const key = 'engraphis-ledger-graph-preferences-v1';
+  const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
+    localStorage.setItem(storageKey, JSON.stringify(value));
+  }, { storageKey: key, value: preferences });
+  const readPreferences = () => page.evaluate(storageKey => {
+    const value = localStorage.getItem(storageKey);
+    return value === null ? null : JSON.parse(value);
+  }, key);
+
+  await mockApi(page);
+  await page.goto('/');
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  // A first-time dashboard may use the new HTML default without manufacturing preferences.
+  expect(await readPreferences()).toBeNull();
+
+  await page.evaluate(() => {
+    [['graph-repel', '120'], ['graph-link', '80'], ['graph-gravity', '400']]
+      .forEach(([id, value]) => {
+        const control = document.getElementById(id);
+        control.value = value;
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    document.getElementById('graph-reset-tuning').click();
+  });
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+
+  await writePreferences({
+    preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
+    layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-gravity')).toHaveValue('0');
+  const migrated = await readPreferences();
+  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.preset).toBe('galaxy');
+  expect(migrated.style).toBe('solar');
+  expect(migrated.tuning.repel).toBe(60);
+  expect(migrated.tuning.link).toBe(8);
+  expect(migrated.tuning.gravity).toBe(0);
+  expect(migrated.layers).toEqual({
+    temporal: false, entity: true, causal: false, semantic: true, code: false,
+  });
+
+  await writePreferences({
+    preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('73');
+  await expect(page.locator('#graph-link')).toHaveValue('21');
+  await expect(page.locator('#graph-gravity')).toHaveValue('0');
+  const custom = await readPreferences();
+  expect(custom.physicsVersion).toBe(2);
+  expect(custom.tuning.repel).toBe(73);
+  expect(custom.tuning.link).toBe(21);
+  expect(custom.tuning.gravity).toBe(0);
+
+  // Once versioned, 48 is a deliberate user selection rather than the retired default.
+  await writePreferences({
+    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('48');
+  expect((await readPreferences()).tuning.repel).toBe(48);
+});
+
+test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    let shortenedGraphDeadline = false;
+    window.setTimeout = (callback, delay, ...args) => {
+      const firstGraphDeadline = delay === 12_000 && !shortenedGraphDeadline;
+      if (firstGraphDeadline) shortenedGraphDeadline = true;
+      return nativeSetTimeout(callback, firstGraphDeadline ? 80 : delay, ...args);
+    };
+  });
+  await mockApi(page);
+  let releaseStalledAsset;
+  const stalledAsset = new Promise(resolve => { releaseStalledAsset = resolve; });
+  let d3Attempts = 0;
+  await page.route('**/v2-assets/vendor/d3.min.js*', async route => {
+    d3Attempts += 1;
+    if (d3Attempts === 1) {
+      await stalledAsset;
+      return route.abort('failed');
+    }
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-empty')).toContainText('High-quality graph loading timed out');
+
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations', { timeout: 15000 });
+  expect(d3Attempts).toBe(2);
+  releaseStalledAsset();
 });
 
 test('Ledger requests a remote token in a masked retryable dialog', async ({ page }) => {
@@ -696,7 +961,8 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
           }] }
           : {
             format: 'engraphis-context-savings/1',
-            scope: { workspace: selected },
+            scope: { workspace: 'all' },
+            workspace_count: 2,
             period: { from_ts: null, to_ts: null },
             release_version: null,
             estimated: {
@@ -777,7 +1043,9 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
   await page.getByRole('tab', { name: 'Audit & receipts' }).click();
   await expect(page.locator('#audit-list')).toContainText(`${otherWorkspace} audit`);
   releaseAudit();
-  await expect.poll(() => auditCompleted).toBe(3);
+  // Audit and receipts remain workspace-scoped. Context savings is now a global visible-
+  // workspace aggregate, so it deliberately carries no workspace query to join this gate.
+  await expect.poll(() => auditCompleted).toBe(2);
   await expect(page.locator('#audit-list')).toContainText(`${otherWorkspace} audit`);
   await expect(page.locator('#audit-list')).not.toContainText(`${workspace} audit`);
 
@@ -958,17 +1226,29 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await page.goto('/');
   const initialGraphRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('connected_only') === 'true';
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('level') === 'overview'
+      && url.searchParams.get('node_limit') === '1000'
+      && url.searchParams.get('edge_limit') === '2000'
+      && !url.searchParams.has('connected_only');
   });
   await page.locator('.nav-item[data-view="relations"]').click();
   await initialGraphRequest;
-  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   await expect(page.getByRole('tab', { name: 'Explore' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByPlaceholder('Find an entity…')).toBeVisible();
   await expect(page.getByPlaceholder('Filter to a repository or topic…')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cyber' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('button', { name: 'Islands' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Galaxy gravity' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
+  await expect(page.getByLabel('Size by')).toBeDisabled();
+  await expect(page.locator('#graph-repel-label')).toHaveText('Orbital speed');
+  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
@@ -976,28 +1256,33 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
-  const showUnlinkedRequest = page.waitForRequest(request => {
-    const url = new URL(request.url());
-    return url.pathname === '/api/graph' && !url.searchParams.has('connected_only');
-  });
-  await page.getByRole('button', { name: 'Show unlinked nodes' }).click();
-  await showUnlinkedRequest;
+  await expect(page.getByRole('button', { name: 'Show all nodes' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  const paletteNotice = page.locator('#notice-banner');
+  await page.locator('[data-graph-palette-choice="ember"]').click();
+  await expect(paletteNotice).toHaveText('ember palette applied to the graph.');
+  await expect(paletteNotice).toBeHidden({ timeout: 4500 });
   const hideUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('connected_only') === 'true';
+    return url.pathname === '/api/graph/scene' && url.searchParams.get('connected_only') === 'true';
   });
   await page.getByRole('button', { name: 'Hide unlinked nodes' }).click();
   await hideUnlinkedRequest;
   await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
+  const showUnlinkedRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene' && !url.searchParams.has('connected_only');
+  });
+  await page.getByRole('button', { name: 'Show unlinked nodes' }).click();
+  await showUnlinkedRequest;
+  await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   const codeRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('include_code') === 'true';
+    return url.pathname === '/api/graph/scene' && url.searchParams.get('include_code') === 'true';
   });
   await page.getByRole('button', { name: 'Code ↔ memory' }).click();
   await codeRequest;
@@ -1022,7 +1307,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await page.getByRole('button', { name: 'Save current' }).click();
   await expect(page.locator('#graph-saved-view-status')).toHaveText('Current graph view saved locally.');
 
-  await page.getByRole('button', { name: 'Galaxy' }).click();
+  await page.getByRole('button', { name: 'Galaxy', exact: true }).click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('data-graph-style', 'galaxy');
   await page.getByRole('button', { name: 'Compact' }).click();
   await expect(page.locator('#graph-mode')).toContainText('Compact');
@@ -1043,19 +1328,19 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
 
   const repoFilter = page.getByPlaceholder('Filter to a repository or topic…');
   await repoFilter.fill('agent-memory');
-  await expect(page.locator('#graph-count')).toContainText('1 of 2 entities · 0 relations');
+  await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export PNG or JSON' }).click();
   await page.getByRole('button', { name: 'JSON data' }).click();
   const json = JSON.parse(await fs.readFile(await (await download).path(), 'utf8'));
-  expect(json.nodes.map(node => node.id)).toEqual(['engraphis']);
+  expect(json.nodes.map(node => node.id).sort()).toEqual(['engraphis', 'unlinked']);
   expect(json.links).toEqual([]);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(repoFilter).toHaveValue('agent-memory');
-  await expect(page.locator('#graph-count')).toContainText('1 of 2 entities · 0 relations');
+  await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
-  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   await page.getByRole('tab', { name: 'Analyse' }).click();
   await expect(page.getByRole('heading', { name: 'Scope' })).toBeVisible();
@@ -1066,7 +1351,8 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(asOf).toBeVisible();
   const temporalRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.has('as_of');
+    return url.pathname === '/api/graph/scene' && url.searchParams.has('as_of')
+      && url.searchParams.get('include_history') === 'true';
   });
   await asOf.fill('2021-01-01');
   await temporalRequest;
@@ -1076,7 +1362,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
 
   await page.reload();
   await page.locator('.nav-item[data-view="relations"]').click();
-  await expect(page.getByRole('button', { name: 'Galaxy' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Galaxy', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
@@ -1089,7 +1375,7 @@ test('graph node connections expose linked memory evidence without leaving the g
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await page.getByRole('tab', { name: 'Analyse' }).click();
-  await expect(page.locator('#graph-top button')).toHaveCount(2);
+  await expect(page.locator('#graph-top button')).toHaveCount(3);
 
   const firstGraphFact = page.locator('#graph-top button').first();
   await firstGraphFact.click();
@@ -1106,6 +1392,69 @@ test('graph node connections expose linked memory evidence without leaving the g
   await expect(page.getByRole('button', { name: 'Open in Library' })).toBeVisible();
 });
 
+test('historical connections request ghost-edge evidence for live and ghost endpoints', async ({ page }) => {
+  await mockApi(page, {
+    graphScene: {
+      nodes: [
+        {
+          id: 'live-node', label: 'Origin Node', member_ids: ['live-member'],
+          gravity_mass: 4, visual_radius: 8, community_id: 'graph', x: -20, y: 0,
+        },
+        {
+          id: 'canon:ghost:ghost', label: 'Archived Node', ghost: true,
+          member_ids: ['archived-member'], gravity_mass: 0, visual_radius: 0,
+          community_id: 'history', x: 20, y: 0,
+        },
+        {
+          id: 'historical-live', label: 'Historical Live Node',
+          member_ids: ['historical-live-member'], gravity_mass: 2, visual_radius: 6,
+          community_id: 'graph', x: 0, y: 20,
+        },
+      ],
+      edges: [
+        {
+          id: 'historical-ghost-edge', source: 'live-node', target: 'canon:ghost:ghost',
+          relation: 'used', ghost: true, rest_length: 18, spring_strength: 0,
+        },
+        {
+          id: 'historical-live-edge', source: 'live-node', target: 'historical-live',
+          relation: 'superseded', ghost: true, rest_length: 18, spring_strength: 0,
+        },
+      ],
+      communities: [{ id: 'graph', mass: 4 }],
+      community_bridges: [],
+      meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  await page.locator('#graph-top button').filter({ hasText: 'Origin Node' }).click();
+  await expect(page.locator('#graph-connections-list')).toContainText('Archived Node');
+  await expect(page.locator('#graph-connections-list')).toContainText('Historical Live Node');
+
+  const evidenceRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.endsWith('/memories')
+      && url.searchParams.get('member_id') === 'archived-member'
+      && url.searchParams.get('include_history') === 'true';
+  });
+  await page.locator('.graph-connection-row').filter({ hasText: 'Archived Node' })
+    .getByRole('button', { name: 'Memories' }).click();
+  await evidenceRequest;
+  await expect(page.locator('#graph-connection-memory-list')).toContainText('Database choice');
+
+  const liveEndpointRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.includes('/graph/entities/historical-live/memories')
+      && url.searchParams.get('include_history') === 'true'
+      && !url.searchParams.has('member_id');
+  });
+  await page.locator('.graph-connection-row').filter({ hasText: 'Historical Live Node' })
+    .getByRole('button', { name: 'Memories' }).click();
+  await liveEndpointRequest;
+});
+
 test('changing the time anchor replaces a pending graph request', async ({ page }) => {
   let releaseInitial;
   const initialRelease = new Promise(resolve => { releaseInitial = resolve; });
@@ -1113,7 +1462,7 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
   const waitForInitial = new Promise(resolve => { initialStarted = resolve; });
   await mockApi(page, {
     deferGraphRequest: async url => {
-      if (!url.searchParams.has('as_of') && url.searchParams.get('connected_only') === 'true') {
+      if (!url.searchParams.has('as_of') && !url.searchParams.has('connected_only')) {
         initialStarted();
         await initialRelease;
       }
@@ -1126,14 +1475,52 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
   await page.getByRole('tab', { name: 'Time' }).click();
   const anchored = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph'
+    return url.pathname === '/api/graph/scene'
       && url.searchParams.has('as_of')
-      && url.searchParams.get('connected_only') === 'true';
+      && !url.searchParams.has('connected_only');
   }, { timeout: 5_000 });
   await page.getByLabel('As of date').fill('2021-01-01');
   await anchored;
   releaseInitial();
   await expect(page.locator('#graph-count')).toContainText('1 relations');
+});
+
+test('Reload data replaces an identical pending graph request once', async ({ page }) => {
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  let releaseRetry;
+  const retryGate = new Promise(resolve => { releaseRetry = resolve; });
+  let firstStarted;
+  const waitForFirst = new Promise(resolve => { firstStarted = resolve; });
+  let retryStarted;
+  const waitForRetry = new Promise(resolve => { retryStarted = resolve; });
+  let graphAttempts = 0;
+  await mockApi(page, {
+    deferGraphRequest: async url => {
+      if (url.searchParams.has('connected_only')) return;
+      graphAttempts += 1;
+      if (graphAttempts === 1) {
+        firstStarted();
+        await firstGate;
+      } else if (graphAttempts === 2) {
+        retryStarted();
+        await retryGate;
+      }
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await waitForFirst;
+
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await waitForRetry;
+  // A second click while the forced retry is pending must not churn another identical request.
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect.poll(() => graphAttempts).toBe(2);
+
+  releaseFirst();
+  releaseRetry();
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 });
 
 test('a custom graph view restores every saved control and server filter', async ({ page }) => {
@@ -1165,13 +1552,13 @@ test('a custom graph view restores every saved control and server filter', async
 
   const restored = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.has('as_of')
+    return url.pathname === '/api/graph/scene' && url.searchParams.has('as_of')
       && url.searchParams.get('include_code') === 'true';
   });
   await page.getByRole('button', { name: 'Saved custom' }).click();
   await restored;
 
-  await expect(page.getByRole('button', { name: 'Galaxy' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Galaxy', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Radial' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-flow-speed')).toHaveValue('67');
@@ -1185,6 +1572,62 @@ test('a custom graph view restores every saved control and server filter', async
   await expect(page.getByLabel('As of date')).toHaveValue('2021-01-01');
   await expect(page.getByLabel('Show superseded ghosts')).not.toBeChecked();
   await expect(page.getByPlaceholder('Filter to a repository or topic…')).toHaveValue('agent-memory');
+});
+
+test('a saved code view reloads when only its repository changes', async ({ page }) => {
+  await page.route('**/', async route => {
+    const response = await route.fetch();
+    const html = await response.text();
+    await route.fulfill({
+      response,
+      body: html.replace(
+        'data-graph-saved-view="operations" aria-pressed="false">Operations',
+        'data-graph-saved-view="custom" aria-pressed="false">Saved custom',
+      ),
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('engraphis-ledger-graph-preferences-v1', JSON.stringify({
+      includeCode: true,
+      repoFilter: '',
+    }));
+    localStorage.setItem('engraphis-ledger-graph-custom-view-v1', JSON.stringify({
+      preset: 'radial', style: 'galaxy', color: 'community', palette: 'theme',
+      flow: true, labels: false, tuning: {}, minDegree: 1, depth: 2,
+      showUnlinked: false,
+      layers: { temporal: true, entity: true, causal: true, semantic: true, code: true },
+      includeCode: true, asOf: '', ghosts: true, size: 'degree', bridges: false,
+      collapse: false, repoFilter: 'repo-after',
+    }));
+  });
+  await mockApi(page, {
+    workspaces: [{
+      name: workspace,
+      memories: memories.length,
+      repos: ['repo-before', 'repo-after'],
+    }],
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+
+  const before = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true'
+      && url.searchParams.get('repo') === 'repo-before';
+  });
+  await page.locator('#graph-repo-filter').fill('repo-before');
+  await before;
+
+  const after = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true'
+      && url.searchParams.get('repo') === 'repo-after';
+  });
+  await page.getByRole('button', { name: 'Saved custom' }).click();
+  await after;
 });
 
 test('themes persist and both visible interface selectors round-trip', async ({ page }) => {

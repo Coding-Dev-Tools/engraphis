@@ -24,6 +24,7 @@ import numpy as np
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.backends.model_source import is_local_model_source, validate_model_source
+from engraphis.core.interfaces import Embedder
 
 
 LOCAL_MODEL_PREFIX = "local:"
@@ -273,7 +274,7 @@ def get_embedder(
     *,
     revision: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
-):
+) -> Embedder:
     """Return a semantic model when available, else explicit lexical degradation.
 
     Prefix a configured model with ``local:`` to require a local path or cached
