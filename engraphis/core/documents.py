@@ -32,6 +32,7 @@ from xml.etree import ElementTree
 
 from engraphis.core.obsidian import parse_obsidian_note
 from engraphis.core.secrets import secret_kind
+from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
 
 
 IMPORTER_VERSION = "1"
@@ -669,10 +670,6 @@ def _looks_binary(raw: bytes) -> bool:
     controls = sum(byte < 32 and byte not in (9, 10, 12, 13) for byte in sample)
     return controls / len(sample) > 0.02
 
-
-def _is_reparse_point(info: os.stat_result) -> bool:
-    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & marker)
 
 
 def _parse_text_format(

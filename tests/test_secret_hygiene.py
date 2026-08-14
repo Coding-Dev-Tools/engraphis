@@ -98,12 +98,21 @@ def test_retire_is_canonical_and_forget_remains_a_compatibility_alias():
     assert service.store.get_memory(second["id"]) is not None
 
 
-def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
+def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path, monkeypatch):
     db_path = tmp_path / "engraphis.db"
     service = MemoryService.create(str(db_path))
     leaked = service.remember("Legacy row placeholder.", workspace="acme")
     other = service.remember("Independent safe memory.", workspace="acme")
     mid = leaked["id"]
+    workspace_id = service.store.get_or_create_workspace("acme")
+    vault_id = service.store.register_source_vault(
+        kind="documents", root_digest="a" * 64, workspace_id=workspace_id,
+    )
+    source_id = service.store.upsert_source_import_item(
+        vault_id=vault_id, source_key="b" * 64, relative_path="secret.txt",
+        memory_id=mid,
+    )
+    service.store.mark_memories_sync_exported([mid], workspace_id=workspace_id)
 
     # Simulate a row captured before the boundary existed, including an FTS mirror.
     service.store.conn.execute("UPDATE memories SET content=? WHERE id=?", (_LEAK, mid))
@@ -112,6 +121,14 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     service.store.audit("tester", "legacy_note", mid, "legacy audit detail " + _LEAK)
     service.store.conn.commit()
 
+    maintenance_transactions = []
+    original_maintenance = Store._checkpoint_and_vacuum
+
+    def observe_maintenance(conn, *, durable):
+        maintenance_transactions.append(conn.in_transaction)
+        return original_maintenance(conn, durable=durable)
+
+    monkeypatch.setattr(Store, "_checkpoint_and_vacuum", staticmethod(observe_maintenance))
     erased = service.secure_erase(mid, workspace="acme")
     assert erased["status"] == "securely_erased"
     assert erased["vector_index_cleanup"] == "deleted"
@@ -121,6 +138,11 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
     assert service.store.conn.execute(
         "SELECT COUNT(*) FROM mem_links WHERE a=? OR b=?", (mid, mid)
     ).fetchone()[0] == 0
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) FROM source_imports WHERE id=?", (source_id,)
+    ).fetchone()[0] == 0
+    # Content-free export proof deliberately survives so the tombstone remains syncable.
+    assert service.store.get_memory_sync_export(mid) is not None
     audit_rows = service.store.conn.execute(
         "SELECT action, detail FROM audit WHERE target=?", (mid,)
     ).fetchall()
@@ -133,7 +155,9 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path):
         assert _LEAK.encode("utf-8") not in wal_path.read_bytes()
     # The physical result is explicit; a busy WAL/VACUUM must never be reported as success.
     assert erased["maintenance"]["wal"] in {"truncated", "busy", "failed"}
-    assert erased["maintenance"]["vacuum"] in {"completed", "failed"}
+    assert erased["maintenance"]["vacuum"] == "completed"
+    assert maintenance_transactions
+    assert maintenance_transactions[-1] is False
 
 
 def test_writable_store_enables_sqlite_secure_delete_before_an_emergency_erase(tmp_path):
@@ -206,6 +230,216 @@ def test_secure_erase_removes_sync_conflict_successors():
     } >= {original_id, successor_id}
 
 
+def test_secure_erase_does_not_follow_foreign_conflict_lineage():
+    engine = MemoryEngine.create(":memory:")
+    workspace_a = engine.store.get_or_create_workspace("workspace-a")
+    workspace_b = engine.store.get_or_create_workspace("workspace-b")
+    repo_a = engine.store.get_or_create_repo(workspace_a, "repo-a")
+    repo_b = engine.store.get_or_create_repo(workspace_b, "repo-b")
+    original_id = engine.remember(
+        "Workspace B repository secret.",
+        workspace_id=workspace_b,
+        repo_id=repo_b,
+        scope=Scope.REPO,
+    )
+
+    def add_successor(workspace_id, repo_id, label):
+        return engine.store.add_memory(MemoryRecord(
+            id="",
+            content=f"{label} secret copy.",
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            scope=Scope.REPO,
+            metadata={"sync_conflict": {"memory_id": original_id}},
+            provenance={
+                "source": "sync_conflict",
+                "trusted": False,
+                "conflict_of": original_id,
+            },
+        ))
+
+    legitimate_id = add_successor(workspace_b, repo_b, "legitimate")
+    foreign_workspace_id = add_successor(workspace_a, repo_a, "foreign workspace")
+    foreign_repo_id = add_successor(workspace_b, repo_a, "foreign repository")
+
+    assert set(engine.store.secure_erase_target_ids(original_id)) == {
+        original_id, legitimate_id,
+    }
+    engine.secure_erase(original_id)
+
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(legitimate_id) is None
+    assert engine.store.get_memory(foreign_workspace_id) is not None
+    assert engine.store.get_memory(foreign_repo_id) is not None
+
+
+def test_secure_erase_deletes_transitive_successors_from_external_vector_index():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    grandchild_id = ids.new_id("memory")
+    for memory_id, parent_id in ((successor_id, original_id), (grandchild_id, successor_id)):
+        engine.store.add_memory(MemoryRecord(
+            id=memory_id,
+            content="Losing secret copy.",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+            metadata={"sync_conflict": {"memory_id": parent_id}},
+            provenance={"conflict_of": parent_id, "trusted": False},
+        ))
+
+    class RecordingExternalIndex:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+
+    index = RecordingExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "deleted"
+    assert len(index.deleted) == 1
+    assert set(index.deleted[0][0]) == {original_id, successor_id, grandchild_id}
+    assert index.deleted[0][1] is True
+    assert all(engine.store.get_memory(memory_id) is None for memory_id in index.deleted[0][0])
+
+
+def test_secure_erase_reports_external_failure_after_erasing_all_successors():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    engine.store.add_memory(MemoryRecord(
+        id=successor_id,
+        content="Losing secret copy.",
+        workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+        metadata={"sync_conflict": {"memory_id": original_id}},
+        provenance={"conflict_of": original_id, "trusted": False},
+    ))
+
+    class FailingExternalIndex:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+            raise RuntimeError("external index unavailable")
+
+    index = FailingExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "failed"
+    assert "external_index_limitation" in result
+    assert index.deleted == [((original_id, successor_id), True)]
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
+
+
+def test_secure_erase_reports_partial_external_cleanup_as_limited():
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+
+    class PartialExternalIndex:
+        def __init__(self):
+            self.deleted = []
+            self.injected = False
+
+        def delete(self, memory_ids, *, commit=True):
+            self.deleted.append((tuple(memory_ids), commit))
+            if not self.injected:
+                self.injected = True
+                engine.store.add_memory(MemoryRecord(
+                    id=successor_id,
+                    content="Losing secret copy.",
+                    workspace_id=workspace,
+                    scope=Scope.WORKSPACE,
+                    metadata={"sync_conflict": {"memory_id": original_id}},
+                    provenance={"conflict_of": original_id, "trusted": False},
+                ))
+                return
+            raise RuntimeError("successor vector unavailable")
+
+    index = PartialExternalIndex()
+    engine.index = index
+
+    result = engine.secure_erase(original_id)
+
+    assert result["vector_index_cleanup"] == "partial"
+    assert "external_index_limitation" in result
+    assert len(index.deleted) == 2
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
+
+
+def test_secure_erase_reports_limitation_when_successor_external_delete_fails():
+    """A successor appearing after the first external scan whose vector delete fails
+    must still surface the external_index_limitation warning (cleanup="partial"),
+    while the authoritative local erase completes."""
+    engine = MemoryEngine.create(":memory:")
+    workspace = engine.store.get_or_create_workspace("acme")
+    original_id = engine.remember("Original secret source.", workspace_id=workspace)
+
+    # The index succeeds on the first delete (original targets) but fails on the
+    # second delete (successors discovered during the final scan under the lock).
+    class PartialExternalIndex:
+        def __init__(self):
+            self.deleted = []
+            self.call_count = 0
+
+        def delete(self, memory_ids, *, commit=True):
+            self.call_count += 1
+            self.deleted.append((tuple(memory_ids), commit))
+            if self.call_count >= 2:
+                raise RuntimeError("external index unavailable for successors")
+
+    index = PartialExternalIndex()
+    engine.index = index
+
+    # Inject a successor *after* the initial target scan but before the final scan.
+    # We do this by monkey-patching secure_erase_target_ids to return the successor
+    # on its second call (the refreshed scan inside the transaction).
+    from engraphis.core import ids
+    successor_id = ids.new_id("memory")
+    original_target_ids = engine.store.secure_erase_target_ids
+    call_counter = {"n": 0}
+
+    def patched_target_ids(mid):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return original_target_ids(mid)
+        # Second call: simulate a successor having been written between scans.
+        engine.store.add_memory(MemoryRecord(
+            id=successor_id,
+            content="Successor secret copy.",
+            workspace_id=workspace,
+            scope=Scope.WORKSPACE,
+            metadata={"sync_conflict": {"memory_id": mid}},
+            provenance={"conflict_of": mid, "trusted": False},
+        ))
+        return original_target_ids(mid)
+
+    engine.store.secure_erase_target_ids = patched_target_ids
+    try:
+        result = engine.secure_erase(original_id)
+    finally:
+        engine.store.secure_erase_target_ids = original_target_ids
+
+    assert result["vector_index_cleanup"] == "partial"
+    assert "external_index_limitation" in result
+    assert engine.store.get_memory(original_id) is None
+    assert engine.store.get_memory(successor_id) is None
 def test_secure_erase_preserves_shared_edge_history_from_retired_support():
     engine = MemoryEngine.create(":memory:")
     workspace = engine.store.get_or_create_workspace("acme")

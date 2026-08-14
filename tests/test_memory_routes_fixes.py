@@ -268,6 +268,51 @@ def test_legacy_folder_import_skips_symlink_escape(monkeypatch, tmp_path):
     assert response.json()["data"]["imported"] == 0
 
 
+def test_legacy_folder_import_errors_do_not_echo_user_path(monkeypatch, tmp_path):
+    """SEC-001: HTTP error responses must not echo the user-supplied path —
+    leaking filesystem structure aids path-traversal reconnaissance."""
+    from engraphis.routes import vault as vault_routes
+
+    client = _client(monkeypatch, tmp_path)
+    home = tmp_path / "decoy-home"
+    allowed = tmp_path / "allowed"
+    home.mkdir()
+    allowed.mkdir()
+    monkeypatch.setattr(vault_routes.Path, "home", lambda: home)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+
+    sentinel = "zzz-hostile-sentinel-zzz"
+
+    with client:
+        # Path traversal: outside allowed roots.
+        outside = tmp_path / sentinel
+        outside.mkdir()
+        resp = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(outside), "namespace": "ns"},
+        )
+        assert resp.status_code in (403, 404)
+        assert sentinel not in str(resp.json())
+
+        # Path not found: under allowed root but missing.
+        gone = allowed / sentinel
+        resp = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(gone), "namespace": "ns"},
+        )
+        assert resp.status_code == 404
+        assert sentinel not in str(resp.json())
+
+        # Not a directory: file under allowed root.
+        blocker = allowed / sentinel
+        blocker.write_text("not a dir", encoding="utf-8")
+        resp = client.post(
+            "/memory/vaults/import-folder",
+            json={"path": str(blocker), "namespace": "ns"},
+        )
+        assert resp.status_code == 400
+        assert sentinel not in str(resp.json())
+
 def test_safe_call_classifies_and_sanitizes_legacy_failures():
     from fastapi import HTTPException
     from engraphis.core.secrets import SecretDetectedError

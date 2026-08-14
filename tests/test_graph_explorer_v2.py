@@ -1,5 +1,6 @@
 """Focused schema/API coverage for the analytical Galaxy Graph vertical slice."""
 # ruff: noqa: E402 -- optional-stack guard must run before importing FastAPI routes
+import copy
 import json
 import math
 import sqlite3
@@ -23,7 +24,58 @@ from engraphis.core.schema import SCHEMA_VERSION
 from engraphis.core.store import Store
 from engraphis.routes import v2_api
 from engraphis import service as service_module
-from engraphis.service import GraphIndexRebuilding, MemoryService, ValidationError
+from engraphis.service import (
+    GraphIndexRebuilding, GraphSceneCapacityExceeded, MemoryService, ValidationError,
+)
+
+
+def test_hierarchy_anchors_are_metadata_driven_not_coding_dev_tools_label():
+    """A renamed explicit global remains central even against the historical-name decoy."""
+    def resolve(rows):
+        nodes = {
+            row["id"]: {
+                "id": row["id"], "label": row.get("label", row["id"]),
+                "gravity_mass": row.get("gravity_mass", 1.0),
+                "scene_rank": row.get("scene_rank", 0.0),
+                "weighted_degree": row.get("weighted_degree", 0.0),
+                "anchor_role": row.get("anchor_role", "community"),
+            }
+            for row in rows
+        }
+        return graph_scene_module._hierarchy_anchors(
+            nodes, {node_id: [node_id] for node_id in nodes}
+        )
+
+    explicit = [
+        {"id": "custom-orbit-root", "label": "Before rename", "anchor_role": "global",
+         "gravity_mass": 1.0},
+        {"id": "Coding-Dev-Tools", "label": "Coding-Dev-Tools", "gravity_mass": 999.0},
+    ]
+    _, before = resolve(explicit)
+    explicit[0]["label"] = "After arbitrary rename"
+    _, after = resolve(explicit)
+    assert before == after == "custom-orbit-root"
+
+    # Without authored global authority, physics uses deterministic mass, rank, degree, then id.
+    _, mass_winner = resolve([
+        {"id": "mass-winner", "gravity_mass": 12},
+        {"id": "high-rank", "gravity_mass": 11, "scene_rank": 999},
+    ])
+    _, rank_winner = resolve([
+        {"id": "low-rank", "gravity_mass": 8, "scene_rank": 1},
+        {"id": "high-rank", "gravity_mass": 8, "scene_rank": 2},
+    ])
+    _, degree_winner = resolve([
+        {"id": "low-degree", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 1},
+        {"id": "high-degree", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+    ])
+    _, id_winner = resolve([
+        {"id": "zeta", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+        {"id": "alpha", "gravity_mass": 8, "scene_rank": 2, "weighted_degree": 2},
+    ])
+    assert (mass_winner, rank_winner, degree_winner, id_winner) == (
+        "mass-winner", "high-rank", "high-degree", "alpha"
+    )
 
 
 def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
@@ -506,6 +558,39 @@ def test_complete_scene_keeps_every_enabled_code_memory_connector():
     assert scene["meta"]["code_memory_connectors"] == 2
 
 
+def test_complete_connected_only_keeps_code_memory_only_endpoints():
+    entities = [
+        {
+            "id": "code:symbol", "canonical_id": "code:symbol",
+            "name": "repo:module.fn", "etype": "code_function", "repo_id": "repo",
+        },
+        {
+            "id": "isolated", "canonical_id": "isolated",
+            "name": "Isolated", "etype": "concept", "repo_id": "repo",
+        },
+    ]
+    memories = [{
+        "id": "memory", "title": "Function behavior", "mtype": "procedural",
+        "scope": "repo", "repo_id": "repo", "importance": 0.5,
+    }]
+    links = [{
+        "id": "code-link", "symbol_id": "symbol", "memory_id": "memory",
+        "relation": "documents", "confidence": 0.9,
+    }]
+
+    scene = build_graph_scene(
+        "w", entities, [], [], level="complete", connected_only=True,
+        memory_rows=memories, code_memory_link_rows=links,
+    )
+
+    assert {node["id"] for node in scene["nodes"]} == {"code:symbol", "memory"}
+    assert [(edge["id"], edge["source"], edge["target"])
+            for edge in scene["edges"]] == [
+        ("code-link", "memory", "code:symbol")
+    ]
+    assert scene["meta"]["code_memory_connectors"] == 1
+
+
 def test_community_bridges_keep_aggregate_evidence_for_physics():
     nodes = {
         "a": {"community_id": "ca"},
@@ -563,6 +648,42 @@ def test_community_bridges_keep_aggregate_evidence_for_physics():
     assert stronger["edge_count"] == 8
 
 
+def test_overview_retains_real_cross_system_connectors_for_galaxy_painting():
+    nodes = {
+        "black-hole": {"community_id": "core", "anchor_role": "global"},
+        "solar-star": {"community_id": "solar", "anchor_role": "community"},
+        "outer-star": {"community_id": "outer", "anchor_role": "community"},
+        "solar-planet": {"community_id": "solar", "anchor_role": "none"},
+    }
+    def edge(edge_id, source, target, strength):
+        return {
+            "id": edge_id, "source": source, "target": target,
+            "layer": "entity", "relation": "relates", "strength": strength,
+            "tier": "context",
+        }
+    graph = {
+        "nodes": nodes,
+        "edges": [
+            edge("black-hole-solar", "black-hole", "solar-star", 0.8),
+            edge("black-hole-outer", "black-hole", "outer-star", 0.7),
+            edge("solar-outer", "solar-star", "outer-star", 0.6),
+            edge("solar-internal", "solar-star", "solar-planet", 1.0),
+        ],
+        "community_members": {
+            "core": ["black-hole"], "solar": ["solar-star", "solar-planet"],
+            "outer": ["outer-star"],
+        },
+        "global_anchor": "black-hole",
+    }
+
+    selected = set(nodes)
+    chosen = graph_scene_module._selected_edges(graph, selected, "overview", 20)
+
+    assert {edge["id"] for edge in chosen} == {
+        "black-hole-solar", "black-hole-outer", "solar-outer", "solar-internal",
+    }
+
+
 def test_canonical_bundle_filters_use_aggregate_support_and_confidence():
     entities = [
         {"id": "a1", "canonical_id": "a", "name": "Alpha", "etype": "concept"},
@@ -615,6 +736,36 @@ def test_edge_support_count_includes_identified_and_anonymous_evidence():
 
     assert edge["support_count"] == 2
     assert edge["support_memory_ids"] == ["known"]
+
+
+def test_anonymous_support_magnitude_contributes_to_node_evidence_mass():
+    entities = [
+        {"id": "a", "name": "Alpha", "etype": "concept"},
+        {"id": "b", "name": "Beta", "etype": "concept"},
+        {"id": "c", "name": "Gamma", "etype": "concept"},
+        {"id": "d", "name": "Delta", "etype": "concept"},
+    ]
+    edges = [
+        {"id": "light", "src": "a", "dst": "b", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+        {"id": "heavy", "src": "c", "dst": "d", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+    ]
+    supports = [
+        {"edge_id": "light", "memory_id": "", "confidence": 0.8,
+         "provenance": "{}"},
+        *[
+            {"edge_id": "heavy", "memory_id": "", "confidence": 0.8,
+             "provenance": "{}"}
+            for _ in range(10)
+        ],
+    ]
+
+    graph = graph_scene_module.build_canonical_graph(entities, edges, supports)
+
+    assert graph["nodes"]["a"]["support_count"] == 1
+    assert graph["nodes"]["c"]["support_count"] == 10
+    assert graph["nodes"]["c"]["gravity_mass"] > graph["nodes"]["a"]["gravity_mass"]
 
 
 @pytest.mark.parametrize("bad", [None, "bad", float("nan"), float("inf")])
@@ -698,7 +849,7 @@ def test_overview_ranks_communities_by_the_mass_sent_to_physics(monkeypatch):
     add_community("c0", [8.0], global_anchor=True)
     add_community("ca", [8.0])
     add_community("cb", [3.0, 3.0])
-    for index in range(22):
+    for index in range(34):
         add_community(f"f{index:02d}", [3.2, 3.2])
 
     fake_graph = {
@@ -715,11 +866,18 @@ def test_overview_ranks_communities_by_the_mass_sent_to_physics(monkeypatch):
 
     scene = graph_scene_module.build_graph_scene("w", [], [], [])
     chosen = {community["id"] for community in scene["communities"]}
+    black_hole = next(node for node in scene["nodes"]
+                      if node["anchor_role"] == "global")
 
-    # ca has the larger raw sum (8 > 6), but cb has the larger system mass
-    # (sqrt(3) + sqrt(3) > sqrt(8)) and is therefore the community physics ranks.
-    assert "cb" in chosen
-    assert "ca" not in chosen
+    # System physics uses the combined member mass, so sqrt must not be applied before
+    # aggregation: ca weighs 8 while cb weighs 6.
+    assert "ca" in chosen
+    assert "cb" not in chosen
+    assert black_hole["gravity_mass"] == max(
+        community["mass"] for community in scene["communities"]
+        if community["member_count"] == 1
+    )
+    assert (black_hole["x"], black_hole["y"]) == (0.0, 0.0)
 
 
 def test_overview_excludes_obvious_regex_extraction_noise_even_when_connected():
@@ -786,6 +944,295 @@ def test_zero_evidence_ties_do_not_turn_isolates_into_maximum_mass_nodes():
     assert max(node["mass_score"] for node in isolated_graph["nodes"].values()) < 0.5
     assert mixed_graph["nodes"]["c"]["mass_score"] < mixed_graph["nodes"]["a"]["mass_score"]
     assert mixed_graph["nodes"]["c"]["mass_score"] < mixed_graph["nodes"]["b"]["mass_score"]
+
+
+def test_skewed_evidence_keeps_mass_and_radius_contrast_after_top_n_cap():
+    entities = [
+        {"id": f"n{index}", "name": f"Node {index}", "etype": "concept"}
+        for index in range(60)
+    ]
+    edges = []
+    supports = []
+    for source in range(10):
+        for target in range(source + 1, 10):
+            edge_id = f"core-{source}-{target}"
+            edges.append({
+                "id": edge_id, "src": f"n{source}", "dst": f"n{target}",
+                "relation": "uses", "layer": "entity", "weight": 1.0,
+                "provenance": "{}",
+            })
+            supports.extend({
+                "edge_id": edge_id,
+                "memory_id": f"core-memory-{source}-{target}-{support_index}",
+                "confidence": 0.9,
+                "provenance": "{}",
+            } for support_index in range(4))
+    for leaf in range(10, 60):
+        edge_id = f"leaf-{leaf}"
+        edges.append({
+            "id": edge_id, "src": f"n{leaf % 10}", "dst": f"n{leaf}",
+            "relation": "uses", "layer": "entity", "weight": 1.0,
+            "provenance": "{}",
+        })
+        supports.append({
+            "edge_id": edge_id, "memory_id": f"leaf-memory-{leaf}",
+            "confidence": 0.9, "provenance": "{}",
+        })
+
+    scene = build_graph_scene(
+        "w", entities, edges, supports,
+        level="overview", node_limit=20, edge_limit=100,
+    )
+    masses = sorted(node["gravity_mass"] for node in scene["nodes"])
+    radii = sorted(node["visual_radius"] for node in scene["nodes"])
+
+    assert len(scene["nodes"]) == 20
+    assert masses[-1] / masses[0] >= 4.0
+    assert radii[-1] / radii[0] >= 1.5
+    for node in scene["nodes"]:
+        assert node["gravity_mass"] == pytest.approx(
+            1.0 + 15.0 * node["mass_score"] ** 2, abs=1e-6
+        )
+        assert node["visual_radius"] == pytest.approx(
+            1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0), abs=2e-6
+        )
+
+
+def test_visual_mass_mapping_preserves_live_fit_to_view_contrast():
+    # The pre-change live top-300 painted range (4.47..9.13) corresponds to these
+    # public masses under the old sqrt mapping. The replacement must remain compact
+    # while preserving enough contrast to read after the whole galaxy is fitted.
+    light_mass = ((4.47 - 2.0) / 2.0) ** 2
+    heavy_mass = ((9.13 - 2.0) / 2.0) ** 2
+
+    light_radius = graph_scene_module._visual_radius(light_mass)
+    heavy_radius = graph_scene_module._visual_radius(heavy_mass)
+
+    assert heavy_radius / light_radius >= 2.7
+    assert heavy_radius < 13.0
+
+
+def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
+    nodes = {}
+    member_ids = []
+    for index in range(21):
+        node_id = f"star-{index:02d}"
+        gravity_mass = 16.0 - 0.6 * index
+        member_ids.append(node_id)
+        nodes[node_id] = {
+            "id": node_id,
+            "canonical_id": node_id,
+            "label": f"Star {index}",
+            "type": "concept",
+            "member_ids": [node_id],
+            "member_count": 1,
+            "repo_ids": [],
+            "repo_names": [],
+            "weighted_degree": 21.0 - index,
+            "pagerank": 1.0 - index / 21.0,
+            "support_count": 21 - index,
+            "entity_quality": 1.0,
+            "mass_score": math.sqrt((gravity_mass - 1.0) / 15.0),
+            "gravity_mass": gravity_mass,
+            "visual_radius": graph_scene_module._visual_radius(gravity_mass),
+            "component_id": "component-stars",
+            "community_id": "community-stars",
+            "anchor_role": "none",
+            "core_affinity": 1.0 - index / 21.0,
+            "scene_rank": 1.0 - index / 21.0,
+            "anchor_eligible": True,
+        }
+    fake_graph = {
+        "nodes": nodes,
+        "edges": [],
+        "member_to_canonical": {node_id: node_id for node_id in nodes},
+        "community_members": {"community-stars": member_ids},
+        "community_anchors": {"community-stars": member_ids[-1]},
+        "global_anchor": member_ids[-1],
+    }
+    monkeypatch.setattr(
+        graph_scene_module,
+        "build_canonical_graph",
+        lambda *_args, **_kwargs: copy.deepcopy(fake_graph),
+    )
+
+    scene = build_graph_scene("w", [], [], [], node_limit=40)
+    by_id = {node["id"]: node for node in scene["nodes"]}
+    core = by_id[member_ids[0]]
+
+    assert scene["communities"][0]["anchor_id"] == core["id"]
+    assert core["gravity_mass"] == max(node["gravity_mass"] for node in by_id.values())
+    assert core["anchor_role"] == "global"
+    assert core["system_anchor_id"] == core["id"]
+    assert core["orbit_tier"] == 0
+    assert core["orbit_radius"] == 0.0
+    assert (core["x"], core["y"]) == (0.0, 0.0)
+    assert core["galactic_radius"] == 0.0
+    assert core["galactic_target_radius"] == 0.0
+    assert core["galactic_radius_scale"] == 0.4
+    assert core["galactic_initial_compactness"] == 0.8
+    assert core["galactic_clearance_adjusted"] is False
+    assert core["galactic_overlap"] is False
+    assert core["galactic_arm"] == -1
+    assert core["galactic_phase"] == 0.0
+    assert 0.84 <= core["galactic_eccentricity"] <= 0.92
+    assert all(node["system_anchor_id"] == core["id"] for node in by_id.values())
+    assert [sum(node["orbit_tier"] == tier for node in by_id.values())
+            for tier in range(4)] == [1, 4, 8, 8]
+
+    satellites = sorted(
+        (node for node in by_id.values() if node["id"] != core["id"]),
+        key=lambda node: -node["gravity_mass"],
+    )
+    assert [node["orbit_tier"] for node in satellites] == sorted(
+        node["orbit_tier"] for node in satellites
+    )
+    tier_radii = {
+        tier: {node["orbit_radius"] for node in satellites
+               if node["orbit_tier"] == tier}
+        for tier in range(1, 4)
+    }
+    assert all(len(radii) == 1 for radii in tier_radii.values())
+    assert [next(iter(tier_radii[tier])) for tier in range(1, 4)] == sorted(
+        next(iter(tier_radii[tier])) for tier in range(1, 4)
+    )
+    for node in satellites:
+        distance = math.hypot(node["x"] - core["x"], node["y"] - core["y"])
+        assert 0.87 * node["orbit_radius"] <= distance <= node["orbit_radius"] + 1e-5
+    assert len({(node["x"], node["y"]) for node in by_id.values()}) == len(by_id)
+    assert scene["communities"][0]["radius"] >= max(
+        node["orbit_radius"] + node["visual_radius"] for node in by_id.values()
+    ) + 5.9
+
+    # Recreate the otherwise-identical pre-contraction orbital positions using
+    # the emitted scene seed.  Both local offsets and public orbit metadata are
+    # exactly 80% of this reference, including every live satellite.
+    reference_nodes = copy.deepcopy(fake_graph["nodes"])
+    reference_slots, _reference_radii = graph_scene_module._assign_orbit_hierarchy(
+        reference_nodes,
+        fake_graph["community_members"],
+        {"community-stars": core["id"]},
+        radius_scale=1.0,
+    )
+    for node_id, node in by_id.items():
+        if node_id == core["id"]:
+            reference_x, reference_y = 0.0, 0.0
+        else:
+            reference_x, reference_y = graph_scene_module._orbit_position(
+                0.0, 0.0, "community-stars", reference_slots[node_id],
+                scene["meta"]["layout_seed"],
+            )
+        assert node["x"] == pytest.approx(0.8 * reference_x, abs=2e-6)
+        assert node["y"] == pytest.approx(0.8 * reference_y, abs=2e-6)
+        assert math.hypot(node["x"], node["y"]) == pytest.approx(
+            0.8 * math.hypot(reference_x, reference_y), abs=2e-6
+        )
+        assert node["orbit_radius"] == pytest.approx(
+            0.8 * reference_nodes[node_id]["orbit_radius"], abs=2e-6
+        )
+
+
+def test_community_spiral_packs_compact_preferred_targets_without_envelope_overlap():
+    communities = [
+        {"id": f"system-{index:02d}", "mass": 100.0 - index, "radius": radius}
+        for index, radius in enumerate([69.6, 66.3, *([36.0] * 22)])
+    ]
+
+    positions, hints = graph_scene_module._community_positions(
+        communities, "system-00", 1779033703, spacing=98.0
+    )
+    repeated = graph_scene_module._community_positions(
+        communities, "system-00", 1779033703, spacing=98.0
+    )
+    assert (positions, hints) == repeated
+    assert positions["system-00"] == (0.0, 0.0)
+    assert hints["system-00"]["galactic_radius"] == 0.0
+    assert hints["system-00"]["galactic_target_radius"] == 0.0
+    assert hints["system-00"]["galactic_radius_scale"] == 0.4
+    assert hints["system-00"]["galactic_initial_compactness"] == 0.8
+    assert hints["system-00"]["galactic_overlap"] is False
+    assert hints["system-00"]["galactic_arm"] == -1
+    outer_hints = [hint for community_id, hint in hints.items() if community_id != "system-00"]
+    assert len({hint["galactic_arm"] for hint in outer_hints}) in {2, 3}
+    assert all(0.84 <= hint["galactic_eccentricity"] <= 0.92
+               for hint in hints.values())
+
+    for community in communities[1:]:
+        community_id = community["id"]
+        # 0.4 remains the compact preferred scale, but the resulting physical carrier orbit
+        # must expand as needed for complete painted solar-system envelopes.
+        assert hints[community_id]["galactic_preferred_radius"] <= hints[community_id]["galactic_radius"]
+        assert hints[community_id]["galactic_target_radius"] == hints[community_id]["galactic_radius"]
+        assert math.hypot(*positions[community_id]) == pytest.approx(
+            hints[community_id]["galactic_radius"], abs=1e-6
+        )
+
+    overlap_pairs = 0
+    for left_index, left in enumerate(communities):
+        for right in communities[left_index + 1:]:
+            distance = math.dist(positions[left["id"]], positions[right["id"]])
+            if distance < graph_scene_module.GALAXY_ENVELOPE_CLEARANCE_FACTOR * (
+                left["radius"] + right["radius"]
+            ) - 1e-8:
+                overlap_pairs += 1
+    assert overlap_pairs == 0
+    assert not any(hint["galactic_overlap"] for hint in outer_hints)
+    radial_span = max(math.hypot(x, y) for x, y in positions.values())
+    x_span = max(x for x, _y in positions.values()) - min(
+        x for x, _y in positions.values()
+    )
+    y_span = max(y for _x, y in positions.values()) - min(
+        y for _x, y in positions.values()
+    )
+    outer_radii = sorted(
+        math.hypot(x, y) for community_id, (x, y) in positions.items()
+        if community_id != "system-00"
+    )
+    angles = sorted(
+        math.atan2(y, x) % math.tau
+        for community_id, (x, y) in positions.items()
+        if community_id != "system-00"
+    )
+    angular_gaps = [
+        ((angles[(index + 1) % len(angles)] - angle) % math.tau)
+        for index, angle in enumerate(angles)
+    ]
+    mean_gap = sum(angular_gaps) / len(angular_gaps)
+    gap_deviation = math.sqrt(sum(
+        (gap - mean_gap) ** 2 for gap in angular_gaps
+    ) / len(angular_gaps))
+    assert outer_radii[-1] / outer_radii[0] >= 2.0
+    assert gap_deviation / mean_gap >= 0.25
+    assert len({round(gap, 3) for gap in angular_gaps}) >= len(angular_gaps) // 2
+    # Envelope clearance grows a dense galaxy only as much as is geometrically necessary.
+    assert radial_span < 1200.0
+    assert max(x_span, y_span) < 2400.0
+
+
+def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
+    calls = 0
+    original_hypot = math.hypot
+
+    def counted_hypot(*values):
+        nonlocal calls
+        calls += 1
+        return original_hypot(*values)
+
+    monkeypatch.setattr(graph_scene_module.math, "hypot", counted_hypot)
+    traversal_counts = []
+    for count in (200, 400):
+        before = calls
+        communities = [
+            {"id": f"system-{index:04d}", "mass": count - index, "radius": 36.0}
+            for index in range(count)
+        ]
+        positions, _hints = graph_scene_module._community_positions(
+            communities, "system-0000", 42, spacing=92.0
+        )
+        assert len(positions) == count
+        traversal_counts.append(calls - before)
+
+    assert traversal_counts[1] < 2.5 * traversal_counts[0]
 
 
 def test_scene_bounds_public_support_ids_and_deduplicates_confidence():
@@ -923,6 +1370,36 @@ def test_graph_scene_applies_independent_world_and_system_anchors():
         )
 
 
+def test_graph_scene_keeps_support_metadata_when_closure_was_recorded_later():
+    service, _alpha, _beta, _gamma = _seed_service()
+    support = service.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+    ).fetchone()
+    assert support is not None
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE id=?",
+        (support["memory_id"],),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=50, "
+        "valid_to_recorded_at=100 WHERE id='edge_ab'"
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", valid_at=75, known_at=25,
+    )
+
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    assert support["memory_id"] in edge["support_memory_ids"]
+
+
 def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():
     service, alpha, _beta, gamma = _seed_service()
     app = FastAPI()
@@ -1029,6 +1506,17 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
     assert meta["evidence_connectors"] == 4
     assert meta["memory_connectors"] == 1
     assert meta["payload_bytes_estimate"] > 0
+    assert meta["safety_limits"] == {
+        "entity_rows": 40_000,
+        "all_mode_nodes": 20_000,
+        "all_mode_entity_nodes": 20_000,
+        "raw_relations": 200_000,
+        "evidence_rows": 500_000,
+        "memory_nodes": 100_000,
+        "memory_connectors": 300_000,
+        "code_memory_connectors": 300_000,
+        "payload_bytes": 128 * 1024 * 1024,
+    }
     assert meta["shown_nodes"] == meta["total_nodes"]
     assert meta["shown_edges"] == meta["total_edges"]
     assert {node["id"] for node in scene["nodes"] if node["node_kind"] == "memory"} \
@@ -1038,11 +1526,77 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
     assert all(bridge["edge_ids_truncated"] is False
                for bridge in scene["community_bridges"])
 
+    legacy = client.get("/api/graph/scene", params={
+        "workspace": "acme", "level": "full", "node_limit": 3,
+    })
+    assert legacy.status_code == 200
+    assert legacy.json()["meta"]["level"] == "complete"
+    assert legacy.json()["meta"]["include_memory_nodes"] is False
+
     limited = client.get("/api/graph/scene", params={
         "workspace": "acme", "level": "complete", "node_limit": 3,
     })
     assert limited.status_code == 400
     assert "do not accept node_limit" in limited.json()["detail"]["error"]
+
+
+def test_graph_scene_code_overlay_degrades_without_repo_filter(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    calls = []
+
+    def fake_graph_scene(**kwargs):
+        calls.append(kwargs)
+        if kwargs["include_code"]:
+            raise ValidationError(
+                "graph analysis exceeds the entity candidate limit; "
+                "filter the code overlay by repository"
+            )
+        return {"meta": {"level": kwargs["level"]}, "nodes": [], "edges": []}
+
+    monkeypatch.setattr(service, "graph_scene", fake_graph_scene)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    try:
+        response = TestClient(app).get("/api/graph/scene", params={
+            "workspace": "acme", "include_code": True,
+        })
+    finally:
+        v2_api.set_service(None)
+
+    assert response.status_code == 200
+    assert [call["include_code"] for call in calls] == [True, False]
+    assert response.json()["meta"]["degraded_reason"] == (
+        "code_overlay_requires_repository_filter"
+    )
+    assert response.json()["meta"]["include_code"] is False
+
+
+def test_graph_scene_code_overlay_failure_does_not_fail_entity_graph(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    calls = []
+
+    def fake_graph_scene(**kwargs):
+        calls.append(kwargs)
+        if kwargs["include_code"]:
+            raise RuntimeError("private code overlay failure")
+        return {"meta": {"level": kwargs["level"]}, "nodes": [], "edges": []}
+
+    monkeypatch.setattr(service, "graph_scene", fake_graph_scene)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    try:
+        response = TestClient(app).get("/api/graph/scene", params={
+            "workspace": "acme", "include_code": True,
+        })
+    finally:
+        v2_api.set_service(None)
+
+    assert response.status_code == 200
+    assert [call["include_code"] for call in calls] == [True, False]
+    assert response.json()["meta"]["degraded_reason"] == "code_overlay_failed"
+    assert response.json()["meta"]["include_code"] is False
 
 
 def test_complete_scene_capacity_error_is_explicit_and_never_samples(monkeypatch):
@@ -1203,7 +1757,627 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v2"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
+
+
+def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
+    service, alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.conn.execute(
+        "SELECT id FROM workspaces WHERE name='acme'"
+    ).fetchone()["id"]
+    repo_id = service.store.get_or_create_repo(workspace_id, "product")
+    service.store.conn.execute(
+        "UPDATE entities SET repo_id=? WHERE id=?", (repo_id, alpha)
+    )
+    service.store.upsert_entity(Node(
+        id="", name="Isolated", ntype="concept", workspace_id=workspace_id,
+    ))
+    service.store.conn.commit()
+
+    baseline = service.graph_scene(workspace="acme")
+    connected = service.graph_scene(workspace="acme", connected_only=True)
+    complete = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+    )
+
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
+    assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
+    assert baseline["meta"]["filters"]["connected_only"] is False
+    assert connected["meta"]["filters"]["connected_only"] is True
+    assert "Isolated" in {node["label"] for node in baseline["nodes"]}
+    assert "Isolated" not in {node["label"] for node in connected["nodes"]}
+    alpha_node = next(node for node in baseline["nodes"] if node["id"] == alpha)
+    assert alpha_node["repo_names"] == ["product"]
+    assert complete["meta"]["node_projection"] == "entities"
+    assert complete["meta"]["include_memory_nodes"] is False
+    assert {node["node_kind"] for node in complete["nodes"]} == {"entity"}
+
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    try:
+        accepted = TestClient(app).get("/api/graph/scene", params={
+            "workspace": "acme", "level": "complete", "include_memory_nodes": False,
+            "connected_only": True, "include_history": True,
+        })
+        assert accepted.status_code == 200
+        assert accepted.json()["meta"]["node_projection"] == "entities"
+        rejected = TestClient(app).get("/api/graph/scene", params={
+            "workspace": "acme", "include_memory_nodes": False,
+        })
+        assert rejected.status_code == 400
+        with pytest.raises(ValidationError, match="only accepted for complete"):
+            service.graph_scene(workspace="acme", include_memory_nodes=False)
+    finally:
+        v2_api.set_service(None)
+
+
+def test_graph_scene_repo_names_are_deterministic_and_bounded():
+    entities = [
+        {
+            "id": f"member-{index}", "canonical_id": "canonical",
+            "name": "Canonical", "etype": "concept", "repo_id": f"repo-{index}",
+            "repo_name": f"Repo {index:03d}",
+        }
+        for index in range(graph_scene_module.PUBLIC_REPO_NAME_LIMIT + 5)
+    ]
+
+    scene = build_graph_scene("w", entities, [], [])
+
+    node = scene["nodes"][0]
+    assert len(node["repo_names"]) == graph_scene_module.PUBLIC_REPO_NAME_LIMIT
+    assert node["repo_names"] == sorted(node["repo_names"], key=str.casefold)
+
+
+def test_graph_scene_hash_changes_when_public_repo_metadata_changes():
+    base = [
+        {"id": "a", "canonical_id": "a", "name": "Alpha", "etype": "concept",
+         "repo_id": "repo", "repo_name": "First"},
+    ]
+    changed = [dict(base[0], repo_name="Second")]
+
+    first = build_graph_scene("w", base, [], [])
+    second = build_graph_scene("w", changed, [], [])
+
+    assert first["nodes"][0]["repo_names"] == ["First"]
+    assert second["nodes"][0]["repo_names"] == ["Second"]
+    assert first["meta"]["scene_hash"] != second["meta"]["scene_hash"]
+
+
+def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
+    service, alpha, beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge_ab", at=closed_at)
+
+    live = service.graph_scene(
+        workspace="acme", valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+    history = service.graph_scene(
+        workspace="acme", valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+        include_history=True,
+    )
+
+    assert {edge["id"] for edge in live["edges"]} == {"edge_bg"}
+    ghost = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert ghost["ghost"] is True
+    assert ghost["valid_to"] == closed_at
+    assert ghost["strength"] == 0.0
+    assert ghost["spring_strength"] == 0.0
+    assert ghost["rest_length"] == 0.0
+    alpha_node = next(node for node in history["nodes"] if node["id"] == alpha)
+    beta_live = next(node for node in live["nodes"] if node["id"] == beta)
+    beta_history = next(node for node in history["nodes"] if node["id"] == beta)
+    assert alpha_node["ghost"] is True
+    assert alpha_node["gravity_mass"] == 0.0
+    assert beta_history["gravity_mass"] == beta_live["gravity_mass"]
+    assert (beta_history["x"], beta_history["y"]) == (
+        beta_live["x"], beta_live["y"]
+    )
+    assert history["meta"]["layout_seed"] == live["meta"]["layout_seed"]
+    assert alpha_node["community_id"] not in {
+        community["id"] for community in history["communities"]
+    }
+    assert history["meta"]["filters"]["include_history"] is True
+    assert history["meta"]["scene_hash"] != live["meta"]["scene_hash"]
+    complete = service.graph_scene(
+        workspace="acme", level="complete", include_history=True,
+        include_memory_nodes=False, valid_at=closed_at + 1.0,
+        known_at=closed_at + 1.0,
+    )
+    complete_ghost = next(edge for edge in complete["edges"] if edge["id"] == "edge_ab")
+    assert complete_ghost["connector_kind"] == "entity_relation"
+    assert complete_ghost["ghost"] is True
+    assert complete_ghost["strength"] == 0.0
+    complete_alpha = next(node for node in complete["nodes"] if node["id"] == alpha)
+    assert complete_alpha["community_id"] not in {
+        community["id"] for community in complete["communities"]
+    }
+
+
+def test_graph_scene_history_collision_uses_consistent_ghost_node_id():
+    entities = [
+        {"id": "live", "canonical_id": "canon", "name": "Current", "etype": "concept"},
+        {"id": "historical", "canonical_id": "canon", "name": "Former", "etype": "concept"},
+        {"id": "other", "canonical_id": "other", "name": "Other", "etype": "concept"},
+    ]
+    edges = [
+        {"id": "live-edge", "src": "live", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+        {"id": "ghost-edge", "src": "historical", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "ghost": True, "provenance": "{}"},
+    ]
+
+    scene = build_graph_scene("w", entities, edges, [], include_history=True)
+    nodes_by_id = {node["id"]: node for node in scene["nodes"]}
+
+    assert len(nodes_by_id) == len(scene["nodes"])
+    assert nodes_by_id["canon"].get("ghost") is not True
+    assert nodes_by_id["canon:ghost"]["ghost"] is True
+    assert nodes_by_id["canon:ghost"]["id"] == "canon:ghost"
+    ghost_edge = next(edge for edge in scene["edges"] if edge["id"] == "ghost-edge")
+    assert ghost_edge["source"] == "canon:ghost"
+
+
+def test_graph_scene_history_ghost_alias_does_not_overwrite_live_node():
+    entities = [
+        {"id": "live", "canonical_id": "canon", "name": "Current", "etype": "concept"},
+        {"id": "live-ghost", "canonical_id": "canon:ghost", "name": "Literal Ghost", "etype": "concept"},
+        {"id": "historical", "canonical_id": "canon", "name": "Former", "etype": "concept"},
+        {"id": "other", "canonical_id": "other", "name": "Other", "etype": "concept"},
+    ]
+    edges = [
+        {"id": "live-edge", "src": "live-ghost", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "provenance": "{}"},
+        {"id": "ghost-edge", "src": "historical", "dst": "other", "relation": "uses",
+         "layer": "entity", "weight": 1.0, "ghost": True, "provenance": "{}"},
+    ]
+
+    scene = build_graph_scene("w", entities, edges, [], include_history=True)
+    nodes_by_id = {node["id"]: node for node in scene["nodes"]}
+
+    assert nodes_by_id["canon:ghost"].get("ghost") is not True
+    assert nodes_by_id["canon:ghost:ghost"]["ghost"] is True
+    assert {edge["id"]: edge["source"] for edge in scene["edges"]} == {
+        "live-edge": "canon:ghost",
+        "ghost-edge": "canon:ghost:ghost",
+    }
+
+
+def test_live_graph_excludes_edges_supported_only_by_session_memories():
+    service, alpha, beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    session = service.start_session("acme", repo="web", goal="private graph")
+    private_id = service.store.add_memory(MemoryRecord(
+        id="mem_session_only", content="private graph relation",
+        workspace_id=workspace_id, repo_id=repo_id,
+        session_id=session["session_id"], scope=Scope.SESSION,
+    ))
+    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edge_ab'")
+    service.store.conn.execute(
+        "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
+        "VALUES ('edge_ab', ?, 'manual', 1.0)", (private_id,),
+    )
+    service.store.conn.commit()
+
+    live = service.graph_scene(workspace="acme")
+
+    assert {edge["id"] for edge in live["edges"]} == {"edge_bg"}
+    assert alpha not in {edge["source"] for edge in live["edges"]}
+    assert beta in {edge["source"] for edge in live["edges"]}
+
+
+def test_history_graph_excludes_session_supports_alongside_public_evidence():
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    session = service.start_session("acme", repo="web", goal="private graph")
+    private_id = service.store.add_memory(MemoryRecord(
+        id="mem_session_mixed", content="private graph relation",
+        workspace_id=workspace_id, repo_id=repo_id,
+        session_id=session["session_id"], scope=Scope.SESSION,
+    ))
+    service.store.add_edge_support(
+        "edge_ab", {"source": "manual", "memory_id": private_id},
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
+    )
+
+    relation = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert private_id not in relation["support_memory_ids"]
+    assert relation["support_count"] == 1
+
+
+def test_history_edge_metadata_counts_appended_ghost_relations():
+    service, _alpha, _beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge_ab", at=closed_at)
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert history["meta"]["total_edges"] == 2
+    assert history["meta"]["shown_edges"] == 2
+    assert history["meta"]["truncated"] is False
+
+
+def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
+    service, _alpha, _beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge_ab", at=closed_at)
+
+    history = service.graph_scene(
+        workspace="acme", valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+        include_history=True, edge_limit=1,
+    )
+
+    assert len(history["edges"]) == 1
+    assert history["edges"][0]["id"] == "edge_ab"
+    assert history["edges"][0]["ghost"] is True
+
+
+def test_graph_scene_history_reserves_edge_cap_for_relations_between_live_nodes():
+    entities = [
+        {"id": node_id, "canonical_id": node_id, "name": node_id, "etype": "concept"}
+        for node_id in ("left", "middle", "right")
+    ]
+    edges = [
+        {"id": "live-left", "src": "left", "dst": "middle", "relation": "uses",
+         "layer": "entity", "weight": 10.0},
+        {"id": "live-right", "src": "middle", "dst": "right", "relation": "uses",
+         "layer": "entity", "weight": 9.0},
+        {"id": "history-live", "src": "left", "dst": "middle", "relation": "used",
+         "layer": "entity", "weight": 1.0, "ghost": True},
+    ]
+
+    scene = build_graph_scene(
+        "w", entities, edges, [], include_history=True, edge_limit=1,
+    )
+
+    assert [(edge["id"], edge["ghost"]) for edge in scene["edges"]] == [
+        ("history-live", True),
+    ]
+
+
+@pytest.mark.parametrize("node_limit", [1, 2])
+def test_graph_scene_history_keeps_one_relation_atomic_beyond_node_cap(node_limit):
+    entities = [
+        {"id": node_id, "canonical_id": node_id, "name": node_id, "etype": "concept"}
+        for node_id in ("hub", "live-a", "live-b", "old-a", "old-b")
+    ]
+    edges = [
+        {"id": "live-a", "src": "hub", "dst": "live-a", "relation": "uses",
+         "layer": "entity", "weight": 10.0},
+        {"id": "live-b", "src": "hub", "dst": "live-b", "relation": "uses",
+         "layer": "entity", "weight": 9.0},
+        {"id": "history", "src": "old-a", "dst": "old-b", "relation": "used",
+         "layer": "entity", "weight": 1.0, "ghost": True},
+    ]
+
+    scene = build_graph_scene(
+        "w", entities, edges, [], include_history=True,
+        node_limit=node_limit, edge_limit=1,
+    )
+
+    assert {node["id"] for node in scene["nodes"]} == {"old-a", "old-b"}
+    assert [(edge["id"], edge["ghost"]) for edge in scene["edges"]] == [
+        ("history", True),
+    ]
+
+
+def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
+    service, _alpha, _beta, _gamma = _seed_service()
+    other_workspace_id = service.store.get_or_create_workspace("other")
+    other_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Evidence from another workspace.",
+        workspace_id=other_workspace_id, scope=Scope.WORKSPACE,
+    ))
+    service.store.conn.execute(
+        "DELETE FROM edge_supports WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
+        "VALUES ('edge_ab', ?, 'manual', 1.0)", (other_memory,)
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
+    )
+
+    assert "edge_ab" not in {edge["id"] for edge in history["edges"]}
+
+
+def test_graph_scene_history_facets_keep_invalidated_supports_visible():
+    service, _alpha, _beta, _gamma = _seed_service()
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE content='Alpha uses Beta.'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id='edge_ab'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE edge_id='edge_ab'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", include_history=True, memory_types=["semantic"],
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    edge = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert edge["ghost"] is True
+    assert edge["support_memory_ids"]
+
+
+def test_graph_scene_history_includes_closed_code_rows_and_marks_them_ghost():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    source = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="source", fqname="source",
+        file="source.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    target = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    edge_id = service.store.add_code_edge(
+        repo_id=repo_id, src=source, dst=target, relation="calls", commit=False,
+    )
+    live = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_memory_nodes=False,
+    )
+    assert f"code-edge:{edge_id}" in {edge["id"] for edge in live["edges"]}
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.execute(
+        "UPDATE code_edges SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, include_memory_nodes=False,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert {node["id"] for node in history["nodes"]} >= {
+        f"code:{source}", f"code:{target}",
+    }
+    code_edge = next(
+        edge for edge in history["edges"] if edge["id"] == f"code-edge:{edge_id}"
+    )
+    assert code_edge["ghost"] is True
+
+
+def test_graph_scene_history_marks_live_code_memory_link_to_closed_symbol_ghost():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="", content="Live code note.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+    ))
+    symbol_id = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="closed", fqname="closed",
+        file="closed.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    link_id = service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id,
+        relation="documents", commit=False,
+    )
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, valid_to=?, valid_to_recorded_at=?",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    history = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=closed_at + 1.0,
+        known_at=closed_at + 1.0,
+    )
+
+    symbol = next(node for node in history["nodes"] if node["id"] == f"code:{symbol_id}")
+    link = next(edge for edge in history["edges"] if edge["id"] == link_id)
+    assert symbol["ghost"] is True
+    assert symbol["gravity_mass"] == 0.0
+    assert link["ghost"] is True
+    assert link["strength"] == 0.0
+    assert link["spring_strength"] == 0.0
+
+
+def test_graph_scene_history_honors_known_at_for_expired_code_rows():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="", content="Historical code note.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+    ))
+    source = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="source", fqname="source",
+        file="source.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    target = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    code_edge_id = service.store.add_code_edge(
+        repo_id=repo_id, src=source, dst=target, relation="calls", commit=False,
+    )
+    code_link_id = service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=source, memory_id=memory_id,
+        relation="documents", commit=False,
+    )
+    service.store.conn.execute(
+        "UPDATE symbols SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE code_edges SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE code_memory_links SET valid_from=0, ingested_at=0, expired_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0"
+    )
+    service.store.conn.commit()
+
+    known = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=1.0, known_at=100.0,
+    )
+    expired = service.graph_scene(
+        workspace="acme", level="complete", include_code=True,
+        include_history=True, valid_at=1.0, known_at=300.0,
+    )
+
+    assert {f"code:{source}", f"code:{target}"} <= {
+        node["id"] for node in known["nodes"]
+    }
+    assert f"code-edge:{code_edge_id}" in {edge["id"] for edge in known["edges"]}
+    assert code_link_id in {edge["id"] for edge in known["edges"]}
+    assert f"code:{source}" not in {node["id"] for node in expired["nodes"]}
+    assert f"code:{target}" not in {node["id"] for node in expired["nodes"]}
+    assert f"code-edge:{code_edge_id}" not in {edge["id"] for edge in expired["edges"]}
+    assert code_link_id not in {edge["id"] for edge in expired["edges"]}
+
+
+def test_graph_history_does_not_expose_support_learned_after_known_at():
+    service, _alpha, _beta, _gamma = _seed_service()
+    support = service.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+    ).fetchone()
+    assert support is not None
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0 WHERE id=?",
+        (support["memory_id"],),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=200 WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", valid_at=1.0, known_at=100.0, include_history=True,
+    )
+
+    assert "edge_ab" not in {edge["id"] for edge in scene["edges"]}
+
+
+def test_graph_history_keeps_evidence_expired_after_known_at():
+    service, _alpha, _beta, _gamma = _seed_service()
+    support = service.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+    ).fetchone()
+    assert support is not None
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE id='edge_ab'"
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE id=?",
+        (support["memory_id"],),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, expired_at=200 "
+        "WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", valid_at=1.0, known_at=100.0,
+        include_history=True,
+    )
+
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    assert edge["ghost"] is False
+
+
+def test_complete_scene_history_returns_closed_memory_as_temporal_ghost():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="", content="Historical decision.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    closed_at = time.time() + 10.0
+    service.store.close_validity(memory_id, at=closed_at)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    node = next(node for node in scene["nodes"] if node["id"] == memory_id)
+    assert node["node_kind"] == "memory"
+    assert node["ghost"] is True
+    assert node["valid_to"] == closed_at
+    assert node["gravity_mass"] == 0.0
+    assert math.isfinite(node["x"])
+    assert math.isfinite(node["y"])
+    assert scene["communities"] == []
+    assert scene["meta"]["node_projection"] == "all"
+
+
+def test_complete_scene_history_returns_closed_memory_link_with_zero_physics():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    memory_ids = [
+        service.store.add_memory(MemoryRecord(
+            id="", content=content, workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+        ))
+        for content in ("First decision.", "Second decision.")
+    ]
+    service.store.add_link(memory_ids[0], memory_ids[1], relation="related")
+    closed_at = time.time() + 10.0
+    service.store.conn.execute(
+        "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=?",
+        (closed_at, time.time()),
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    link = next(edge for edge in scene["edges"]
+                if edge["connector_kind"] == "memory_link")
+    assert link["ghost"] is True
+    assert link["valid_to"] == closed_at
+    assert link["strength"] == 0.0
+    assert link["rest_length"] == 0.0
+    assert link["spring_strength"] == 0.0
 
 
 def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
@@ -1225,6 +2399,22 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["cache_hit"] is False
     assert refreshed["meta"]["total_nodes"] == first["meta"]["total_nodes"] + 1
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
+
+
+def test_graph_scene_cache_separates_algorithm_contract(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+
+    first = service.graph_scene(workspace="acme")
+    warm = service.graph_scene(workspace="acme")
+    assert warm["meta"]["cache_hit"] is True
+
+    monkeypatch.setattr(service_module, "GRAPH_SCENE_ALGORITHM_VERSION", "galaxy-test")
+    monkeypatch.setattr(graph_scene_module, "ALGORITHM_VERSION", "galaxy-test")
+    refreshed = service.graph_scene(workspace="acme")
+
+    assert refreshed["meta"]["cache_hit"] is False
+    assert refreshed["meta"]["algorithm_version"] == "galaxy-test"
+    assert refreshed["meta"]["scene_hash"] != first["meta"]["scene_hash"]
 
 
 def test_explicit_graph_index_dry_run_is_persisted_counted_and_audited():
@@ -1695,11 +2885,98 @@ def test_current_graph_scene_cache_expires_at_next_temporal_boundary(monkeypatch
     assert expired["meta"]["total_edges"] == 1
 
 
+def test_current_graph_scene_cache_tracks_memory_temporal_boundaries(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    now = time.time()
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=?, ingested_at=?, expired_at=? "
+        "WHERE content='Alpha uses Beta.'",
+        (now + 1.0, now + 2.0, now + 4.0),
+    )
+    workspace_id = service.store.get_or_create_workspace("acme")
+    service.store.conn.execute(
+        "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("ent_future", workspace_id, "Future", "concept", now + 3.0),
+    )
+    service.store.conn.commit()
+    clock = {"now": now}
+    monkeypatch.setattr(service_module, "time", types.SimpleNamespace(
+        time=lambda: clock["now"], perf_counter=time.perf_counter,
+    ))
+
+    before = service.graph_scene(workspace="acme")
+    warm = service.graph_scene(workspace="acme")
+    clock["now"] = now + 1.5
+    before_ingestion = service.graph_scene(workspace="acme")
+    clock["now"] = now + 2.5
+    after_ingestion = service.graph_scene(workspace="acme")
+    clock["now"] = now + 3.5
+    after_entity_creation = service.graph_scene(workspace="acme")
+    clock["now"] = now + 4.5
+    after_expiry = service.graph_scene(workspace="acme")
+
+    assert before["meta"]["total_edges"] == 1
+    assert warm["meta"]["cache_hit"] is True
+    assert before_ingestion["meta"]["cache_hit"] is False
+    assert before_ingestion["meta"]["total_edges"] == 1
+    assert after_ingestion["meta"]["cache_hit"] is False
+    assert after_ingestion["meta"]["total_edges"] == 2
+    assert after_entity_creation["meta"]["cache_hit"] is False
+    assert after_expiry["meta"]["cache_hit"] is False
+    assert after_expiry["meta"]["total_edges"] == 1
+
+
+def test_history_cache_expires_when_known_time_is_unanchored(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    recorded_at = 105.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE workspace_id=?",
+        (recorded_at, workspace_id),
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE edge_id='edge_ab'",
+        (recorded_at,),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=5, "
+        "valid_to_recorded_at=? WHERE id='edge_ab'",
+        (recorded_at,),
+    )
+    service.store.conn.execute(
+        "UPDATE entities SET created_at=0 WHERE workspace_id=?",
+        (workspace_id,),
+    )
+    service.store.conn.commit()
+    clock = {"now": 100.0}
+    monkeypatch.setattr(service_module, "time", types.SimpleNamespace(
+        time=lambda: clock["now"], perf_counter=time.perf_counter,
+    ))
+
+    before_recording = service.graph_scene(
+        workspace="acme", level="complete", include_history=True, valid_at=10.0,
+    )
+    clock["now"] = 106.0
+    after_recording = service.graph_scene(
+        workspace="acme", level="complete", include_history=True, valid_at=10.0,
+    )
+
+    before_edge = next(edge for edge in before_recording["edges"] if edge["id"] == "edge_ab")
+    after_edge = next(edge for edge in after_recording["edges"] if edge["id"] == "edge_ab")
+    assert before_edge["ghost"] is False
+    assert after_recording["meta"]["cache_hit"] is False
+    assert after_edge["ghost"] is True
+
+
 @pytest.mark.parametrize(("kwargs", "message"), [
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
     ({"min_confidence": float("nan")}, "min_confidence"),
-    ({"node_limit": 301}, "node_limit"),
+    ({"node_limit": 1001}, "node_limit"),
+    ({"edge_limit": 2001}, "edge_limit"),
     ({"edge_limit": -1}, "edge_limit"),
 ])
 def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
@@ -1708,6 +2985,128 @@ def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
     with pytest.raises(ValidationError, match=message):
         service.graph_scene(workspace="acme", **kwargs)
 
+
+
+def test_graph_scene_accepts_the_1000_node_2000_relation_overview_limit():
+    service, _alpha, _beta, _gamma = _seed_service()
+
+    scene = service.graph_scene(
+        workspace="acme", node_limit=1000, edge_limit=2000,
+    )
+
+    assert scene["meta"]["shown_nodes"] <= 1000
+    assert scene["meta"]["shown_edges"] <= 2000
+
+
+def test_graph_scene_all_profile_keeps_exact_20k_entity_and_200k_relation_contract(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    entities = [{"id": f"ent-{index:05d}"} for index in range(20_000)]
+    edges = [object() for _index in range(200_000)]
+
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
+        "acme", "workspace-id", entities, edges, [], [], [], [],
+        {"generation": 7, "state": "ready"},
+    ))
+    monkeypatch.setattr(service_module, "build_graph_scene", lambda _workspace, entity_rows, edge_rows, *_args, **_kwargs: {
+        "meta": {"total_nodes": len(entity_rows), "total_edges": len(edge_rows), "shown_nodes": len(entity_rows), "shown_edges": len(edge_rows), "truncated": False},
+        "nodes": [], "edges": [], "communities": [], "community_bridges": [], "facets": {},
+    })
+    scene = service.graph_scene(workspace="acme", level="complete", presentation="all", include_memory_nodes=False)
+    assert scene["meta"]["presentation"] == "all"
+    assert scene["meta"]["total_nodes"] == 20_000
+    assert scene["meta"]["total_edges"] == 200_000
+    assert scene["meta"]["safety_limits"]["all_mode_entity_nodes"] == 20_000
+    assert scene["meta"]["safety_limits"]["all_mode_nodes"] == 20_000
+
+
+def test_graph_scene_all_profile_rejects_entity_over_capacity_without_sampling(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    entities = [{"id": f"ent-{index:05d}"} for index in range(20_001)]
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
+        "acme", "workspace-id", entities, [], [], [], [], [], {"generation": 1, "state": "ready"},
+    ))
+    with pytest.raises(GraphSceneCapacityExceeded, match="all-mode entity nodes"):
+        service.graph_scene(workspace="acme", level="complete", presentation="all", include_memory_nodes=False)
+
+
+def test_graph_scene_all_profile_caps_final_nodes_after_a_code_overlay(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
+        "acme", "workspace-id", [{"id": "entity"}], [], [], [], [], [],
+        {"generation": 1, "state": "ready"},
+    ))
+    monkeypatch.setattr(service_module, "build_graph_scene", lambda *_args, **_kwargs: {
+        "meta": {"total_nodes": 20_001, "total_edges": 0, "shown_nodes": 20_001,
+                 "shown_edges": 0, "truncated": False},
+        "nodes": [{"id": f"node-{index}"} for index in range(20_001)],
+        "edges": [], "communities": [], "community_bridges": [], "facets": {},
+    })
+    with pytest.raises(GraphSceneCapacityExceeded, match="all-mode nodes"):
+        service.graph_scene(
+            workspace="acme", level="complete", presentation="all",
+            include_memory_nodes=False, include_code=True, repo="repository",
+        )
+
+
+def test_graph_scene_route_exposes_all_profile_and_capacity_error(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    client = TestClient(app)
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
+        "acme", "workspace-id", [], [], [], [], [], [], {"generation": 1, "state": "ready"},
+    ))
+    monkeypatch.setattr(service_module, "build_graph_scene", lambda *_args, **_kwargs: {
+        "meta": {"total_nodes": 0, "total_edges": 0, "shown_nodes": 0, "shown_edges": 0, "truncated": False},
+        "nodes": [], "edges": [], "communities": [], "community_bridges": [], "facets": {},
+    })
+    params = {"workspace": "acme", "level": "complete", "presentation": "all", "include_memory_nodes": "false"}
+    response = client.get("/api/graph/scene", params=params)
+    assert response.status_code == 200 and response.json()["meta"]["presentation"] == "all"
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (_ for _ in ()).throw(GraphSceneCapacityExceeded(resource="raw relations", count=200_001, limit=200_000)))
+    service._graph_scene_cache.clear()
+    response = client.get("/api/graph/scene", params=params)
+    assert response.status_code == 413 and response.json()["detail"]["limit"] == 200_000
+    entities = [{"id": f"ent-{index:05d}"} for index in range(20_001)]
+    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
+        "acme", "workspace-id", entities, [], [], [], [], [],
+        {"generation": 1, "state": "ready"},
+    ))
+    service._graph_scene_cache.clear()
+    response = client.get("/api/graph/scene", params=params)
+    detail = response.json()["detail"]
+    assert response.status_code == 413
+    assert detail["resource"] == "all-mode entity nodes"
+    assert detail["count"] == 20_001
+    assert detail["limit"] == 20_000
+
+
+def test_graph_scene_route_allows_repository_scoped_code_in_all_presentation(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    client = TestClient(app)
+    calls = []
+
+    def scene(**kwargs):
+        calls.append(kwargs)
+        return {
+            "meta": {"presentation": "all", "include_code": kwargs["include_code"]},
+            "nodes": [], "edges": [], "communities": [], "community_bridges": [],
+            "facets": {},
+        }
+
+    monkeypatch.setattr(service, "graph_scene", scene)
+    response = client.get("/api/graph/scene", params={
+        "workspace": "acme", "level": "complete", "presentation": "all",
+        "include_memory_nodes": "false", "include_code": "true", "repo": "repository",
+    })
+    assert response.status_code == 200
+    assert calls and calls[-1]["include_code"] is True
+    assert calls[-1]["repo"] == "repository"
+    assert calls[-1]["presentation"] == "all"
 
 def test_graph_lookup_direct_service_inputs_are_bounded():
     service, _alpha, _beta, _gamma = _seed_service()
@@ -1826,3 +3225,422 @@ def test_workspace_copy_remaps_canonical_and_support_ids():
     for edge in copied_edges:
         provenance = json.loads(edge["provenance"])
         assert provenance["memory_id"] in copied_memory_ids
+
+
+def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoint():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    archived_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Archived relation evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    current_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Current relation evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    literal_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Literal suffix evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    archived = service.store.upsert_entity(Node(
+        id="archived-member", name="Archived Origin", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon",
+    ))
+    current = service.store.upsert_entity(Node(
+        id="current-member", name="Current Primary", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon",
+    ))
+    literal = service.store.upsert_entity(Node(
+        id="literal-member", name="Literal Suffix", ntype="concept",
+        workspace_id=workspace_id, canonical_id="canon:ghost",
+    ))
+    shared = service.store.upsert_entity(Node(
+        id="shared-member", name="Shared Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    for edge_id, source, memory_id in (
+        ("archived-edge", archived, archived_memory),
+        ("current-edge", current, current_memory),
+        ("literal-edge", literal, literal_memory),
+    ):
+        service.store.upsert_edge(Edge(
+            id=edge_id, src=source, dst=shared, relation="uses",
+            workspace_id=workspace_id,
+            provenance={"source": "manual", "memory_id": memory_id},
+        ))
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("archived-edge", at=closed_at)
+
+    scene = service.graph_scene(
+        workspace="acme", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+    ghost = next(
+        node for node in scene["nodes"]
+        if node.get("ghost") and archived in node["member_ids"]
+    )
+    assert ghost["id"] == "canon:ghost:ghost"
+
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    v2_api.set_service(service)
+    literal_response = TestClient(app).get(
+        "/api/graph/entities/canon:ghost/memories",
+        params={"workspace": "acme"},
+    )
+    assert literal_response.status_code == 200
+    literal_detail = literal_response.json()
+    assert literal_detail["canonical_id"] == "canon:ghost"
+    assert [item["excerpt"] for item in literal_detail["evidence"]] == [
+        "Literal suffix evidence.",
+    ]
+
+    response = TestClient(app).get(
+        f"/api/graph/entities/{ghost['id']}/memories",
+        params={
+            "workspace": "acme",
+            "valid_at": closed_at + 1.0,
+            "known_at": closed_at + 1.0,
+            "member_id": archived,
+            "include_history": True,
+        },
+    )
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["canonical_id"] == "canon"
+    assert [item["excerpt"] for item in detail["evidence"]] == [
+        "Archived relation evidence.",
+    ]
+
+    live_response = TestClient(app).get(
+        "/api/graph/entities/canon/memories",
+        params={
+            "workspace": "acme",
+            "valid_at": closed_at + 1.0,
+            "known_at": closed_at + 1.0,
+            "include_history": True,
+        },
+    )
+    assert live_response.status_code == 200
+    assert [item["excerpt"] for item in live_response.json()["evidence"]] == [
+        "Archived relation evidence.",
+    ]
+
+
+def test_graph_entity_evidence_history_includes_closed_support_on_live_relation():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="live-history-source", name="Live History Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="live-history-target", name="Live History Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    current_memory = service.store.add_memory(MemoryRecord(
+        id="live-history-current", content="Current support.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, valid_from=0.0, ingested_at=0.0,
+    ))
+    closed_memory = service.store.add_memory(MemoryRecord(
+        id="live-history-closed", content="Closed support.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0,
+        valid_to_recorded_at=100.0, ingested_at=0.0,
+    ))
+    edge_id = service.store.upsert_edge(Edge(
+        id="live-history-edge", src=source, dst=target, relation="relates",
+        workspace_id=workspace_id, valid_from=0.0, ingested_at=0.0,
+    ))
+    service.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": current_memory},
+    )
+    service.store.add_edge_support(
+        edge_id, {"source": "manual", "memory_id": closed_memory},
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, valid_to=100, "
+        "valid_to_recorded_at=100, ingested_at=0 "
+        "WHERE edge_id=? AND memory_id=?",
+        (edge_id, closed_memory),
+    )
+    service.store.conn.commit()
+
+    detail = service.graph_entity_evidence(
+        source, workspace="acme", include_history=True,
+        valid_at=150.0, known_at=150.0,
+    )
+
+    assert [item["memory_id"] for item in detail["evidence"]] == [closed_memory]
+
+
+def test_graph_scene_history_visibility_scopes_to_requested_repo():
+    """Regression: visibility preclassification must apply the same repo scope
+    as the subsequent edge/entity queries so unrelated-repo edges cannot
+    promote private entities into the candidate set."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="", content="Alpha evidence.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    entity_shared = service.store.upsert_entity(Node(
+        id="ent_shared", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    entity_shared2 = service.store.upsert_entity(Node(
+        id="ent_shared2", name="Shared2", ntype="concept", workspace_id=workspace_id,
+    ))
+    entity_b_only = service.store.upsert_entity(Node(
+        id="ent_b_only", name="BetaOnly", ntype="concept",
+        workspace_id=workspace_id, repo_id=repo_b,
+    ))
+    # Edge in repo_b touching a shared entity — should be invisible when
+    # filtering to repo_a.
+    service.store.upsert_edge(Edge(
+        id="edge_b", src=entity_b_only, dst=entity_shared, relation="uses",
+        workspace_id=workspace_id, repo_id=repo_b,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+    # Repo-less shared edge between two shared entities — must remain visible.
+    service.store.upsert_edge(Edge(
+        id="edge_shared", src=entity_shared, dst=entity_shared2, relation="relates",
+        workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", repo="alpha", include_history=True,
+        valid_at=time.time() + 10.0, known_at=time.time() + 10.0,
+    )
+    node_ids = {node["id"] for node in scene["nodes"]}
+    edge_ids = {edge["id"] for edge in scene["edges"]}
+
+    assert entity_shared in node_ids
+    assert entity_shared2 in node_ids
+    assert "edge_shared" in edge_ids
+    assert entity_b_only not in node_ids
+    assert "edge_b" not in edge_ids
+
+
+def test_graph_entity_evidence_history_scopes_to_requested_repo():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    shared = service.store.upsert_entity(Node(
+        id="shared-evidence", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="target-evidence", name="Target", ntype="concept", workspace_id=workspace_id,
+    ))
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="memory-alpha", content="Alpha-only history.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    memory_shared = service.store.add_memory(MemoryRecord(
+        id="memory-shared", content="Shared history.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    memory_b = service.store.add_memory(MemoryRecord(
+        id="memory-beta", content="Beta history.", workspace_id=workspace_id,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge-history-evidence", src=shared, dst=target, relation="relates",
+        workspace_id=workspace_id,
+    ))
+    for memory_id in (memory_a, memory_shared, memory_b):
+        service.store.add_edge_support(
+            "edge-history-evidence", {"source": "manual", "memory_id": memory_id},
+        )
+    closed_at = time.time() + 10.0
+    service.store.invalidate_edge("edge-history-evidence", at=closed_at)
+
+    detail = service.graph_entity_evidence(
+        shared, workspace="acme", repo="beta", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    assert detail["repo"] == "beta"
+    assert {item["memory_id"] for item in detail["evidence"]} == {
+        memory_shared, memory_b,
+    }
+
+
+def test_graph_scene_history_support_scopes_to_requested_repo():
+    """Historical support enrichment must honor the selected repository."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+    repo_b = service.store.get_or_create_repo(workspace_id, "beta")
+    memory_a = service.store.add_memory(MemoryRecord(
+        id="", content="Alpha-only evidence.", workspace_id=workspace_id,
+        repo_id=repo_a, scope=Scope.REPO,
+    ))
+    entity_shared = service.store.upsert_entity(Node(
+        id="ent_shared_support", name="Shared", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    entity_shared2 = service.store.upsert_entity(Node(
+        id="ent_shared_support2", name="Shared2", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    _entity_b_only = service.store.upsert_entity(Node(
+        id="ent_b_only_support", name="BetaOnly", ntype="concept",
+        workspace_id=workspace_id, repo_id=repo_b,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_shared_support", src=entity_shared, dst=entity_shared2,
+        relation="relates", workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": memory_a},
+    ))
+    memory_shared = service.store.add_memory(MemoryRecord(
+        id="", content="Shared evidence.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+    ))
+    memory_b = service.store.add_memory(MemoryRecord(
+        id="", content="Beta-only evidence.", workspace_id=workspace_id,
+        repo_id=repo_b, scope=Scope.REPO,
+    ))
+    service.store.add_edge_support(
+        "edge_shared_support", {"source": "manual", "memory_id": memory_shared},
+    )
+    service.store.add_edge_support(
+        "edge_shared_support", {"source": "manual", "memory_id": memory_b},
+    )
+    closed_at = time.time() + 1.0
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id=?",
+        (closed_at, closed_at, memory_a),
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
+        "WHERE id='edge_shared_support'",
+        (closed_at, closed_at),
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", repo="beta", include_history=True,
+        valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
+    )
+
+    shared_edge = next(
+        (edge for edge in scene["edges"] if edge["id"] == "edge_shared_support"),
+        None,
+    )
+    assert shared_edge is not None
+    support_ids = set(shared_edge.get("support_memory_ids") or [])
+    assert memory_a not in support_ids
+    assert {memory_shared, memory_b} <= support_ids
+    assert shared_edge["support_count"] == 2
+
+
+def test_graph_repo_filter_keeps_legacy_workspace_memory_ancestors():
+    """Scope, not a retained legacy repo id, controls ancestor visibility."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("acme")
+        repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
+        service.store.get_or_create_repo(workspace_id, "beta")
+        service.store.conn.executemany(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?, ?, NULL, ?, 'concept', 0)",
+            [
+                ("legacy-ancestor-source", workspace_id, "Legacy Source"),
+                ("legacy-ancestor-target", workspace_id, "Legacy Target"),
+            ],
+        )
+        service.store.conn.execute("PRAGMA ignore_check_constraints=ON")
+        workspace_memory = service.store.add_memory(MemoryRecord(
+            id="mem_legacy_workspace_ancestor", content="shared ancestor evidence",
+            workspace_id=workspace_id, repo_id=repo_a, scope=Scope.WORKSPACE,
+            valid_from=0.0, valid_to=100.0, valid_to_recorded_at=100.0,
+            ingested_at=0.0,
+        ))
+        service.store.conn.execute("PRAGMA ignore_check_constraints=OFF")
+        edge_id = service.store.upsert_edge(Edge(
+            id="edge_legacy_workspace_ancestor", src="legacy-ancestor-source",
+            dst="legacy-ancestor-target", relation="relates", workspace_id=workspace_id,
+            valid_from=0.0, valid_to=100.0, valid_to_recorded_at=100.0,
+            ingested_at=0.0,
+        ))
+        service.store.add_edge_support(edge_id, {"memory_id": workspace_memory})
+        service.store.conn.execute(
+            "UPDATE edge_supports SET valid_from=0, valid_to=100, "
+            "valid_to_recorded_at=100, ingested_at=0 WHERE edge_id=? AND memory_id=?",
+            (edge_id, workspace_memory),
+        )
+        service.store.conn.commit()
+
+        scene = service.graph_scene(
+            workspace="acme", repo="beta", include_history=True,
+            valid_at=150.0, known_at=150.0,
+        )
+        edge = next(item for item in scene["edges"] if item["id"] == edge_id)
+        assert workspace_memory in edge["support_memory_ids"]
+
+        detail = service.graph_entity_evidence(
+            "legacy-ancestor-source", workspace="acme", repo="beta",
+            include_history=True, valid_at=150.0, known_at=150.0,
+        )
+        assert [item["memory_id"] for item in detail["evidence"]] == [workspace_memory]
+    finally:
+        service.close()
+
+
+def test_graph_scene_connected_only_uses_filtered_relations():
+    """Facet-excluded relations must not keep their endpoints connected."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="ent_source", name="Source", ntype="concept", workspace_id=workspace_id,
+    ))
+    shared = service.store.upsert_entity(Node(
+        id="ent_shared", name="Shared", ntype="concept", workspace_id=workspace_id,
+    ))
+    excluded = service.store.upsert_entity(Node(
+        id="ent_excluded", name="Excluded", ntype="concept", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_excluded", src=source, dst=shared, relation="uses",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_selected", src=shared, dst=excluded, relation="likes",
+        workspace_id=workspace_id,
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", relations=["likes"], connected_only=True,
+    )
+
+    node_ids = {node["id"] for node in scene["nodes"]}
+    assert source not in node_ids
+    assert {shared, excluded} <= node_ids
+    assert {edge["id"] for edge in scene["edges"]} == {"edge_selected"}
+
+
+def test_graph_entity_preserves_literal_ghost_suffix():
+    """Regression: canonical IDs ending in :ghost must not be stripped.
+
+    The member_to_canonical mapping already resolves ghost aliases to their
+    live canonical IDs when needed. Unconditionally stripping :ghost would
+    corrupt legitimate IDs like 'canon:ghost' that happen to end with that
+    suffix.
+    """
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    service.store.upsert_entity(
+        Node(
+            id="canon:ghost", name="Literal Ghost", ntype="concept",
+            workspace_id=workspace_id,
+        )
+    )
+
+    result = service.graph_entity("canon:ghost", workspace="acme")
+    assert result["canonical_id"] == "canon:ghost"
+    assert result["label"] == "Literal Ghost"

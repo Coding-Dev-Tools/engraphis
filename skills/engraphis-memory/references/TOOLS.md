@@ -92,7 +92,7 @@ bodies already represented in `context`.
   original query plus at most two planner routes, with strict per-route and cumulative bounds.
 - `mtype_limits (dict[str,int], None)`: optional post-rerank maxima by memory type. Limits drop
   lower-ranked results; they never boost relevance.
-- `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`; truncation
+- `max_response_tokens (int, None)`: optional serialized-response cap `2..1000000`; truncation
   removes packed context from the end while preserving source references.
 
 Returns `{query, count, context, sources, packed_sources, usage, valid_at, known_at, historical,
@@ -124,7 +124,7 @@ It is the full-response compatibility surface; prefer `engraphis_recall_context`
 - `diagnostics (bool, false)`: include `retrieval_trace` with raw/normalized/fusion/rerank data.
 - `planning (str, "off")`: `off` preserves single-query recall; `auto` enables bounded planning.
 - `mtype_limits (dict[str,int], None)`: optional post-rerank maxima by memory type.
-- `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`; truncation
+- `max_response_tokens (int, None)`: optional serialized-response cap `2..1000000`; truncation
   removes packed context and memory bodies from the end while preserving source references.
 
 Returns `{query, count, context, memories:[{id, title, content, scope, mtype, repo_id, score,
@@ -149,7 +149,7 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
 - `token_budget (int, None)`; `retrieval_profile (str, "balanced")`; `candidate_depth (str,
   "fixed")`; `response_mode (str, "full" | "compact")`; `diagnostics (bool, false)`.
 - `planning (str, "off")`; `mtype_limits (dict[str,int], None)`;
-  `max_response_tokens (int, None)`: optional serialized-response cap `1..1000000`.
+  `max_response_tokens (int, None)`: optional serialized-response cap `2..1000000`.
 - `min_support (float, None)`: absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)`: ask a configured LLM for cited prose; falls back safely.
@@ -520,11 +520,13 @@ List content-free, SHA-256-chained operation receipts for a workspace.
 - `workspace (str)`, `limit (int, 100)`.
 
 ### `engraphis_context_savings`
-Aggregate the content-free token-usage fields already stored in operation receipts. Results are
-scoped to a workspace and optional repo, and are kept separate by token-counter identity so
-unlike tokenizers are never added together. No prompt, answer, or memory content is returned.
+Aggregate the content-free token-usage fields already stored in operation receipts. Results cover
+all visible workspaces by default, or one workspace and optional repo, and are kept separate by
+token-counter identity so unlike tokenizers are never added together. No prompt, answer, or
+memory content is returned.
 
-- `workspace (str)`; `repo (str, None)`; `from_ts (float, None)` inclusive;
+- `workspace (str, None)`; omit for all visible workspaces; `repo (str, None)`;
+  `from_ts (float, None)` inclusive;
   `to_ts (float, None)` exclusive; `release_version (str, None)`;
   `format (str, None)`: `json` or `csv`; `group_by (str, None)`: `workspace`, `repo`, `agent`,
   or `day`.

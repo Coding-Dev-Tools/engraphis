@@ -254,5 +254,14 @@ def test_codemem_public_break_even_baseline_is_reproducible() -> None:
                 "retrieval_hit_rate": 1.0,
                 "answer_token_recall": 1.0,
             }
+        # Release gate: the measured query-context reduction must be at least
+        # 9% while preserving the full-history evidence quality on this
+        # deterministic public fixture.
+        comparison = report["engraphis_vs_full_history"]
+        assert comparison["query_context_savings_ratio"] >= 0.09
+        assert (
+            report["methods"]["engraphis"]["quality"]
+            == report["methods"]["full_history"]["quality"]
+        )
     assert tight["engraphis_vs_full_history"]["break_even_query_count"] == 142
     assert roomy["engraphis_vs_full_history"]["break_even_query_count"] == 144

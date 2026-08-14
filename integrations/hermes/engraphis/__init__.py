@@ -75,7 +75,6 @@ class EngraphisMemoryProvider(MemoryProvider):
             embed_model=_local_embed_model(settings.embed_model),
             embed_dim=settings.embed_dim or 384,
             vector_backend=settings.vector_backend,
-            allowed_workspaces=settings.allowed_workspaces,
             extractor="none",
             graph_extractor="none",
             retention_supervisor="none",
@@ -248,4 +247,10 @@ class EngraphisMemoryProvider(MemoryProvider):
             return []
 
     def shutdown(self) -> None:
+        svc = self._service
         self._service = None
+        if svc is not None:
+            try:
+                svc.close()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass

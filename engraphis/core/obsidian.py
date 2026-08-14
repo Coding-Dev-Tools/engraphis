@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import unicodedata
 
 from engraphis.core.secrets import secret_kind
+from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
 
 
 IMPORTER_VERSION = "1"
@@ -331,10 +332,6 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
         return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
     return True
 
-
-def _is_reparse_point(info: os.stat_result) -> bool:
-    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & marker)
 
 
 def _walk_vault(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str]]]:

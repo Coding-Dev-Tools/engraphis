@@ -43,7 +43,6 @@ def _service(db_path: str) -> MemoryService:
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,
         rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        allowed_workspaces=settings.allowed_workspaces,
     )
 
 
@@ -231,11 +230,7 @@ def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
         from engraphis.core import ids
         sync_device_id = engine.store.get_sync_state("device_id") or ids.new_id("device")
     engine_sync = SyncEngine(engine.store, embedder=engine.embedder,
-                             vector_index=engine.index, device_id=sync_device_id,
-                             allowed_workspaces=(
-                                 frozenset(settings.allowed_workspaces)
-                                 if settings.allowed_workspaces else None
-                             ))
+                             vector_index=engine.index, device_id=sync_device_id)
     # Honor the same durable, fail-closed device policy as dashboard auto-sync. This
     # matters for member/admin tokens too: a device explicitly configured download-only
     # must not silently regain upload authority merely because this CLI runs after a

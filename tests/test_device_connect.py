@@ -1290,6 +1290,20 @@ def test_control_url_defaults_to_the_shipped_manifest(monkeypatch):
     assert device_connect.default_compute_url(CONTROL_URL) == ""
 
 
+def test_local_mode_allows_explicit_connect_command_to_use_shipped_endpoint(monkeypatch):
+    """The connect command itself is the cloud opt-in on a fresh installation."""
+    monkeypatch.setattr(device_connect, "default_control_url", lambda: CONTROL_URL)
+    monkeypatch.setattr(device_connect, "default_compute_url", lambda _url: COMPUTE_URL)
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    summary = device_connect.connect(TOKEN)
+
+    assert summary["control_url"] == CONTROL_URL
+    assert summary["compute_url"] == COMPUTE_URL
+    assert opener.calls[0]["url"].startswith(CONTROL_URL)
+
+
 def test_the_manifest_outranks_the_compute_constant(monkeypatch):
     """A published ``compute_plane`` wins, so the manifest stays the endpoint authority.
 
@@ -1515,6 +1529,19 @@ def test_an_unconfigured_control_plane_is_a_clear_error(monkeypatch):
 
     assert "ENGRAPHIS_CLOUD_CONTROL_URL" in str(caught.value)
     assert caught.value.status == 400
+
+
+def test_explicit_local_connect_command_honors_manifest_endpoint(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_HOSTED_MODE", "false")
+    monkeypatch.setattr(device_connect, "default_control_url", lambda: CONTROL_URL)
+    monkeypatch.setattr(device_connect, "default_compute_url", lambda _url: COMPUTE_URL)
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    summary = device_connect.connect(TOKEN)
+
+    assert summary["control_url"] == CONTROL_URL
+    assert opener.calls[0]["url"].startswith(CONTROL_URL)
 
 
 def test_token_dash_reads_stdin(monkeypatch, capsys):

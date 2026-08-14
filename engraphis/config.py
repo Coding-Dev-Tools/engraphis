@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
+from urllib.parse import parse_qsl
 
 from engraphis.private_state import (
     UnsafeStateFile,
@@ -360,14 +361,62 @@ def _lock_windows_migration_file(handle, msvcrt) -> None:
             time.sleep(_WINDOWS_LOCK_RETRY_SECONDS)
 
 
+def _normalize_sqlite_lock_path(path_str: str) -> Optional[Path]:
+    """Return the physical path a SQLite target uses, or ``None`` for memory databases."""
+    raw = str(path_str or "")
+    if not raw or raw == ":memory:":
+        return None
+    if not raw.startswith("file:"):
+        return Path(raw).expanduser().resolve()
+
+    from urllib.parse import parse_qs, unquote, urlsplit
+    from urllib.request import url2pathname
+
+    parsed = urlsplit(raw.replace("\\", "/"))
+    query = parse_qs(parsed.query)
+    uri_path = unquote(parsed.path)
+    if uri_path == ":memory:" or "memory" in query.get("mode", []):
+        return None
+    if not uri_path:
+        return None
+    physical = url2pathname(uri_path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        physical = "//%s%s" % (parsed.netloc, physical)
+    return Path(physical).expanduser().resolve()
+
+
 @contextmanager
 def _migration_lock(target: Path):
     """Serialize first-run migration across processes without a third-party lock."""
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    resolved = _normalize_sqlite_lock_path(str(target))
+    if resolved is None:
+        # In-memory or empty target: nothing to serialize on disk.
+        yield
+        return
+    target = resolved
+    # Only apply private permissions to a directory created for this database.
+    # Existing parents belong to the caller and may intentionally be shared with
+    # other databases or processes; changing them here is an unexpected mutation.
     try:
-        os.chmod(target.parent, 0o700)
-    except OSError:
-        pass
+        target.parent.mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError:
+        if not target.parent.is_dir():
+            raise
+    else:
+        try:
+            # Use fd-based chmod to avoid TOCTOU symlink race: open the directory
+            # we just created with O_NOFOLLOW and fchmod the descriptor.
+            parent_fd = os.open(
+                str(target.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError:
+            pass
+        else:
+            try:
+                os.fchmod(parent_fd, 0o700)
+            finally:
+                os.close(parent_fd)
     lock_path = target.with_name(".%s.migration.lock" % target.name)
     expected = private_file_stat(lock_path, allow_missing=True)
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -571,7 +620,49 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
     """Resolve an explicit override or prepare the safe installed default."""
     configured = _env("ENGRAPHIS_DB_PATH", "")
     if configured:
-        return configured
+        # A relative path in the owner-private config must not follow whichever CWD
+        # happened to launch the dashboard, MCP server, or a desktop shortcut. Anchor
+        # it to the trusted config directory so every entrypoint opens the same file.
+        if configured in {":memory:", ""}:
+            return configured
+        if configured.startswith("file:"):
+            # A relative file URI such as file:data/engraphis.db must be anchored to
+            # the trusted config directory. Otherwise SQLite resolves it against the
+            # process CWD and different entry points can open different databases.
+            # Split query parameters before path resolution so Path does not treat
+            # ? as a literal filename character.
+            remainder = configured[len("file:"):]
+            if remainder.startswith(":memory:"):
+                return configured
+            path_part, sep, query_part = remainder.partition("?")
+            if sep and dict(parse_qsl(query_part, keep_blank_values=True)).get("mode") == "memory":
+                # Named shared-memory URIs are identities, not filesystem paths. Anchoring
+                # their relative-looking name to the config directory would make separate
+                # connections open different databases and break SQLite's shared cache.
+                return configured
+            if (
+                not path_part
+                or path_part.startswith("/")
+                or path_part.startswith("\\")
+                or PureWindowsPath(path_part).is_absolute()
+            ):
+                return configured
+            anchor = str((_CONFIG_ENV_PATH.parent / path_part).resolve())
+            return f"file:{anchor}" + (sep + query_part if sep else "")
+        configured_path = Path(configured).expanduser()
+        # Drive-relative Windows paths (e.g. C:data/foo.db) are neither absolute
+        # nor relative to the config directory; they resolve against the drive's
+        # current working directory, which is the expected behaviour.
+        if PureWindowsPath(configured).anchor and not PureWindowsPath(configured).is_absolute():
+            return configured
+
+        if (configured_path.is_absolute()
+                or PurePosixPath(configured).is_absolute()
+                or PureWindowsPath(configured).is_absolute()):
+            # Preserve explicit absolute spelling for compatibility with callers that
+            # intentionally use a POSIX-style path on Windows or a symlinked path.
+            return configured
+        return str((_CONFIG_ENV_PATH.parent / configured_path).resolve())
     target = Path(_default_db_path(root))
     parts = {p.lower() for p in root.parts}
     if "site-packages" in parts or "dist-packages" in parts:
@@ -737,12 +828,12 @@ class Settings:
         default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""),
                                                _env_int("ENGRAPHIS_PORT", 8700))
     )
-    # Optional server-side workspace binding — the hard multi-tenant isolation boundary.
-    # When non-empty, MemoryService refuses any read or write whose
-    # workspace is not in this comma-separated allow-list, so knowing or guessing a
-    # workspace name is not enough to reach it. Empty = unrestricted (single-tenant local).
+    # Kept as a compatibility attribute for callers that inspect Settings. Public
+    # entrypoints no longer read a process-wide workspace allow-list: workspace creation
+    # and selection are unrestricted by configuration. Deliberate tenant-bound services
+    # may still pass an allow-list directly to their service/store constructor.
     allowed_workspaces: list = field(
-        default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
+        default_factory=list
     )
     # The public package is always the customer runtime. Hosted service roles are private.
     service_mode: str = field(
@@ -776,7 +867,7 @@ class Settings:
     )
     embed_dim: Optional[int] = field(
         default_factory=lambda: (
-            _env_int("ENGRAPHIS_EMBED_DIM", 384) or None
+            None if _env("ENGRAPHIS_EMBED_DIM", "") == "0" else _env_int("ENGRAPHIS_EMBED_DIM", 384)
         )
     )
 
@@ -915,11 +1006,69 @@ def _parse_origins(raw: str, port: int = 8700) -> list:
 
 
 def _parse_csv(raw: str) -> list:
-    """Generic comma-separated allow-list. Empty -> [] (no restriction)."""
+    """Parse a comma-separated compatibility value without enabling a global binding."""
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 settings = Settings()
+
+
+#: Env vars whose presence indicates a hosted/cloud-connected deployment.
+#: When ALL are absent, the installation is pure local mode.
+_HOSTED_MODE_ENV_VARS = (
+    "ENGRAPHIS_CLOUD_CONTROL_URL",
+    "ENGRAPHIS_CLOUD_COMPUTE_URL",
+    "ENGRAPHIS_CLOUD_ORGANIZATION_ID",
+    "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL",
+    "ENGRAPHIS_CLOUD_ACCESS_TOKEN",
+    "ENGRAPHIS_CONTROL_PLANE_URL",
+    "ENGRAPHIS_HOSTED_MODE",
+)
+
+
+def deployment_mode() -> str:
+    """Return the current deployment mode: ``"local"`` or ``"hosted"``.
+
+    Local mode is the default and activates when none of the hosted/cloud env vars
+    or validated persisted cloud session are present. Hosted mode activates when at
+    least one hosted env var is present, a saved cloud session is configured, or when
+    ``ENGRAPHIS_HOSTED_MODE=true`` is explicitly set.
+
+    This function is the single authority for mode detection.  All code that needs
+    to distinguish local from hosted installations MUST call this function rather
+    than checking env vars directly.
+    """
+    hosted_override = os.environ.get("ENGRAPHIS_HOSTED_MODE", "").strip().lower()
+    if hosted_override in ("1", "true", "yes", "on"):
+        return "hosted"
+    if hosted_override in ("0", "false", "no", "off"):
+        return "local"
+    # A successful device connect persists the validated cloud session in the owner-only
+    # state directory. That session is intentionally usable without repeating bootstrap
+    # environment secrets, so deployment mode must recognize it on later process starts.
+    # State errors are handled as local mode here; cloud-session consumers surface the
+    # structured retryable error when they actually need the credential.
+    try:
+        from engraphis import cloud_session
+
+        if cloud_session.configured(require_compute=False):
+            return "hosted"
+    except Exception:  # noqa: BLE001 — mode detection must not break local startup
+        pass
+    for var in _HOSTED_MODE_ENV_VARS:
+        if os.environ.get(var, "").strip():
+            return "hosted"
+    return "local"
+
+
+def is_local_mode() -> bool:
+    """Return True when the installation is in pure local mode (no hosted features)."""
+    return deployment_mode() == "local"
+
+
+def is_hosted_mode() -> bool:
+    """Return True when the installation has hosted/cloud features configured."""
+    return deployment_mode() == "hosted"
 
 
 def canonicalize_relay_url(url: str) -> str:

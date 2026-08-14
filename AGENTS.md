@@ -244,6 +244,26 @@ These are pure, unit-tested functions — change them only with a corresponding 
   re-verify with `wc -l`/`grep` before trusting a test run against it; clearing `__pycache__`
   alone does not fix this (the staleness is in the source, not in cached bytecode).
 
+### PR delivery protocol for automated maintenance
+
+When an agent is maintaining an open pull request, the matching PR branch or an isolated
+worktree is the delivery boundary:
+
+1. Implement every attributable, safe, scoped review or CI fix in that matching branch or
+   worktree. After tests and lint pass, inspect `git status` and the complete diff, then commit
+   and push every clean, attributable fix and PR worktree file with an ordinary non-force push.
+   A verified fix must not be left only in a local checkout.
+2. Keep unrelated user edits, ambiguous files, credentials, generated databases, logs, and
+   secrets out of the PR. Preserve ambiguous work in its original checkout or a separate
+   worktree and report the exact separation needed; never mix it into an otherwise clean PR.
+3. After each push, recheck the remote CI/workflow results, logs, and current review threads.
+   Continue with safe, attributable iterations until the PR is merge-ready, and report exact
+   files, commits, tests, remaining review items, and blockers.
+4. Never force-push, merge, deploy, publish, delete branches/files, change credentials, rerun
+   workflows, post GitHub comments, resolve review threads, or send external messages without
+   explicit approval. Merge remains prohibited unless the user explicitly approves it, even
+   when checks are green.
+
 ---
 
 ## 7. Source-of-truth docs

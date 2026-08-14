@@ -86,7 +86,7 @@ def personalized_pagerank(
     ordered_nodes = sorted(nodes)
     node_index = {node: index for index, node in enumerate(ordered_nodes)}
     n_nodes = len(ordered_nodes)
-    seed_ids = [node_index[seed] for seed in seeds if seed in node_index]
+    seed_ids = list(dict.fromkeys(node_index[seed] for seed in seeds if seed in node_index))
     live_seeds = [seed for seed in seeds if seed in adjacency and adjacency[seed]]
     if not seed_ids or not live_seeds:
         return {}

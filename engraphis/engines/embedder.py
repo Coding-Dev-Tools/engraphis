@@ -143,10 +143,51 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
         chunks.append(current)
 
     if overlap > 0 and len(chunks) > 1:
+        # Clamp overlap so overlapped chunks never exceed chunk_size.
+        safe_overlap = min(overlap, max(chunk_size // 2, 1))
+
+        def take_piece(source: str, limit: int) -> tuple[str, str]:
+            """Take a bounded piece without dropping the remainder."""
+            if not source:
+                return "", ""
+            if len(source) <= limit:
+                return source, ""
+            # Prefer a whitespace boundary so overlap does not split an ordinary
+            # word. A long unbroken token still falls back to the hard limit.
+            boundary = max(source.rfind(" ", 0, limit), source.rfind("\n", 0, limit))
+            end = boundary + 1 if boundary >= 0 else limit
+            if end <= 0:
+                end = limit
+            return source[:end], source[end:]
+
+        def append_preserving_source(output: list[str], prefix: str, source: str) -> None:
+            """Add overlap plus all source text, splitting instead of truncating."""
+            if not source:
+                return
+            # A normal source chunk already fits by itself. Reduce the duplicated
+            # prefix until the complete chunk fits; never split a source chunk merely
+            # to preserve an overlap, since that can lose a suffix or split a token.
+            if len(source) <= chunk_size:
+                prefix_budget = max(chunk_size - len(source), 0)
+                if len(prefix) > prefix_budget:
+                    prefix = prefix[-prefix_budget:] if prefix_budget else ""
+                output.append(prefix + source)
+                return
+            if len(prefix) >= chunk_size:
+                prefix = prefix[: max(chunk_size - 1, 0)]
+            content_budget = max(chunk_size - len(prefix), 1)
+            first, remaining = take_piece(source, content_budget)
+            output.append(prefix + first)
+            while remaining:
+                piece, remaining = take_piece(remaining, chunk_size)
+                output.append(piece)
+
         overlapped = [chunks[0]]
         for i in range(1, len(chunks)):
-            prev_tail = chunks[i - 1][-overlap:] if len(chunks[i - 1]) > overlap else chunks[i - 1]
-            overlapped.append(prev_tail + " " + chunks[i])
+            previous = chunks[i - 1]
+            prev_tail = previous[-safe_overlap:] if len(previous) > safe_overlap else previous
+            prefix = (prev_tail + " ") if prev_tail else ""
+            append_preserving_source(overlapped, prefix, chunks[i])
         chunks = overlapped
 
     return chunks
