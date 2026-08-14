@@ -31,7 +31,7 @@ _PACKAGE_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s]+)\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _BUILDER_IMAGE = (
     "python:3.11-slim@sha256:"
-    "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
+    "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1"
 )
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",

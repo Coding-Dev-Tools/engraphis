@@ -137,7 +137,7 @@ def _release_inputs(root, dist):
             "name": name,
             "image": (
                 "python:3.11-slim@sha256:"
-                "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
+                "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1"
             ),
             "python": "3.11",
             "environment_lock_sha256": "e" * 64,
@@ -515,7 +515,7 @@ def test_release_workflow_publishes_complete_captured_evidence():
     assert "name: build-environment-evidence" in build
     assert "dist-repeat" not in build
     assert "Independent distribution builder ${{ matrix.builder }}" in reproducibility
-    assert "python:3.11-slim@sha256:90744cff" in reproducibility
+    assert "python:3.11-slim@sha256:a630a63c" in reproducibility
     assert 'builder: ["a", "b"]' in reproducibility
     assert "Compare independent distribution builders" in reproducibility
     assert "name: independent-reproducibility" in reproducibility
