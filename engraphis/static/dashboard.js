@@ -1658,7 +1658,9 @@ function renderUpdateBanner(u){
  const btn=el.querySelector('.ub-dismiss');
  if(btn)btn.addEventListener('click',function(){try{localStorage.setItem('engraphis-update-dismissed',u.latest)}catch(e){}el.hidden=true;el.textContent=''});
 }
-async function boot(){graphResetEngineFailure();try{const b=await api('/bootstrap');LIC=b.license;RELEASE_VERSION=typeof b.version==='string'?b.version.trim():'';renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===404?'Dashboard APIs are unavailable. This usually means the legacy v1 server is running. Stop it, then launch scripts.start_dashboard.':'Dashboard initialization failed. Run engraphis-init --check for diagnostics.';document.getElementById('app').innerHTML='<div class="modal-bg"><div class="modal"><h2>Engraphis is unavailable</h2><p class="muted">'+esc(msg)+'</p><button class="btn btn-primary" data-onclick="h145">Retry</button></div></div>'}}
+function clearBootstrapError(){const overlay=document.getElementById('bootstrap-error-overlay');if(overlay){overlay.classList.remove('show');dialogChanged(overlay);overlay.remove()}}
+function showBootstrapError(msg){clearBootstrapError();const overlay=document.createElement('div');overlay.id='bootstrap-error-overlay';overlay.className='mm-overlay show';overlay.setAttribute('aria-hidden','false');overlay.innerHTML='<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="bootstrap-error-title" aria-describedby="bootstrap-error-message"><div class="mm-head"><div class="mm-title" id="bootstrap-error-title">Engraphis is unavailable</div></div><div class="mm-body"><p class="muted" id="bootstrap-error-message">'+esc(msg)+'</p><button class="btn btn-primary" data-onclick="h154">Retry</button></div></div>';document.body.appendChild(overlay);dialogChanged(overlay)}
+async function boot(){clearBootstrapError();graphResetEngineFailure();try{const b=await api('/bootstrap');LIC=b.license;RELEASE_VERSION=typeof b.version==='string'?b.version.trim():'';renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===404?'Dashboard APIs are unavailable. This usually means the legacy v1 server is running. Stop it, then launch scripts.start_dashboard.':'Dashboard initialization failed. Run engraphis-init --check for diagnostics.';showBootstrapError(msg)}}
 initTheme();
 initDashboard();
 boot();
@@ -1779,6 +1781,7 @@ h131:function(event){testLlm()},
 h150:function(event){setLlmExtractor(true)},
 h151:function(event){setLlmExtractor(false)},
 h153:function(event){loadHealthView()},
+h154:function(event){boot()},
 h136:function(event){syncNow()},
 h138:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,false)},
 h139:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,true)},
