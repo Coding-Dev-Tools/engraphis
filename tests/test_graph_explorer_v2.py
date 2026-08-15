@@ -3715,6 +3715,63 @@ def test_complete_scene_bounds_prompt_ineligible_memory_candidates(monkeypatch):
             include_memory_nodes=True,
         )
 
+
+def test_complete_scene_connector_caps_ignore_prompt_ineligible_memories(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    rejected = [
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Rejected import {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={
+                "source": "import", "trusted": False, "review_state": "pending",
+            },
+        ))
+        for index in range(2)
+    ]
+    approved = [
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Approved fact {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={"source": "agent", "trusted": True, "review_state": "approved"},
+        ))
+        for index in range(2)
+    ]
+    service.store.add_link(rejected[0], rejected[1], relation="rejected")
+    service.store.add_link(approved[0], approved[1], relation="approved")
+    symbol_id = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=rejected[0],
+        relation="rejected", commit=False,
+    )
+    service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=approved[0],
+        relation="approved", commit=False,
+    )
+    service.store.conn.commit()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_MEMORY_LINKS", 1)
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS", 1)
+
+    scene = service.graph_scene(
+        workspace="acme", repo="web", level="complete",
+        presentation="quality", include_code=True, include_memory_nodes=True,
+    )
+
+    memory_links = [
+        edge for edge in scene["edges"] if edge.get("connector_kind") == "memory_link"
+    ]
+    code_links = [
+        edge for edge in scene["edges"] if edge.get("connector_kind") == "code_memory"
+    ]
+    assert {(edge["source"], edge["target"]) for edge in memory_links} == {
+        (approved[0], approved[1]),
+    }
+    assert {edge["source"] for edge in code_links} == {approved[0]}
+
 def test_visibility_classification_caps_edge_scan_without_giant_allocation(monkeypatch):
     """Visibility preclassification must honor MAX_GRAPH_ANALYSIS_EDGES and
     raise a capacity error rather than materializing an unbounded edge set."""

@@ -345,8 +345,10 @@
       }
       return new Uint32Array(result);
     };
-    const shouldCollapse = state.focusIndex < 0
-      && (state.collapseMode === true || state.lodTier === 'far');
+    const shouldCollapse = state.focusIndex < 0 && (
+      state.collapseMode === true
+      || (state.collapseMode === 'auto' && state.lodTier === 'far')
+    );
     if (state.lodTier === 'far') {
       const values = allVisibleNodes();
       setCollapsed(shouldCollapse);

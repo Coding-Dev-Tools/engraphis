@@ -276,6 +276,11 @@ GRAPH_ENTITY_EVIDENCE_LIMIT = 100
 GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT = 400
 GRAPH_ENTITY_HISTORY_LIMIT = 50
 CONFLICT_REVIEW_SCAN_LIMIT = 10_000
+def _sqlite_prompt_eligible(provenance: object, metadata: object) -> int:
+    """Expose the exact Python prompt-security predicate to scoped SQLite joins."""
+    return int(prompt_eligible(_loads(provenance, {}), _loads(metadata, {})))
+
+
 
 
 
@@ -1148,6 +1153,11 @@ class MemoryService:
                  allowed_workspaces: Optional[list] = None) -> None:
         self.engine = engine
         self.store = engine.store
+        connection = getattr(self.store, "conn", None)
+        if connection is not None:
+            connection.create_function(
+                "_engraphis_prompt_eligible", 2, _sqlite_prompt_eligible,
+            )
         # Server-side workspace binding (the hard isolation boundary). None means
         # unrestricted (single-tenant local default); a non-empty set means every scoped
         # read/write must target one of these workspaces — see ``_authorize_workspace``.
@@ -8920,6 +8930,13 @@ class MemoryService:
                 memory_where.append("COALESCE(valid_from, ingested_at, 0)<=?")
                 memory_params.append(upper_time)
             scoped_memory_sql = "SELECT id FROM memories WHERE " + " AND ".join(memory_where)
+            # Keep the separately bounded Python candidate scan above, but make connector
+            # capacity count only the exact approved IDs. Otherwise links from quarantined
+            # or pending memories can exhaust a visible-scene limit without producing nodes.
+            eligible_memory_sql = (
+                scoped_memory_sql
+                + " AND _engraphis_prompt_eligible(provenance, metadata)=1"
+            )
             memory_rows = []
             memory_candidate_count = 0
             last_memory_id: Optional[str] = None
@@ -8983,7 +9000,7 @@ class MemoryService:
                 )
 
             memory_link_sql = (
-                "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                "WITH selected_memory AS (" + eligible_memory_sql + ") "
                 "SELECT links.a, links.b, links.relation, links.layer, links.reason, "
                 "links.created_at, links.valid_from, links.valid_to, "
                 "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
@@ -9036,7 +9053,7 @@ class MemoryService:
 
             if include_code:
                 code_sql = (
-                    "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                    "WITH selected_memory AS (" + eligible_memory_sql + ") "
                     "SELECT links.id, links.repo_id, links.symbol_id, links.memory_id, "
                     "links.relation, links.confidence, links.valid_from, links.valid_to, "
                     "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
