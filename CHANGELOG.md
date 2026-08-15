@@ -5,8 +5,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [1.7] - 2026-08-14
-
 ### Changed
 
 
@@ -142,7 +140,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   interpolation, eliminating a fragile SQL construction pattern (SEC-002).
 - The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
   PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
-## [1.6] - 2026-08-08
+## [1.6] - 2026-08-15
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
 local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
