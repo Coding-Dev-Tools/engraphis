@@ -241,6 +241,9 @@ send({{ type: 'scope', scope: {{ minDegree: 0, showUnlinked: true, depth: 1 }} }
 send({{ type: 'collapse', value: 'auto' }});
 send({{ type: 'camera', x: 0, y: 0, scale: 0.2, width: 100000, height: 100000 }});
 const collapsed = latest('visible');
+send({{ type: 'collapse', value: false }});
+send({{ type: 'camera', x: 1, y: 0, scale: 0.2, width: 100000, height: 100000 }});
+const expanded = latest('visible');
 send({{ type: 'focus', index: ready.ids.indexOf('a') }});
 send({{ type: 'camera', x: 0, y: 0, scale: 1.5, width: 100000, height: 100000 }});
 const depthOne = latest('visible');
@@ -253,6 +256,7 @@ const layered = latest('visible');
 console.log(JSON.stringify({{
   filtered: ids(filtered.nodes), filteredEdges: filtered.drawnLinks,
   collapsed: ids(collapsed.nodes), isCollapsed: collapsed.collapsed,
+  expanded: ids(expanded.nodes), isExpanded: !expanded.collapsed,
   depthOne: ids(depthOne.nodes), depthTwo: ids(depthTwo.nodes),
   layeredEdges: layered.drawnLinks,
 }}));
@@ -265,6 +269,8 @@ console.log(JSON.stringify({{
     assert report["filteredEdges"] == 0
     assert report["isCollapsed"] is True
     assert set(report["collapsed"]) == {"b", "d", "lonely"}
+    assert report["isExpanded"] is True
+    assert set(report["expanded"]) == {"a", "b", "c", "d", "e", "lonely"}
     assert report["depthOne"] == ["a", "b"]
     assert report["depthTwo"] == ["a", "b", "c"]
     assert report["layeredEdges"] == 0
