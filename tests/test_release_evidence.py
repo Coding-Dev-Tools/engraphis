@@ -371,6 +371,28 @@ def test_release_evidence_accepts_lock_superset_of_sbom(tmp_path):
     # Should not raise — SBOM ⊆ lock
     _build(root, dist, inputs=inputs)
 
+def test_release_evidence_rejects_empty_sbom_package_set(tmp_path):
+    """An SBOM with no Python components must not pass the subset check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # Replace SBOM with one that has no pypi components
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "components": [
+                    {"type": "library", "name": "libssl", "version": "3.0",
+                     "purl": "pkg:deb/debian/libssl@3.0"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="no Python package components"):
+        _build(root, dist, inputs=inputs)
+
 
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
