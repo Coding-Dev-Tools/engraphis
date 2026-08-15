@@ -1618,7 +1618,13 @@ for (const reducedMotion of [false, true]) {
 
       const samples = [await renderedStellarSnapshot(page)];
       for (let sample = 0; sample < 13; sample += 1) {
-        await page.waitForTimeout(500);
+        /* Advance by simulation work, not wall-clock time. Under a busy CI browser, a fixed
+           timeout can observe fewer integrator steps and turn a healthy global orbit into a
+           false negative even though the local orbit remains correct. */
+        const targetSteps = samples.at(-1).diagnostics.steps + 14;
+        await page.waitForFunction(step => window.__engraphisGraph
+          && window.__engraphisGraph.physicsDiagnostics().steps >= step,
+        targetSteps, { timeout: 10_000 });
         samples.push(await renderedStellarSnapshot(page));
       }
       const angleDelta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
@@ -1656,7 +1662,7 @@ for (const reducedMotion of [false, true]) {
       });
       const before = samples[0], after = samples.at(-1);
       const evidence = {
-        preference, elapsedMs: 6500,
+        preference, sampleStepBudget: 14 * 13,
         assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
         before: { anchor: before.anchor, star: before.star, planet: before.planet, local: before.local,
           screenLocal: before.screenLocal, globalAngle: before.globalAngle,

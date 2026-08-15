@@ -1,17 +1,16 @@
 # Engraphis Release Deliverables
 
 **Generated**: 2026-08-14  
-**Status**: ✅ Both branches merge-ready — all CI gates green (except expected protected-main gate)
+**Status**: ✅ Both releases merged, tagged, published on GitHub — awaiting PyPI upload
 
 ---
 
 ## Repository State
-
 | Branch | Commit | Tag | Status |
 |--------|--------|-----|--------|
-| `hotfix/v1.6.1-security` | `479ba0a` | `v1.6.1` | ✅ Merge-ready |
-| `feat/team-hosted-auth` | `444c3d9` | `v1.7` | ✅ Merge-ready |
-| `main` | `128fe05` | `v1.6` | Needs hotfix merge |
+| `hotfix/v1.6.1-security` | `564afb0` | `v1.6.1` | ✅ Merged to main (#141), branch deleted |
+| `feat/team-hosted-auth` | `1b67bcd` | `v1.7` | ✅ Merged to main (#142), branch deleted |
+| `main` | `1b67bcd` | `v1.7` | ✅ Current release |
 
 ---
 
@@ -148,14 +147,13 @@ twine upload dist/engraphis-1.7*
 ---
 
 ## Post-Merge Checklist
-
-- [ ] Merge `hotfix/v1.6.1-security` to `main`
-- [ ] Merge `feat/team-hosted-auth` to `main`
-- [ ] Retag `v1.6.1` and `v1.7` on `main` HEAD
-- [ ] Publish both versions to PyPI
-- [ ] Create GitHub Security Advisory for SEC-001
-- [ ] Create GitHub Release for v1.7 with notes above
-- [ ] Update `CHANGELOG.md` on `main` if not already present
+- [x] Merge `hotfix/v1.6.1-security` to `main` (commit `564afb0`)
+- [x] Merge `feat/team-hosted-auth` to `main` (commit `1b67bcd`)
+- [x] Retag `v1.6.1` and `v1.7` on `main`
+- [ ] Publish both versions to PyPI (user handles manually — see commands below)
+- [x] Create GitHub Release for v1.6.1 with artifacts uploaded
+- [x] Create GitHub Release for v1.7 with artifacts uploaded
+- [x] Delete hotfix/feature branches after merge
 - [ ] Delete hotfix/feature branches after merge:
   ```bash
   git push origin --delete hotfix/v1.6.1-security

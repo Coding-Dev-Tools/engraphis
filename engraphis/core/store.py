@@ -4586,6 +4586,45 @@ class Store:
                 break
         return out
 
+    def list_memory_ids(self, flt: Optional[SearchFilter] = None,
+                        *, include_invalid: bool = False, limit: Optional[int] = None,
+                        prompt_only: bool = False) -> list[str]:
+        """Return only memory IDs visible to a search filter without hydrating records.
+
+        The PPR graph arm needs up to 12,000 memory IDs to build its adjacency matrix
+        but discards every other field.  Materializing full ``MemoryRecord`` objects
+        (content, provenance, metadata JSON) for that many rows adds 20-80ms of latency
+        and ~10MB of transient allocation on a 10k-memory workspace.  This method selects
+        only the columns required for scope/temporal/prompt-eligibility filtering and
+        returns bare id strings.
+        """
+        if limit is not None and int(limit) <= 0:
+            return []
+        # The prompt_only path needs provenance + metadata for eligibility, so select
+        # them alongside id in a single streaming query.  Doing per-row follow-up
+        # SELECTs would be N+1 — strictly worse than what this replaces.
+        cols = "id, provenance, metadata" if prompt_only else "id"
+        sql = f"SELECT {cols} FROM memories"
+        where, params = self._where(flt, include_invalid)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ingested_at DESC"
+        if limit is not None and not prompt_only:
+            sql += f" LIMIT {int(limit)}"
+        if not prompt_only:
+            return [
+                str(row["id"]) for row in self.conn.execute(sql, params).fetchall()
+            ]
+        eligible_limit = None if limit is None else int(limit)
+        out: list[str] = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append(str(row["id"]))
+            if eligible_limit is not None and len(out) >= eligible_limit:
+                break
+        return out
+
     def count_memories(self, flt: Optional[SearchFilter] = None,
                        *, include_invalid: bool = False) -> int:
         """Count records visible to a search filter without materializing them."""

@@ -1629,6 +1629,44 @@ def test_folder_transport_push_never_writes_through_planted_symlinks(tmp_path):
                  if p.name.endswith(".tmp") and not p.is_symlink()]
     assert leftovers == []
 
+def test_folder_transport_push_closes_fd_when_fdopen_fails(tmp_path, monkeypatch):
+    """Round 1 fixed an FD leak: if os.fdopen raised after os.open succeeded,
+    the raw descriptor leaked. The fix sets fd=-1 inside the with-block so the
+    except handler closes only when fd is still valid. This test pins that
+    contract by forcing fdopen to fail and verifying no descriptors leak."""
+    import os
+    from engraphis.backends import sync_folder
+
+    root = tmp_path / "share"
+    root.mkdir()
+    transport = sync_folder.FolderTransport(str(root))
+
+    opened_fds = []
+    real_open = os.open
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        opened_fds.append(fd)
+        return fd
+
+    def failing_fdopen(*args, **kwargs):
+        raise OSError("simulated fdopen failure")
+
+    monkeypatch.setattr(sync_folder.os, "open", tracking_open)
+    monkeypatch.setattr(sync_folder.os, "fdopen", failing_fdopen)
+
+    with pytest.raises(OSError, match="simulated fdopen failure"):
+        transport.push("bundle-a.json", b'{"test":true}')
+
+    # Every opened FD must be closed; if the leak exists, reopening fails on Windows.
+    for fd in opened_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)  # closed FD raises EBADF
+
+    # No temp file left behind.
+    leftovers = [p.name for p in root.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
 
 def test_two_devices_converge(tmp_path):
     a = MemoryEngine.create(":memory:")

@@ -267,19 +267,6 @@ def _try_watchdog_watcher(root: Path, callback, stop_event, startup_reconcile):
                 return False
             return any(part in self._exclude_dirs for part in Path(relative).parts)
 
-        def _dispatch(self, paths: list[str]) -> None:
-            for attempt in range(1, _MAX_RETRIES + 1):
-                if callback(paths):
-                    return
-                logger.warning(
-                    "watchdog reindex failed (attempt %d/%d) for %d file(s)",
-                    attempt, _MAX_RETRIES, len(paths),
-                )
-                stop_event.wait(timeout=min(2 ** attempt, 8))
-            logger.error(
-                "watchdog reindex permanently failed after %d attempts for %s",
-                _MAX_RETRIES, paths,
-            )
 
         def on_any_event(self, event):
             # Belt-and-suspenders gate at the framework entry point: reject events
