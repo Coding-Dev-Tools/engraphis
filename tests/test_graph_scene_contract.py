@@ -119,6 +119,8 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
 def test_all_presentation_projects_only_renderer_fields_without_mutating_scene():
     scene = _scene()
     scene["nodes"][0]["private_evidence"] = [{"memory": "must stay server-side"}]
+    scene["nodes"][0]["ghost"] = True
+    scene["nodes"][0]["member_ids"] = ["member-primary", "member-extra"]
     scene["edges"][0]["support_ids"] = ["mem_private"]
     projected = project_all_presentation(scene)
 
@@ -127,6 +129,7 @@ def test_all_presentation_projects_only_renderer_fields_without_mutating_scene()
     assert "support_ids" not in projected["edges"][0]
     assert scene["nodes"][0]["private_evidence"]
     assert scene["edges"][0]["support_ids"] == ["mem_private"]
+    assert projected["nodes"][0]["member_ids"] == ["member-primary"]
     assert {
         "id", "label", "type", "community_id", "x", "y",
         "anchor_role", "system_anchor_id", "gravity_mass", "visual_radius",
@@ -159,6 +162,7 @@ def test_all_presentation_allowlist_is_closed_to_unknown_fields():
     allowed_edge_keys = set(_ALL_PRESENTATION_EDGE_FIELDS) | {"bridge"}
     allowed_meta_keys = set(_ALL_PRESENTATION_META_FIELDS) | {"all_projected"}
     assert "unknown_future_field" not in projected["nodes"][0]
+    assert "member_ids" not in projected["nodes"][0]
     assert "unknown_future_edge" not in projected["edges"][0]
     assert "unknown_future_meta" not in projected["meta"]
     assert set(projected["nodes"][0].keys()) <= allowed_node_keys

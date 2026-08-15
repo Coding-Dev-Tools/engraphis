@@ -2627,7 +2627,7 @@ def build_graph_scene(
     }
 
 _ALL_PRESENTATION_NODE_FIELDS = (
-    "id", "label", "type", "node_kind", "community_id", "ghost",
+    "id", "label", "type", "node_kind", "community_id", "ghost", "member_ids",
     "x", "y", "gravity_mass", "visual_radius", "mass_score",
     "weighted_degree", "pagerank", "support_count", "scene_rank",
     "anchor_role", "system_anchor_id", "orbit_tier", "orbit_radius",
@@ -2652,10 +2652,22 @@ def project_all_presentation(scene: Mapping[str, Any]) -> dict[str, Any]:
     metrics, and relation physics. Keeping this projection explicit prevents multi-megabyte
     evidence arrays from crossing the HTTP/worker boundary only to be discarded.
     """
-    nodes = [
-        {key: node[key] for key in _ALL_PRESENTATION_NODE_FIELDS if key in node}
-        for node in scene.get("nodes", ())
-    ]
+    nodes = []
+    for node in scene.get("nodes", ()):
+        projected_node = {
+            key: node[key] for key in _ALL_PRESENTATION_NODE_FIELDS
+            if key != "member_ids" and key in node
+        }
+        if node.get("ghost"):
+            member_ids = node.get("member_ids")
+            if isinstance(member_ids, Sequence) and not isinstance(member_ids, (str, bytes)):
+                member_id = next((
+                    value for value in member_ids
+                    if isinstance(value, str) and value
+                ), "")
+                if member_id:
+                    projected_node["member_ids"] = [member_id]
+        nodes.append(projected_node)
     communities = {
         str(node.get("id") or ""): str(node.get("community_id") or "")
         for node in nodes
