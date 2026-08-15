@@ -2633,7 +2633,7 @@ _ALL_PRESENTATION_NODE_FIELDS = (
     "anchor_role", "system_anchor_id", "orbit_tier", "orbit_radius",
 )
 _ALL_PRESENTATION_EDGE_FIELDS = (
-    "id", "source", "target", "layer", "ghost", "strength",
+    "id", "source", "target", "relation", "layer", "ghost", "strength",
     "rest_length", "spring_strength",
 )
 _ALL_PRESENTATION_META_FIELDS = (
