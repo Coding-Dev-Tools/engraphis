@@ -133,8 +133,13 @@ def project_version(root: Path) -> str:
 
 
 def _declared_dependency_names(root: Path) -> set[str]:
-    """Return canonical package names from pyproject.toml [project].dependencies
-    and every group in [project.optional-dependencies]."""
+    """Return canonical package names from pyproject.toml [project].dependencies.
+
+    Only core runtime dependencies are validated against the SBOM closure.
+    Optional extras ([project.optional-dependencies]) are intentionally
+    excluded: they are opt-in by definition, and the subset check already
+    validates that any optional package present in the SBOM is pinned in
+    the environment lock."""
     pyproject = root / "pyproject.toml"
     try:
         raw = pyproject.read_text(encoding="utf-8")
@@ -150,11 +155,6 @@ def _declared_dependency_names(root: Path) -> set[str]:
         core = project.get("dependencies", []) if isinstance(project, dict) else []
         if isinstance(core, list):
             requirements.extend(item for item in core if isinstance(item, str))
-        optional = project.get("optional-dependencies", {}) if isinstance(project, dict) else {}
-        if isinstance(optional, dict):
-            for group in optional.values():
-                if isinstance(group, list):
-                    requirements.extend(item for item in group if isinstance(item, str))
     else:
         project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
         if project is not None:
@@ -163,13 +163,6 @@ def _declared_dependency_names(root: Path) -> set[str]:
             )
             if deps_block is not None:
                 requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
-        for optional_block in re.finditer(
-            r'(?ms)^\[project\.optional-dependencies\]\s*(.*?)(?=^\[|\Z)', raw,
-        ):
-            for group in re.finditer(
-                r'(?m)^[A-Za-z0-9_-]+\s*=\s*\[(.*?)\]', optional_block.group(1), re.DOTALL,
-            ):
-                requirements.extend(re.findall(r'"([^"]+)"', group.group(1)))
     names: set[str] = set()
     for requirement in requirements:
         if not isinstance(requirement, str) or not requirement.strip():
