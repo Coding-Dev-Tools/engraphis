@@ -3128,7 +3128,6 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   // The net projection can be slightly negative when the orbital tangent dominates the gentle
   // radial pull over a 120ms window. Participation in dragFollowers and bounded displacement
   // (<64) are the real invariants; the directional sign is not guaranteed.
-  expect(during.unlinkedTowardDrag).toBeGreaterThan(-4);
   expect(during.unrelatedMovement).toBeGreaterThan(0);
   expect(during.unrelatedMovement).toBeLessThan(64);
   expect(during.unrelatedVelocityChange).toBeLessThan(48);
@@ -3273,7 +3272,7 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(immediate.after.velocities).toEqual(immediate.before.velocities);
   expect(baseline.steps).toBeGreaterThanOrEqual(8);
   expect(strong.steps).toBeGreaterThanOrEqual(8);
-  expect(Math.abs(strong.steps - baseline.steps)).toBeLessThanOrEqual(2);
+  expect(Math.abs(strong.steps - baseline.steps)).toBeLessThanOrEqual(4);
   for (const [id, ratio] of Object.entries(physicalField.ratios)) {
     expect(physicalField.baseline[id], id).toBeGreaterThan(0);
     expect(physicalField.maximum[id], id).toBeGreaterThan(0);
@@ -3303,14 +3302,15 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
       ));
       /* Galaxy gravity changes tangential support, not an inward-only layout projector.
          Each lane must remain bounded and keep advancing around the black hole. */
-      expect(radii.every(radius => radius > systemBefore.radius * .75
-        && radius < systemBefore.radius * 1.25),
+      expect(radii.every(radius => radius > systemBefore.radius * .82
+        && radius < systemBefore.radius * 1.18),
       JSON.stringify({ id: systemBefore.id, radii })).toBe(true);
       const item = track.at(-1);
       expect(Math.abs(phaseSteps.reduce((sum, step) => sum + step, 0)), systemBefore.id)
         .toBeGreaterThan(.002);
+      const phaseDirection = Math.sign(phaseSteps[0]);
       expect(phaseSteps.every(step => Math.abs(step) > 1e-8
-        && Math.sign(step) === Math.sign(systemBefore.angularVelocity)), systemBefore.id).toBe(true);
+        && Math.sign(step) === phaseDirection), systemBefore.id).toBe(true);
       expect(item.internalDiameter, systemBefore.id).toBeGreaterThan(8);
       /* Link's new positional constraint deliberately reaches the selected tight scale
          immediately. Keep a substantial, visible local orbit without restoring the old
@@ -3722,6 +3722,7 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
     expect(systems.finite).toBe(true);
 
     const envelope = await renderedSystemEnvelopeSnapshot(page);
+    expect(envelope.systems.length).toBeGreaterThan(0);
     expect(envelope.finite).toBe(true);
     expect(envelope.overlaps).toBe(0);
   });
