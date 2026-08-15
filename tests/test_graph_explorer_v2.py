@@ -3711,6 +3711,86 @@ def test_visibility_classification_caps_edge_scan_without_giant_allocation(monke
     with pytest.raises(GraphSceneCapacityExceeded, match="visibility relation rows"):
         service.graph_scene(workspace="acme", level="complete", include_memory_nodes=False)
 
+
+def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
+    service, _alpha, _beta, gamma = _seed_service()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
+    workspace_id = service.store.get_or_create_workspace("acme")
+    service.store.get_or_create_repo(workspace_id, "selected")
+    noisy_repo = service.store.get_or_create_repo(workspace_id, "noisy")
+    noisy = service.store.upsert_entity(Node(
+        id="ent_noisy", name="Noisy", ntype="concept",
+        workspace_id=workspace_id, repo_id=noisy_repo,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_noisy", src=gamma, dst=noisy, relation="mentions",
+        workspace_id=workspace_id, repo_id=noisy_repo,
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", repo="selected", level="complete",
+        include_memory_nodes=False,
+    )
+
+    assert noisy not in {node["id"] for node in scene["nodes"]}
+    assert "edge_noisy" not in {edge["id"] for edge in scene["edges"]}
+
+
+def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
+    service, _alpha, _beta, gamma = _seed_service()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_SUPPORTS", 3)
+    workspace_id = service.store.get_or_create_workspace("acme")
+    history_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Gamma used Delta.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    delta = service.store.upsert_entity(Node(
+        id="ent_history_delta", name="History Delta", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_zz_history", src=gamma, dst=delta, relation="uses",
+        workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": history_memory},
+    ))
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_to=100, valid_to_recorded_at=100 "
+        "WHERE id='edge_zz_history'"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_to=100, valid_to_recorded_at=100 "
+        "WHERE edge_id='edge_zz_history'"
+    )
+    service.store.conn.commit()
+
+    rows = service._graph_scene_rows(
+        workspace="acme", valid_at=200, known_at=200, include_history=True,
+        include_memory_nodes=False,
+    )
+    support_keys = {
+        (support["edge_id"], support["memory_id"], support["source_kind"])
+        for support in rows[4]
+    }
+
+    assert len(support_keys) == 3
+    assert any(
+        edge_id == "edge_zz_history" and memory_id == history_memory
+        for edge_id, memory_id, _source_kind in support_keys
+    )
+
 def test_all_presentation_allowlist_excludes_server_only_fields():
     """project_all_presentation must drop every server-only field and retain
     only the explicit renderer allowlist. Adding a new private field to the
