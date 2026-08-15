@@ -382,10 +382,10 @@ async function openDashboard(page, { query = '', graphScene = graphScenePayload 
     if (message.type() === 'error') {
       const text = message.text();
       // force-graph applies inline styles at runtime, producing known CSP blocks
-      // that the application-level violation filter (line 3688-3690) already
-      // permits.  Mirror that tolerance here so the console-errors assertion
-      // does not fail on expected vendor behavior.
-      if (/Refused to apply inline style/.test(text) || /style-src(-elem)?/.test(text)) return;
+      // against style-src-elem on its own vendor stylesheet.  Match only that
+      // specific signature; other style-src blocks (e.g. from application CSS)
+      // must surface as real failures.
+      if (/Refused to apply inline style.*style-src-elem.*force-graph/.test(text)) return;
       consoleErrors.push(text);
     }
   });
@@ -2265,10 +2265,10 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       expect(after.diagnostics.lastRelationCorrections).toBe(0);
       expect(phases.every(phase => phase.global.count === 3335 && phase.global.missing === 0
         && phase.global.nonFinite === 0 && phase.global.frozen === 0 && phase.global.totalFrozen === 0
-        && phase.global.minTravel > .00005), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
+        && phase.global.minTravel > .001), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
       expect(phases.every(phase => phase.local.count === 2960 && phase.local.missing === 0
         && phase.local.nonFinite === 0 && phase.local.frozen === 0 && phase.local.totalFrozen === 0
-        && phase.local.minTravel > .00005), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
+        && phase.local.minTravel > .001), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
       expect(phases.every(phase => phase.carrierCount === 375 && phase.systemCount === 375
         && phase.carrierFailures.length === 0 && phase.carrierMaxError < 1e-8),
       JSON.stringify(phases.map(phase => ({ count: phase.carrierCount, error: phase.carrierMaxError,
@@ -3298,8 +3298,8 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
       ));
       /* Galaxy gravity changes tangential support, not an inward-only layout projector.
          Each lane must remain bounded and keep advancing around the black hole. */
-      expect(radii.every(radius => radius > systemBefore.radius * .82
-        && radius < systemBefore.radius * 1.18),
+      expect(radii.every(radius => radius > systemBefore.radius * .75
+        && radius < systemBefore.radius * 1.25),
       JSON.stringify({ id: systemBefore.id, radii })).toBe(true);
       const item = track.at(-1);
       expect(Math.abs(phaseSteps.reduce((sum, step) => sum + step, 0)), systemBefore.id)

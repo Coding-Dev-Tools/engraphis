@@ -557,6 +557,40 @@ def test_release_evidence_rejects_sbom_with_mismatched_root_purl(tmp_path):
     with pytest.raises(EvidenceError, match="metadata.component does not identify"):
         _build(root, dist, inputs=inputs)
 
+
+def test_release_evidence_rejects_sbom_with_malformed_dependency_purl(tmp_path):
+    """An SBOM component whose PURL names a different package than its name/version must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/other-project@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="PURL does not match"):
+        _build(root, dist, inputs=inputs)
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
