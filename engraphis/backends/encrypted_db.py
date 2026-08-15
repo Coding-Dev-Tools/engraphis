@@ -275,42 +275,6 @@ def make_connector(key: str) -> _EncryptedConnector:
 
     pragma = _key_pragma(key)
 
-    def _connect(path: str):
-        try:
-            if path != ":memory:":
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-            raw = sqlcipher3.connect(path, timeout=30, check_same_thread=False)
-        except Exception:  # noqa: BLE001
-            raise EncryptionError(
-                "could not initialize the encrypted database connection"
-            ) from None
-        try:
-            raw.execute(pragma)                   # MUST be the first statement
-        except Exception:  # noqa: BLE001
-            try:
-                raw.close()
-            except Exception:  # noqa: BLE001
-                pass
-            # Suppress the driver message (`from None`): a PRAGMA syntax error can echo the
-            # statement text, which contains the key. Never surface key material.
-            raise EncryptionError(
-                "failed to apply the database key — check the ENGRAPHIS_DB_KEY format") from None
-        try:
-            # Touch the header so a wrong key / plaintext-vs-encrypted mismatch fails now,
-            # with a clear message, instead of deep inside an unrelated query later.
-            raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except Exception:  # noqa: BLE001
-            try:
-                raw.close()
-            except Exception:  # noqa: BLE001
-                pass
-            raise EncryptionError(
-                "could not open the encrypted database — wrong ENGRAPHIS_DB_KEY, or "
-                "the file is not SQLCipher-encrypted (an existing plaintext DB cannot be "
-                "opened with a key; migrate it first)."
-            ) from None
-        raw.row_factory = sqlcipher3.Row
-        return _TranslatingConnection(raw)
 
     return _EncryptedConnector(sqlcipher3, pragma)
 

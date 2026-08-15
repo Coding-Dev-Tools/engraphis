@@ -291,6 +291,8 @@ def test_cli_ingest_metadata_cannot_override_local_source(monkeypatch, capsys):
         def remember_local_cli(self, content, **kwargs):
             captured.update(content=content, **kwargs)
             return {"id": "mem_1", "workspace": kwargs["workspace"], "op": "add"}
+        def close(self):
+            pass
 
     monkeypatch.setattr(cli, "_service", _Service)
     cli.cmd_ingest(SimpleNamespace(
@@ -309,6 +311,8 @@ def test_cli_chat_passes_the_selected_namespace(monkeypatch, capsys):
         def grounded_recall(self, prompt, **kwargs):
             captured.update(prompt=prompt, **kwargs)
             return {"grounded": True, "answer": "answer", "citations": []}
+        def close(self):
+            pass
 
     monkeypatch.setattr(cli, "_service", _Service)
     cli.cmd_chat(SimpleNamespace(prompt="question", namespace="ops"))
@@ -316,6 +320,26 @@ def test_cli_chat_passes_the_selected_namespace(monkeypatch, capsys):
     assert captured == {"prompt": "question", "workspace": "ops"}
     assert capsys.readouterr().out.strip() == "answer"
 
+
+
+def test_cli_ingest_closes_the_service_even_when_it_raises(monkeypatch, capsys):
+    """The CLI creates a MemoryService per invocation; an exception inside the call
+    must not strand the SQLite connection or any loaded embedder model."""
+    closed = []
+
+    class _Service:
+        def remember_local_cli(self, content, **kwargs):
+            raise RuntimeError("boom")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cli, "_service", _Service)
+    with pytest.raises(RuntimeError, match="boom"):
+        cli.cmd_ingest(SimpleNamespace(
+            content="x", namespace="ops", key=None, metadata=None,
+        ))
+    assert closed == [True]
 
 def test_cli_bulk_review_is_dry_run_by_default_and_excludes_quarantine(
         monkeypatch, capsys):

@@ -248,6 +248,65 @@ def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
     assert [row.id for row in rows] == [approved]
 
 
+def test_list_memory_ids_returns_only_ids_without_hydrating_records(store):
+    """list_memory_ids selects only the id column, avoiding full record materialization."""
+    wid = store.get_or_create_workspace("w")
+    ids = [
+        store.add_memory(MemoryRecord(
+            id="", content=f"Memory {i}", workspace_id=wid,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+        for i in range(5)
+    ]
+    result = store.list_memory_ids(SearchFilter(workspace_id=wid))
+    assert set(result) == set(ids)
+    assert all(isinstance(mid, str) for mid in result)
+
+
+def test_list_memory_ids_prompt_only_excludes_pending_rows_before_capping(store):
+    """prompt_only must filter ineligible rows before applying the limit, same as list_memories."""
+    wid = store.get_or_create_workspace("w")
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved release history.", workspace_id=wid,
+        provenance={"trusted": True, "review_state": "approved"}, ingested_at=1.0,
+    ))
+    store.add_memory(MemoryRecord(
+        id="", content="Pending release history.", workspace_id=wid,
+        provenance={"trusted": False, "review_state": "pending"}, ingested_at=2.0,
+    ))
+    ids = store.list_memory_ids(
+        SearchFilter(workspace_id=wid), limit=1, prompt_only=True,
+    )
+    assert ids == [approved]
+
+
+def test_list_memory_ids_respects_limit(store):
+    wid = store.get_or_create_workspace("w")
+    for i in range(10):
+        store.add_memory(MemoryRecord(id="", content=f"m{i}", workspace_id=wid))
+    ids = store.list_memory_ids(SearchFilter(workspace_id=wid), limit=3)
+    assert len(ids) == 3
+    assert store.list_memory_ids(SearchFilter(workspace_id=wid), limit=0) == []
+    assert store.list_memory_ids(SearchFilter(workspace_id=wid), limit=-1) == []
+
+
+def test_list_memory_ids_include_invalid(store):
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(id="", content="fact", workspace_id=wid))
+    store.close_validity(mid, reason="superseded")
+    # Default: closed fact not visible.
+    assert mid not in store.list_memory_ids(SearchFilter(workspace_id=wid))
+    # include_invalid: visible.
+    assert mid in store.list_memory_ids(SearchFilter(workspace_id=wid), include_invalid=True)
+
+
+def test_list_memory_ids_empty_scope_matches_nothing(store):
+    """An empty scopes filter must not widen the read to every scope."""
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(id="", content="x", workspace_id=wid))
+    assert store.list_memory_ids(SearchFilter(workspace_id=wid, scopes=[])) == []
+
+
 def test_clean_v7_schema_has_temporal_code_and_memory_link_tables(store):
     tables = {row["name"] for row in store.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
