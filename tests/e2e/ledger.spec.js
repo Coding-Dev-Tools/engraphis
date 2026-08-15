@@ -1878,6 +1878,8 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
 });
 
 test('overview→all readiness failure preserves the committed overview renderer and re-enables controls', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(String(error)));
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
     window.setTimeout = (callback, delay, ...args) => {
@@ -1910,6 +1912,7 @@ test('overview→all readiness failure preserves the committed overview renderer
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
   // Old renderer data survives: count still reflects the overview dataset
   await expect(page.locator('#graph-count')).toContainText('entities');
+  expect(pageErrors).toEqual([]);
 });
 
 test('all→quality readiness failure preserves the committed all-node renderer and re-enables controls', async ({ page }) => {

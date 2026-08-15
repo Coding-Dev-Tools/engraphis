@@ -3098,6 +3098,8 @@
     state.graphLoadController = controller;
     if (previousController && !previousController.signal.aborted) previousController.abort();
     setGraphLoadControlsBusy(true);
+    const oldEngine = state.graphEngine;
+    const oldOverlay = state.graphSpacetimeOverlay;
     /* Loading is a transaction: freeze the committed renderer before fetching its replacement.
        A failed request restores it; a successful request destroys it immediately before commit. */
     if (state.graphEngine && typeof state.graphEngine.freeze === 'function') {
@@ -3203,8 +3205,8 @@
             : sceneMeta.nodes_complete,
         };
         const oldHost = byId('graph-canvas');
-        const oldEngine = state.graphEngine;
-        const oldOverlay = state.graphSpacetimeOverlay;
+        // oldEngine/oldOverlay were captured before the first await so the failure path
+        // can restore the exact committed renderer even when candidate setup never begins.
         candidateHost = oldHost.cloneNode(false);
         candidateHost.id = `graph-canvas-candidate-${request.id}`;
         candidateHost.classList.add('graph-canvas-candidate');

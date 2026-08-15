@@ -8171,14 +8171,35 @@ class MemoryService:
         visibility_rows = self.store.conn.execute(
             visibility_sql, visibility_params,
         ).fetchall()
-        # Never materialize an unbounded workspace edge population merely to classify
-        # a smaller repository view. The selected scene has the same hard relation cap.
+        # Privacy classification remains workspace-wide even for a repository view:
+        # a shared entity touched only by an unrelated repo's session-private edge must
+        # stay hidden. Bound the scan by selected candidate entities, not by every
+        # unrelated relation in the workspace.
+        touching_entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
+        touching_sql = (
+            "SELECT selected_entity.id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
+        )
+        touching_params: list[Any] = [wid]
+        if repo_id:
+            touching_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            touching_params.append(repo_id)
+        touching_sql += (
+            "AND (EXISTS (SELECT 1 FROM edges touching_edge "
+            "WHERE touching_edge.workspace_id=? "
+            "AND touching_edge.src=selected_entity.id) "
+            "OR EXISTS (SELECT 1 FROM edges touching_edge "
+            "WHERE touching_edge.workspace_id=? "
+            "AND touching_edge.dst=selected_entity.id)) "
+            "ORDER BY selected_entity.id LIMIT ?"
+        )
+        touching_params.extend((wid, wid, touching_entity_cap + 1))
         touching_rows = self.store.conn.execute(
-            "SELECT src, dst FROM edges WHERE workspace_id=? ORDER BY id LIMIT ?",
-            (wid, MAX_GRAPH_ANALYSIS_EDGES + 1),
+            touching_sql, touching_params,
         ).fetchall()
-        if (len(visibility_rows) > MAX_GRAPH_ANALYSIS_EDGES
-                or len(touching_rows) > MAX_GRAPH_ANALYSIS_EDGES):
+        if len(visibility_rows) > MAX_GRAPH_ANALYSIS_EDGES:
             if include_complete_rows:
                 raise GraphSceneCapacityExceeded(
                     resource="visibility relation rows",
@@ -8189,11 +8210,24 @@ class MemoryService:
                 "graph analysis exceeds the relation visibility limit; "
                 "filter or reduce the workspace graph"
             )
+        if len(touching_rows) > touching_entity_cap:
+            if all_mode_entity_cap is not None:
+                raise GraphSceneCapacityExceeded(
+                    resource="all-mode entity nodes",
+                    count=touching_entity_cap + 1,
+                    limit=touching_entity_cap,
+                )
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="entity rows",
+                    count=touching_entity_cap + 1,
+                    limit=touching_entity_cap,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the entity candidate limit; filter by repository"
+            )
         historical_touching_ids = {
-            str(row[key])
-            for row in touching_rows
-            for key in ("src", "dst")
-            if row[key]
+            str(row["id"]) for row in touching_rows if row["id"]
         }
         historically_public_ids = {
             str(row[key])
@@ -8644,14 +8678,15 @@ class MemoryService:
                 if not chunk:
                     continue
                 marks = ",".join("?" for _ in chunk)
-                # A closed relation may still have live supporting memories. History mode
-                # retains every public support that had begun by the requested anchors;
-                # ghost classification below records which support or memory later closed.
+                # Query only rows absent from the live support arm, and collapse repeated
+                # historical versions to one evidence key before applying the global cap.
+                # This prevents live duplicates from consuming the page that should carry a
+                # later closed support while retaining live supports of a closed relation.
                 historical_sql = (
-                    "SELECT support.edge_id, support.memory_id, support.source_kind, "
-                    "support.confidence, support.valid_from, support.valid_to, "
-                    "support.valid_to_recorded_at, support.ingested_at, "
-                    "support.expired_at, support.provenance FROM edge_supports support "
+                    "WITH historical_keys AS ("
+                    "SELECT MAX(support.id) AS support_id "
+                    "FROM edge_supports support "
+                    "JOIN edges historical_edge ON historical_edge.id=support.edge_id "
                     "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE support.edge_id IN ({marks}) "
                     "AND (support.valid_from IS NULL OR support.valid_from<=?) "
@@ -8662,14 +8697,30 @@ class MemoryService:
                     "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "AND memory.workspace_id=? "
+                    "AND ("
+                    "(support.valid_to IS NOT NULL AND support.valid_to<=? "
+                    "AND (support.valid_to_recorded_at IS NULL "
+                    "OR support.valid_to_recorded_at<=?)) "
+                    "OR (historical_edge.valid_to IS NOT NULL "
+                    "AND historical_edge.valid_to<=? "
+                    "AND (historical_edge.valid_to_recorded_at IS NULL "
+                    "OR historical_edge.valid_to_recorded_at<=?))) "
                 )
                 historical_params: list[Any] = [
                     *chunk, t, known_t, known_t, t, known_t, known_t, wid,
+                    t, known_t, t, known_t,
                 ]
                 if repo_id:
                     historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
                     historical_params.append(repo_id)
                 historical_sql += (
+                    "GROUP BY support.edge_id, support.memory_id, support.source_kind"
+                    ") SELECT support.edge_id, support.memory_id, support.source_kind, "
+                    "support.confidence, support.valid_from, support.valid_to, "
+                    "support.valid_to_recorded_at, support.ingested_at, "
+                    "support.expired_at, support.provenance "
+                    "FROM historical_keys "
+                    "JOIN edge_supports support ON support.id=historical_keys.support_id "
                     "ORDER BY support.edge_id, support.memory_id, support.source_kind "
                     "LIMIT ?"
                 )
