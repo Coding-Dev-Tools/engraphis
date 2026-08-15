@@ -132,9 +132,10 @@ def test_all_presentation_projects_only_renderer_fields_without_mutating_scene()
         "anchor_role", "system_anchor_id", "gravity_mass", "visual_radius",
     } <= projected["nodes"][0].keys()
     assert {
-        "id", "source", "target", "layer", "strength", "rest_length",
+        "id", "source", "target", "relation", "layer", "strength", "rest_length",
         "spring_strength", "bridge",
     } <= projected["edges"][0].keys()
+    assert projected["edges"][0]["relation"] == scene["edges"][0]["relation"]
     assert set(projected) == {"meta", "nodes", "edges"}
     assert "facets" not in projected
     assert "community_bridges" not in projected
