@@ -272,7 +272,8 @@ def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
     }
 
 
-def environment_lock_artifact(root: Path, path: Path, sbom: Path) -> dict[str, Any]:
+def environment_lock_artifact(
+        root: Path, path: Path, sbom: Path, version: str) -> dict[str, Any]:
     """Require the exact build freeze to equal the Python SBOM package closure."""
     if not path.is_file() or path.is_symlink():
         raise EvidenceError("build environment lock is missing")
@@ -292,13 +293,29 @@ def environment_lock_artifact(root: Path, path: Path, sbom: Path) -> dict[str, A
         if package in packages:
             raise EvidenceError("build environment lock contains a duplicate package")
         packages.add(package)
-    sbom_packages = _python_sbom_packages(_json_object(sbom, "SBOM"))
+    document = _json_object(sbom, "SBOM")
+    sbom_packages = _python_sbom_packages(document)
     if not sbom_packages:
         raise EvidenceError("SBOM contains no Python package components")
-    sbom_names = {name for name, _ in sbom_packages}
-    if PACKAGE not in sbom_names:
+    metadata_component = document.get("metadata", {}).get("component")
+    if not isinstance(metadata_component, dict):
         raise EvidenceError(
-            "SBOM does not include the " + PACKAGE + " root component"
+            "SBOM metadata.component does not identify the " + PACKAGE + " root"
+        )
+    root_name = metadata_component.get("name")
+    root_version = metadata_component.get("version")
+    root_purl = metadata_component.get("purl")
+    if (
+        not isinstance(root_name, str)
+        or _canonical_package_name(root_name) != PACKAGE
+        or not isinstance(root_version, str)
+        or root_version != version
+        or not isinstance(root_purl, str)
+        or not root_purl.startswith("pkg:pypi/")
+    ):
+        raise EvidenceError(
+            "SBOM metadata.component does not identify the " + PACKAGE
+            + " root at version " + version
         )
     if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
@@ -682,7 +699,7 @@ def build_evidence(
     artifacts = distribution_artifacts(distribution_directory, version)
     artifact_digests = {item["filename"]: item["sha256"] for item in artifacts}
     python_sbom = sbom_artifact(root, sbom)
-    environment = environment_lock_artifact(root, environment_lock, sbom)
+    environment = environment_lock_artifact(root, environment_lock, sbom, version)
     container_sbom = container_sbom_artifact(root, image_sbom, image_digest)
     container_scan = container_scan_artifact(root, image_scan)
     reproducibility_record = reproducibility_artifact(

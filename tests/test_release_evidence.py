@@ -59,18 +59,20 @@ def _release_inputs(root, dist):
             {
                 "bomFormat": "CycloneDX",
                 "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
                 "components": [
                     {
                         "type": "library",
                         "name": "alpha-package",
                         "version": "1.0",
                         "purl": "pkg:pypi/alpha-package@1.0",
-                    },
-                    {
-                        "type": "application",
-                        "name": "engraphis",
-                        "version": "1.2.3",
-                        "purl": "pkg:pypi/engraphis@1.2.3",
                     },
                 ],
             }
@@ -418,7 +420,47 @@ def test_release_evidence_rejects_sbom_missing_root_component(tmp_path):
         ),
         encoding="utf-8",
     )
-    with pytest.raises(EvidenceError, match="root component"):
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_with_wrong_version_root_component(tmp_path):
+    """An SBOM whose metadata.component names a different project version must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "other-project",
+                        "version": "9.9.9",
+                        "purl": "pkg:pypi/other-project@9.9.9",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
         _build(root, dist, inputs=inputs)
 
 
