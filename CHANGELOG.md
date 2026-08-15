@@ -7,6 +7,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+
 - Direct black-hole children now receive compact, deterministic orbital lanes near the black
   hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
   clearance, while community-child planets remain in their local moving frame; oversized Galaxy
@@ -24,9 +25,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
   relation labels no longer suppress direct star/system motion.
 - Galaxy physics ticks now explicitly invalidate the canvas camera, so advancing orbital
   coordinates repaints visibly even when force-graph's automatic redraw loop is paused.
-- Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
-  with matching evidence, connector, payload, and full-loader ceilings; live-render safety
-  thresholds remain unchanged so oversized scenes stay on the static/kinematic path.
+- Complete graph analysis now scans up to 40,000 entity rows and 200,000 raw relationships,
+  while the explicit all-node renderer retains its 20,000-node, 200,000-link refusal ceiling.
+  Live-render safety thresholds remain unchanged so oversized scenes stay on the static path.
+- Show all nodes now keeps the complete sidebar live: deterministic worker layouts respond to
+  repel, link-distance, gravity, and advanced force controls; minimum relations, unlinked nodes,
+  focus depth, relation layers, ghosts, and auto-collapse filter the LOD scene without a reload.
+  Capped directional relation flow, reduced-motion fallbacks, visible-count status, exact-repository
+  code overlays, and a 200,000-link worker guard complete the release safety contract.
 
 - Galaxy admission now uses a tighter default carrier gap and calibrated orbital slack, keeping
   more complete solar systems in the black-hole interior without sacrificing painted clearance.
@@ -69,6 +75,29 @@ All notable changes to Engraphis are documented here. Format loosely follows
   undersized node caps, and ghost evidence drilldowns resolve invalidated supporting memories
   instead of a colliding live canonical alias.
 
+- The source-import consolidation loop now uses union-find (path halving) to merge overlapping
+  clusters, replacing an O(n²) nested scan with near-linear time. The `consolidation_evidence_cache`
+  is bounded to 1000 entries with clear-on-overflow to prevent unbounded memory growth.
+- Duplicate `_is_reparse_point` implementations across 4 modules (documents, obsidian, resources,
+  vault) are extracted to a shared `core/fsutil.is_reparse_point` helper, eliminating code drift.
+- Backend factory functions (`get_embedder`, `get_vector_index`, `get_transport`, `get_extractor`,
+  `get_resource_extractor`, `get_postgres_introspector`) now declare Protocol-based return types,
+  making the interface contract explicit and enabling static type checking.
+- Graph visibility SQL helpers now use parameterized queries instead of `repr(float)` string
+  interpolation, eliminating a fragile pattern that could theoretically be exploited if float
+  representation ever produced non-numeric characters. The dead `_graph_edge_visibility_sql`
+  helper is removed; `_graph_edge_history_visibility_sql` returns `(sql, params)` tuple.
+- The dashboard graph scene endpoint (`/api/graph/scene`) now accepts a `presentation`
+  query parameter (`quality` or `all`); the `all` profile requests the complete entity
+  projection up to 20,000 nodes and 200,000 relationships with an explicit worker-backed
+  LOD renderer, while `quality` retains the existing overview cap.
+- Galaxy overview now retains the strongest cross-community bridge edge for every visible
+  system pair plus every direct global-anchor link, so inter-system and black-hole
+  relationships appear connected instead of isolated.
+- Added `docs/GRAPH_PERFORMANCE.md` documenting the two graph presentation profiles,
+  worker layout, progressive rendering, and the 20,000-node / 200,000-relation safety
+  ceilings.
+
 ### Fixed
 
 - Galaxy layout now packs each complete solar-system envelope before orbital seeding and keeps
@@ -103,7 +132,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Existing Galaxy preferences migrate only the retired `48` orbital-separation default to `60`;
   deliberate custom values, including Gravity `0`, remain unchanged.
 
-## [1.6] - 2026-08-08
+### Security
+
+- HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths back
+  to the client, preventing filesystem structure leakage (SEC-001).
+- Graph visibility SQL helpers now use parameterized queries instead of `repr(float)` string
+  interpolation, eliminating a fragile SQL construction pattern (SEC-002).
+- The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
+  PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
+## [1.6] - 2026-08-15
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
 local document and Obsidian import, tighter trust boundaries, synchronized agent guidance, and
@@ -111,6 +148,13 @@ stronger release and evaluation evidence.
 
 ### Changed
 
+- The dashboard graph now separates two explicit presentation budgets. **High quality** keeps the
+  interactive renderer for focused exploration, while **Show all nodes** requests the complete
+  entity projection and uses a worker-backed level-of-detail renderer with batched WebGL2 points,
+  a bounded Canvas fallback, progressive relationship disclosure, and no live force simulation.
+  The all-node profile supports up to 20,000 entities and 200,000 relationships; larger filtered
+  results fail with an explicit capacity response instead of silently sampling an incomplete graph.
+  Repository and entity-type filters remain the supported route for narrowing oversized views.
 - The Ledger knowledge graph now defaults to evidence-mass Galaxy gravity. The `galaxy-v6`
   scene contract retains the magnitude of degree, PageRank, support, and repository evidence;
   one mass value determines both visibly distinct star radius and gravitational pull. Deterministic

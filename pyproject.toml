@@ -106,7 +106,7 @@ code = [
 # Pillow floor: an unmarked floor would make a 3.9 [documents]/[all] install resolve
 # pytesseract without its required Pillow, which breaks at runtime.
 documents = [
-    "pypdf>=4.0",
+    "pypdf>=6.15.0",
     "Pillow>=12.3.0; python_version >= '3.10'",
     "pytesseract>=0.3.10; python_version >= '3.10'",
 ]
@@ -146,7 +146,7 @@ all = [
     "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
     "tree-sitter-language-pack==1.14.3; python_version >= '3.10'",
-    "pypdf>=4.0",
+    "pypdf>=6.15.0",
     "Pillow>=12.3.0; python_version >= '3.10'",
     "pytesseract>=0.3.10; python_version >= '3.10'",
     "faster-whisper>=1.0",
@@ -189,7 +189,7 @@ test = [
     "tree-sitter>=0.23; python_version >= '3.10'",
     "tree-sitter-language-pack==0.9.0; python_version < '3.10'",
     "tree-sitter-language-pack==1.14.3; python_version >= '3.10'",
-    "pypdf>=4.0",
+    "pypdf>=6.15.0",
     "Pillow>=12.3.0; python_version >= '3.10'",
     "pytesseract>=0.3.10; python_version >= '3.10'",
     "faster-whisper>=1.0",

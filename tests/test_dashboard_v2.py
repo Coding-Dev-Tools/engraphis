@@ -96,8 +96,9 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert re.search(
             r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
         )
-        assert "graphLimit=GRAPH_FULL?40000:320" in classic_js.text
-        assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
+        assert "presentation=all" not in classic_js.text
+        assert "GRAPH_FULL" not in classic_js.text
+        assert "EngraphisAllGraph" not in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["version"] == __version__
@@ -840,7 +841,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         script = client.get("/v2-assets/ledger.js")
         assert 'id="graph-retry"' in page.text
         assert 'id="graph-full"' not in page.text
-        assert '>Show all nodes<' not in page.text
+        assert 'id="graph-show-all"' in page.text
         assert 'id="graph-show-unlinked"' in page.text
         assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
@@ -848,14 +849,21 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
         assert "const GRAPH_INITIAL_NODE_LIMIT = 1000;" in script.text
         assert "const GRAPH_INITIAL_EDGE_LIMIT = 2000;" in script.text
-        assert "const GRAPH_FULL_NODE_LIMIT = 40_000;" in script.text
+        assert "const GRAPH_ALL_NODE_LIMIT = 20_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
+        assert "graphLoadRepo: ''" in script.text
         assert "function graphLoadKey(" in script.text
         assert "function isCurrentGraphLoad(request)" in script.text
+        assert "request.repo === (byId('graph-repo-filter').value || '').trim()" in script.text
+        assert "Filter by exact repository name…" in script.text
+        assert "candidate && !validatedGraphRepository(candidate)" in script.text
         assert "function retryGraphLoad()" in script.text
         assert "function releaseGraphAssetsAttempt(attempt)" in script.text
+        assert "function ensureGraphAllAsset()" in script.text
+        assert "function releaseGraphAllAssetsAttempt(attempt)" in script.text
+        assert "const assets = ensureGraphAssets(fullGraph);" in script.text
         assert "if (!force && state.graphLoadPromise && state.graphLoadKey === key)" in script.text
         assert "previousController.abort()" in script.text
         assert "Promise.race([" in script.text
@@ -863,14 +871,19 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "/graph/scene?" in script.text
         assert "&level=${level}" in script.text
         assert "&include_memory_nodes=false" in script.text
+        assert "&presentation=all" in script.text
+        assert "renderMode: fullGraph ? 'all' : 'overview'" in script.text
         assert "&include_history=true" in script.text
         assert "&connected_only=true" in script.text
         assert "const repo = (byId('graph-repo-filter').value || '').trim();" in script.text
         assert "repo ? `&repo=${encodeURIComponent(repo)}`" in script.text
         assert "item.degree != null ? item.degree : item.weighted_degree" in script.text
         assert "style: 'cyber'" in script.text
-        assert "renderMode: targetMode" in script.text
+        assert "renderMode: fullGraph ? 'all' : 'overview'" in script.text
         assert "loadGraph({ force: true })" in script.text
+        assert "if (!fullGraph && window.EngraphisSpacetime" in script.text
+        assert "setAttribute('aria-busy', 'true')" in script.text
+        assert "setAttribute('aria-busy', 'false')" in script.text
 
 
 def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp_path):
@@ -893,6 +906,8 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             "setSettings({ flowSpeed: speed })",
         ):
             assert behavior in script.text
+        assert "syncGraphSpacetimeTuning(" in script.text
+        assert "state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy())" in script.text
 
 
 def test_code_overlay_scopes_only_to_known_repositories(monkeypatch, tmp_path):
@@ -903,9 +918,29 @@ def test_code_overlay_scopes_only_to_known_repositories(monkeypatch, tmp_path):
         assert "function validatedGraphRepository(value)" in script.text
         assert "workspace && Array.isArray(workspace.repos)" in script.text
         assert "repositories: Array.isArray(scene.repos)" in script.text
-        assert "const validatedRepo = targetIncludeCode ? validatedGraphRepository(targetRepo) : '';" in script.text
-        assert "const codeRepo = validatedRepo" in script.text
+        assert "const validatedRepo = targetIncludeCode || fullGraph" in script.text
+        assert "const scopedRepo = validatedRepo" in script.text
         assert "targetIncludeCode && targetRepo" not in script.text
+
+
+def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        assert script.status_code == 200
+        assert "graphScopeBeforeAll: null" not in script.text
+        assert "showUnlinked: state.graphShowUnlinked" in script.text
+        assert "includeCode: state.graphIncludeCode" in script.text
+        assert "minDegree: number(byId('graph-min-degree').value)" in script.text
+        assert "if (loadAll) return ensureGraphAllAsset();" in script.text
+        assert "const graphFactory = fullGraph ? window.EngraphisAllGraph" in script.text
+        assert "scopeControl.disabled = full" not in script.text
+        assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text
+        assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in script.text
+        assert "function scheduleGraphRepositoryReload()" in script.text
+        assert "}, 250);" in script.text
+        assert "const indentation = state.graphMode === 'full' ? undefined : 2;" in script.text
+        assert "error.code === 'GRAPH_CAPACITY'" in script.text
+        assert "state.graphLoadRequest !== request.id" in script.text
 
 
 def test_graph_palette_notice_auto_dismisses_after_three_seconds(monkeypatch, tmp_path):
@@ -1953,3 +1988,71 @@ def test_every_managed_cloud_error_message_is_fixed_local_copy():
         "a CloudFeatureError message is no longer fixed local copy; _managed_call "
         "forwards it to the customer: %r" % (interpolated,)
     )
+
+def test_graph_toggle_labels_are_fixed_and_use_aria_pressed(monkeypatch, tmp_path):
+    """Toggle labels must stay fixed (not swap) and reflect state via aria-pressed."""
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        script = client.get("/v2-assets/ledger.js")
+        # The All-nodes toggle keeps a fixed label; aria-pressed carries the state.
+        assert 'id="graph-show-all"' in page.text
+        assert 'toggle.textContent = \'All nodes\'' in script.text
+        assert "toggle.setAttribute('aria-pressed', String(full))" in script.text
+        # Unlinked toggle also uses a fixed label + aria-pressed, not swapped text.
+        assert "control.textContent = 'Unlinked nodes'" in script.text
+        assert "control.setAttribute('aria-pressed', String(next))" in script.text
+        # Reject the prior inverted-label pattern where text swapped between states.
+        assert "button.textContent=full?'High quality':'Show all nodes'" not in script.text
+
+
+def test_full_mode_hides_freeze_and_orbit_pause_controls(monkeypatch, tmp_path):
+    """Full-mode quality-only motion controls must be hidden, not merely disabled."""
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        markup = client.get("/")
+        # Freeze and orbit-pause rows exist in markup for high-quality mode.
+        assert 'id="graph-freeze-row"' in markup.text
+        assert 'id="graph-orbit-pause-row"' in markup.text
+        # In full mode, updateGraphModeControls hides both rows.
+        assert "freezeRow.hidden = full" in script.text
+        assert "orbitPause.hidden = full" in script.text
+        # Relation flow remains visible in full mode (not hidden).
+        assert 'id="graph-flow"' in markup.text
+
+
+def test_graph_load_busy_disables_controls_and_updates_recovery_copy(monkeypatch, tmp_path):
+    """During load, retry/show-all are disabled and recovery copy names Reload data."""
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        # Busy state disables the two primary load controls.
+        assert "function setGraphLoadControlsBusy(busy)" in script.text
+        assert "'graph-show-all', 'graph-retry'" in script.text
+        assert "control.disabled = busy" in script.text
+        # Recovery copy uses actionable "Reload data", not vague retry language.
+        assert "retry.textContent = busy ? 'Reloading graph…' : 'Reload data'" in script.text
+        # Error messages reference "Reload data" as the actionable next step.
+        assert "Choose Reload data to try again." in script.text
+        # Reject misleading recovery copy that names nonexistent filters.
+        assert "Try adjusting your filters" not in script.text
+
+
+def test_export_disclosure_manages_keyboard_focus_and_aria_expanded(monkeypatch, tmp_path):
+    """Export menu opening focuses PNG; Escape and outside focus restore trigger."""
+    with _client(monkeypatch, tmp_path) as client:
+        script = client.get("/v2-assets/ledger.js")
+        markup = client.get("/")
+        # Trigger has aria-expanded and aria-controls for disclosure pattern.
+        assert 'id="graph-export"' in markup.text
+        assert 'aria-expanded="false"' in markup.text
+        assert 'aria-controls="graph-export-menu"' in markup.text
+        # Opening focuses the first menu item (PNG).
+        assert "byId('graph-export-png').focus()" in script.text
+        # aria-expanded updates on open/close.
+        assert "trigger.setAttribute('aria-expanded', 'true')" in script.text
+        assert "trigger.setAttribute('aria-expanded', 'false')" in script.text
+        # Escape on the wrap restores trigger focus.
+        assert "graphExportWrap.addEventListener('keydown'" in script.text
+        assert "setGraphExportMenuOpen(false, true)" in script.text
+        # Outside focusin/pointerdown collapses the menu.
+        assert "document.addEventListener('focusin'" in script.text
+        assert "document.addEventListener('pointerdown'" in script.text

@@ -199,7 +199,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert (
         _text("Dockerfile").splitlines()[1]
         == "FROM python:3.11-slim@sha256:"
-        "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff AS base"
+        "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1 AS base"
     )
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
@@ -300,7 +300,7 @@ def test_release_builds_one_portable_open_core_wheel():
     assert release.count("python -m build") == 2
     assert "python -m build --outdir dist-repeat" not in release
     assert 'builder: ["a", "b"]' in release
-    assert "python:3.11-slim@sha256:90744cff" in release
+    assert "github-hosted:ubuntu-latest/python-3.11" in release
     assert "Compare independent distribution builders" in release
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release

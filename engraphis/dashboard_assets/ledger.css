@@ -121,6 +121,10 @@ body[data-theme="matrix"] {
 
 button, input, select, textarea { font: inherit; }
 button, select { cursor: pointer; }
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
 a { color: var(--c-acc); }
 :where(button, a, input, select, textarea, summary):focus-visible {
   outline: 2px solid var(--c-acc);
@@ -591,11 +595,24 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
   background: linear-gradient(var(--c-inset), color-mix(in srgb, var(--c-inset) 88%, transparent), transparent);
   pointer-events: none;
 }
+body[data-theme="paper"] .graph-header {
+  background: rgba(240, 238, 232, .96);
+  border-bottom: 1px solid var(--c-line);
+}
 .graph-header > * { pointer-events: auto; }
 .graph-header .eyebrow { margin-bottom: 3px; font-size: 10.5px; }
 .graph-header h1 { font-size: 20px; }
 .graph-actions { display: flex; gap: 6px; }
 .graph-canvas { position: absolute; inset: 0; }
+.graph-canvas[data-graph-style="classic"] { background: var(--c-inset); }
+.graph-canvas-candidate {
+  visibility: hidden;
+  pointer-events: none;
+}
+.graph-canvas .engraphis-all-canvas,
+.graph-canvas .engraphis-all-labels { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.graph-canvas .engraphis-all-labels { pointer-events: none; }
+.graph-canvas.engraphis-all-node-hover { cursor: pointer; }
 .force-graph-container canvas {
   display: block;
   user-select: none;
@@ -760,6 +777,19 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
 }
 .graph-drawer-input::placeholder { color: var(--c-dim); opacity: 1; }
 .graph-toolbar { display: flex; flex-wrap: wrap; gap: 5px; }
+.graph-lod-note {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 3px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--c-acc);
+  background: var(--c-acc-soft);
+  color: var(--c-mid);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.graph-lod-note[hidden] { display: none; }
+.graph-lod-note strong { color: var(--c-fg); font-size: 11px; font-weight: 650; }
 .graph-action { min-height: 36px; padding: 8px 10px; border-radius: 3px; font-size: 11px; }
 .graph-action:hover,
 .graph-choice:hover,

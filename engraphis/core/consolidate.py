@@ -588,7 +588,19 @@ def _structured_retry_clusters(store, flt: SearchFilter) -> list[list[MemoryReco
         STRUCTURED_RECOVERY_CURSOR_NAME,
         next_recovery_cursor,
     )
-    source_groups: list[set[str]] = []
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path halving
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
     for derived in derived_rows:
         metadata = derived.metadata if isinstance(derived.metadata, dict) else {}
         nested = metadata.get("provenance")
@@ -606,25 +618,21 @@ def _structured_retry_clusters(store, flt: SearchFilter) -> list[list[MemoryReco
         }
         if source_ids <= attached:
             continue
-        for group in source_groups:
-            if group & source_ids:
-                group.update(source_ids)
-                break
-        else:
-            source_groups.append(set(source_ids))
+        for sid in source_ids:
+            if sid not in parent:
+                parent[sid] = sid
+        first = next(iter(source_ids))
+        for sid in source_ids:
+            union(first, sid)
 
-    # Merge transitive overlaps (A overlaps B, B overlaps C).
-    changed = True
-    while changed:
-        changed = False
-        for index, group in enumerate(source_groups):
-            for other_index in range(index + 1, len(source_groups)):
-                if group & source_groups[other_index]:
-                    group.update(source_groups.pop(other_index))
-                    changed = True
-                    break
-            if changed:
-                break
+    # Collect groups by root
+    groups: dict[str, set[str]] = {}
+    for sid in parent:
+        root = find(sid)
+        if root not in groups:
+            groups[root] = set()
+        groups[root].add(sid)
+    source_groups = list(groups.values())
 
     def in_scope(source: Optional[MemoryRecord]) -> bool:
         if source is None:

@@ -16,7 +16,7 @@ from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
-ALGORITHM_VERSION = "galaxy-v7-system-envelope-packing"
+ALGORITHM_VERSION = "galaxy-v8-cross-system-links"
 PUBLIC_REFERENCE_ID_LIMIT = 200
 PUBLIC_FACET_LIMIT = 100
 PUBLIC_REPO_NAME_LIMIT = 100
@@ -1131,10 +1131,37 @@ class _UnionFind:
 def _selected_edges(graph: dict, selected: set[str], level: str, cap: int) -> list[dict]:
     candidates = [edge for edge in graph["edges"]
                   if edge["source"] in selected and edge["target"] in selected]
+    bridge_ids: set[str] = set()
     if level == "overview":
-        candidates = [edge for edge in candidates if
-                      graph["nodes"][edge["source"]]["community_id"]
-                      == graph["nodes"][edge["target"]]["community_id"]]
+        internal = [edge for edge in candidates if
+                    graph["nodes"][edge["source"]]["community_id"]
+                    == graph["nodes"][edge["target"]]["community_id"]]
+        internal_ids = {edge["id"] for edge in internal}
+        cross_system = [edge for edge in candidates if edge["id"] not in internal_ids]
+        # Overview used to discard every cross-community edge. Galaxy mode still got the
+        # aggregate bridge metadata, but had no real endpoints to paint, so black-hole and
+        # inter-system relationships appeared disconnected. Keep the strongest connector for
+        # every visible system pair, plus every direct global-anchor link; the regular per-node
+        # ranking below can add a few more when the edge budget permits.
+        pair_best: dict[tuple[str, str, str], dict] = {}
+        for edge in sorted(cross_system, key=lambda item: (-item["strength"], item["id"])):
+            source = graph["nodes"][edge["source"]]
+            target = graph["nodes"][edge["target"]]
+            communities = tuple(sorted((source["community_id"], target["community_id"])))
+            key = (*communities, edge["layer"])
+            pair_best.setdefault(key, edge)
+        bridge_edges = list(pair_best.values())
+        global_anchor = graph.get("global_anchor")
+        if global_anchor in selected:
+            bridge_edges.extend(
+                edge for edge in cross_system
+                if edge["source"] == global_anchor or edge["target"] == global_anchor
+            )
+        bridge_ids = {edge["id"] for edge in bridge_edges}
+        for edge in bridge_edges:
+            if edge["tier"] == "context":
+                edge["tier"] = "primary"
+        candidates = internal + cross_system
     retained: set[str] = set()
     for community_id, member_ids in graph["community_members"].items():
         members = selected.intersection(member_ids)
@@ -1160,6 +1187,8 @@ def _selected_edges(graph: dict, selected: set[str], level: str, cap: int) -> li
             retained.add(edge["id"])
             if edge["tier"] == "context":
                 edge["tier"] = "primary"
+    if level == "overview":
+        retained.update(bridge_ids)
     chosen = [
         {key: value for key, value in edge.items() if not key.startswith("_")}
         for edge in candidates if edge["id"] in retained
@@ -2596,6 +2625,61 @@ def build_graph_scene(
         "community_bridges": bridges,
         "facets": _facets(graph),
     }
+
+_ALL_PRESENTATION_NODE_FIELDS = (
+    "id", "label", "type", "node_kind", "community_id", "ghost",
+    "x", "y", "gravity_mass", "visual_radius", "mass_score",
+    "weighted_degree", "pagerank", "support_count", "scene_rank",
+    "anchor_role", "system_anchor_id", "orbit_tier", "orbit_radius",
+)
+_ALL_PRESENTATION_EDGE_FIELDS = (
+    "id", "source", "target", "layer", "ghost", "strength",
+    "rest_length", "spring_strength",
+)
+_ALL_PRESENTATION_META_FIELDS = (
+    "workspace", "level", "scene_hash", "index_generation",
+    "total_nodes", "total_edges", "shown_nodes", "shown_edges", "truncated",
+    "query_ms", "layout_seed", "index_state", "connected_only",
+    "include_history", "include_memory_nodes", "algorithm_version",
+)
+
+
+def project_all_presentation(scene: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the compact renderer contract for ``presentation=all``.
+
+    Complete analytical scenes retain provenance, temporal evidence, and inspector fields.
+    The all-node renderer needs only stable identity, canonical layout/hierarchy, display
+    metrics, and relation physics. Keeping this projection explicit prevents multi-megabyte
+    evidence arrays from crossing the HTTP/worker boundary only to be discarded.
+    """
+    nodes = [
+        {key: node[key] for key in _ALL_PRESENTATION_NODE_FIELDS if key in node}
+        for node in scene.get("nodes", ())
+    ]
+    communities = {
+        str(node.get("id") or ""): str(node.get("community_id") or "")
+        for node in nodes
+    }
+    edges = []
+    for edge in scene.get("edges", ()):
+        projected = {
+            key: edge[key] for key in _ALL_PRESENTATION_EDGE_FIELDS if key in edge
+        }
+        source_community = communities.get(str(projected.get("source") or ""), "")
+        target_community = communities.get(str(projected.get("target") or ""), "")
+        projected["bridge"] = bool(
+            source_community and target_community
+            and source_community != target_community
+        )
+        edges.append(projected)
+    meta = {
+        key: scene.get("meta", {})[key]
+        for key in _ALL_PRESENTATION_META_FIELDS
+        if key in scene.get("meta", {})
+    }
+    meta["all_projected"] = True
+    return {"meta": meta, "nodes": nodes, "edges": edges}
+
 
 
 def strongest_path(graph: dict[str, Any], source: str, target: str, *,

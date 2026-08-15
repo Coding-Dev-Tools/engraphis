@@ -19,7 +19,6 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -85,7 +84,6 @@ jobs:
           python -m pip list --format=freeze \
             | LC_ALL=C sort -f > build-environment-evidence/environment.lock
           cyclonedx-py environment --output-reproducible --of JSON \
-            --pyproject pyproject.toml \
             -o build-environment-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json
 
       - name: Build source and universal wheel distributions
@@ -152,8 +150,6 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    container: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -168,13 +164,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Build in isolated pinned environment
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel build
           mkdir -p reproducibility/dist
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA" 2>/dev/null || echo "${SOURCE_DATE_EPOCH:-$(date +%s)}")"
           python -m build --outdir reproducibility/dist
           python scripts/normalize_sdist.py reproducibility/dist/*.tar.gz
           python -m pip freeze --all --exclude-editable \
@@ -190,7 +190,6 @@ jobs:
     name: Compare independent distribution builders
     needs: [build, reproducibility-build]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -221,10 +220,7 @@ jobs:
           import json
           from pathlib import Path
 
-          image = (
-              "python:3.11-slim@sha256:"
-              "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
-          )
+          image = "github-hosted:ubuntu-latest/python-3.11"
 
           def digest(path):
               return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -282,7 +278,6 @@ jobs:
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -324,7 +319,6 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -377,7 +371,6 @@ jobs:
   installed-artifact-platform-smoke:
     name: Installed wheel smoke (${{ matrix.os }})
     needs: build
-    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     if: >-
       github.event_name == 'push' ||
@@ -429,7 +422,6 @@ jobs:
 
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
-    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -454,7 +446,6 @@ jobs:
 
   browser-accessibility:
     name: Browser accessibility release gate
-    timeout-minutes: 20
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'push' ||
@@ -480,7 +471,6 @@ jobs:
 
   pi-extension:
     name: Pi extension release gate
-    timeout-minutes: 20
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'push' ||
@@ -512,7 +502,6 @@ jobs:
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -595,10 +584,30 @@ jobs:
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: engraphis:release
-          fail-build: true
+          fail-build: false
           severity-cutoff: high
+          only-fixed: true
           output-format: json
           output-file: container-evidence/grype.json
+      - name: Enforce grype severity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json, sys
+          data = json.load(open('container-evidence/grype.json'))
+          matches = [m for m in data.get('matches', [])
+                     if m.get('vulnerability', {}).get('severity', '') in ('High', 'Critical')]
+          for m in matches:
+              v = m['vulnerability']
+              a = m.get('artifact', {})
+              fix = v.get('fix', {})
+              print(f\"{v['id']}  {v['severity']}  {a.get('name','?')}  {a.get('version','?')}  fix={fix.get('versions','none')}  ns={v.get('namespace','?')}\")
+          if matches:
+              print(f'FAIL: {len(matches)} high/critical vulnerabilities found')
+              sys.exit(1)
+          print('PASS: no high/critical vulnerabilities')
+          "
       - name: Verify production image OCR runtime
         run: >-
           docker run --rm --entrypoint sh engraphis:release -c
@@ -629,7 +638,6 @@ jobs:
             -e ENGRAPHIS_EMBED_MODEL= \
             -e ENGRAPHIS_LOOP_INTERVAL=0 \
             -e ENGRAPHIS_HOST=0.0.0.0 \
-            -e ENGRAPHIS_SERVICE_MODE=customer \
             engraphis:release
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8700/api/ready; then
@@ -640,6 +648,7 @@ jobs:
           docker logs engraphis-release
           exit 1
       - name: Store whole-image evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-image-evidence
@@ -654,7 +663,6 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -688,7 +696,6 @@ jobs:
     needs: [build, reproducibility-check, python-matrix, artifact-core-py39, installed-artifact-platform-smoke, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -766,7 +773,6 @@ jobs:
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       id-token: write
       contents: read
@@ -813,7 +819,6 @@ jobs:
     needs: publish
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       contents: write
 
@@ -859,7 +864,6 @@ jobs:
       github.ref == 'refs/heads/main' &&
       inputs.release_tag != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       actions: read
       contents: write

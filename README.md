@@ -179,7 +179,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > across re-imports, binds adapters and target scopes, and retains only bounded, content-free
 > per-job format/result metadata. The schema 16 migration persists each import job's optional session target
 > and requires source lineage and job-item attachments to remain in that exact session. See the
-> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
+> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-15).
 
 ---
 
@@ -230,7 +230,9 @@ delegates configuration, startup health, browser opening, and process lifecycle 
 
 Inspect memories, supersession diffs, recall scores, timelines, links, consolidation, and audit
 records in the dashboard. The offline graph renderer is vendored, and the interface is keyboard-
-navigable with light and dark themes.
+navigable with light and dark themes. Graph exploration offers a focused **High quality** view and
+an explicit worker-backed **Show all nodes** view for complete entity projections up to 20,000
+nodes and 200,000 relationships; see the [graph performance profiles](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/GRAPH_PERFORMANCE.md).
 
 ---
 

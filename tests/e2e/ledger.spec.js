@@ -48,6 +48,7 @@ async function mockApi(page, options = {}) {
   requests.details = [];
   requests.documentImports = [];
   requests.contextSavingsQueries = [];
+  requests.graphQueries = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
@@ -141,6 +142,7 @@ async function mockApi(page, options = {}) {
     if (path === '/audit') return ok({ workspace, audit });
     if (path === '/receipts') return ok({ workspace, receipts });
     if (path === '/graph/scene') {
+      requests.graphQueries.push(Object.fromEntries(requestUrl.searchParams.entries()));
       if (typeof options.deferGraphRequest === 'function') {
         await options.deferGraphRequest(requestUrl);
       }
@@ -391,6 +393,123 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
+test('Ledger enters All nodes from a loaded overview without losing its scope', async ({ page }) => {
+  const allAssetRequests = [];
+  page.on('request', request => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.endsWith('/v2-assets/engraphis-graph-all.js')) allAssetRequests.push(request.url());
+  });
+  const requests = await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  expect(allAssetRequests).toEqual([]);
+
+  await page.locator('#graph-show-unlinked').click();
+  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
+  await page.locator('#graph-repo-filter').fill('agent-memory');
+  await page.getByRole('tab', { name: 'Time' }).click();
+  await page.locator('#graph-as-of').fill('2026-08-14');
+  await page.getByRole('tab', { name: 'Explore' }).click();
+  await page.locator('[data-graph-layer="code"]').click();
+  await page.locator('#graph-show-all').click();
+
+  await expect(page.locator('#graph-show-all')).toHaveText('All nodes');
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter by exact repository name…');
+  await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
+  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-flow')).toBeEnabled();
+  await expect(page.locator('[data-graph-layer="code"]')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+  expect(allAssetRequests).toHaveLength(1);
+  const allQuery = requests.graphQueries.find(item => item.presentation === 'all');
+  expect(allQuery).toBeTruthy();
+  expect(allQuery.repo).toBe('agent-memory');
+  expect(allQuery.include_code).toBe('true');
+  expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
+  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await expect(page.locator('[data-graph-color-choice="type"]')).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('#graph-flow').click();
+  await expect(page.locator('#graph-flow')).toHaveAttribute('aria-checked', 'false');
+  await page.locator('#graph-flow').click();
+  await page.locator('#graph-repel').fill('82');
+  await page.locator('#graph-link').fill('34');
+  await page.locator('#graph-gravity').fill('27');
+  await expect(page.locator('#graph-repel-output')).toHaveText('82');
+  await expect(page.locator('#graph-link-output')).toHaveText('34');
+  await expect(page.locator('#graph-gravity-output')).toHaveText('27');
+  await page.locator('#graph-tune-min-degree').fill('2');
+  await expect(page.locator('#graph-count')).toContainText('0 visible of 3 entities');
+  await page.locator('#graph-tune-min-degree').fill('1');
+  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.locator('[data-graph-palette-choice="ocean"]').click();
+  const persistedInAllMode = await page.evaluate(() => JSON.parse(
+    localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
+  ));
+  expect(persistedInAllMode.showUnlinked).toBe(false);
+  expect(persistedInAllMode.layers.code).toBe(true);
+  expect(persistedInAllMode.includeCode).toBe(true);
+  expect(persistedInAllMode.flow).toBe(true);
+  const allAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(allAccessibility.violations).toEqual([]);
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveText('All nodes');
+  await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
+  await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
+  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-flow')).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('[data-graph-layer="code"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  expect(allAssetRequests).toHaveLength(1);
+});
+
+test('Ledger keeps authored Galaxy coordinates in the All-node renderer', async ({ page }) => {
+  await mockApi(page, {
+    graphScene: {
+      nodes: [
+        {
+          id: 'black-hole', label: 'Black hole', gravity_mass: 64, visual_radius: 9,
+          community_id: 'core', anchor_role: 'global', system_anchor_id: 'black-hole',
+          orbit_tier: 0, galactic_radius: 0, x: 0, y: 0,
+        },
+        {
+          id: 'star', label: 'Star', gravity_mass: 12, visual_radius: 7,
+          community_id: 'star-system', anchor_role: 'community', system_anchor_id: 'star',
+          orbit_tier: 0, galactic_radius: 80, galactic_target_radius: 80, x: 80, y: 0,
+        },
+        {
+          id: 'planet', label: 'Planet', gravity_mass: 1, visual_radius: 3,
+          community_id: 'star-system', anchor_role: 'member', system_anchor_id: 'star',
+          orbit_tier: 1, galactic_radius: 80, x: 95, y: 0,
+        },
+      ],
+      edges: [
+        { from: 'black-hole', to: 'star', rest_length: 80, spring_strength: 0 },
+        { from: 'star', to: 'planet', rest_length: 15, spring_strength: 0 },
+      ],
+      communities: [{ id: 'core', mass: 64 }, { id: 'star-system', mass: 13 }],
+      community_bridges: [],
+      meta: { algorithm_version: 'galaxy-v6', layout_seed: 17, total_nodes: 3 },
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+});
+
 test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
   await mockApi(page);
   const rendererRequests = [];
@@ -412,14 +531,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260813-carrier-frame-log-halo-7');
+  expect(first.searchParams.get('v')).toBe('20260815-merge-ready-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260813-carrier-frame-log-halo-7');
+  expect(second.searchParams.get('v')).toBe('20260815-merge-ready-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -518,7 +637,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
-  await expect(page.locator('#graph-empty')).toContainText('Graph loading timed out');
+  await expect(page.locator('#graph-empty')).toContainText('High-quality graph loading timed out');
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations', { timeout: 15000 });
@@ -1128,7 +1247,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-repel')).toHaveValue('60');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity-label')).toHaveText('Gravity strength · loose ↔ tight');
+  await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
   await expect(page.locator('#graph-gravity')).toHaveValue('48');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
@@ -1137,8 +1256,8 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'All nodes' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   const paletteNotice = page.locator('#notice-banner');
   await page.locator('[data-graph-palette-choice="ember"]').click();
@@ -1148,17 +1267,17 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && url.searchParams.get('connected_only') === 'true';
   });
-  await page.getByRole('button', { name: 'Hide unlinked nodes' }).click();
+  await page.getByRole('button', { name: 'Unlinked nodes' }).click();
   await hideUnlinkedRequest;
-  await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
   const showUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && !url.searchParams.has('connected_only');
   });
-  await page.getByRole('button', { name: 'Show unlinked nodes' }).click();
+  await page.getByRole('button', { name: 'Unlinked nodes' }).click();
   await showUnlinkedRequest;
-  await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   const codeRequest = page.waitForRequest(request => {
@@ -1395,8 +1514,10 @@ test('Reload data replaces an identical pending graph request once', async ({ pa
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await waitForRetry;
-  // A second click while the forced retry is pending must not churn another identical request.
-  await page.getByRole('button', { name: 'Reload data' }).click();
+  // Busy controls reject a second user action; even a synthetic click cannot churn the request.
+  const reload = page.getByRole('button', { name: 'Reloading graph…' });
+  await expect(reload).toBeDisabled();
+  await reload.evaluate(button => button.click());
   await expect.poll(() => graphAttempts).toBe(2);
 
   releaseFirst();
@@ -1754,4 +1875,121 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
     'href',
     'https://cloud.engraphis.test/account?plan=team&interval=annual&trial=team&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
+});
+
+test('overview→all readiness failure preserves the committed overview renderer and re-enables controls', async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  await mockApi(page);
+  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/javascript',
+      body: 'window.__brokenAllAsset = true;',
+    });
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
+
+  // Committed mode reverted to overview: aria-pressed survives
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+  // Controls re-enabled
+  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  // Candidate alone is destroyed — no orphan host in the DOM
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  // Old renderer data survives: count still reflects the overview dataset
+  await expect(page.locator('#graph-count')).toContainText('entities');
+});
+
+test('all→quality readiness failure preserves the committed all-node renderer and re-enables controls', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // Enter all mode successfully first
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // Shorten the quality timeout after page load, before the failing transition
+  await page.evaluate(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 12_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  // Block quality API responses so the timeout fires before data arrives
+  await page.route('**/api/graph/scene**', async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('presentation') === 'quality') {
+      await new Promise(() => {});
+      return;
+    }
+    return route.fallback();
+  });
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('timed out', { timeout: 10_000 });
+
+  // Committed mode stays at full (all-node): aria-pressed survives
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  // Controls re-enabled
+  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  // Candidate alone is destroyed
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  // Old renderer data survives
+  await expect(page.locator('#graph-count')).toContainText('entities');
+});
+
+test('successful retry after readiness failure commits exactly one new renderer', async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  await mockApi(page);
+  let allAssetAttempts = 0;
+  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+    allAssetAttempts += 1;
+    if (allAssetAttempts === 1) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/javascript',
+        body: 'window.__brokenAllAsset = true;',
+      });
+    }
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // First attempt fails; mode reverts to overview
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+
+  // Retry by toggling again — second asset load succeeds and commits
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  expect(allAssetAttempts).toBe(2);
 });
