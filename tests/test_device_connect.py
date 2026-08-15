@@ -1564,6 +1564,28 @@ def test_token_dash_reads_stdin(monkeypatch, capsys):
     assert TOKEN not in capsys.readouterr().out
 
 
+
+@pytest.mark.parametrize("suffix", ["\n", "\r\n", ""])
+def test_read_token_strips_every_line_terminator(monkeypatch, suffix):
+    """Piped tokens arrive with whatever line ending the sender's platform chose.
+
+    ``sys.stdin.readline()`` retains the terminator; a pasted Windows token carries
+    ``\\r\\n``, a Unix pipe ``\\n``, and a bare ``printf`` may deliver nothing. Every
+    variant must authenticate identically — the control plane rejects a token that
+    still has whitespace at either end."""
+
+    class _Stdin:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+        @staticmethod
+        def readline() -> str:
+            return TOKEN + suffix
+
+    monkeypatch.setattr(connect_cli.sys, "stdin", _Stdin)
+    assert connect_cli._read_token("-") == TOKEN
+
 def test_token_dash_on_a_terminal_explains_itself_instead_of_hanging(monkeypatch, capsys):
     class _Tty:
         @staticmethod

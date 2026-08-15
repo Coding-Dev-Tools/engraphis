@@ -1293,11 +1293,9 @@ class RecallEngine:
             endpoint
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
-        } | {
-            memory.id for memory in self.store.list_memories(
-                flt, limit=12_000, prompt_only=prompt_only,
-            )
-        }
+        } | set(self.store.list_memory_ids(
+            flt, limit=12_000, prompt_only=prompt_only,
+        ))
         if prompt_only:
             memory_ids = self._prompt_eligible_memory_ids(memory_ids, flt)
             incidence = [

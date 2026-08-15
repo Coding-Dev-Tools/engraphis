@@ -67,12 +67,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     # A terminal command is the local database owner's explicit memory action. It is
     # not a public transport assertion, so use the service's narrow local-owner path;
     # normal HTTP/MCP/import writes remain pending review by design.
-    out = _service().remember_local_cli(
-        args.content,
-        workspace=args.namespace,
-        title=args.key or "",
-        metadata=(args.metadata or {}) | {"source": "cli"},
-    )
+    svc = _service()
+    try:
+        out = svc.remember_local_cli(
+            args.content,
+            workspace=args.namespace,
+            title=args.key or "",
+            metadata=(args.metadata or {}) | {"source": "cli"},
+        )
+    finally:
+        svc.close()
     print(f"Stored: {out['id']} (workspace={out['workspace']}, op={out['op']})")
     if out.get("resolution"):
         print(f"  resolution: {out['resolution']}")
@@ -85,18 +89,26 @@ def cmd_ingest_file(args: argparse.Namespace) -> None:
         sys.exit(1)
     content = p.read_text(encoding="utf-8", errors="replace")
     doc_id = args.key or p.stem
-    out = _service().ingest(
-        content,
-        workspace=args.namespace,
-        metadata={"source": "cli", "document_id": doc_id, "file": p.name},
-        source="cli",
-    )
+    svc = _service()
+    try:
+        out = svc.ingest(
+            content,
+            workspace=args.namespace,
+            metadata={"source": "cli", "document_id": doc_id, "file": p.name},
+            source="cli",
+        )
+    finally:
+        svc.close()
     print(f"Stored '{p.name}' as {doc_id} ({len(content)} chars, "
           f"{out['count']} memories, extracted={out['extracted']})")
 
 
 def cmd_recall(args: argparse.Namespace) -> None:
-    out = _service().recall(args.prompt, workspace=args.namespace, k=args.num_chunks)
+    svc = _service()
+    try:
+        out = svc.recall(args.prompt, workspace=args.namespace, k=args.num_chunks)
+    finally:
+        svc.close()
     if not out["count"]:
         print(f"(no memories found{': ' + out['note'] if out.get('note') else ''})")
         return
@@ -107,7 +119,11 @@ def cmd_recall(args: argparse.Namespace) -> None:
 def cmd_chat(args: argparse.Namespace) -> None:
     # Grounded, citation-backed answer built strictly from stored memories —
     # offline and deterministic (no LLM/API key needed, unlike the old REST chat).
-    out = _service().grounded_recall(args.prompt, workspace=args.namespace)
+    svc = _service()
+    try:
+        out = svc.grounded_recall(args.prompt, workspace=args.namespace)
+    finally:
+        svc.close()
     if not out.get("grounded"):
         print(f"(no grounded answer: {out.get('reason') or 'insufficient supporting memories'})")
         return
@@ -118,7 +134,11 @@ def cmd_chat(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    out = _service().recall_proactive(workspace=args.namespace, k=args.limit)
+    svc = _service()
+    try:
+        out = svc.recall_proactive(workspace=args.namespace, k=args.limit)
+    finally:
+        svc.close()
     if not out["memories"]:
         print("(no memories)")
         return

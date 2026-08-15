@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 import time
 
+import pytest
+
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.store import Store
@@ -126,3 +128,28 @@ def test_rebuild_code_memory_links_does_not_resurrect_pending_bridge():
     assert {
         row["memory_id"] for row in engine.store.list_code_memory_links(repo_id)
     } == {approved_id}
+
+def test_backfill_closes_store_even_when_feed_raises(tmp_path, monkeypatch):
+    """Round 1 wrapped the processing loop in try/finally: store.close().
+
+    An extractor failure, JSON decode error, or any other mid-loop exception
+    must not strand the SQLite connection. This test pins that contract.
+    """
+    path = tmp_path / "graph-backfill-lifecycle.db"
+    store = Store(str(path))
+    workspace_id = store.get_or_create_workspace("lifecycle")
+    store.add_memory(MemoryRecord(
+        id="", content="test memory", workspace_id=workspace_id,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    store.close()
+
+    def _exploding_feed(*args, **kwargs):
+        raise RuntimeError("extractor exploded")
+
+    monkeypatch.setattr(backfill_graph, "feed", _exploding_feed)
+    with pytest.raises(RuntimeError, match="extractor exploded"):
+        backfill_graph.backfill(str(path))
+    # If the store leaked, reopening would fail on Windows (file locked).
+    reopened = Store(str(path))
+    reopened.close()
