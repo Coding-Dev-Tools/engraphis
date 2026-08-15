@@ -179,13 +179,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 > across re-imports, binds adapters and target scopes, and retains only bounded, content-free
 > per-job format/result metadata. The schema 16 migration persists each import job's optional session target
 > and requires source lineage and job-item attachments to remain in that exact session. See the
-> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-08).
-
-> **Upgrading to 1.7:** no schema migration required (schema 16 unchanged). This release hardens
-> security (removes path echoes in HTTP errors, eliminates `repr(float)` SQL interpolation, patches
-> pypdf CVEs), improves performance (union-find consolidation, bounded recall cache), and adds the
-> all-node LOD graph renderer (20,000 nodes, 200,000 relations, worker-backed). See the
-> [1.7 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#17---2026-08-14).
+> [1.6 release notes](https://github.com/Coding-Dev-Tools/engraphis/blob/main/CHANGELOG.md#16---2026-08-15).
 
 ---
 
