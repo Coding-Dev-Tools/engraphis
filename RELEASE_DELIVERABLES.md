@@ -1,17 +1,15 @@
 # Engraphis Release Deliverables
 
 **Generated**: 2026-08-14  
-**Status**: ✅ Both releases merged, tagged, published on GitHub — awaiting PyPI upload
+**Status**: ✅ Both releases merged, tagged, published on GitHub. Security advisory published. PyPI upload pending (manual).
 
----
 
 ## Repository State
 | Branch | Commit | Tag | Status |
 |--------|--------|-----|--------|
 | `hotfix/v1.6.1-security` | `564afb0` | `v1.6.1` | ✅ Merged to main (#141), branch deleted |
 | `feat/team-hosted-auth` | `1b67bcd` | `v1.7` | ✅ Merged to main (#142), branch deleted |
-| `main` | `1b67bcd` | `v1.7` | ✅ Current release |
-
+| `main` | `HEAD` | `v1.7` | ✅ Includes #141, #142, #145 |
 ---
 
 ## v1.6.1 Security Hotfix
@@ -49,21 +47,13 @@ twine upload dist/engraphis-1.6.1*
 ```
 
 ### GitHub Security Advisory
-Draft a new advisory at: https://github.com/Coding-Dev-Tools/engraphis/security/advisories/new
+**Published**: [GHSA-rhrw-rg5c-4q76](https://github.com/Coding-Dev-Tools/engraphis/security/advisories/GHSA-rhrw-rg5c-4q76)
 
-**Template**:
-```
-Title: Path disclosure in vault import error responses (SEC-001)
-Severity: Low
-CWE: CWE-209 (Information Exposure Through Error Message)
-Affected versions: < 1.6.1
-Patched versions: 1.6.1
-
-Description:
-HTTP error responses in `/vaults/import-folder` and related endpoints echoed
-user-controlled path values, potentially exposing internal filesystem structure.
-Error messages now return generic "invalid path" without echoing the input.
-```
+- **Title**: Path disclosure in vault import error responses (SEC-001)
+- **Severity**: Low
+- **CWE**: CWE-209 (Information Exposure Through Error Message)
+- **Affected versions**: `< 1.6.1`
+- **Patched versions**: `1.6.1`
 
 ---
 
@@ -146,19 +136,15 @@ twine upload dist/engraphis-1.7*
 
 ---
 
-## Post-Merge Checklist
 - [x] Merge `hotfix/v1.6.1-security` to `main` (commit `564afb0`)
 - [x] Merge `feat/team-hosted-auth` to `main` (commit `1b67bcd`)
 - [x] Retag `v1.6.1` and `v1.7` on `main`
-- [ ] Publish both versions to PyPI (user handles manually — see commands below)
+- [ ] Publish both versions to PyPI (user handles manually)
 - [x] Create GitHub Release for v1.6.1 with artifacts uploaded
 - [x] Create GitHub Release for v1.7 with artifacts uploaded
 - [x] Delete hotfix/feature branches after merge
-- [ ] Delete hotfix/feature branches after merge:
-  ```bash
-  git push origin --delete hotfix/v1.6.1-security
-  git push origin --delete feat/team-hosted-auth
-  ```
+- [x] Publish GitHub Security Advisory for SEC-001 (GHSA-rhrw-rg5c-4q76)
+- [x] Commit post-release WIP fixes (#145 — resource leaks, perf, dead code)
 
 ---
 
