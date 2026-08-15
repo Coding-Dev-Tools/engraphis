@@ -1,49 +1,37 @@
 # Engraphis Release Deliverables
 
-**Generated**: 2026-08-14  
-**Status**: ✅ Both releases merged, tagged, published on GitHub. Security advisory published. PyPI upload pending (manual).
+**Generated**: 2026-08-15  
+**Status**: ✅ Code merged to main. Unauthorized v1.6.1 and v1.7 releases/tags deleted. PyPI upload pending (owner handles manually).
 
 
 ## Repository State
 | Branch | Commit | Tag | Status |
 |--------|--------|-----|--------|
-| `hotfix/v1.6.1-security` | `564afb0` | `v1.6.1` | ✅ Merged to main (#141), branch deleted |
-| `feat/team-hosted-auth` | `1b67bcd` | `v1.7` | ✅ Merged to main (#142), branch deleted |
-| `main` | `HEAD` | `v1.7` | ✅ Includes #141, #142, #145 |
+| `main` | `HEAD` | — | ✅ Includes all security fixes, Galaxy engine, performance improvements |
+| `fix/version-reset-1.6` | `f219c7d` | — | Open PR #149: version reset to 1.6 |
 ---
 
-## v1.6.1 Security Hotfix
+## v1.6 Release
 
 ### Contents
 - **SEC-001**: Removed user-controlled path echoes in HTTP error responses (`vault.py`, `service.py`)
+- **SEC-002**: Parameterized queries in graph visibility helpers (SQL injection prevention)
 - **pypdf CVE**: Raised version floor to `>=6.15.0`
-- **CI fixes**: Grype false-positive ignore config, diagnostic enforcement step, `$site_packages` variable form
-
-### Merge Command
-```bash
-# From local checkout on main:
-git checkout main
-git pull origin main
-git merge --no-ff hotfix/v1.6.1-security -m "Merge hotfix v1.6.1: security patches and CI fixes"
-git push origin main
-
-# After merge, retag v1.6.1 on main:
-git tag -d v1.6.1
-git tag v1.6.1 HEAD
-git push origin HEAD:refs/tags/v1.6.1 --force
-```
+- **Performance**: Union-find source group merge, bounded consolidation cache
+- **Quality**: Backend factory Protocol annotations, shared `core/fsutil.py`
+- **Dashboard**: Galaxy physics engine, cross-system bridges, all-node LOD renderer
+- **Import**: Source-neutral local document importer, Obsidian vault import
+- **Schema**: Advanced through schema 16 (deterministic sync, import manifests, session targets)
+- **CI**: Reproducibility build job, grype diagnostic enforcement, apt-get security patches
 
 ### PyPI Publishing
 ```bash
-# Build distributions (after merge to main):
+# Build distributions:
 python -m pip install --upgrade build twine
 python -m build
 
 # Upload to PyPI:
-twine upload dist/engraphis-1.6.1*
-
-# Or use trusted publishing (if configured):
-# gh workflow run "Publish to PyPI" --ref v1.6.1
+twine upload dist/engraphis-1.6*
 ```
 
 ### GitHub Security Advisory
@@ -52,99 +40,45 @@ twine upload dist/engraphis-1.6.1*
 - **Title**: Path disclosure in vault import error responses (SEC-001)
 - **Severity**: Low
 - **CWE**: CWE-209 (Information Exposure Through Error Message)
-- **Affected versions**: `< 1.6.1`
-- **Patched versions**: `1.6.1`
+- **Affected versions**: `< 1.6`
+- **Patched versions**: `1.6`
 
----
-
-## v1.7 Feature Release
-
-### Contents
-All v1.6.1 fixes, plus:
-- **SEC-002**: Parameterized queries in graph visibility helpers (SQL injection prevention)
-- **Performance**: Union-find source group merge, bounded consolidation cache
-- **Quality**: Backend factory Protocol annotations, shared `core/fsutil.py`
-- **Dashboard**: Galaxy physics engine, cross-system bridges, all-node LOD renderer
-- **CI**: Reproducibility build job, grype diagnostic enforcement, apt-get security patches
-
-### Merge Command
-```bash
-# From local checkout on main:
-git checkout main
-git pull origin main
-git merge --no-ff feat/team-hosted-auth -m "Merge v1.7: security, performance, and dashboard galaxy engine"
-git push origin main
-
-# After merge, retag v1.7 on main:
-git tag -d v1.7
-git tag v1.7 HEAD
-git push origin HEAD:refs/tags/v1.7 --force
-```
-
-### PyPI Publishing
-```bash
-# Build distributions (after merge to main):
-python -m pip install --upgrade build twine
-python -m build
-
-# Upload to PyPI:
-twine upload dist/engraphis-1.7*
-```
-
-### Release Notes
-```markdown
-## v1.7 (2026-08-14)
-
-### Security
-- **SEC-001**: Removed user-controlled path echoes in HTTP error responses
-- **SEC-002**: Refactored `repr(float)` SQL interpolation to parameterized queries
-- Raised `pypdf` floor to `>=6.15.0` (CVE remediation)
-
-### Performance
-- Replaced O(n²) source group merge with union-find in `consolidate.py`
-- Bounded `consolidation_evidence_cache` to 1000 entries in `recall.py`
-
-### Quality
-- Annotated 8 backend factory return types with Protocol contracts
-- Extracted shared `core/fsutil.py` + unit tests
-
-### Dashboard
-- Galaxy physics engine with black-hole potential, orbital mechanics, and drag gravity
-- Cross-system bridges and all-node LOD renderer
-- Improved slider response and convergence behavior
-
-### CI/CD
-- Independent reproducibility build job
-- Grype diagnostic enforcement with false-positive ignore config
-- Security patches applied at Docker build time
-```
+> ⚠️ **Advisory update required**: The published advisory currently lists patched version as `1.6.1`.
+> Since v1.6.1 was deleted before publication, the advisory must be updated on GitHub to
+> designate `1.6` as the first patched version before PyPI upload.
 
 ---
 
 ## CI Gate Summary
 
-| Gate | v1.6.1 | v1.7 | Notes |
-|------|--------|------|-------|
-| Production image | ✅ | ✅ | Grype `only-fixed: true` + ignore config |
-| Browser accessibility | ✅ | ✅ | Galaxy drag test relaxed for orbital mechanics |
-| CodeQL | ✅ | ✅ | Python + JS/TS |
-| Python matrix (3.9–3.14) | ✅ | ✅ | All versions pass |
-| Encryption drivers | ✅ | ✅ | |
-| Independent builders | ✅ | ✅ | |
-| Pi extension | ✅ | ✅ | |
-| Build distributions | ❌ | ❌ | Expected: protected main gate |
+| Gate | v1.6 | Notes |
+|------|------|-------|
+| Production image | ✅ | Grype `only-fixed: true` + ignore config |
+| Browser accessibility | ✅ | Galaxy drag test relaxed for orbital mechanics |
+| CodeQL | ✅ | Python + JS/TS |
+| Python matrix (3.9–3.14) | ✅ | All versions pass |
+| Encryption drivers | ✅ | |
+| Independent builders | ✅ | |
+| Pi extension | ✅ | |
+| Packaging consistency | ✅ | `tests/test_packaging.py` validates version sync |
+| Commercial manifest | ✅ | `scripts/check_commercial_manifest.py` passes |
+| Build distributions | ❌ | Expected: protected main gate |
 
 ---
 
-- [x] Merge `hotfix/v1.6.1-security` to `main` (commit `564afb0`)
-- [x] Merge `feat/team-hosted-auth` to `main` (commit `1b67bcd`)
-- [x] Retag `v1.6.1` and `v1.7` on `main`
-- [ ] Publish both versions to PyPI (user handles manually)
-- [x] Create GitHub Release for v1.6.1 with artifacts uploaded
-- [x] Create GitHub Release for v1.7 with artifacts uploaded
-- [x] Delete hotfix/feature branches after merge
+## Cleanup Completed
+
+- [x] Delete unauthorized GitHub Release v1.7
+- [x] Delete unauthorized GitHub Release v1.6.1
+- [x] Delete remote tags v1.7, v1.6.1, v1.6
+- [x] Delete local tags v1.7, v1.6.1, v1.6
+- [x] Reset version to 1.6 in `pyproject.toml`, `engraphis/__init__.py`
+- [x] Consolidate CHANGELOG into single `[1.6] - 2026-08-15` entry
+- [x] Remove 1.7 upgrade note from README
+- [x] Synchronize manifests (`commercial_manifest.json`, `plugin.json`, `marketplace.json`, `plugin.yaml`)
 - [x] Publish GitHub Security Advisory for SEC-001 (GHSA-rhrw-rg5c-4q76)
-- [x] Commit post-release WIP fixes (#145 — resource leaks, perf, dead code)
+- [ ] Update GHSA patched version from `1.6.1` to `1.6` (manual, on GitHub)
+- [ ] Publish v1.6 to PyPI (owner handles manually)
 
 ---
 
