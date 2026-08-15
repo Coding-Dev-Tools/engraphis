@@ -20,7 +20,7 @@
 - **Performance**: Union-find source group merge, bounded consolidation cache
 - **Quality**: Backend factory Protocol annotations, shared `core/fsutil.py`
 - **Dashboard**: Galaxy physics engine, cross-system bridges, all-node LOD renderer
-- **Import**: Source-neutral local document importer, Obsidian vault import
+- **Import**: Source-neutral local document importer, rich Markdown vault import
 - **Schema**: Advanced through schema 16 (deterministic sync, import manifests, session targets)
 - **CI**: Reproducibility build job, grype diagnostic enforcement, apt-get security patches
 
