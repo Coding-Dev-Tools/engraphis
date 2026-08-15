@@ -361,6 +361,19 @@ def test_release_evidence_rejects_build_freeze_that_differs_from_python_sbom(tmp
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_lock_with_conflicting_versions(tmp_path):
+    """A lock with the same package at two versions must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nalpha-package==9.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="conflicting versions"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_accepts_lock_superset_of_sbom(tmp_path):
     """The lock may contain extra build-tool packages not in the SBOM."""
     root = _root(tmp_path)

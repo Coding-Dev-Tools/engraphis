@@ -337,6 +337,7 @@ def environment_lock_artifact(
         raise EvidenceError("build environment lock is missing")
     relative = _relative_path(root, path)
     packages: set[tuple[str, str]] = set()
+    seen_names: set[str] = set()
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -347,9 +348,15 @@ def environment_lock_artifact(
         match = _PACKAGE_LOCK_LINE.fullmatch(line)
         if match is None:
             raise EvidenceError("build environment lock must contain exact name==version lines")
-        package = (_canonical_package_name(match.group(1)), match.group(2))
+        canonical = _canonical_package_name(match.group(1))
+        package = (canonical, match.group(2))
         if package in packages:
             raise EvidenceError("build environment lock contains a duplicate package")
+        if canonical in seen_names:
+            raise EvidenceError(
+                "build environment lock contains conflicting versions of " + canonical
+            )
+        seen_names.add(canonical)
         packages.add(package)
     document = _json_object(sbom, "SBOM")
     sbom_packages = _python_sbom_packages(document)
