@@ -147,6 +147,8 @@ async function mockApi(page, options = {}) {
         await options.deferGraphRequest(requestUrl);
       }
       if (options.graphScene) return ok(options.graphScene);
+      const degradedCodeOverlay = options.degradeCodeOverlay
+        && requestUrl.searchParams.get('include_code') === 'true';
       const asOf = Number(requestUrl.searchParams.get('as_of'));
       const includeUnlinked = requestUrl.searchParams.get('connected_only') !== 'true';
       // Make the historical payload depend on the server's selected-day anchor. A client
@@ -163,7 +165,16 @@ async function mockApi(page, options = {}) {
         edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo, rest_length: 18, spring_strength: 0.25 }],
         communities: [{ id: 'memory', mass: 9 }, { id: 'storage', mass: 2 }],
         community_bridges: [{ source_community: 'memory', target_community: 'storage', physics_strength: 0.8 }],
-        meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
+        meta: degradedCodeOverlay
+          ? {
+            algorithm_version: 'galaxy-v6',
+            layout_seed: 7,
+            degraded: true,
+            degraded_reason: 'code_overlay_requires_repository_filter',
+            requested_include_code: true,
+            include_code: false,
+          }
+          : { algorithm_version: 'galaxy-v6', layout_seed: 7 },
         layers: [
           { layer: 'temporal', count: 15 }, { layer: 'entity', count: 26 },
           { layer: 'causal', count: 22 }, { layer: 'semantic', count: 21 }, { layer: 'code', count: 0 },
@@ -1375,6 +1386,33 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'false');
+});
+
+test('degraded code overlay clears its control and subsequent reload request', async ({ page }) => {
+  await mockApi(page, { degradeCodeOverlay: true });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  const codeControl = page.getByRole('button', { name: 'Code ↔ memory' });
+  const degradedResponse = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true';
+  });
+
+  await codeControl.click();
+  await degradedResponse;
+
+  await expect(codeControl).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#notice-banner')).toHaveText(
+    'Code overlay needs a repository filter; showing entity relationships only.',
+  );
+
+  const noCodeReload = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene' && !url.searchParams.has('include_code');
+  });
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await noCodeReload;
 });
 
 test('graph node connections expose linked memory evidence without leaving the graph', async ({ page }) => {
