@@ -358,6 +358,20 @@ def test_release_evidence_rejects_build_freeze_that_differs_from_python_sbom(tmp
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_accepts_lock_superset_of_sbom(tmp_path):
+    """The lock may contain extra build-tool packages not in the SBOM."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # Lock has the SBOM packages plus extra build tools
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nengraphis==1.2.3\npip==26.2\nsetuptools==83.0.0\n",
+        encoding="utf-8",
+    )
+    # Should not raise — SBOM ⊆ lock
+    _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
