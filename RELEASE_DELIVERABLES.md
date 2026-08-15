@@ -9,7 +9,7 @@
 |--------|--------|-----|--------|
 | `hotfix/v1.6.1-security` | `564afb0` | `v1.6.1` | ✅ Merged to main (#141), branch deleted |
 | `feat/team-hosted-auth` | `1b67bcd` | `v1.7` | ✅ Merged to main (#142), branch deleted |
-| `main` | `ec11fed` | — | ✅ Current HEAD (includes #145 post-release fixes) |
+| `main` | `HEAD` | `v1.7` | ✅ Includes #141, #142, #145 |
 ---
 
 ## v1.6.1 Security Hotfix
