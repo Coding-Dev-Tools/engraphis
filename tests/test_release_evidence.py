@@ -536,6 +536,36 @@ def test_release_evidence_rejects_sbom_missing_declared_dependencies(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_sbom_version_violating_declared_constraint(tmp_path):
+    """An SBOM whose version violates a declared specifier must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # pyproject.toml declares alpha-package>=1.0, but SBOM has 0.5
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {"type": "library", "name": "alpha-package", "version": "0.5",
+                     "purl": "pkg:pypi/alpha-package@0.5"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
 
 def test_release_evidence_rejects_sbom_with_mismatched_root_purl(tmp_path):
     """An SBOM whose metadata.component PURL names a different package must fail."""

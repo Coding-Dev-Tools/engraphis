@@ -3308,9 +3308,8 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
       const item = track.at(-1);
       expect(Math.abs(phaseSteps.reduce((sum, step) => sum + step, 0)), systemBefore.id)
         .toBeGreaterThan(.002);
-      const phaseDirection = Math.sign(phaseSteps[0]);
       expect(phaseSteps.every(step => Math.abs(step) > 1e-8
-        && Math.sign(step) === phaseDirection), systemBefore.id).toBe(true);
+        && Math.sign(step) === Math.sign(systemBefore.angularVelocity)), systemBefore.id).toBe(true);
       expect(item.internalDiameter, systemBefore.id).toBeGreaterThan(8);
       /* Link's new positional constraint deliberately reaches the selected tight scale
          immediately. Keep a substantial, visible local orbit without restoring the old

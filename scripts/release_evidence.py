@@ -132,45 +132,6 @@ def project_version(root: Path) -> str:
     return version
 
 
-def _declared_dependency_names(root: Path) -> set[str]:
-    """Return canonical package names from pyproject.toml [project].dependencies.
-
-    Only core runtime dependencies are validated against the SBOM closure.
-    Optional extras ([project.optional-dependencies]) are intentionally
-    excluded: they are opt-in by definition, and the subset check already
-    validates that any optional package present in the SBOM is pinned in
-    the environment lock."""
-    pyproject = root / "pyproject.toml"
-    try:
-        raw = pyproject.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    requirements: list[str] = []
-    if tomllib is not None:
-        try:
-            parsed = tomllib.loads(raw)
-        except (KeyError, ValueError):
-            parsed = {}
-        project = parsed.get("project", {}) if isinstance(parsed, dict) else {}
-        core = project.get("dependencies", []) if isinstance(project, dict) else []
-        if isinstance(core, list):
-            requirements.extend(item for item in core if isinstance(item, str))
-    else:
-        project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
-        if project is not None:
-            deps_block = re.search(
-                r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
-            )
-            if deps_block is not None:
-                requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
-    names: set[str] = set()
-    for requirement in requirements:
-        if not isinstance(requirement, str) or not requirement.strip():
-            continue
-        name = re.split(r"[\s;<(>=!~\[]", requirement.strip(), maxsplit=1)[0]
-        if name:
-            names.add(_canonical_package_name(name))
-    return names
 
 
 def git_commit(root: Path) -> str:
@@ -269,6 +230,128 @@ def _json_object(path: Path, label: str) -> dict[str, Any]:
 def _canonical_package_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
+
+def _parse_requirement(requirement: str) -> tuple[str, str | None]:
+    """Extract (name, specifier) from a PEP 508 requirement string."""
+    requirement = requirement.strip()
+    if not requirement:
+        return ("", None)
+    match = re.match(
+        r'^([A-Za-z0-9][A-Za-z0-9._-]*)'
+        r'(?:\[.*?\])?'
+        r'\s*'
+        r'((?:[<>=!~]=?[^;,\s]+(?:\s*,\s*[<>=!~]=?[^;,\s]+)*)?)',
+        requirement,
+    )
+    if not match:
+        name = re.split(r"[\s;<(>=!~\[]", requirement, maxsplit=1)[0]
+        return (name, None)
+    name = match.group(1)
+    specifier = match.group(2) if match.group(2) else None
+    return (name, specifier)
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    """Parse a version string into a comparable integer tuple."""
+    v = v.lstrip("vV")
+    parts: list[int] = []
+    for part in re.split(r"[.\-]", v):
+        m = re.match(r"^(\d+)", part)
+        if m:
+            parts.append(int(m.group(1)))
+        else:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def _version_satisfies(version: str, specifier: str) -> bool:
+    """Check if *version* satisfies a PEP 440 specifier (basic subset).
+
+    Supports ==, !=, >=, <=, >, <, ~= and comma-separated constraints.
+    Does NOT support wildcards (==1.*) or environment markers.
+    """
+    if not specifier:
+        return True
+    ver = _version_tuple(version)
+    for constraint in specifier.split(","):
+        constraint = constraint.strip()
+        if not constraint:
+            continue
+        m = re.match(r"^(~=|==|!=|>=|<=|>|<)\s*(.+)$", constraint)
+        if not m:
+            continue
+        op, req_ver_str = m.groups()
+        req = _version_tuple(req_ver_str)
+        max_len = max(len(ver), len(req))
+        v = ver + (0,) * (max_len - len(ver))
+        r = req + (0,) * (max_len - len(req))
+        if op == "==":
+            if v != r:
+                return False
+        elif op == "!=":
+            if v == r:
+                return False
+        elif op == ">=":
+            if v < r:
+                return False
+        elif op == "<=":
+            if v > r:
+                return False
+        elif op == ">":
+            if v <= r:
+                return False
+        elif op == "<":
+            if v >= r:
+                return False
+        elif op == "~=":
+            if v < r:
+                return False
+            upper = list(req[:-1])
+            if upper:
+                upper[-1] += 1
+                u = tuple(upper) + (0,) * (max_len - len(upper))
+                if v >= u:
+                    return False
+    return True
+
+
+def _declared_dependencies(root: Path) -> dict[str, str | None]:
+    """Return {canonical_name: specifier} from pyproject.toml [project].dependencies.
+
+    Only core runtime dependencies are validated against the SBOM closure.
+    Optional extras are intentionally excluded.
+    """
+    pyproject = root / "pyproject.toml"
+    try:
+        raw = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    requirements: list[str] = []
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(raw)
+        except (KeyError, ValueError):
+            parsed = {}
+        project = parsed.get("project", {}) if isinstance(parsed, dict) else {}
+        core = project.get("dependencies", []) if isinstance(project, dict) else []
+        if isinstance(core, list):
+            requirements.extend(item for item in core if isinstance(item, str))
+    else:
+        project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
+        if project is not None:
+            deps_block = re.search(
+                r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
+            )
+            if deps_block is not None:
+                requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
+    deps: dict[str, str | None] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, str) or not requirement.strip():
+            continue
+        name, specifier = _parse_requirement(requirement)
+        if name:
+            deps[_canonical_package_name(name)] = specifier
+    return deps
 
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
     packages = set()
@@ -382,21 +465,32 @@ def environment_lock_artifact(
             "SBOM metadata.component does not identify the " + PACKAGE
             + " root at version " + version
         )
-    declared = _declared_dependency_names(root)
+    declared = _declared_dependencies(root)
     dependency_packages = {
         pkg for pkg in sbom_packages
         if pkg != (_canonical_package_name(PACKAGE), version)
     }
-    declared_tuples = {name for name in declared if name != PACKAGE}
+    declared_names = {name for name in declared if name != PACKAGE}
     sbom_dependency_names = {
         name for name, _ in dependency_packages
     }
-    missing_declared = declared_tuples - sbom_dependency_names
+    missing_declared = declared_names - sbom_dependency_names
     if missing_declared:
         raise EvidenceError(
             "SBOM is missing declared dependencies: "
             + ", ".join(sorted(missing_declared))
         )
+    # Validate version constraints for declared dependencies
+    sbom_versions = {name: ver for name, ver in dependency_packages}
+    for name, specifier in declared.items():
+        if name == PACKAGE or not specifier or name not in sbom_versions:
+            continue
+        sbom_ver = sbom_versions[name]
+        if not _version_satisfies(sbom_ver, specifier):
+            raise EvidenceError(
+                f"SBOM version {name}=={sbom_ver} does not satisfy "
+                f"declared constraint {specifier}"
+            )
     if not dependency_packages:
         raise EvidenceError(
             "SBOM contains no dependency components beyond the " + PACKAGE + " root"
