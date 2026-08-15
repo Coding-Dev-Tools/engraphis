@@ -1048,6 +1048,31 @@ def test_correct_wrong_workspace_raises_validation_error():
         s.correct(out["id"], "tampered", workspace="beta")
 
 
+def test_correct_translates_engine_value_error_to_validation_error():
+    """A deliberate engine ValueError must remain actionable at the service boundary."""
+    s = _svc()
+    out = s.remember("A fact worth correcting.", workspace="acme")
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("session scope requires session_id")
+
+    s.engine.correct = _boom
+    with pytest.raises(ValidationError, match="session scope requires"):
+        s.correct(out["id"], "replacement", workspace="acme")
+
+
+def test_pin_translates_engine_value_error_to_validation_error():
+    s = _svc()
+    out = s.remember("A fact worth pinning.", workspace="acme")
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("cannot pin an expired memory")
+
+    s.engine.pin = _boom
+    with pytest.raises(ValidationError, match="cannot pin"):
+        s.pin(out["id"], workspace="acme")
+
+
 def test_promote_repo_memory_to_workspace():
     s = _svc()
     source = s.remember(
@@ -1508,6 +1533,34 @@ def test_import_folder_missing_path_rejected(tmp_path, monkeypatch):
     with pytest.raises(ValidationError):
         s.import_folder(workspace="acme", path=str(tmp_path / "does-not-exist"))
 
+
+def test_import_folder_error_messages_do_not_echo_user_path(tmp_path, monkeypatch):
+    """SEC-001: import error messages must not echo the user-supplied path back to
+    the caller — leaking filesystem structure aids path-traversal reconnaissance."""
+    sentinel = "zzz-hostile-sentinel-zzz"
+    hostile = str(tmp_path / sentinel / "secret.md")
+    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
+    import pathlib
+    decoy_home = tmp_path / "decoy-home"
+    decoy_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", lambda: decoy_home)
+    s = _svc()
+    # Path traversal rejection — sentinel must not appear in the message.
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=hostile)
+    assert sentinel not in str(exc_info.value)
+    # "path not found" — sentinel must not appear.
+    allowed_but_gone = tmp_path / sentinel
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=str(allowed_but_gone))
+    assert sentinel not in str(exc_info.value)
+    # "not a directory" — sentinel must not appear.
+    blocker = tmp_path / sentinel
+    blocker.write_text("not a dir", encoding="utf-8")
+    with pytest.raises(ValidationError) as exc_info:
+        s.import_folder(workspace="acme", path=str(blocker))
+    assert sentinel not in str(exc_info.value)
 
 def test_import_folder_path_traversal_blocked(tmp_path, monkeypatch):
     """A path outside the allowed roots (home dir / ENGRAPHIS_IMPORT_ROOTS) must be

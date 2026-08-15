@@ -23,7 +23,7 @@ import numpy as np
 
 from engraphis.backends.embedder_deterministic import MAX_EMBEDDING_DIM
 from engraphis.backends.vector_numpy import NumpyVectorIndex
-from engraphis.core.interfaces import SearchFilter
+from engraphis.core.interfaces import SearchFilter, VectorIndex
 from engraphis.core.store import Store
 
 _INDEX_FORMAT_VERSION = 3
@@ -536,7 +536,7 @@ class SqliteVecVectorIndex:
 
 
 
-def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):
+def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto") -> VectorIndex:
     """Return a sqlite-vec index if available, else the NumPy reference index.
 
     prefer: "auto" (try sqlite-vec, fall back), "sqlite-vec" (require it),

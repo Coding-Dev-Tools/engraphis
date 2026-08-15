@@ -507,6 +507,7 @@ class RecallEngine:
         score_details: dict[str, dict[str, Any]] = {}
         consolidated_ids: set[str] = set()
         consolidation_evidence_cache: dict[str, tuple[str, ...]] = {}
+        _CACHE_MAX = 1000
 
         def consolidation_evidence_for(record: MemoryRecord) -> tuple[str, ...]:
             cached = consolidation_evidence_cache.get(record.id)
@@ -516,6 +517,8 @@ class RecallEngine:
                 tuple(_consolidation_evidence(record, store=self.store, flt=flt))
                 if _consolidated_source(record) else ()
             )
+            if len(consolidation_evidence_cache) >= _CACHE_MAX:
+                consolidation_evidence_cache.clear()
             consolidation_evidence_cache[record.id] = evidence
             return evidence
         for mid, rec in recs.items():
@@ -1290,11 +1293,9 @@ class RecallEngine:
             endpoint
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
-        } | {
-            memory.id for memory in self.store.list_memories(
-                flt, limit=12_000, prompt_only=prompt_only,
-            )
-        }
+        } | set(self.store.list_memory_ids(
+            flt, limit=12_000, prompt_only=prompt_only,
+        ))
         if prompt_only:
             memory_ids = self._prompt_eligible_memory_ids(memory_ids, flt)
             incidence = [

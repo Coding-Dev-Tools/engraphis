@@ -183,7 +183,9 @@ def _run(fn, *a, **k):
             "resource": exc.resource,
             "count": exc.count,
             "limit": exc.limit,
-            "recommended_action": "narrow repository, time, type, or relation filters",
+            "recommended_action": (
+                "narrow by repository or entity type, or reduce the workspace graph"
+            ),
         }) from None
     except WorkspaceBindingError:
         logger.info("dashboard request rejected by workspace binding")
@@ -2206,6 +2208,7 @@ def _graph_csv(value: Optional[str]) -> Optional[list[str]]:
 
 @router.get("/graph/scene")
 def graph_scene(workspace: Optional[str] = None, level: str = "overview",
+                presentation: str = Query(default="quality", max_length=16),
                 center_id: Optional[str] = None, system_id: Optional[str] = None,
                 seeds: Optional[str] = None, repo: Optional[str] = None,
                 layers: Optional[str] = None, relations: Optional[str] = None,
@@ -2233,12 +2236,20 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
     # ``overview`` response from the canonical ``complete`` projection. Keep the alias
     # at the HTTP boundary so a browser with a stale graph asset cannot turn a valid full
     # graph request into the generic 400 "invalid request" response. Legacy full scenes
-    # were entity-only; preserve that bounded projection even if the stale client omitted
-    # the newer ``include_memory_nodes=false`` flag. Ignore stale overview caps as well:
+    # excluded memory nodes; preserve that bounded projection even if the stale client omitted
+    # the newer ``include_memory_nodes=false`` flag. A repository-scoped code overlay may still
+    # add symbols within the same final-node ceiling. Ignore stale overview caps as well:
     # complete scenes enforce their own safety ceiling and must not be sampled.
     legacy_full = level.strip().lower() == "full"
-    scene_level = "complete" if legacy_full else level
-    if legacy_full:
+    presentation_value = presentation.strip().lower()
+    if presentation_value not in {"quality", "all"}:
+        raise HTTPException(status_code=400, detail={
+            "error": "presentation must be quality or all",
+            "recommended_action": "choose the High quality or All nodes · LOD profile",
+        })
+    all_presentation = presentation_value == "all"
+    scene_level = "complete" if legacy_full or all_presentation else level
+    if legacy_full or all_presentation:
         include_memory_nodes = False
         node_limit = None
         edge_limit = None
@@ -2259,6 +2270,7 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
         })
     graph_kwargs = {
         "workspace": ws, "level": scene_level,
+        "presentation": "all" if all_presentation else "quality",
         "center_id": center_id, "system_id": system_id, "seeds": _graph_csv(seeds),
         "repo": repo, "layers": _graph_csv(layers), "relations": _graph_csv(relations),
         "entity_types": _graph_csv(entity_types), "memory_types": _graph_csv(memory_types),

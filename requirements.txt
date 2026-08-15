@@ -18,3 +18,4 @@ sentence-transformers>=2.7; python_version >= '3.10'
 mcp>=1.28.1,<2; python_version >= '3.10'
 pydantic-settings>=2.14.2; python_version >= '3.10'
 cryptography>=50.0.0; python_version >= '3.10'
+pypdf>=6.15.0

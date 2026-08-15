@@ -30,6 +30,7 @@ import os
 import re
 from collections.abc import Callable
 from typing import Any, Optional
+from engraphis.core.interfaces import Extractor
 
 from engraphis.core.interfaces import ExtractedFact, MemoryType, LLM
 from engraphis.core.textutil import estimate_tokens, tokenize
@@ -807,7 +808,7 @@ def get_extractor(
     token_counter: Optional[Callable[[str], int]] = None,
     token_counter_identity: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
-):
+) -> Extractor:
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
     ``kind='chunk'`` returns the deterministic, offline ``ChunkingExtractor`` (knobs from

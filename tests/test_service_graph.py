@@ -1462,3 +1462,31 @@ def test_graph_as_of_omits_the_live_code_overlay():
     )
     assert f"code:{symbol_id}" not in {node["id"] for node in historical["nodes"]}
     assert historical["unified"] is False
+
+
+def test_graph_edge_history_visibility_sql_returns_params_tuple():
+    """SEC-002: _graph_edge_history_visibility_sql must return (sql, params) — never
+    interpolate floats into SQL text via repr()."""
+    from engraphis.service import _graph_edge_history_visibility_sql
+    result = _graph_edge_history_visibility_sql("edges", at=1000.0, known_at=2000.0)
+    assert isinstance(result, tuple) and len(result) == 2
+    sql, params = result
+    # SQL must use ? placeholders, not repr(float) literals
+    assert "1000.0" not in sql
+    assert "2000.0" not in sql
+    assert sql.count("?") == 6  # 6 anchor comparisons
+    assert params == [1000.0, 2000.0, 2000.0, 1000.0, 2000.0, 2000.0]
+
+
+def test_graph_edge_history_visibility_sql_uses_current_time_when_known_at_omitted():
+    """SEC-002: the known_at anchor falls back to time.time(), never to a hardcoded repr."""
+    from engraphis.service import _graph_edge_history_visibility_sql
+    import time
+    before = time.time()
+    sql, params = _graph_edge_history_visibility_sql("edges", at=500.0)
+    after = time.time()
+    assert "500.0" not in sql
+    assert params[0] == 500.0  # at anchor
+    # known_anchor slots: params[1], params[2], params[4], params[5] — all from time.time()
+    for slot in (1, 2, 4, 5):
+        assert before <= params[slot] <= after

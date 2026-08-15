@@ -26,6 +26,7 @@ import secrets
 import stat
 from pathlib import Path
 from typing import Iterator, Optional
+from engraphis.core.interfaces import SyncTransport
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024  # skip absurdly large blobs before reading them
 MAX_TOTAL_PULL_BYTES = 256 * 1024 * 1024
@@ -90,11 +91,17 @@ class FolderTransport:
         fd = os.open(tmp, flags, 0o644)
         try:
             with os.fdopen(fd, "wb") as fh:
+                fd = -1  # fdopen owns the fd from here; its __exit__ closes it
                 fh.write(data)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, dest)
         except BaseException:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(tmp)
             except OSError:
@@ -194,7 +201,7 @@ class FolderTransport:
                 os.close(fd)
 
 
-def get_transport(kind: str = "folder", **kw):
+def get_transport(kind: str = "folder", **kw) -> SyncTransport:
     """Factory mirroring ``get_embedder``/``get_vector_index`` — select a transport by
     name so swapping the folder backend for the managed relay is a config change.
 

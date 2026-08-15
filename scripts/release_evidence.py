@@ -29,10 +29,7 @@ _TAG = re.compile(r"v([0-9]+\.[0-9]+(?:\.[0-9]+)?)\Z")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _PACKAGE_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s]+)\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_BUILDER_IMAGE = (
-    "python:3.11-slim@sha256:"
-    "90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff"
-)
+_BUILDER_IMAGE = "github-hosted:ubuntu-latest/python-3.11"
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",
     "pip": "26.2",
@@ -223,6 +220,18 @@ def _canonical_package_name(value: str) -> str:
 
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
     packages = set()
+    metadata_component = document.get("metadata", {}).get("component")
+    if isinstance(metadata_component, dict):
+        purl = metadata_component.get("purl")
+        name = metadata_component.get("name")
+        version = metadata_component.get("version")
+        if (
+            isinstance(purl, str)
+            and purl.startswith("pkg:pypi/")
+            and isinstance(name, str)
+            and isinstance(version, str)
+        ):
+            packages.add((_canonical_package_name(name), version))
     for component in document.get("components", []):
         if not isinstance(component, dict):
             continue

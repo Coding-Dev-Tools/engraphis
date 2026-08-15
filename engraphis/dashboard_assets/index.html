@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260812-stable-orbit-lanes-6">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260815-merge-ready-1">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -273,7 +273,8 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
+                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load all entity nodes with progressive level-of-detail rendering">All nodes</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
@@ -283,6 +284,7 @@
                   </div>
                 </div>
               </div>
+              <p id="graph-lod-note" class="graph-lod-note" role="status" aria-live="polite" hidden><strong>All nodes · live controls</strong><span>Layout, forces, scope, colour and relation flow update without reloading the complete graph.</span></p>
 
               <section class="graph-drawer-section" aria-labelledby="graph-rendering-title">
                 <h2 id="graph-rendering-title">Rendering</h2>
@@ -326,9 +328,9 @@
 
               <section class="graph-drawer-section graph-motion" aria-labelledby="graph-motion-title">
                 <h2 id="graph-motion-title">Motion</h2>
-                <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>particles</small></div>
+                <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>direction</small></div>
                 <div class="graph-motion-row"><button id="graph-labels" class="graph-switch" type="button" role="switch" aria-label="Entity labels" aria-checked="false"><span></span></button><span>Entity labels</span><small>names</small></div>
-                <div class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span>Freeze simulation</span><small>pause physics</small></div>
+                <div id="graph-freeze-row" class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span id="graph-freeze-label">Freeze simulation</span><small id="graph-freeze-detail">pause physics</small></div>
                 <label class="graph-motion-speed" for="graph-flow-speed"><span>Flow speed</span><input id="graph-flow-speed" type="range" min="0" max="100" value="45" aria-label="Flow speed"><output id="graph-flow-speed-output" class="sr-only">45</output></label>
               </section>
 
@@ -345,11 +347,11 @@
               </section>
 
               <details class="graph-drawer-section graph-tuning" open>
-                <summary>Tune the simulation — forces, size, scope</summary>
+                <summary>Tune the simulation · forces, size, scope</summary>
                 <div class="graph-tuning-grid">
                   <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="120" value="60" aria-labelledby="graph-repel-label"><output id="graph-repel-output">60</output></label>
                   <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
-                  <label for="graph-gravity"><span id="graph-gravity-label">Gravity strength · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="48" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">48</output></label>
+                  <label for="graph-gravity"><span id="graph-gravity-label">Galactic gravity · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="48" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">48</output></label>
                   <label for="graph-node-size"><span id="graph-node-size-label">Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3" aria-labelledby="graph-node-size-label"><output id="graph-node-size-output">3</output></label>
                   <label for="graph-text-size"><span id="graph-text-size-label">Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12" aria-labelledby="graph-text-size-label"><output id="graph-text-size-output">12</output></label>
                   <label for="graph-line-width"><span id="graph-line-width-label">Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72" aria-labelledby="graph-line-width-label"><output id="graph-line-width-output">0.72</output></label>
@@ -365,16 +367,16 @@
                   <button class="graph-layer-chip" type="button" data-graph-layer="code" aria-pressed="false"><i></i>Code overlay <small id="graph-layer-code-count">0</small></button>
                 </div>
                 <details id="graph-spacetime-tuning" class="graph-spacetime-tuning" open>
-                  <summary>Spacetime — black-hole orbit controls</summary>
+                  <summary id="graph-spacetime-summary">Spacetime · black-hole orbit controls</summary>
                   <div class="graph-tuning-grid">
-                    <label for="graph-gravitational-constant"><span>Galactic gravity</span><input id="graph-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-gravitational-constant-output">100</output></label>
-                    <label for="graph-black-hole-mass"><span>Black hole mass</span><input id="graph-black-hole-mass" type="range" min="20" max="500" value="160"><output id="graph-black-hole-mass-output">160</output></label>
-                    <label for="graph-local-gravitational-constant"><span>Local solar gravity</span><input id="graph-local-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-local-gravitational-constant-output">100</output></label>
-                    <label for="graph-space-damping"><span>Space friction</span><input id="graph-space-damping" type="range" min="0" max="15" step="0.1" value="1"><output id="graph-space-damping-output">1.0</output></label>
-                    <label for="graph-spring-stiffness"><span>Spring stiffness</span><input id="graph-spring-stiffness" type="range" min="0" max="100" value="32"><output id="graph-spring-stiffness-output">32</output></label>
+                    <label for="graph-gravitational-constant"><span id="graph-gravitational-constant-label">Galactic gravity</span><input id="graph-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-gravitational-constant-output">100</output></label>
+                    <label for="graph-black-hole-mass"><span id="graph-black-hole-mass-label">Black hole mass</span><input id="graph-black-hole-mass" type="range" min="20" max="500" value="160"><output id="graph-black-hole-mass-output">160</output></label>
+                    <label for="graph-local-gravitational-constant"><span id="graph-local-gravitational-constant-label">Local solar gravity</span><input id="graph-local-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-local-gravitational-constant-output">100</output></label>
+                    <label for="graph-space-damping"><span id="graph-space-damping-label">Space friction</span><input id="graph-space-damping" type="range" min="0" max="15" step="0.1" value="1"><output id="graph-space-damping-output">1.0</output></label>
+                    <label for="graph-spring-stiffness"><span id="graph-spring-stiffness-label">Spring stiffness</span><input id="graph-spring-stiffness" type="range" min="0" max="100" value="32"><output id="graph-spring-stiffness-output">32</output></label>
                   </div>
-                  <div class="graph-motion-row graph-orbit-pause"><button id="graph-orbits-pause" class="graph-switch" type="button" role="switch" aria-label="Pause orbital physics" aria-checked="false"><span></span></button><span>Pause orbits</span><small>physics</small></div>
-                  <p class="graph-note">Drag and release a node to slingshot it into a new orbit.</p>
+                  <div id="graph-orbit-pause-row" class="graph-motion-row graph-orbit-pause"><button id="graph-orbits-pause" class="graph-switch" type="button" role="switch" aria-label="Pause orbital physics" aria-checked="false"><span></span></button><span id="graph-orbits-pause-label">Pause orbits</span><small id="graph-orbits-pause-detail">physics</small></div>
+                  <p id="graph-spacetime-note" class="graph-note">Drag and release a node to slingshot it into a new orbit.</p>
                 </details>
                 <button id="graph-reset-tuning" class="graph-action" type="button">Reset to preset defaults</button>
               </details>
@@ -705,6 +707,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260813-live-carrier-frames-9"></script>
+  <script src="/v2-assets/ledger.js?v=20260815-merge-ready-1"></script>
 </body>
 </html>

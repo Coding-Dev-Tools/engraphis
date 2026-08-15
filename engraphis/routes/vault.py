@@ -35,6 +35,7 @@ from engraphis.engines.reweight import retention_score
 from engraphis.stores import blob_to_vector, get_conn, now_ts
 from engraphis.stores import vaults as vault_store
 from engraphis.stores import vectors as mem_store
+from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
 
 logger = logging.getLogger("engraphis.routes.vault")
 # Multipart boundaries and per-part headers count toward the HTTP request size even
@@ -65,11 +66,6 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
         return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
     return True
 
-
-def _is_reparse_point(info: os.stat_result) -> bool:
-    """Return whether a stat result carries the Windows reparse-point attribute."""
-    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & marker)
 
 
 def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
@@ -404,9 +400,9 @@ def import_folder(req: FolderImportReq):
             "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
         )
     if not folder.exists():
-        raise HTTPException(404, f"Path not found: {req.path}")
+        raise HTTPException(404, "Path not found")
     if not folder.is_dir():
-        raise HTTPException(400, f"Not a directory: {req.path}")
+        raise HTTPException(400, "Not a directory")
 
     namespace = req.namespace
     if namespace is None:

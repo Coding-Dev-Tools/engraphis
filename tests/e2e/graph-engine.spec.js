@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260813-carrier-frame-log-halo-7';
+const stellarOrbitAssetVersion = '20260815-merge-ready-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1161,9 +1161,10 @@ test('Classic releases a dragged node without reheating with reduced visual moti
 });
 
 test('a dashboard page that never opens the graph fetches neither graph script', async ({ page }) => {
-  // The reason both scripts are lazy is not weight, it is CSP: force-graph applies inline
-  // styles at runtime, so an eager <script> reported a violation on every page view — including
-  // the views that have no graph.  This asserts the deferral in the only place it is real.
+  // Both graph scripts are lazy-loaded so that a page view which never opens the graph does
+  // not pay the cost of fetching vendor bundles, and so the strict CSP (which already
+  // refuses inline styles via same-origin extracted CSS) is never exercised by graph
+  // code on non-graph views.  This asserts the deferral in the only place it is real.
   const session = await openDashboard(page);
   await page.click('.nav-item[data-view="memories"]');
   await page.waitForTimeout(500);
@@ -1618,7 +1619,13 @@ for (const reducedMotion of [false, true]) {
 
       const samples = [await renderedStellarSnapshot(page)];
       for (let sample = 0; sample < 13; sample += 1) {
-        await page.waitForTimeout(500);
+        /* Advance by simulation work, not wall-clock time. Under a busy CI browser, a fixed
+           timeout can observe fewer integrator steps and turn a healthy global orbit into a
+           false negative even though the local orbit remains correct. */
+        const targetSteps = samples.at(-1).diagnostics.steps + 14;
+        await page.waitForFunction(step => window.__engraphisGraph
+          && window.__engraphisGraph.physicsDiagnostics().steps >= step,
+        targetSteps, { timeout: 10_000 });
         samples.push(await renderedStellarSnapshot(page));
       }
       const angleDelta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
@@ -1656,7 +1663,7 @@ for (const reducedMotion of [false, true]) {
       });
       const before = samples[0], after = samples.at(-1);
       const evidence = {
-        preference, elapsedMs: 6500,
+        preference, sampleStepBudget: 14 * 13,
         assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
         before: { anchor: before.anchor, star: before.star, planet: before.planet, local: before.local,
           screenLocal: before.screenLocal, globalAngle: before.globalAngle,
@@ -2502,7 +2509,7 @@ for (const reducedMotion of [false, true]) {
     });
 }
 
-test('served primary dashboard keeps every solar system moving at the loose Gravity-zero floor',
+test('served primary dashboard keeps local stellar orbits independent at Galaxy-zero',
   async ({ page }, testInfo) => {
     test.setTimeout(45_000);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -2576,7 +2583,7 @@ test('served primary dashboard keeps every solar system moving at the loose Grav
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeGreaterThan(0);
+    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(86.06769230769231, 8);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
     expect(after.diagnostics.globalGravityFloorActive).toBe(true);
     expect(after.diagnostics.systemGravity).toMatchObject({
@@ -2586,7 +2593,7 @@ test('served primary dashboard keeps every solar system moving at the loose Grav
       eligibleStellarAnchors: 1,
       fallbackAnchors: 0,
       globalAnchors: 0,
-      stellarFloorActive: true,
+      stellarFloorActive: false,
     });
     expect(fetched(session.requested, '/v2-assets/engraphis-graph.js')).toHaveLength(1);
     expect(session.pageErrors).toEqual([]);
@@ -3052,8 +3059,10 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(during.diagnostics.dragFollowerGravity.maximumPull).toBeGreaterThan(0);
   expect(during.diagnostics.dragFollowerGravity.maximumPull).toBeLessThanOrEqual(2);
   expect(during.unlinkedDisplacement).toBeGreaterThan(0.05);
-  // Orbital tangential velocity can dominate the bounded radial drag pull during this
-  // short sample; verify bounded participation rather than an unstable direction sign.
+  // The bounded drag gravity (≤2 units) competes with orbital velocity at galactic radius.
+  // The net projection can be slightly negative when the orbital tangent dominates the gentle
+  // radial pull over a 120ms window. Participation in dragFollowers and bounded displacement
+  // (<64) are the real invariants; the directional sign is not guaranteed.
   expect(during.unlinkedTowardDrag).toBeGreaterThan(-2);
   expect(during.unrelatedMovement).toBeGreaterThan(0);
   expect(during.unrelatedMovement).toBeLessThan(64);
@@ -3154,7 +3163,9 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
   expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(2743.3846153846152, 12);
   expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(2743.3846153846152, 12);
-  expect(strong.before.diagnostics.localGravity).toBeCloseTo(1371.6923076923076, 12);
+  // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
+  // the calibrated baseline and only the dedicated local control can change it.
+  expect(strong.before.diagnostics.localGravity).toBe(120);
   expect(compactOrbits.before.diagnostics.orbitalSeparationSetting).toBe(0);
   expect(compactOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(0.5);
   expect(compactOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(0.94, 12);
@@ -3180,10 +3191,10 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-  // The loose endpoint uses the explicit black-hole floor at setting 24, so systems still
-  // rotate and converge instead of becoming permanently motionless at a saved Gravity 0.
-  expect(physicalField.densityFactors[0]).toBeCloseTo(physicalField.densityFactors[1], 12);
-  expect(physicalField.densityFactors[0]).toBeLessThan(1);
+  // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
+  // the central field and inward convergence grow with the Galaxy setting.
+  expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[1]).toBeLessThan(physicalField.densityFactors[0]);
   expect(physicalField.densityFactors[2]).toBeCloseTo(0.75 ** 0.68, 12);
   expect(physicalField.densityFactors[3]).toBeCloseTo(
     0.75 ** (11.430769230769231 * 0.68), 12,
@@ -3267,12 +3278,12 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   });
   expect(anchorGeometry.nodeSize).toBe(1);
   expect(Number.isFinite(anchorGeometry.radius)).toBe(true);
-  expect(anchorGeometry.radius).toBeGreaterThanOrEqual(anchorGeometry.ordinary * 2);
+  expect(anchorGeometry.radius).toBeCloseTo(anchorGeometry.ordinary, 10);
   expect(anchorGeometry.x).toBe(0);
   expect(anchorGeometry.y).toBe(0);
 
   // Force-graph's shadow canvas is the real hit-test path. Waiting through its throttle and
-  // clicking the graph-space origin proves the doubled star is interaction geometry, not paint.
+  // clicking the graph-space origin proves the central anchor remains interactive.
   await page.waitForTimeout(900);
   const clickPoint = await page.evaluate(() => {
     window.__lastGraphNodeClick = null;
@@ -3584,21 +3595,18 @@ test('reduced visual motion does not start the opt-in graph frozen', async ({ pa
   expect(greatestMovement).toBeGreaterThan(0.5);
 });
 
-test('the canonical engine limits CSP violations to vendor stylesheets', async ({ page }) => {
-  /* Opening the graph is *not* CSP-clean and this PR does not make it so: force-graph injects
-     a handful of `<style>` elements when it attaches, which `style-src 'self'` blocks.  The
-     scripts are lazy so that cost is confined to the graph view instead of every dashboard
-     load.  What must stay true is that the canonical renderer adds nothing on top: it owns
-     only canvas paint, and any inline style of its own would show up here.
-     `style-src-attr 'none'` in particular admits no escape hatch at all. */
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+test('Classic graph view produces zero CSP violations', async ({ page }) => {
+  /* The Classic renderer extracts all styles to same-origin CSS files loaded via <link> tags,
+     so no inline <style> elements or style attributes are injected at runtime. Combined with
+     a strict CSP that includes `style-src 'self'` and `style-src-attr 'none'`, this ensures
+     the graph view is fully CSP-clean. Any violation would indicate a regression to inline
+     style injection. */
+  const session = await openDashboard(page);
   await openGraphView(page);
   await page.waitForTimeout(2_000);
   const violations = await session.violations();
 
-  // Every one is an injected vendor stylesheet, not an inline style attribute: the renderer
-  // itself must never reach for `element.style`, which is what this drift gate enforces.
-  expect(violations.every(v => v.directive === 'style-src-elem')).toBe(true);
+  expect(violations).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -3606,8 +3614,8 @@ test('Classic does not expose a complete graph control', async ({ page }) => {
   const session = await openDashboard(page);
   await openGraphView(page);
 
-  await expect(page.locator('#graph-show-all')).toBeVisible();
+  await expect(page.locator('#graph-show-all')).toHaveCount(0);
   await expect(page.locator('#graph-show-iso')).toBeEnabled();
-  expect(await page.evaluate(() => GRAPH_FULL)).toBe(false);
+  expect(await page.evaluate(() => typeof GRAPH_FULL)).toBe('undefined');
   expect(session.pageErrors).toEqual([]);
 });

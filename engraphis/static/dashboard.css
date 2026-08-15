@@ -758,5 +758,8 @@ progress.graph-degree[data-graph-node-type="person_or_concept"]::-webkit-progres
 #graph-net[data-graph-style="solar"]{background:radial-gradient(38% 46% at 50% 50%,rgba(255,155,58,.17),transparent 60%),radial-gradient(88% 88% at 50% 50%,rgba(112,48,15,.18),transparent 82%),#080504}
 #graph-net[data-graph-style="cyber"]{background:linear-gradient(rgba(34,224,255,.055) 1px,transparent 1px) 0 0/30px 30px,linear-gradient(90deg,rgba(34,224,255,.055) 1px,transparent 1px) 0 0/30px 30px,radial-gradient(72% 60% at 50% 0%,rgba(255,62,165,.12),transparent 72%),#050810}
 #graph-net.engraphis-graph-node-hover{cursor:pointer}
-#graph-net:not(.engraphis-graph-node-hover){cursor:grab}
+#graph-net .engraphis-all-canvas,#graph-net .engraphis-all-labels{position:absolute;inset:0;width:100%;height:100%;display:block}
+#graph-net .engraphis-all-labels{pointer-events:none}
+#graph-net.engraphis-all-node-hover{cursor:pointer}
+#graph-net:not(.engraphis-graph-node-hover):not(.engraphis-all-node-hover){cursor:grab}
 .skip-link{position:fixed;top:8px;left:8px;z-index:1000;padding:8px 12px;border-radius:4px;background:var(--accent);color:var(--bg);transform:translateY(-150%)}.skip-link:focus{transform:translateY(0)}

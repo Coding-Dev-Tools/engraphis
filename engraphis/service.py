@@ -43,6 +43,7 @@ from engraphis.core.graph_scene import (
     ALGORITHM_VERSION as GRAPH_SCENE_ALGORITHM_VERSION,
     build_canonical_graph,
     build_graph_scene,
+    project_all_presentation,
     is_broad_search_fragment,
     strongest_path,
 )
@@ -246,6 +247,8 @@ MAX_IMPORT_TOTAL_BYTES = 250_000_000
 MAX_GRAPH_ANALYSIS_ENTITIES = 40_000
 MAX_GRAPH_ANALYSIS_EDGES = 200_000
 MAX_GRAPH_ANALYSIS_SUPPORTS = 500_000
+# Explicit all-node rendering refuses to sample beyond this final node capacity.
+MAX_GRAPH_ALL_NODES = 20_000
 # Complete scenes are intentionally not representative samples.  These are hard
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
@@ -271,36 +274,11 @@ GRAPH_ENTITY_HISTORY_LIMIT = 50
 CONFLICT_REVIEW_SCAN_LIMIT = 10_000
 
 
-def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -> str:
-    """SQL predicate: support-less legacy edge or evidence from a non-session memory."""
-    anchor = (
-        repr(float(at)) if at is not None
-        else repr(time.time())
-    )
-    return (
-        "(NOT EXISTS (SELECT 1 FROM edge_supports visibility_support "
-        f"WHERE visibility_support.edge_id={edge_alias}.id) OR EXISTS ("
-        "SELECT 1 FROM edge_supports visibility_support "
-        "JOIN memories visibility_memory "
-        "ON visibility_memory.id=visibility_support.memory_id "
-        f"WHERE visibility_support.edge_id={edge_alias}.id "
-        "AND (visibility_support.valid_from IS NULL "
-        f"OR visibility_support.valid_from<={anchor}) "
-        "AND (visibility_support.valid_to IS NULL "
-        f"OR {anchor}<visibility_support.valid_to) "
-        "AND visibility_support.expired_at IS NULL "
-        "AND (visibility_memory.valid_from IS NULL "
-        f"OR visibility_memory.valid_from<={anchor}) "
-        "AND (visibility_memory.valid_to IS NULL "
-        f"OR {anchor}<visibility_memory.valid_to) "
-        "AND visibility_memory.expired_at IS NULL "
-        "AND COALESCE(visibility_memory.scope, 'workspace')!='session'))"
-    )
 
 
 def _graph_edge_history_visibility_sql(
     edge_alias: str, *, at: float, known_at: Optional[float] = None,
-) -> str:
+) -> tuple[str, list[Any]]:
     """Visibility predicate for a time-travel graph payload.
 
     The ordinary graph reader asks whether evidence is public *at now*.  The Time
@@ -310,29 +288,31 @@ def _graph_edge_history_visibility_sql(
     public relation is intentionally retained as a ghost. Hard-expired evidence remains
     hidden in either case.
     """
-    anchor = repr(float(at))
-    known_anchor = repr(float(known_at)) if known_at is not None else repr(time.time())
-    return (
+    anchor = float(at)
+    known_anchor = float(known_at) if known_at is not None else time.time()
+    sql = (
         "(NOT EXISTS (SELECT 1 FROM edge_supports history_support "
         f"WHERE history_support.edge_id={edge_alias}.id) OR EXISTS ("
         "SELECT 1 FROM edge_supports history_support "
         "JOIN memories history_memory ON history_memory.id=history_support.memory_id "
         f"WHERE history_support.edge_id={edge_alias}.id "
         "AND (history_support.valid_from IS NULL "
-        f"OR history_support.valid_from<={anchor}) "
+        "OR history_support.valid_from<=?) "
         "AND (history_support.ingested_at IS NULL "
-        f"OR history_support.ingested_at<={known_anchor}) "
+        "OR history_support.ingested_at<=?) "
         "AND (history_support.expired_at IS NULL "
-        f"OR {known_anchor}<history_support.expired_at) "
+        "OR ?<history_support.expired_at) "
         "AND (history_memory.valid_from IS NULL "
-        f"OR history_memory.valid_from<={anchor}) "
-         "AND (history_memory.ingested_at IS NULL "
-         f"OR history_memory.ingested_at<={known_anchor}) "
-         "AND (history_memory.expired_at IS NULL "
-         f"OR {known_anchor}<history_memory.expired_at) "
-         f"AND history_memory.workspace_id={edge_alias}.workspace_id "
-         "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
-     )
+        "OR history_memory.valid_from<=?) "
+        "AND (history_memory.ingested_at IS NULL "
+        "OR history_memory.ingested_at<=?) "
+        "AND (history_memory.expired_at IS NULL "
+        "OR ?<history_memory.expired_at) "
+        f"AND history_memory.workspace_id={edge_alias}.workspace_id "
+        "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
+    )
+    params: list[Any] = [anchor, known_anchor, known_anchor, anchor, known_anchor, known_anchor]
+    return sql, params
 
 
 def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = None) -> str:
@@ -431,7 +411,7 @@ class GraphSceneCapacityExceeded(ValidationError):
         self.limit = int(limit)
         super().__init__(
             f"complete graph exceeds the {resource} safety limit "
-            f"({self.count} > {self.limit}); narrow the workspace filters"
+            f"({self.count} > {self.limit}); narrow by repository or entity type"
         )
 
 
@@ -919,9 +899,9 @@ def _resolve_import_root(raw_path: str) -> Path:
             "ENGRAPHIS_IMPORT_ROOTS)")
     folder = Path(safe_path)
     if not folder.exists():
-        raise ValidationError(f"path not found: {raw_path}")
+        raise ValidationError("path not found")
     if not folder.is_dir():
-        raise ValidationError(f"not a directory: {raw_path}")
+        raise ValidationError("not a directory")
     return folder
 
 
@@ -4177,7 +4157,7 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.pin(mid, pinned=bool(pinned), actor=actor)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
@@ -4191,7 +4171,7 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.correct(mid, new_content, reason=reason, actor=actor)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
     def promote(self, memory_id: str, target_scope: str, *, workspace: str,
@@ -8040,6 +8020,7 @@ class MemoryService:
                           include_weak_cooccurrence: bool = True,
                           include_code: bool = False,
                           include_complete_rows: bool = False,
+                          all_mode_entity_cap: Optional[int] = None,
                           include_history: bool = False,
                           include_memory_nodes: bool = True) -> tuple:
         """Load one transactionally consistent graph snapshot and generation state."""
@@ -8064,6 +8045,7 @@ class MemoryService:
                 include_weak_cooccurrence=include_weak_cooccurrence,
                 include_code=include_code,
                 include_complete_rows=include_complete_rows,
+                all_mode_entity_cap=all_mode_entity_cap,
                 include_history=include_history,
                 include_memory_nodes=include_memory_nodes,
             )
@@ -8093,6 +8075,7 @@ class MemoryService:
                                    include_weak_cooccurrence: bool = True,
                                    include_code: bool = False,
                                    include_complete_rows: bool = False,
+                                   all_mode_entity_cap: Optional[int] = None,
                                    include_history: bool = False,
                                    include_memory_nodes: bool = True) -> tuple:
         """Load the complete scoped graph for deterministic server-side ranking.
@@ -8182,16 +8165,30 @@ class MemoryService:
             visibility_params.append(repo_id)
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst"
+            "visibility_edge.src, visibility_edge.dst LIMIT ?"
         )
+        visibility_params.append(MAX_GRAPH_ANALYSIS_EDGES + 1)
         visibility_rows = self.store.conn.execute(
             visibility_sql, visibility_params,
         ).fetchall()
-        # Workspace-wide endpoints still prevent an unrelated private edge from
-        # promoting a workspace-scoped entity into the selected repository.
+        # Never materialize an unbounded workspace edge population merely to classify
+        # a smaller repository view. The selected scene has the same hard relation cap.
         touching_rows = self.store.conn.execute(
-            "SELECT src, dst FROM edges WHERE workspace_id=?", (wid,)
+            "SELECT src, dst FROM edges WHERE workspace_id=? ORDER BY id LIMIT ?",
+            (wid, MAX_GRAPH_ANALYSIS_EDGES + 1),
         ).fetchall()
+        if (len(visibility_rows) > MAX_GRAPH_ANALYSIS_EDGES
+                or len(touching_rows) > MAX_GRAPH_ANALYSIS_EDGES):
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="visibility relation rows",
+                    count=MAX_GRAPH_ANALYSIS_EDGES + 1,
+                    limit=MAX_GRAPH_ANALYSIS_EDGES,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the relation visibility limit; "
+                "filter or reduce the workspace graph"
+            )
         historical_touching_ids = {
             str(row[key])
             for row in touching_rows
@@ -8238,9 +8235,11 @@ class MemoryService:
                 if entity_id not in historical_touching_ids \
                         or entity_id in historically_public_ids:
                     entity_rows.append(row)
-                    if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+                    entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
+                    if len(entity_rows) > entity_cap:
                         break
-            if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES \
+            entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
+            if len(entity_rows) > entity_cap \
                     or len(raw_entity_rows) < entity_batch_size:
                 break
             entity_offset += len(raw_entity_rows)
@@ -8251,13 +8250,16 @@ class MemoryService:
             "provenance FROM edges WHERE workspace_id=? "
         )
         if include_history:
+            history_vis_sql, history_vis_params = _graph_edge_history_visibility_sql(
+                "edges", at=t, known_at=known_t,
+            )
             edge_sql += (
                 "AND (valid_from IS NULL OR valid_from<=?) "
                 "AND (ingested_at IS NULL OR ingested_at<=?) "
                 "AND (expired_at IS NULL OR ?<expired_at) AND "
-                + _graph_edge_history_visibility_sql("edges", at=t, known_at=known_t)
+                + history_vis_sql
             )
-            edge_params: list[Any] = [wid, t, known_t, known_t]
+            edge_params: list[Any] = [wid, t, known_t, known_t, *history_vis_params]
         else:
             edge_sql += (
                 "AND (valid_from IS NULL OR valid_from<=?) "
@@ -8420,6 +8422,11 @@ class MemoryService:
             or canonical_by_id.get(str(entity["id"]), str(entity["id"]))
             in visible_canonical_ids
         ]
+        if all_mode_entity_cap is not None and len(entity_rows) > all_mode_entity_cap:
+            raise GraphSceneCapacityExceeded(
+                resource="all-mode entity nodes", count=len(entity_rows),
+                limit=all_mode_entity_cap,
+            )
         if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
             if include_complete_rows:
                 raise GraphSceneCapacityExceeded(
@@ -8627,10 +8634,19 @@ class MemoryService:
             }
             historical_supports: list[dict] = []
             for start in range(0, len(edge_ids), 500):
+                remaining = (
+                    MAX_GRAPH_ANALYSIS_SUPPORTS
+                    - len(support_rows) - len(historical_supports)
+                )
+                if remaining < 0:
+                    break
                 chunk = edge_ids[start:start + 500]
                 if not chunk:
                     continue
                 marks = ",".join("?" for _ in chunk)
+                # A closed relation may still have live supporting memories. History mode
+                # retains every public support that had begun by the requested anchors;
+                # ghost classification below records which support or memory later closed.
                 historical_sql = (
                     "SELECT support.edge_id, support.memory_id, support.source_kind, "
                     "support.confidence, support.valid_from, support.valid_to, "
@@ -8654,12 +8670,16 @@ class MemoryService:
                     historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
                     historical_params.append(repo_id)
                 historical_sql += (
-                    "ORDER BY support.edge_id, support.memory_id, support.source_kind"
+                    "ORDER BY support.edge_id, support.memory_id, support.source_kind "
+                    "LIMIT ?"
                 )
+                historical_params.append(remaining + 1)
                 rows = self.store.conn.execute(
                     historical_sql, historical_params,
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
+                if len(rows) > remaining:
+                    break
             for support in support_rows:
                 support["ghost"] = temporal_ghost(support)
             for support in historical_supports:
@@ -8818,14 +8838,23 @@ class MemoryService:
                 memory_where.append("COALESCE(valid_from, ingested_at, 0)<=?")
                 memory_params.append(upper_time)
             scoped_memory_sql = "SELECT id FROM memories WHERE " + " AND ".join(memory_where)
-            memory_rows = [dict(row) for row in self.store.conn.execute(
+            memory_rows = []
+            for row in self.store.conn.execute(
                 "SELECT id, repo_id, session_id, scope, mtype, title, "
                 "substr(content, 1, 160) AS content, substr(summary, 1, 160) AS summary, "
                 "importance, valid_from, valid_to, valid_to_recorded_at, "
-                "ingested_at, expired_at, pinned FROM memories WHERE "
-                + " AND ".join(memory_where) + " ORDER BY id LIMIT ?",
-                [*memory_params, MAX_GRAPH_COMPLETE_MEMORIES + 1],
-            ).fetchall()]
+                "ingested_at, expired_at, pinned, metadata, provenance FROM memories WHERE "
+                + " AND ".join(memory_where) + " ORDER BY id",
+                memory_params,
+            ):
+                memory = dict(row)
+                metadata = _loads(memory.pop("metadata", None), {})
+                provenance = _loads(memory.pop("provenance", None), {})
+                if not prompt_eligible(provenance, metadata):
+                    continue
+                memory_rows.append(memory)
+                if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
+                    break
             if include_history:
                 for memory in memory_rows:
                     valid_to_value = memory.get("valid_to")
@@ -8973,6 +9002,7 @@ class MemoryService:
         )
 
     def graph_scene(self, *, workspace: str, level: str = "overview",
+                    presentation: str = "quality",
                     center_id: Optional[str] = None,
                     system_id: Optional[str] = None,
                     seeds: Optional[list[str]] = None,
@@ -8992,7 +9022,7 @@ class MemoryService:
                     include_code: bool = False,
                     connected_only: bool = False,
                     include_history: bool = False,
-                    include_memory_nodes: bool = True,
+                    include_memory_nodes: Optional[bool] = None,
                     node_limit: Optional[int] = None,
                     edge_limit: Optional[int] = None) -> dict:
         started = time.perf_counter()
@@ -9000,6 +9030,23 @@ class MemoryService:
         clean_level = _clean_text(
             level, field="level", max_chars=32
         ).lower()
+        clean_presentation = _clean_text(
+            presentation, field="presentation", max_chars=16
+        ).lower()
+        if clean_presentation not in {"quality", "all"}:
+            raise ValidationError("presentation must be one of: quality, all")
+        if clean_presentation == "all" and clean_level != "complete":
+            raise ValidationError("all presentation requires a complete scene")
+        clean_include_memory_nodes = (
+            clean_presentation != "all"
+            if include_memory_nodes is None else include_memory_nodes
+        )
+        if not isinstance(clean_include_memory_nodes, bool):
+            raise ValidationError("include_memory_nodes must be a boolean")
+        if clean_presentation == "all" and clean_include_memory_nodes:
+            raise ValidationError(
+                "all presentation excludes memory nodes; set include_memory_nodes=false"
+            )
         if clean_level not in {"overview", "system", "neighborhood", "path", "complete"}:
             raise ValidationError(
                 "level must be one of: overview, system, neighborhood, path, complete"
@@ -9007,11 +9054,11 @@ class MemoryService:
         for field, value in (
             ("connected_only", connected_only),
             ("include_history", include_history),
-            ("include_memory_nodes", include_memory_nodes),
+            ("include_memory_nodes", clean_include_memory_nodes),
         ):
             if not isinstance(value, bool):
                 raise ValidationError(f"{field} must be a boolean")
-        if clean_level != "complete" and not include_memory_nodes:
+        if clean_level != "complete" and not clean_include_memory_nodes:
             raise ValidationError("include_memory_nodes is only accepted for complete scenes")
         clean_center_id = (
             _clean_text(center_id, field="center_id", max_chars=MAX_NAME_CHARS)
@@ -9108,7 +9155,8 @@ class MemoryService:
             clean_depth, clean_min_support,
             clean_min_confidence, bool(include_weak_cooccurrence),
             bool(include_code), connected_only, include_history,
-            include_memory_nodes, clean_node_limit, clean_edge_limit,
+            clean_include_memory_nodes, clean_node_limit, clean_edge_limit,
+            clean_presentation,
             GRAPH_SCENE_ALGORITHM_VERSION,
         )
         cached = self._graph_scene_cache.get(cache_key)
@@ -9121,8 +9169,12 @@ class MemoryService:
         )
         if cached is not None and (
                 both_anchored or time.time() < cached[0]):
-            self._graph_scene_cache.move_to_end(cache_key)
-            scene = copy.deepcopy(cached[1])
+            if clean_presentation == "all":
+                cached_scene = cached[1]
+                scene = dict(cached_scene)
+                scene["meta"] = dict(cached_scene["meta"])
+            else:
+                scene = copy.deepcopy(cached[1])
             scene["meta"]["cache_hit"] = True
             scene["meta"]["query_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3
@@ -9142,9 +9194,17 @@ class MemoryService:
             include_weak_cooccurrence=include_weak_cooccurrence,
             include_code=include_code,
             include_complete_rows=clean_level == "complete",
+            all_mode_entity_cap=(
+                MAX_GRAPH_ALL_NODES if clean_presentation == "all" else None
+            ),
             include_history=include_history,
-            include_memory_nodes=include_memory_nodes,
+            include_memory_nodes=clean_include_memory_nodes,
         )
+        if clean_presentation == "all" and len(entities) > MAX_GRAPH_ALL_NODES:
+            raise GraphSceneCapacityExceeded(
+                resource="all-mode entity nodes", count=len(entities),
+                limit=MAX_GRAPH_ALL_NODES,
+            )
         selected_layers = set(clean_layers) if clean_layers is not None else None
         selected_relations = set(clean_relations) or None
         filters = {
@@ -9164,7 +9224,7 @@ class MemoryService:
             "include_code": bool(include_code),
             "connected_only": connected_only,
             "include_history": include_history,
-            "include_memory_nodes": include_memory_nodes,
+            "include_memory_nodes": clean_include_memory_nodes,
         }
         filters = {key: value for key, value in filters.items()
                    if key in {"connected_only", "include_history", "include_memory_nodes"}
@@ -9180,15 +9240,25 @@ class MemoryService:
             layers=selected_layers, relations=selected_relations,
             min_support=clean_min_support, min_confidence=clean_min_confidence,
             connected_only=connected_only, include_history=include_history,
-            include_memory_nodes=include_memory_nodes,
+            include_memory_nodes=clean_include_memory_nodes,
             filters=filters, index_generation=int(index_info["generation"]),
         )
+        if clean_presentation == "all":
+            scene = project_all_presentation(scene)
         scene["meta"]["index_state"] = index_info["state"]
+        scene["meta"]["presentation"] = clean_presentation
+        if clean_presentation == "all" and len(scene.get("nodes", [])) > MAX_GRAPH_ALL_NODES:
+            raise GraphSceneCapacityExceeded(
+                resource="all-mode nodes", count=len(scene.get("nodes", [])),
+                limit=MAX_GRAPH_ALL_NODES,
+            )
         scene["meta"]["query_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         scene["meta"]["cache_hit"] = False
         if clean_level == "complete":
             scene["meta"]["safety_limits"] = {
                 "entity_rows": MAX_GRAPH_ANALYSIS_ENTITIES,
+                "all_mode_entity_nodes": MAX_GRAPH_ALL_NODES,
+                "all_mode_nodes": MAX_GRAPH_ALL_NODES,
                 "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
                 "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
                 "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,
@@ -9225,7 +9295,8 @@ class MemoryService:
         if clean_level == "complete":
             for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
                 self._graph_scene_cache.pop(key, None)
-        self._graph_scene_cache[cache_key] = (valid_until, copy.deepcopy(scene))
+        cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
+        self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
         self._graph_scene_cache.move_to_end(cache_key)
         while len(self._graph_scene_cache) > 16:
             self._graph_scene_cache.popitem(last=False)
@@ -10389,20 +10460,20 @@ class MemoryService:
                     marks = ",".join("?" for _ in selected_layers)
                     history_sql += f" AND relation.layer IN ({marks})"
                     history_params.extend(sorted(selected_layers))
-            anchor = repr(world_anchor)
-            known = repr(system_anchor)
             live_at_anchor = (
-                "(relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ") "
-                "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to "
+                "(relation.valid_from IS NULL OR relation.valid_from<=?) "
+                "AND (relation.valid_to IS NULL OR ?<relation.valid_to "
                 "OR (relation.valid_to_recorded_at IS NOT NULL AND "
-                + known + "<relation.valid_to_recorded_at))"
+                "?<relation.valid_to_recorded_at))"
             )
+            live_at_anchor_params: list[Any] = [world_anchor, world_anchor, system_anchor]
             # The bounded Time payload must first preserve relations that were live at
             # the selected anchor. Remaining capacity is then used for recent ghosts.
             history_sql += (
                 " ORDER BY CASE WHEN " + live_at_anchor + " THEN 0 ELSE 1 END, "
                 "relation.valid_from DESC, relation.id LIMIT ?"
             )
+            history_params.extend(live_at_anchor_params)
             history_params.append(edge_cap)
             edgs = [
                 dict(row) for row in conn.execute(history_sql, history_params).fetchall()
