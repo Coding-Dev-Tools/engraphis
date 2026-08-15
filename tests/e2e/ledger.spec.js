@@ -1340,6 +1340,12 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(repoFilter).toHaveValue('agent-memory');
   await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
+  // setRepoFilter('') triggers an async render cycle; wait for the count to
+  // update from the filtered state before asserting the unfiltered value.
+  await page.waitForFunction(() => {
+    const text = document.querySelector('#graph-count')?.textContent || '';
+    return text.includes('3 entities') && text.includes('1 relations');
+  }, { timeout: 10_000 });
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   await page.getByRole('tab', { name: 'Analyse' }).click();
