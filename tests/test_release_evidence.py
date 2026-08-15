@@ -488,7 +488,38 @@ def test_release_evidence_rejects_sbom_with_only_root_component(tmp_path):
         ),
         encoding="utf-8",
     )
-    with pytest.raises(EvidenceError, match="no dependency components"):
+    with pytest.raises(EvidenceError, match="(no dependency components|missing declared dependencies)"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_missing_declared_dependencies(tmp_path):
+    """An SBOM missing a declared dependency must fail the closure check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM has root + pip (not declared) but omits alpha-package (declared)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {"type": "library", "name": "pip", "version": "26.2",
+                     "purl": "pkg:pypi/pip@26.2"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="missing declared dependencies"):
         _build(root, dist, inputs=inputs)
 
 
