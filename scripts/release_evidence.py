@@ -147,7 +147,7 @@ def _declared_dependency_names(root: Path) -> set[str]:
     for requirement in deps:
         if not isinstance(requirement, str) or not requirement.strip():
             continue
-        name = re.split(r"[\s;<(>=!~\[]", requirement.strip(), 1)[0]
+        name = re.split(r"[\s;<(>=!~\[]", requirement.strip(), maxsplit=1)[0]
         if name:
             names.add(_canonical_package_name(name))
     return names
@@ -350,6 +350,10 @@ def environment_lock_artifact(
             + " root at version " + version
         )
     declared = _declared_dependency_names(root)
+    dependency_packages = {
+        pkg for pkg in sbom_packages
+        if pkg != (_canonical_package_name(PACKAGE), version)
+    }
     declared_tuples = {name for name in declared if name != PACKAGE}
     sbom_dependency_names = {
         name for name, _ in dependency_packages
