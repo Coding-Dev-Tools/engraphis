@@ -1513,6 +1513,7 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
         "raw_relations": 200_000,
         "evidence_rows": 500_000,
         "memory_nodes": 100_000,
+        "memory_candidate_rows": 200_000,
         "memory_connectors": 300_000,
         "code_memory_connectors": 300_000,
         "payload_bytes": 128 * 1024 * 1024,
@@ -3694,6 +3695,26 @@ def test_complete_scene_excludes_prompt_ineligible_memory_nodes():
     assert pending not in memory_ids
     assert quarantined not in memory_ids
 
+
+def test_complete_scene_bounds_prompt_ineligible_memory_candidates(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES", 2)
+    for index in range(3):
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Rejected import {index}.", workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            provenance={
+                "source": "import", "trusted": False, "review_state": "pending",
+            },
+        ))
+
+    with pytest.raises(GraphSceneCapacityExceeded, match="memory candidate rows"):
+        service.graph_scene(
+            workspace="acme", level="complete", presentation="quality",
+            include_memory_nodes=True,
+        )
+
 def test_visibility_classification_caps_edge_scan_without_giant_allocation(monkeypatch):
     """Visibility preclassification must honor MAX_GRAPH_ANALYSIS_EDGES and
     raise a capacity error rather than materializing an unbounded edge set."""
@@ -3774,6 +3795,25 @@ def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
         "UPDATE edge_supports SET valid_to=100, valid_to_recorded_at=100 "
         "WHERE edge_id='edge_zz_history'"
     )
+    live_supports = service.store.conn.execute(
+        "SELECT support.edge_id, support.memory_id, support.source_kind, "
+        "support.confidence, support.provenance FROM edge_supports support "
+        "JOIN edges edge ON edge.id=support.edge_id "
+        "WHERE support.valid_to IS NULL AND edge.valid_to IS NULL "
+        "ORDER BY support.edge_id, support.memory_id, support.source_kind"
+    ).fetchall()
+    assert len(live_supports) == 2
+    for support in live_supports:
+        service.store.conn.execute(
+            "INSERT INTO edge_supports("
+            "edge_id, memory_id, source_kind, confidence, valid_from, valid_to, "
+            "valid_to_recorded_at, ingested_at, expired_at, provenance"
+            ") VALUES (?, ?, ?, ?, 0, 100, 100, 0, NULL, ?)",
+            (
+                support["edge_id"], support["memory_id"], support["source_kind"],
+                support["confidence"], support["provenance"],
+            ),
+        )
     service.store.conn.commit()
 
     rows = service._graph_scene_rows(

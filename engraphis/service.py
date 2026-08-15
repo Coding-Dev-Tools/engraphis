@@ -253,6 +253,10 @@ MAX_GRAPH_ALL_NODES = 20_000
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
 MAX_GRAPH_COMPLETE_MEMORIES = 100_000
+# Prompt eligibility is a Python security predicate over two JSON envelopes. Bound
+# the raw candidate walk independently so rejected imports cannot force an unbounded
+# parse while still leaving room for eligible rows behind rejected candidates.
+MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES = 200_000
 MAX_GRAPH_COMPLETE_MEMORY_LINKS = 300_000
 MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS = 300_000
 MAX_GRAPH_COMPLETE_PAYLOAD_BYTES = 128 * 1024 * 1024
@@ -8705,10 +8709,37 @@ class MemoryService:
                     "AND historical_edge.valid_to<=? "
                     "AND (historical_edge.valid_to_recorded_at IS NULL "
                     "OR historical_edge.valid_to_recorded_at<=?))) "
+                    # An older version of a currently visible evidence key belongs
+                    # to the live arm already. Exclude it before LIMIT so duplicate
+                    # keys cannot consume the global historical-support budget.
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM edge_supports current_support "
+                    "JOIN edges current_edge ON current_edge.id=current_support.edge_id "
+                    "WHERE current_support.edge_id=support.edge_id "
+                    "AND current_support.memory_id=support.memory_id "
+                    "AND current_support.source_kind=support.source_kind "
+                    "AND (current_support.valid_from IS NULL "
+                    "OR current_support.valid_from<=?) "
+                    "AND (current_support.valid_to IS NULL OR ?<current_support.valid_to "
+                    "OR (current_support.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<current_support.valid_to_recorded_at)) "
+                    "AND (current_support.ingested_at IS NULL "
+                    "OR current_support.ingested_at<=?) "
+                    "AND (current_support.expired_at IS NULL "
+                    "OR ?<current_support.expired_at) "
+                    "AND (current_edge.valid_from IS NULL OR current_edge.valid_from<=?) "
+                    "AND (current_edge.valid_to IS NULL OR ?<current_edge.valid_to "
+                    "OR (current_edge.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<current_edge.valid_to_recorded_at)) "
+                    "AND (current_edge.ingested_at IS NULL "
+                    "OR current_edge.ingested_at<=?) "
+                    "AND (current_edge.expired_at IS NULL OR ?<current_edge.expired_at)) "
                 )
                 historical_params: list[Any] = [
                     *chunk, t, known_t, known_t, t, known_t, known_t, wid,
                     t, known_t, t, known_t,
+                    t, t, known_t, known_t, known_t,
+                    t, t, known_t, known_t, known_t,
                 ]
                 if repo_id:
                     historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
@@ -8890,22 +8921,49 @@ class MemoryService:
                 memory_params.append(upper_time)
             scoped_memory_sql = "SELECT id FROM memories WHERE " + " AND ".join(memory_where)
             memory_rows = []
-            for row in self.store.conn.execute(
-                "SELECT id, repo_id, session_id, scope, mtype, title, "
-                "substr(content, 1, 160) AS content, substr(summary, 1, 160) AS summary, "
-                "importance, valid_from, valid_to, valid_to_recorded_at, "
-                "ingested_at, expired_at, pinned, metadata, provenance FROM memories WHERE "
-                + " AND ".join(memory_where) + " ORDER BY id",
-                memory_params,
-            ):
-                memory = dict(row)
-                metadata = _loads(memory.pop("metadata", None), {})
-                provenance = _loads(memory.pop("provenance", None), {})
-                if not prompt_eligible(provenance, metadata):
-                    continue
-                memory_rows.append(memory)
-                if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
+            memory_candidate_count = 0
+            last_memory_id: Optional[str] = None
+            while memory_candidate_count <= MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES:
+                batch_where = list(memory_where)
+                batch_params = list(memory_params)
+                if last_memory_id is not None:
+                    batch_where.append("id>?")
+                    batch_params.append(last_memory_id)
+                batch_limit = min(
+                    500,
+                    MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES + 1 - memory_candidate_count,
+                )
+                raw_memory_rows = self.store.conn.execute(
+                    "SELECT id, repo_id, session_id, scope, mtype, title, "
+                    "substr(content, 1, 160) AS content, "
+                    "substr(summary, 1, 160) AS summary, importance, valid_from, "
+                    "valid_to, valid_to_recorded_at, ingested_at, expired_at, pinned, "
+                    "metadata, provenance FROM memories WHERE "
+                    + " AND ".join(batch_where) + " ORDER BY id LIMIT ?",
+                    [*batch_params, batch_limit],
+                ).fetchall()
+                if not raw_memory_rows:
                     break
+                memory_candidate_count += len(raw_memory_rows)
+                if memory_candidate_count > MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES:
+                    raise GraphSceneCapacityExceeded(
+                        resource="memory candidate rows",
+                        count=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES + 1,
+                        limit=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES,
+                    )
+                for row in raw_memory_rows:
+                    memory = dict(row)
+                    metadata = _loads(memory.pop("metadata", None), {})
+                    provenance = _loads(memory.pop("provenance", None), {})
+                    if not prompt_eligible(provenance, metadata):
+                        continue
+                    memory_rows.append(memory)
+                    if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
+                        break
+                if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES \
+                        or len(raw_memory_rows) < batch_limit:
+                    break
+                last_memory_id = str(raw_memory_rows[-1]["id"])
             if include_history:
                 for memory in memory_rows:
                     valid_to_value = memory.get("valid_to")
@@ -9313,6 +9371,7 @@ class MemoryService:
                 "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
                 "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
                 "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,
+                "memory_candidate_rows": MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES,
                 "memory_connectors": MAX_GRAPH_COMPLETE_MEMORY_LINKS,
                 "code_memory_connectors": MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS,
                 "payload_bytes": MAX_GRAPH_COMPLETE_PAYLOAD_BYTES,
