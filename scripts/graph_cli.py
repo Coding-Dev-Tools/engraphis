@@ -69,30 +69,46 @@ def _git_files(root: str, revision: str) -> list[str]:
 
 
 def _index(args) -> None:
-    _json(_service().index_repo(
-        workspace=args.workspace, repo=args.repo, root_path=args.root,
-        languages=args.languages,
-    ))
+    svc = _service()
+    try:
+        _json(svc.index_repo(
+            workspace=args.workspace, repo=args.repo, root_path=args.root,
+            languages=args.languages,
+        ))
+    finally:
+        svc.close()
 
 
 def _search(args) -> None:
-    _json(_service().search_code(
-        args.query, workspace=args.workspace, repo=args.repo, limit=args.limit,
-    ))
+    svc = _service()
+    try:
+        _json(svc.search_code(
+            args.query, workspace=args.workspace, repo=args.repo, limit=args.limit,
+        ))
+    finally:
+        svc.close()
 
 
 def _query(args) -> None:
-    _json(_service().intent_recall(
-        args.query, intent=args.intent, workspace=args.workspace, repo=args.repo,
-        k=args.limit, reinforce=False,
-    ))
+    svc = _service()
+    try:
+        _json(svc.intent_recall(
+            args.query, intent=args.intent, workspace=args.workspace, repo=args.repo,
+            k=args.limit, reinforce=False,
+        ))
+    finally:
+        svc.close()
 
 
 def _path(args) -> None:
-    _json(_service().code_path(
-        args.source, args.target, workspace=args.workspace, repo=args.repo,
-        max_depth=args.max_depth,
-    ))
+    svc = _service()
+    try:
+        _json(svc.code_path(
+            args.source, args.target, workspace=args.workspace, repo=args.repo,
+            max_depth=args.max_depth,
+        ))
+    finally:
+        svc.close()
 
 
 def _impact(args) -> None:
@@ -101,21 +117,29 @@ def _impact(args) -> None:
         files.extend(_git_files(args.root, args.git_range))
     if not files:
         files = _git_files(args.root, "")
-    _json(_service().code_impact(files, workspace=args.workspace, repo=args.repo))
+    svc = _service()
+    try:
+        _json(svc.code_impact(files, workspace=args.workspace, repo=args.repo))
+    finally:
+        svc.close()
 
 
 def _prs(args) -> None:
     current_files = _git_files(args.root, f"{args.base}...{args.head}")
-    current = _service().code_impact(
-        current_files, workspace=args.workspace, repo=args.repo,
-    )
-    if not args.conflicts_with:
-        _json({"mode": "triage", "range": f"{args.base}...{args.head}", **current})
-        return
-    other_files = _git_files(args.root, f"{args.base}...{args.conflicts_with}")
-    other = _service().code_impact(
-        other_files, workspace=args.workspace, repo=args.repo,
-    )
+    svc = _service()
+    try:
+        current = svc.code_impact(
+            current_files, workspace=args.workspace, repo=args.repo,
+        )
+        if not args.conflicts_with:
+            _json({"mode": "triage", "range": f"{args.base}...{args.head}", **current})
+            return
+        other_files = _git_files(args.root, f"{args.base}...{args.conflicts_with}")
+        other = svc.code_impact(
+            other_files, workspace=args.workspace, repo=args.repo,
+        )
+    finally:
+        svc.close()
     overlap_files = sorted(
         set(current["changed_files"]) & set(other["changed_files"])
         | set(current["dependent_files"]) & set(other["dependent_files"])
@@ -142,17 +166,16 @@ def _prs(args) -> None:
 
 
 def _export(args) -> None:
-    result = _service().export_code_graph(workspace=args.workspace, repo=args.repo)
+    svc = _service()
+    try:
+        result = svc.export_code_graph(workspace=args.workspace, repo=args.repo)
+    finally:
+        svc.close()
     out = Path(args.output).expanduser()
     if out.is_symlink():
-        # A pre-planted symlink at the output directory would redirect the whole
-        # export elsewhere (e.g. a committed `engraphis-graph-out` link in a
-        # hostile checkout run with the default -o). Refuse rather than follow.
         raise ValidationError(f"output path {out} is a symlink; refusing to export")
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    # _atomic_write_text (temp + os.replace) never follows a pre-planted symlink
-    # at the destination, unlike Path.write_text — same discipline as _merge.
     _atomic_write_text(
         out / "graph.json",
         json.dumps(result["graph"], indent=2, ensure_ascii=False, default=str),
@@ -166,10 +189,14 @@ def _postgres(args) -> None:
     dsn = os.environ.get(args.dsn_env, "")
     if not dsn:
         raise ValidationError(f"{args.dsn_env} is not set")
-    _json(_service().import_postgres_schema(
-        dsn, workspace=args.workspace, repo=args.repo, schemas=args.schemas,
-        actor="cli",
-    ))
+    svc = _service()
+    try:
+        _json(svc.import_postgres_schema(
+            dsn, workspace=args.workspace, repo=args.repo, schemas=args.schemas,
+            actor="cli",
+        ))
+    finally:
+        svc.close()
 
 
 def _natural_node(node: dict) -> tuple:

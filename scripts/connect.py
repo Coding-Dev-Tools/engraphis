@@ -56,7 +56,7 @@ def _read_token(value: str) -> str:
             "`printf %s \"$ENGRAPHIS_CONNECT_TOKEN\" | engraphis connect --token -`.",
             status=400,
         )
-    return sys.stdin.readline()
+    return sys.stdin.readline().strip("\r\n")
 
 
 def _print_summary(summary: dict) -> None:
