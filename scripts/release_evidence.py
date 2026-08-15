@@ -290,13 +290,13 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
         purl = component.get("purl")
         name = component.get("name")
         version = component.get("version")
-        if not (
-            isinstance(purl, str)
-            and purl.startswith("pkg:pypi/")
-            and isinstance(name, str)
-            and isinstance(version, str)
-        ):
+        if not isinstance(name, str) or not isinstance(version, str):
             continue
+        if not isinstance(purl, str) or not purl.startswith("pkg:pypi/"):
+            raise EvidenceError(
+                "SBOM component lacks a valid PyPI PURL: "
+                + name + "@" + version
+            )
         if not _purl_matches(purl, _canonical_package_name(name), version):
             raise EvidenceError(
                 "SBOM component PURL does not match its name/version: "
