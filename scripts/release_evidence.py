@@ -295,6 +295,7 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
             and purl.startswith("pkg:pypi/")
             and isinstance(name, str)
             and isinstance(version, str)
+            and _purl_matches(purl, _canonical_package_name(name), version)
         ):
             packages.add((_canonical_package_name(name), version))
     return packages
