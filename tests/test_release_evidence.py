@@ -394,6 +394,34 @@ def test_release_evidence_rejects_empty_sbom_package_set(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_sbom_missing_root_component(tmp_path):
+    """A truncated SBOM that retains one matching dep but omits the root
+    engraphis component must fail the lock comparison."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM has only alpha-package (which IS in the lock) but no engraphis root.
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="root component"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
