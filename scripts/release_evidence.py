@@ -36,6 +36,17 @@ _BUILDER_TOOLCHAIN = {
     "setuptools": "83.0.0",
     "wheel": "0.47.0",
 }
+
+
+def _purl_matches(purl: str, name: str, version: str) -> bool:
+    """Return True when a pkg:pypi PURL names *name* at *version*."""
+    if not purl.startswith("pkg:pypi/"):
+        return False
+    remainder = purl[len("pkg:pypi/"):].split("?", 1)[0]
+    if "@" not in remainder:
+        return False
+    purl_name, purl_version = remainder.split("@", 1)
+    return _canonical_package_name(purl_name) == name and purl_version == version
 _GRYPE_VERSION = "0.110.0"
 _SECRET_NAME = re.compile(
     r"(?:secret|token|password|credential|api[-_]?key|private[-_]?key)", re.IGNORECASE
@@ -122,29 +133,45 @@ def project_version(root: Path) -> str:
 
 
 def _declared_dependency_names(root: Path) -> set[str]:
-    """Return canonical package names from pyproject.toml [project].dependencies."""
+    """Return canonical package names from pyproject.toml [project].dependencies
+    and every group in [project.optional-dependencies]."""
     pyproject = root / "pyproject.toml"
     try:
         raw = pyproject.read_text(encoding="utf-8")
     except OSError:
         return set()
+    requirements: list[str] = []
     if tomllib is not None:
         try:
-            deps = tomllib.loads(raw).get("project", {}).get("dependencies", [])
+            parsed = tomllib.loads(raw)
         except (KeyError, ValueError):
-            return set()
+            parsed = {}
+        project = parsed.get("project", {}) if isinstance(parsed, dict) else {}
+        core = project.get("dependencies", []) if isinstance(project, dict) else []
+        if isinstance(core, list):
+            requirements.extend(item for item in core if isinstance(item, str))
+        optional = project.get("optional-dependencies", {}) if isinstance(project, dict) else {}
+        if isinstance(optional, dict):
+            for group in optional.values():
+                if isinstance(group, list):
+                    requirements.extend(item for item in group if isinstance(item, str))
     else:
         project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
-        if project is None:
-            return set()
-        deps_block = re.search(
-            r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
-        )
-        if deps_block is None:
-            return set()
-        deps = re.findall(r'"([^"]+)"', deps_block.group(1))
+        if project is not None:
+            deps_block = re.search(
+                r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
+            )
+            if deps_block is not None:
+                requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
+        for optional_block in re.finditer(
+            r'(?ms)^\[project\.optional-dependencies\]\s*(.*?)(?=^\[|\Z)', raw,
+        ):
+            for group in re.finditer(
+                r'(?m)^[A-Za-z0-9_-]+\s*=\s*\[(.*?)\]', optional_block.group(1), re.DOTALL,
+            ):
+                requirements.extend(re.findall(r'"([^"]+)"', group.group(1)))
     names: set[str] = set()
-    for requirement in deps:
+    for requirement in requirements:
         if not isinstance(requirement, str) or not requirement.strip():
             continue
         name = re.split(r"[\s;<(>=!~\[]", requirement.strip(), maxsplit=1)[0]
@@ -343,7 +370,7 @@ def environment_lock_artifact(
         or not isinstance(root_version, str)
         or root_version != version
         or not isinstance(root_purl, str)
-        or not root_purl.startswith("pkg:pypi/")
+        or not _purl_matches(root_purl, PACKAGE, version)
     ):
         raise EvidenceError(
             "SBOM metadata.component does not identify the " + PACKAGE
