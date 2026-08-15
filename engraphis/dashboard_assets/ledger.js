@@ -3123,6 +3123,7 @@
       let candidateHost = null;
       let candidateEngine = null;
       let candidateOverlay = null;
+      let candidateStats = null;
       const destroyCandidate = () => {
         if (!candidateEngine) {
           candidateOverlay = null;
@@ -3225,6 +3226,7 @@
           onStats: stats => {
             if (state.graphEngine === candidateEngine
               && state.graphLoadRequest === request.id) graphStatsChanged(stats);
+            else if (state.graphLoadRequest === request.id) candidateStats = stats;
           },
           onMetrics: metrics => {
             if (state.graphEngine === candidateEngine
@@ -3318,9 +3320,10 @@
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
         updateGraphFacts(data);
-        // Candidate stats emitted before commit are intentionally ignored. Publish the
-        // canonical payload counts now; later renderer callbacks refine LOD/drawn counts.
-        graphStatsChanged({ nodes: data.nodes.length, links: data.links.length });
+        // Candidate stats emitted before commit are retained, then published only after the
+        // renderer transaction commits. Raw payload counts are wrong when a frozen renderer
+        // has already applied repository, layer, ghost, or collapse visibility filters.
+        graphStatsChanged(candidateStats || { nodes: data.nodes.length, links: data.links.length });
         updateGraphLayerCounts(data, scene.layers || payload.layers);
       } catch (error) {
         if (!isCurrentGraphLoad(request)) {
