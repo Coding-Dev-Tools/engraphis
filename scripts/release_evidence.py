@@ -293,6 +293,8 @@ def environment_lock_artifact(root: Path, path: Path, sbom: Path) -> dict[str, A
             raise EvidenceError("build environment lock contains a duplicate package")
         packages.add(package)
     sbom_packages = _python_sbom_packages(_json_object(sbom, "SBOM"))
+    if not sbom_packages:
+        raise EvidenceError("SBOM contains no Python package components")
     if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
     return {
