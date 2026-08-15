@@ -30,7 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def _root(tmp_path):
     (tmp_path / "eval" / "datasets").mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "engraphis"\nversion = "1.2.3"\n', encoding="utf-8"
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\ndependencies = ["alpha-package>=1.0"]\n',
+        encoding="utf-8",
     )
     (tmp_path / "LICENSE").write_text("Apache-2.0\n", encoding="utf-8")
     (tmp_path / "NOTICE").write_text("Engraphis\n", encoding="utf-8")
