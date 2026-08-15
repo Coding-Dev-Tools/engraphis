@@ -1336,7 +1336,14 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   expect(json.nodes.map(node => node.id).sort()).toEqual(['engraphis', 'unlinked']);
   expect(json.links).toEqual([]);
 
-  await page.getByRole('button', { name: 'Reload data' }).click();
+  const reload = page.getByRole('button', { name: 'Reload data' });
+  const filteredReloadResponse = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/graph/scene';
+  });
+  await reload.click();
+  await filteredReloadResponse;
+  await expect(reload).toBeEnabled();
   await expect(repoFilter).toHaveValue('agent-memory');
   await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
