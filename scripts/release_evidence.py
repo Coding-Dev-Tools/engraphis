@@ -121,6 +121,38 @@ def project_version(root: Path) -> str:
     return version
 
 
+def _declared_dependency_names(root: Path) -> set[str]:
+    """Return canonical package names from pyproject.toml [project].dependencies."""
+    pyproject = root / "pyproject.toml"
+    try:
+        raw = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    if tomllib is not None:
+        try:
+            deps = tomllib.loads(raw).get("project", {}).get("dependencies", [])
+        except (KeyError, ValueError):
+            return set()
+    else:
+        project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
+        if project is None:
+            return set()
+        deps_block = re.search(
+            r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
+        )
+        if deps_block is None:
+            return set()
+        deps = re.findall(r'"([^"]+)"', deps_block.group(1))
+    names: set[str] = set()
+    for requirement in deps:
+        if not isinstance(requirement, str) or not requirement.strip():
+            continue
+        name = re.split(r"[\s;<(>=!~\[]", requirement.strip(), 1)[0]
+        if name:
+            names.add(_canonical_package_name(name))
+    return names
+
+
 def git_commit(root: Path) -> str:
     try:
         commit = subprocess.check_output(
@@ -317,10 +349,17 @@ def environment_lock_artifact(
             "SBOM metadata.component does not identify the " + PACKAGE
             + " root at version " + version
         )
-    dependency_packages = {
-        pkg for pkg in sbom_packages
-        if pkg != (_canonical_package_name(PACKAGE), version)
+    declared = _declared_dependency_names(root)
+    declared_tuples = {name for name in declared if name != PACKAGE}
+    sbom_dependency_names = {
+        name for name, _ in dependency_packages
     }
+    missing_declared = declared_tuples - sbom_dependency_names
+    if missing_declared:
+        raise EvidenceError(
+            "SBOM is missing declared dependencies: "
+            + ", ".join(sorted(missing_declared))
+        )
     if not dependency_packages:
         raise EvidenceError(
             "SBOM contains no dependency components beyond the " + PACKAGE + " root"
