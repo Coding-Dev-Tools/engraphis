@@ -44,65 +44,66 @@ def backfill(db_path: str, *, dry_run: bool = False,
              only_workspace: Optional[str] = None) -> dict:
     """Extract entities/relations from every live memory and write them to the graph.
 
-    ``dry_run`` opens the existing database read-only, runs the extractor, and invokes
-    no graph writes, so even connection setup cannot migrate or alter journal state.
+    ``dry_run`` opens the existing database read-only, so even connection setup cannot
+    migrate or alter journal state.
     """
     store = Store(db_path, read_only=dry_run)
-    conn = store.conn
-    extractor = get_graph_extractor("regex")
+    try:
+        conn = store.conn
+        extractor = get_graph_extractor("regex")
 
-    ws_names = {r["id"]: r["name"]
-                for r in conn.execute("SELECT id, name FROM workspaces").fetchall()}
+        ws_names = {r["id"]: r["name"]
+                    for r in conn.execute("SELECT id, name FROM workspaces").fetchall()}
 
-    now = time.time()
-    sql = ("SELECT id, workspace_id, repo_id, title, content, metadata, provenance, "
-           "valid_from, ingested_at FROM memories WHERE expired_at IS NULL "
-           "AND (valid_from IS NULL OR valid_from<=?) "
-           "AND (valid_to IS NULL OR ?<valid_to)")
-    params: list = [now, now]
-    if only_workspace:
-        row = conn.execute("SELECT id FROM workspaces WHERE name=?",
-                           (only_workspace,)).fetchone()
-        if row is None:
-            store.close()
-            raise SystemExit(f"no workspace named '{only_workspace}'")
-        sql += " AND workspace_id=?"
-        params.append(row["id"])
+        now = time.time()
+        sql = ("SELECT id, workspace_id, repo_id, title, content, metadata, provenance, "
+               "valid_from, ingested_at FROM memories WHERE expired_at IS NULL "
+               "AND (valid_from IS NULL OR valid_from<=?) "
+               "AND (valid_to IS NULL OR ?<valid_to)")
+        params: list = [now, now]
+        if only_workspace:
+            row = conn.execute("SELECT id FROM workspaces WHERE name=?",
+                               (only_workspace,)).fetchone()
+            if row is None:
+                raise SystemExit(f"no workspace named '{only_workspace}'")
+            sql += " AND workspace_id=?"
+            params.append(row["id"])
 
-    rows = conn.execute(sql, params).fetchall()
-    mem = defaultdict(int)
-    ent = defaultdict(int)
-    rel = defaultdict(int)
+        rows = conn.execute(sql, params).fetchall()
+        mem = defaultdict(int)
+        ent = defaultdict(int)
+        rel = defaultdict(int)
 
-    for r in rows:
-        try:
-            metadata = json.loads(r["metadata"] or "{}")
-        except ValueError:
-            metadata = {}
-        try:
-            provenance = json.loads(r["provenance"] or "{}")
-        except ValueError:
-            provenance = metadata.get("provenance") if isinstance(metadata, dict) else {}
-        if not prompt_eligible(provenance, metadata):
-            continue
-        wid = r["workspace_id"]
-        mem[wid] += 1
-        content, title = r["content"] or "", r["title"] or ""
-        if dry_run:
-            ex = extractor.extract(content, title=title)
-            ent[wid] += len({e[0].lower() for e in ex.entities})
-            rel[wid] += len(ex.relations)
-        else:
-            res = feed(store, content, workspace_id=wid, repo_id=r["repo_id"],
-                       title=title, extractor=extractor,
-                       provenance={"source": "backfill_graph", "memory_id": r["id"]},
-                       valid_from=r["valid_from"], ingested_at=r["ingested_at"])
-            ent[wid] += res["entities"]
-            rel[wid] += res["relations"]
+        for r in rows:
+            try:
+                metadata = json.loads(r["metadata"] or "{}")
+            except ValueError:
+                metadata = {}
+            try:
+                provenance = json.loads(r["provenance"] or "{}")
+            except ValueError:
+                provenance = metadata.get("provenance") if isinstance(metadata, dict) else {}
+            if not prompt_eligible(provenance, metadata):
+                continue
+            wid = r["workspace_id"]
+            mem[wid] += 1
+            content, title = r["content"] or "", r["title"] or ""
+            if dry_run:
+                ex = extractor.extract(content, title=title)
+                ent[wid] += len({e[0].lower() for e in ex.entities})
+                rel[wid] += len(ex.relations)
+            else:
+                res = feed(store, content, workspace_id=wid, repo_id=r["repo_id"],
+                           title=title, extractor=extractor,
+                           provenance={"source": "backfill_graph", "memory_id": r["id"]},
+                           valid_from=r["valid_from"], ingested_at=r["ingested_at"])
+                ent[wid] += res["entities"]
+                rel[wid] += res["relations"]
 
-    totals = {r["workspace_id"]: r["n"] for r in conn.execute(
-        "SELECT workspace_id, COUNT(*) n FROM entities GROUP BY workspace_id").fetchall()}
-    store.close()
+        totals = {r["workspace_id"]: r["n"] for r in conn.execute(
+            "SELECT workspace_id, COUNT(*) n FROM entities GROUP BY workspace_id").fetchall()}
+    finally:
+        store.close()
 
     workspaces = [{
         "workspace": ws_names.get(wid, wid),

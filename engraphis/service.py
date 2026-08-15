@@ -4156,7 +4156,7 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.pin(mid, pinned=bool(pinned), actor=actor)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
@@ -4170,7 +4170,7 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.correct(mid, new_content, reason=reason, actor=actor)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
     def promote(self, memory_id: str, target_scope: str, *, workspace: str,
