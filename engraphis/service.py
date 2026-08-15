@@ -9423,11 +9423,15 @@ class MemoryService:
             for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
                 self._graph_scene_cache.pop(key, None)
         cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
+        response_scene = scene
+        if clean_presentation == "all":
+            response_scene = dict(scene)
+            response_scene["meta"] = dict(scene["meta"])
         self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
         self._graph_scene_cache.move_to_end(cache_key)
         while len(self._graph_scene_cache) > 16:
             self._graph_scene_cache.popitem(last=False)
-        return scene
+        return response_scene
 
     def graph_suggest(self, query: str, *, workspace: str, limit: int = 8,
                       repo: Optional[str] = None,

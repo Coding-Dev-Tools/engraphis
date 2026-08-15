@@ -2402,6 +2402,26 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
 
 
+def test_all_presentation_cache_isolated_from_response_metadata_mutation():
+    service, _alpha, _beta, _gamma = _seed_service()
+
+    first = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False,
+    )
+    first["meta"]["degraded"] = True
+    first["meta"]["requested_include_code"] = True
+
+    warm = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False,
+    )
+
+    assert warm["meta"]["cache_hit"] is True
+    assert "degraded" not in warm["meta"]
+    assert "requested_include_code" not in warm["meta"]
+
+
 def test_graph_scene_cache_separates_algorithm_contract(monkeypatch):
     service, _alpha, _beta, _gamma = _seed_service()
 

@@ -3205,6 +3205,8 @@
             ? (sceneMeta.truncated == null ? fullGraph : !sceneMeta.truncated)
             : sceneMeta.nodes_complete,
         };
+        const responseIncludeCode = sceneMeta.include_code === false ? false : targetIncludeCode;
+        const codeOverlayDegraded = targetIncludeCode && !responseIncludeCode;
         const oldHost = byId('graph-canvas');
         // oldEngine/oldOverlay were captured before the first await so the failure path
         // can restore the exact committed renderer even when candidate setup never begins.
@@ -3309,11 +3311,22 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
-        state.graphDataIncludeCode = targetIncludeCode;
+        state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
         state.graphDataRepo = targetRepo;
         state.graphMeta = nextMeta;
+        if (codeOverlayDegraded) {
+          state.graphIncludeCode = false;
+          const layers = { ...graphLayerState(), code: false };
+          setGraphLayers(layers);
+          candidateEngine.setLayers(layers);
+          clearGraphSavedView();
+          saveGraphPreferences();
+          showNotice(sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter'
+            ? 'Code overlay needs a repository filter; showing entity relationships only.'
+            : 'Code overlay is unavailable; showing entity relationships only.');
+        }
         if (oldOverlay) oldOverlay.destroy();
         if (oldEngine) oldEngine.destroy();
         byId('graph-empty').hidden = Boolean(data.nodes.length);
