@@ -310,3 +310,25 @@ def test_install_merge_driver_fails_closed_on_git_config_hang(monkeypatch, tmp_p
         graph_cli._install_merge_driver(SimpleNamespace(
             root=str(tmp_path), graph_path="graph.json"
         ))
+
+def test_graph_cli_commands_close_service_even_on_error(monkeypatch):
+    """Every graph subcommand must close the MemoryService in a finally block.
+
+    Round 1 fixed resource leaks across all 8 commands; this test pins that
+    contract so a future refactor cannot silently drop the cleanup.
+    """
+    closed = []
+
+    class _FakeService:
+        def index_repo(self, **kwargs):
+            raise RuntimeError("boom")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(graph_cli, "_service", _FakeService)
+    with pytest.raises(RuntimeError, match="boom"):
+        graph_cli._index(SimpleNamespace(
+            workspace="w", repo="r", root=".", languages=None,
+        ))
+    assert closed == [True]

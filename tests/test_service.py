@@ -1048,6 +1048,31 @@ def test_correct_wrong_workspace_raises_validation_error():
         s.correct(out["id"], "tampered", workspace="beta")
 
 
+def test_correct_translates_engine_value_error_to_validation_error():
+    """A deliberate engine ValueError must remain actionable at the service boundary."""
+    s = _svc()
+    out = s.remember("A fact worth correcting.", workspace="acme")
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("session scope requires session_id")
+
+    s.engine.correct = _boom
+    with pytest.raises(ValidationError, match="session scope requires"):
+        s.correct(out["id"], "replacement", workspace="acme")
+
+
+def test_pin_translates_engine_value_error_to_validation_error():
+    s = _svc()
+    out = s.remember("A fact worth pinning.", workspace="acme")
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("cannot pin an expired memory")
+
+    s.engine.pin = _boom
+    with pytest.raises(ValidationError, match="cannot pin"):
+        s.pin(out["id"], workspace="acme")
+
+
 def test_promote_repo_memory_to_workspace():
     s = _svc()
     source = s.remember(
