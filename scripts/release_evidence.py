@@ -317,6 +317,14 @@ def environment_lock_artifact(
             "SBOM metadata.component does not identify the " + PACKAGE
             + " root at version " + version
         )
+    dependency_packages = {
+        pkg for pkg in sbom_packages
+        if pkg != (_canonical_package_name(PACKAGE), version)
+    }
+    if not dependency_packages:
+        raise EvidenceError(
+            "SBOM contains no dependency components beyond the " + PACKAGE + " root"
+        )
     if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
     return {

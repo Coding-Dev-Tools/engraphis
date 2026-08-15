@@ -464,6 +464,33 @@ def test_release_evidence_rejects_sbom_with_wrong_version_root_component(tmp_pat
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_sbom_with_only_root_component(tmp_path):
+    """An SBOM with valid metadata.component but no dependency components must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="no dependency components"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
