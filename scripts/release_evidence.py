@@ -220,6 +220,18 @@ def _canonical_package_name(value: str) -> str:
 
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
     packages = set()
+    metadata_component = document.get("metadata", {}).get("component")
+    if isinstance(metadata_component, dict):
+        purl = metadata_component.get("purl")
+        name = metadata_component.get("name")
+        version = metadata_component.get("version")
+        if (
+            isinstance(purl, str)
+            and purl.startswith("pkg:pypi/")
+            and isinstance(name, str)
+            and isinstance(version, str)
+        ):
+            packages.add((_canonical_package_name(name), version))
     for component in document.get("components", []):
         if not isinstance(component, dict):
             continue
