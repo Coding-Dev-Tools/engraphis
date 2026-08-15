@@ -5,7 +5,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [1.7] - 2026-08-14
+## [1.6] - 2026-08-15
 
 ### Changed
 
