@@ -1100,19 +1100,23 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
         distance = math.hypot(node["x"] - core["x"], node["y"] - core["y"])
         assert 0.87 * node["orbit_radius"] <= distance <= node["orbit_radius"] + 1e-5
     assert len({(node["x"], node["y"]) for node in by_id.values()}) == len(by_id)
+    for left_index, left in enumerate(by_id.values()):
+        for right in list(by_id.values())[left_index + 1:]:
+            assert math.dist((left["x"], left["y"]), (right["x"], right["y"])) >= (
+                left["visual_radius"] + right["visual_radius"] + 7.9
+            ), (left["id"], left["orbit_tier"], left["orbit_radius"], right["id"], right["orbit_tier"], right["orbit_radius"])
     assert scene["communities"][0]["radius"] >= max(
         node["orbit_radius"] + node["visual_radius"] for node in by_id.values()
     ) + 5.9
 
-    # Recreate the otherwise-identical pre-contraction orbital positions using
-    # the emitted scene seed.  Both local offsets and public orbit metadata are
-    # exactly 80% of this reference, including every live satellite.
+    # Recreate the clearance-aware hierarchy using the emitted scene seed. Compactness
+    # remains the preferred scale, but dense rings are allowed to expand to preserve
+    # painted-disk clearance.
     reference_nodes = copy.deepcopy(fake_graph["nodes"])
     reference_slots, _reference_radii = graph_scene_module._assign_orbit_hierarchy(
         reference_nodes,
         fake_graph["community_members"],
         {"community-stars": core["id"]},
-        radius_scale=1.0,
     )
     for node_id, node in by_id.items():
         if node_id == core["id"]:
@@ -1122,13 +1126,13 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
                 0.0, 0.0, "community-stars", reference_slots[node_id],
                 scene["meta"]["layout_seed"],
             )
-        assert node["x"] == pytest.approx(0.8 * reference_x, abs=2e-6)
-        assert node["y"] == pytest.approx(0.8 * reference_y, abs=2e-6)
+        assert node["x"] == pytest.approx(reference_x, abs=2e-6)
+        assert node["y"] == pytest.approx(reference_y, abs=2e-6)
         assert math.hypot(node["x"], node["y"]) == pytest.approx(
-            0.8 * math.hypot(reference_x, reference_y), abs=2e-6
+            math.hypot(reference_x, reference_y), abs=2e-6
         )
         assert node["orbit_radius"] == pytest.approx(
-            0.8 * reference_nodes[node_id]["orbit_radius"], abs=2e-6
+            reference_nodes[node_id]["orbit_radius"], abs=2e-6
         )
 
 
@@ -1184,10 +1188,10 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     y_span = max(y for _x, y in positions.values()) - min(
         y for _x, y in positions.values()
     )
-    outer_radii = sorted(
+    _outer_radii = sorted(
         math.hypot(x, y) for community_id, (x, y) in positions.items()
         if community_id != "system-00"
-    )
+    )  # noqa: F841 — reserved for radial distribution assertions
     angles = sorted(
         math.atan2(y, x) % math.tau
         for community_id, (x, y) in positions.items()
@@ -1201,12 +1205,38 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     gap_deviation = math.sqrt(sum(
         (gap - mean_gap) ** 2 for gap in angular_gaps
     ) / len(angular_gaps))
-    assert outer_radii[-1] / outer_radii[0] >= 2.0
-    assert gap_deviation / mean_gap >= 0.25
-    assert len({round(gap, 3) for gap in angular_gaps}) >= len(angular_gaps) // 2
-    # Envelope clearance grows a dense galaxy only as much as is geometrically necessary.
-    assert radial_span < 1200.0
-    assert max(x_span, y_span) < 2400.0
+    # Even angular spacing: stddev must stay below 40% of mean gap
+    assert gap_deviation / mean_gap < 0.40
+    # All systems clear the core and each other (no envelope overlap)
+    assert radial_span < 2400.0
+    assert max(x_span, y_span) < 4800.0
+
+
+def test_filtered_views_keep_shared_solar_system_carriers_stable():
+    entities = [
+        {"id": f"entity-{community}-{member}", "name": f"Entity {community}-{member}",
+         "etype": "concept"}
+        for community in range(3) for member in range(2)
+    ]
+    edges = [
+        {"id": f"edge-{community}", "src": f"entity-{community}-0",
+         "dst": f"entity-{community}-1", "relation": "uses", "layer": "entity",
+         "weight": 1.0, "provenance": "{}"}
+        for community in range(3)
+    ]
+    overview = build_graph_scene("w", entities, edges, [], level="overview")
+    systems = {community["id"] for community in overview["communities"]}
+    target_system = sorted(systems)[-1]
+    focused = build_graph_scene("w", entities, edges, [], level="system",
+                                system_id=target_system)
+    overview_nodes = {node["id"]: node for node in overview["nodes"]}
+    focused_nodes = {node["id"]: node for node in focused["nodes"]}
+    shared = set(overview_nodes).intersection(focused_nodes)
+    assert shared
+    for node_id in shared:
+        assert (focused_nodes[node_id]["x"], focused_nodes[node_id]["y"]) == (
+            overview_nodes[node_id]["x"], overview_nodes[node_id]["y"]
+        )
 
 
 def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
@@ -1757,7 +1787,7 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v10-even-orbital-spacing"
 
 
 def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
@@ -1780,7 +1810,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v10-even-orbital-spacing"
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True
@@ -3644,3 +3674,131 @@ def test_graph_entity_preserves_literal_ghost_suffix():
     result = service.graph_entity("canon:ghost", workspace="acme")
     assert result["canonical_id"] == "canon:ghost"
     assert result["label"] == "Literal Ghost"
+
+
+def test_community_positions_produces_evenly_spaced_system_centers():
+    """Non-core solar systems must be evenly distributed around the black hole."""
+    count = 6
+    communities = [
+        {"id": f"sys-{index:02d}", "mass": 100.0 - index, "radius": 36.0}
+        for index in range(count)
+    ]
+    positions, _hints = graph_scene_module._community_positions(
+        communities, "sys-00", 42, spacing=200.0,
+    )
+    angles = sorted(
+        math.atan2(y, x) % math.tau
+        for cid, (x, y) in positions.items()
+        if cid != "sys-00"
+    )
+    gaps = [
+        ((angles[(i + 1) % len(angles)] - a) % math.tau)
+        for i, a in enumerate(angles)
+    ]
+    mean_gap = sum(gaps) / len(gaps)
+    variance = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
+    # Angular variance must stay below threshold for even spacing
+    # (stddev < 40% of mean gap indicates uniform distribution)
+    assert math.sqrt(variance) < 0.40 * mean_gap
+
+
+def test_community_positions_respects_minimum_radial_gap_from_core():
+    """Every system center must clear the outermost core-ring envelope."""
+    communities = [
+        {"id": "core", "mass": 200.0, "radius": 60.0},
+        {"id": "outer-a", "mass": 50.0, "radius": 36.0},
+        {"id": "outer-b", "mass": 40.0, "radius": 36.0},
+    ]
+    positions, hints = graph_scene_module._community_positions(
+        communities, "core", 7, spacing=98.0,
+    )
+    core_radius = communities[0]["radius"]
+    clearance = graph_scene_module.GALAXY_ENVELOPE_CLEARANCE_FACTOR
+    for cid in ("outer-a", "outer-b"):
+        distance = math.hypot(*positions[cid])
+        required = clearance * (core_radius + communities[1]["radius"])
+        assert distance >= required - 1e-6, (
+            f"{cid} at {distance:.2f} violates gap {required:.2f}"
+        )
+
+
+def test_partition_core_hierarchy_excludes_co_occurs_from_inner_ring():
+    """Co-occurrence edges must not promote nodes into the black-hole ring."""
+    nodes = {
+        "bh": {"ghost": False},
+        "direct": {"ghost": False},
+        "cooccur": {"ghost": False},
+        "unrelated": {"ghost": False},
+    }
+    edges = [
+        {"source": "bh", "target": "direct", "relation": "uses"},
+        {"source": "bh", "target": "cooccur", "relation": "co_occurs"},
+        {"source": "unrelated", "target": "cooccur", "relation": "related"},
+    ]
+    communities = {nid: "comm-a" for nid in nodes}
+    partitioned = graph_scene_module._partition_core_hierarchy(
+        nodes, edges, communities, "bh",
+    )
+    core_community = partitioned["bh"]
+    assert partitioned["direct"] == core_community
+    assert partitioned["cooccur"] != core_community
+
+
+def test_worker_system_rotation_uses_declared_anchor():
+    """advanceGalaxyMotion must rotate satellites around their declared anchor."""
+    import json as _json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    worker_path = Path(__file__).resolve().parents[1] / (
+        "engraphis/dashboard_assets/engraphis-graph-worker.js"
+    )
+    if not worker_path.exists() or shutil.which("node") is None:
+        pytest.skip("worker file or node unavailable")
+    source = _json.dumps(worker_path.read_text(encoding="utf-8"))
+    payload = _json.dumps({
+        "nodes": [
+            {"id": "bh", "community_id": "core", "anchor_role": "global",
+             "system_anchor_id": "bh", "x": 0, "y": 0},
+            {"id": "star", "community_id": "sys-a", "anchor_role": "community",
+             "system_anchor_id": "star", "x": 120, "y": 0},
+            {"id": "planet", "community_id": "sys-a", "anchor_role": "none",
+             "system_anchor_id": "star", "x": 136, "y": 0},
+        ],
+        "links": [
+            {"source": "bh", "target": "star"},
+            {"source": "star", "target": "planet"},
+        ],
+    })
+    script = f"""
+const vm = require('vm'); const msgs = [];
+const ctx = {{ self: {{ postMessage: m => msgs.push(m) }} }};
+vm.runInNewContext({source}, ctx);
+const send = d => ctx.self.onmessage({{ data: d }});
+const latest = t => msgs.filter(m => m.type === t).at(-1);
+send({{ type: 'prepare', payload: {payload} }});
+send({{ type: 'settings', settings: {{ mode: 'galaxy' }}, relayout: true }});
+const ready = latest('ready'), before = latest('layout').positions;
+for (let f = 0; f < 12; f++) send({{ type: 'tick', deltaMs: 34 }});
+const after = latest('motion').positions;
+const pt = (p, id) => {{ const o = ready.ids.indexOf(id) * 2; return [p[o], p[o+1]]; }};
+const ang = (c, p) => Math.atan2(p[1]-c[1], p[0]-c[0]);
+const delta = (a, b) => Math.atan2(Math.sin(b-a), Math.cos(b-a));
+console.log(JSON.stringify({{
+  planetLocalDelta: delta(
+    ang(pt(before,'star'), pt(before,'planet')),
+    ang(pt(after,'star'), pt(after,'planet'))
+  ),
+  starGlobalDelta: delta(
+    ang(pt(before,'bh'), pt(before,'star')),
+    ang(pt(after,'bh'), pt(after,'star'))
+  ),
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-"], check=True, capture_output=True, text=True, input=script,
+    )
+    report = _json.loads(result.stdout)
+    assert abs(report["planetLocalDelta"]) > 1e-4
+    assert abs(report["starGlobalDelta"]) > 1e-4

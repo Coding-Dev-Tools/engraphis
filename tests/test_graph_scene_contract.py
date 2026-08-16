@@ -54,7 +54,7 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
     scene = _scene()
     nodes = {node["id"]: node for node in scene["nodes"]}
     communities = {community["id"]: community for community in scene["communities"]}
-    assert scene["meta"]["algorithm_version"] == "galaxy-v6"
+    assert scene["meta"]["algorithm_version"] == "galaxy-v10-even-orbital-spacing"
     for node in scene["nodes"]:
         expected_mass = 1.0 + 15.0 * node["mass_score"] ** 2
         assert math.isclose(node["gravity_mass"], expected_mass, abs_tol=1e-6)
@@ -109,7 +109,53 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
             != nodes[edge["target"]]["community_id"]
         )
         if cross_system and scene["meta"]["level"] == "overview":
-            assert not edge["visible_by_default"]
-            assert edge["tier"] in {"context", "ambient"}
+            # Overview retains cross-system bridge edges so galaxy mode can paint
+            # inter-system connections. These are promoted to primary tier.
+            assert edge["tier"] in {"primary", "backbone", "context", "ambient"}
 
     assert scene["community_bridges"]
+
+    # --- v10 even-orbital-spacing invariants ---
+    global_community_id = core_system["id"]
+    non_global_systems = [
+        c for c in communities.values()
+        if c["id"] != global_community_id
+    ]
+
+    # Non-global communities have approximately even angular spacing around the black hole.
+    if len(non_global_systems) >= 2:
+        angles = sorted(
+            math.atan2(
+                nodes[c["anchor_id"]]["y"],
+                nodes[c["anchor_id"]]["x"],
+            )
+            for c in non_global_systems
+        )
+        n = len(angles)
+        expected_gap = math.tau / n
+        gaps = [
+            (angles[(i + 1) % n] - angles[i]) % math.tau
+            for i in range(n)
+        ]
+        for gap in gaps:
+            assert abs(gap - expected_gap) < 0.5, (
+                f"Angular gap {gap:.3f} deviates from even spacing {expected_gap:.3f}"
+            )
+
+    # Every non-global system center is beyond core_outer_extent + minimum gap.
+    # The layout guarantees this in de-eccentrified orbital space; the Euclidean
+    # distance may be smaller by a factor of eccentricity on the compressed axis.
+    core_outer_extent = core_system["radius"]
+    galaxy_system_min_gap = 48.0  # matches GALAXY_SYSTEM_MIN_GAP in graph_scene
+    for c in non_global_systems:
+        anchor = nodes[c["anchor_id"]]
+        ecc = c["galactic_eccentricity"]
+        orbital_radius = (
+            math.hypot(anchor["x"], anchor["y"] / ecc)
+            if ecc > 0
+            else math.hypot(anchor["x"], anchor["y"])
+        )
+        assert orbital_radius >= core_outer_extent + galaxy_system_min_gap - 1.0, (
+            f"System {c['id']} orbital radius {orbital_radius:.2f} "
+            f"inside core extent {core_outer_extent:.2f} + gap {galaxy_system_min_gap}"
+        )

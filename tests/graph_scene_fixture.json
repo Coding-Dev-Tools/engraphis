@@ -5,7 +5,7 @@
     "scene_hash": "fixture-v1",
     "index_generation": 1,
     "total_nodes": 4,
-    "total_edges": 4,
+    "total_edges": 3,
     "shown_nodes": 4,
     "shown_edges": 3,
     "truncated": false,
@@ -13,7 +13,10 @@
     "layout_seed": 1779033703,
     "index_state": "ready",
     "filters": {},
-    "algorithm_version": "galaxy-v6"
+    "connected_only": false,
+    "include_history": false,
+    "include_memory_nodes": true,
+    "algorithm_version": "galaxy-v10-even-orbital-spacing"
   },
   "nodes": [
     {
@@ -21,154 +24,167 @@
       "canonical_id": "ent_core",
       "label": "Engraphis",
       "type": "person_or_concept",
-      "member_ids": ["ent_core"],
+      "member_ids": [
+        "ent_core"
+      ],
       "member_count": 1,
-      "repo_ids": ["repo_product"],
-      "repo_names": ["product"],
-      "weighted_degree": 4.0,
+      "repo_ids": [
+        "repo_product"
+      ],
+      "repo_names": [],
+      "weighted_degree": 1.30508,
       "pagerank": 1.0,
-      "support_count": 8,
-      "mass_score": 1.0,
-      "gravity_mass": 16.0,
-      "visual_radius": 14.199208,
-      "component_id": "component_0",
-      "community_id": "community_memory",
+      "support_count": 9,
+      "entity_quality": 1.0,
+      "mass_score": 0.637792,
+      "gravity_mass": 7.10168,
+      "visual_radius": 8.889313,
       "anchor_role": "global",
+      "component_id": "component_0",
+      "community_id": "community_4be055af4c7ec57a",
+      "core_affinity": 1.0,
+      "scene_rank": 0.728344,
       "system_anchor_id": "ent_core",
       "orbit_tier": 0,
       "orbit_radius": 0.0,
+      "x": 0.0,
+      "y": 0.0,
       "galactic_radius": 0.0,
       "galactic_target_radius": 0.0,
+      "galactic_preferred_radius": 0.0,
       "galactic_radius_scale": 0.4,
       "galactic_initial_compactness": 0.8,
       "galactic_clearance_adjusted": false,
       "galactic_overlap": false,
       "galactic_arm": -1,
       "galactic_phase": 0.0,
-      "galactic_eccentricity": 0.88,
-      "core_affinity": 1.0,
-      "scene_rank": 1.0,
-      "x": 0,
-      "y": 0
-    },
-    {
-      "id": "ent_recall",
-      "canonical_id": "ent_recall",
-      "label": "Grounded Recall",
-      "type": "person_or_concept",
-      "member_ids": ["ent_recall"],
-      "member_count": 1,
-      "repo_ids": ["repo_product"],
-      "repo_names": ["product"],
-      "weighted_degree": 2.4,
-      "pagerank": 0.68,
-      "support_count": 5,
-      "mass_score": 0.72,
-      "gravity_mass": 8.776,
-      "visual_radius": 10.009311,
-      "component_id": "component_0",
-      "community_id": "community_memory",
-      "anchor_role": "none",
-      "system_anchor_id": "ent_core",
-      "orbit_tier": 1,
-      "orbit_radius": 32.20852,
-      "galactic_radius": 0.0,
-      "galactic_target_radius": 0.0,
-      "galactic_radius_scale": 0.4,
-      "galactic_initial_compactness": 0.8,
-      "galactic_clearance_adjusted": false,
-      "galactic_overlap": false,
-      "galactic_arm": -1,
-      "galactic_phase": 0.0,
-      "galactic_eccentricity": 0.88,
-      "core_affinity": 0.87,
-      "scene_rank": 0.82
+      "galactic_eccentricity": 0.881412
     },
     {
       "id": "ent_graph",
       "canonical_id": "ent_graph",
       "label": "Knowledge Graph",
       "type": "person_or_concept",
-      "member_ids": ["ent_graph"],
+      "member_ids": [
+        "ent_graph"
+      ],
       "member_count": 1,
-      "repo_ids": ["repo_product"],
-      "repo_names": ["product"],
-      "weighted_degree": 1.8,
-      "pagerank": 0.51,
-      "support_count": 4,
-      "mass_score": 0.58,
-      "gravity_mass": 6.046,
-      "visual_radius": 8.137565,
+      "repo_ids": [
+        "repo_product"
+      ],
+      "repo_names": [],
+      "weighted_degree": 1.0,
+      "pagerank": 0.755743,
+      "support_count": 7,
+      "entity_quality": 1.0,
+      "mass_score": 0.575416,
+      "gravity_mass": 5.966554,
+      "visual_radius": 8.07929,
       "component_id": "component_0",
-      "community_id": "community_graph",
-      "anchor_role": "community",
-      "system_anchor_id": "ent_graph",
-      "orbit_tier": 0,
-      "orbit_radius": 0.0,
-      "galactic_radius": 75.0,
-      "galactic_target_radius": 75.0,
+      "community_id": "community_4be055af4c7ec57a",
+      "anchor_role": "none",
+      "core_affinity": 0.72402,
+      "scene_rank": 0.612567,
+      "system_anchor_id": "ent_core",
+      "orbit_tier": 1,
+      "orbit_radius": 28.373413,
+      "x": 25.235299,
+      "y": 9.234886,
+      "galactic_radius": 0.0,
+      "galactic_target_radius": 0.0,
+      "galactic_preferred_radius": 0.0,
       "galactic_radius_scale": 0.4,
       "galactic_initial_compactness": 0.8,
-      "galactic_clearance_adjusted": true,
-      "galactic_overlap": true,
-      "galactic_arm": 0,
-      "galactic_phase": 1.0,
-      "galactic_eccentricity": 0.88,
-      "core_affinity": 0.79,
-      "scene_rank": 0.70
+      "galactic_clearance_adjusted": false,
+      "galactic_overlap": false,
+      "galactic_arm": -1,
+      "galactic_phase": 0.0,
+      "galactic_eccentricity": 0.881412
+    },
+    {
+      "id": "ent_recall",
+      "canonical_id": "ent_recall",
+      "label": "Grounded Recall",
+      "type": "person_or_concept",
+      "member_ids": [
+        "ent_recall"
+      ],
+      "member_count": 1,
+      "repo_ids": [
+        "repo_product"
+      ],
+      "repo_names": [],
+      "weighted_degree": 0.30508,
+      "pagerank": 0.302062,
+      "support_count": 5,
+      "entity_quality": 1.0,
+      "mass_score": 0.358421,
+      "gravity_mass": 2.926984,
+      "visual_radius": 5.592389,
+      "component_id": "component_0",
+      "community_id": "community_4be055af4c7ec57a",
+      "anchor_role": "none",
+      "core_affinity": 0.339751,
+      "scene_rank": 0.353754,
+      "system_anchor_id": "ent_core",
+      "orbit_tier": 1,
+      "orbit_radius": 28.373413,
+      "x": -25.235299,
+      "y": -9.234886,
+      "galactic_radius": 0.0,
+      "galactic_target_radius": 0.0,
+      "galactic_preferred_radius": 0.0,
+      "galactic_radius_scale": 0.4,
+      "galactic_initial_compactness": 0.8,
+      "galactic_clearance_adjusted": false,
+      "galactic_overlap": false,
+      "galactic_arm": -1,
+      "galactic_phase": 0.0,
+      "galactic_eccentricity": 0.881412
     },
     {
       "id": "ent_temporal",
       "canonical_id": "ent_temporal",
       "label": "Bi-temporal Truth",
       "type": "person_or_concept",
-      "member_ids": ["ent_temporal"],
+      "member_ids": [
+        "ent_temporal"
+      ],
       "member_count": 1,
-      "repo_ids": ["repo_product"],
-      "repo_names": ["product"],
-      "weighted_degree": 1.1,
-      "pagerank": 0.34,
+      "repo_ids": [
+        "repo_product"
+      ],
+      "repo_names": [],
+      "weighted_degree": 0.0,
+      "pagerank": 0.10289,
       "support_count": 3,
-      "mass_score": 0.43,
-      "gravity_mass": 3.7735,
-      "visual_radius": 6.347594,
+      "entity_quality": 1.0,
+      "mass_score": 0.13172,
+      "gravity_mass": 1.260252,
+      "visual_radius": 3.833467,
       "component_id": "component_0",
-      "community_id": "community_graph",
-      "anchor_role": "none",
-      "system_anchor_id": "ent_graph",
-      "orbit_tier": 1,
-      "orbit_radius": 22.485158,
-      "galactic_radius": 75.0,
-      "galactic_target_radius": 75.0,
+      "community_id": "community_ad12a7e0ee8de25e",
+      "anchor_role": "community",
+      "core_affinity": 0.085618,
+      "scene_rank": 0.120195,
+      "system_anchor_id": "ent_temporal",
+      "orbit_tier": 0,
+      "orbit_radius": 0.0,
+      "x": -79.557815,
+      "y": -37.933955,
+      "galactic_radius": 88.138702,
+      "galactic_target_radius": 88.138702,
+      "galactic_preferred_radius": 42.911001,
       "galactic_radius_scale": 0.4,
       "galactic_initial_compactness": 0.8,
       "galactic_clearance_adjusted": true,
-      "galactic_overlap": true,
+      "galactic_overlap": false,
       "galactic_arm": 0,
-      "galactic_phase": 1.0,
-      "galactic_eccentricity": 0.88,
-      "core_affinity": 0.64,
-      "scene_rank": 0.58
+      "galactic_phase": -2.696669,
+      "galactic_eccentricity": 0.881412
     }
   ],
   "edges": [
-    {
-      "id": "edg_recall",
-      "source": "ent_core",
-      "target": "ent_recall",
-      "relation": "grounds",
-      "layer": "semantic",
-      "directed": true,
-      "weight": 1.0,
-      "confidence": 0.96,
-      "support_count": 5,
-      "strength": 1.0,
-      "rest_length": 28.0,
-      "spring_strength": 0.205,
-      "tier": "backbone",
-      "visible_by_default": true,
-      "bundled_edge_count": 1
-    },
     {
       "id": "edg_graph",
       "source": "ent_core",
@@ -177,14 +193,60 @@
       "layer": "entity",
       "directed": true,
       "weight": 1.0,
-      "confidence": 0.91,
+      "underlying_edge_ids": [
+        "edg_graph"
+      ],
+      "underlying_edge_ids_truncated": false,
+      "bundled_edge_count": 1,
       "support_count": 4,
-      "strength": 0.82,
-      "rest_length": 30.0,
-      "spring_strength": 0.174,
-      "tier": "context",
-      "visible_by_default": false,
-      "bundled_edge_count": 1
+      "support_memory_ids": [
+        "m6",
+        "m7",
+        "m8",
+        "m9"
+      ],
+      "support_ids_truncated": false,
+      "confidence": 0.99993439,
+      "memory_types": [],
+      "support_time_min": null,
+      "support_time_max": null,
+      "strength": 1.0,
+      "rest_length": 25.574882,
+      "spring_strength": 0.205,
+      "tier": "backbone",
+      "visible_by_default": true
+    },
+    {
+      "id": "edg_recall",
+      "source": "ent_core",
+      "target": "ent_recall",
+      "relation": "grounds",
+      "layer": "semantic",
+      "directed": true,
+      "weight": 1.0,
+      "underlying_edge_ids": [
+        "edg_recall"
+      ],
+      "underlying_edge_ids_truncated": false,
+      "bundled_edge_count": 1,
+      "support_count": 5,
+      "support_memory_ids": [
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m5"
+      ],
+      "support_ids_truncated": false,
+      "confidence": 0.9999998976,
+      "memory_types": [],
+      "support_time_min": null,
+      "support_time_max": null,
+      "strength": 0.3050795028276367,
+      "rest_length": 33.314249,
+      "spring_strength": 0.086864,
+      "tier": "backbone",
+      "visible_by_default": true
     },
     {
       "id": "edg_temporal",
@@ -194,90 +256,159 @@
       "layer": "temporal",
       "directed": true,
       "weight": 0.9,
-      "confidence": 0.84,
+      "underlying_edge_ids": [
+        "edg_temporal"
+      ],
+      "underlying_edge_ids_truncated": false,
+      "bundled_edge_count": 1,
       "support_count": 3,
-      "strength": 0.66,
-      "rest_length": 31.0,
-      "spring_strength": 0.147,
+      "support_memory_ids": [
+        "m10",
+        "m11",
+        "m12"
+      ],
+      "support_ids_truncated": false,
+      "confidence": 0.995904,
+      "memory_types": [],
+      "support_time_min": null,
+      "support_time_max": null,
+      "strength": 0.0,
+      "rest_length": 34.0,
+      "spring_strength": 0.035,
       "tier": "primary",
-      "visible_by_default": true,
-      "bundled_edge_count": 1
+      "visible_by_default": true
     }
   ],
   "communities": [
     {
-      "id": "community_memory",
-      "label": "Memory System",
+      "id": "community_4be055af4c7ec57a",
+      "label": "Engraphis System",
       "anchor_id": "ent_core",
-      "mass": 24.776,
-      "radius": 48.217831,
+      "mass": 15.995218,
+      "radius": 42.452703,
+      "member_count": 3,
+      "shown_member_count": 3,
+      "internal_strength": 1.30508,
+      "external_strength": 0.0,
+      "representative_ids": [
+        "ent_core",
+        "ent_graph",
+        "ent_recall"
+      ],
       "galactic_radius": 0.0,
       "galactic_target_radius": 0.0,
+      "galactic_preferred_radius": 0.0,
       "galactic_radius_scale": 0.4,
       "galactic_initial_compactness": 0.8,
       "galactic_clearance_adjusted": false,
       "galactic_overlap": false,
       "galactic_arm": -1,
       "galactic_phase": 0.0,
-      "galactic_eccentricity": 0.88,
-      "member_count": 2,
-      "internal_strength": 1.0,
-      "external_strength": 0.82,
-      "representative_ids": ["ent_core", "ent_recall"]
+      "galactic_eccentricity": 0.881412
     },
     {
-      "id": "community_graph",
-      "label": "Graph System",
-      "anchor_id": "ent_graph",
-      "mass": 9.8195,
+      "id": "community_ad12a7e0ee8de25e",
+      "label": "Bi-temporal Truth System",
+      "anchor_id": "ent_temporal",
+      "mass": 1.260252,
       "radius": 36.0,
-      "galactic_radius": 75.0,
-      "galactic_target_radius": 75.0,
+      "member_count": 1,
+      "shown_member_count": 1,
+      "internal_strength": 0,
+      "external_strength": 0.0,
+      "representative_ids": [
+        "ent_temporal"
+      ],
+      "galactic_radius": 88.138702,
+      "galactic_target_radius": 88.138702,
+      "galactic_preferred_radius": 42.911001,
       "galactic_radius_scale": 0.4,
       "galactic_initial_compactness": 0.8,
       "galactic_clearance_adjusted": true,
-      "galactic_overlap": true,
+      "galactic_overlap": false,
       "galactic_arm": 0,
-      "galactic_phase": 1.0,
-      "galactic_eccentricity": 0.88,
-      "member_count": 2,
-      "internal_strength": 0.66,
-      "external_strength": 0.82,
-      "representative_ids": ["ent_graph", "ent_temporal"]
+      "galactic_phase": -2.696669,
+      "galactic_eccentricity": 0.881412
     }
   ],
   "community_bridges": [
     {
-      "id": "bridge_memory_graph",
-      "source_community": "community_memory",
-      "target_community": "community_graph",
-      "layer": "entity",
-      "strength": 0.82,
-      "aggregate_strength": 0.82,
-      "support_count": 4,
+      "id": "bridge_cedac60e7e515160",
+      "source_community": "community_4be055af4c7ec57a",
+      "target_community": "community_ad12a7e0ee8de25e",
+      "layer": "temporal",
+      "strength": 0.0,
+      "aggregate_strength": 0.0,
+      "support_count": 3,
       "edge_count": 1,
-      "top_relations": ["uses"],
-      "edge_ids": ["edg_graph"],
+      "top_relations": [
+        "preserves"
+      ],
+      "edge_ids": [
+        "edg_temporal"
+      ],
       "edge_ids_truncated": false,
-      "physics_strength": 0.82
+      "physics_strength": 1.0
     }
   ],
   "facets": {
-    "entity_types": [{"value": "person_or_concept", "count": 4}],
+    "entity_types": [
+      {
+        "value": "person_or_concept",
+        "count": 4
+      }
+    ],
     "memory_types": [],
     "layers": [
-      {"value": "semantic", "count": 1},
-      {"value": "entity", "count": 1},
-      {"value": "temporal", "count": 1}
+      {
+        "value": "entity",
+        "count": 1
+      },
+      {
+        "value": "semantic",
+        "count": 1
+      },
+      {
+        "value": "temporal",
+        "count": 1
+      }
     ],
     "relations": [
-      {"value": "grounds", "count": 1},
-      {"value": "uses", "count": 1},
-      {"value": "preserves", "count": 1}
+      {
+        "value": "grounds",
+        "count": 1
+      },
+      {
+        "value": "preserves",
+        "count": 1
+      },
+      {
+        "value": "uses",
+        "count": 1
+      }
     ],
-    "repos": [{"value": "repo_product", "count": 4}],
-    "support": [{"value": "4-7", "count": 2}, {"value": "2-3", "count": 1}],
-    "confidence": [{"value": "90-100%", "count": 2}, {"value": "75-89%", "count": 1}],
+    "repos": [
+      {
+        "value": "repo_product",
+        "count": 4
+      }
+    ],
+    "support": [
+      {
+        "value": "4-7",
+        "count": 2
+      },
+      {
+        "value": "2-3",
+        "count": 1
+      }
+    ],
+    "confidence": [
+      {
+        "value": "90-100%",
+        "count": 3
+      }
+    ],
     "time": []
   }
 }

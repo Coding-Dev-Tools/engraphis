@@ -1,9 +1,8 @@
-/* Progressive renderer for the explicit all-node profile. It intentionally has no live force
-   simulation: a worker prepares deterministic layouts and LOD sets, WebGL2 paints batched
-   geometry, and a bounded overlay communicates relation direction without moving nodes. */
+/* Progressive renderer for the explicit all-node profile. A worker prepares deterministic
+   layouts and LOD sets; Galaxy mode advances authored solar systems as rigid orbital groups. */
 (function () {
   'use strict';
-  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260814-all-controls-2';
+  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260816-galaxy-even-orbits-2';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const FLOW_EDGE_LIMIT = 900;
@@ -47,7 +46,7 @@
       palette: 'theme', themeColors: {}, layers: null, sizeBy: 'degree', bridges: true, ghosts: true,
       scope: { minDegree: 1, showUnlinked: true, depth: 2 }, collapse: false, collapsed: false,
       focus: -1, hover: -1, ready: false, totalLinks: 0, drawnLinks: 0, visibleNodeCount: 0,
-      frame: 0, flowPaintAt: 0, layoutPending: false, hitRequest: 0, drag: null, destroyed: false, error: null,
+      frame: 0, flowPaintAt: 0, motionPending: false, layoutPending: false, hitRequest: 0, drag: null, destroyed: false, error: null,
     };
     let nodeProgram = null, edgeProgram = null, nodeBuffers = {}, edgeBuffers = {};
     let hitFrame = 0, pendingHit = null, layoutFrame = 0, pendingLayoutFit = false;
@@ -248,6 +247,10 @@
       return state.settings.flow && state.visibleEdges.length && Number(state.settings.flowSpeed || 0) > 0
         && !state.settings.frozen && !state.settings.orbitPaused && !reducedMotion();
     }
+    function orbitAnimating() {
+      return state.settings.mode === 'galaxy' && !state.settings.frozen && !state.settings.orbitPaused
+        && !state.paused && !reducedMotion();
+    }
     function draw(now = 0) {
       state.frame = 0;
       if (state.destroyed || state.paused || !state.ready) return;
@@ -256,7 +259,11 @@
       }
       state.flowPaintAt = now;
       const webgl = drawWebgl(); if (!webgl) drawCanvas(); drawLabels(webgl, now);
-      if (flowAnimating()) schedule();
+      if (orbitAnimating() && !state.motionPending) {
+        state.motionPending = true;
+        worker.postMessage({ type: 'tick', deltaMs: FLOW_FRAME_MS });
+      }
+      if (flowAnimating() || orbitAnimating()) schedule();
     }
     function schedule() { if (!state.destroyed && !state.paused && !state.frame) state.frame = raf(draw); }
     function camera() { if (!state.ready) return; worker.postMessage({ type: 'camera', x: state.camera.x, y: state.camera.y, scale: state.camera.scale, width: state.width, height: state.height }); schedule(); }
@@ -319,6 +326,14 @@
         error.code = 'GRAPH_CAPACITY';
         state.error = { code: error.code, message: error.message };
         if (typeof opts.onError === 'function') opts.onError(error);
+        return;
+      }
+      if (message.type === 'motion') {
+        state.motionPending = false;
+        state.positions = message.positions || state.positions;
+        state.bounds = message.bounds || state.bounds;
+        if (!state.ready) return;
+        updateNodes(); camera(); schedule();
         return;
       }
       if (message.type === 'preview') {

@@ -27,6 +27,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from engraphis._win_subprocess import NO_WINDOW
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
@@ -130,6 +131,7 @@ def _run_node(script: str, prelude: str = PRELUDE) -> object:
         capture_output=True,
         text=True,
         check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -152,6 +154,7 @@ const emit = value => console.log(JSON.stringify(value));
         capture_output=True,
         text=True,
         check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -314,6 +317,7 @@ def _run_routing(scenario: str) -> dict:
         capture_output=True,
         text=True,
         check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -8731,6 +8735,7 @@ def _run_render(
         capture_output=True,
         text=True,
         check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout.strip().splitlines()[-1])
@@ -9636,15 +9641,15 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3'"
+        "'/v2-assets/engraphis-graph.js?v=20260816-galaxy-even-orbits-2'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260814-all-controls-2' in markup
+    assert '/v2-assets/ledger.js?v=20260816-galaxy-even-orbits-2' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
                         source.index("function ensureGraphAssets(")]
-    assert "engraphis-graph-all.js?v=20260814-all-controls-2" in all_loader
+    assert "engraphis-graph-all.js?v=20260816-galaxy-even-orbits-2" in all_loader
     assert "engraphis-graph-all.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles
@@ -10591,6 +10596,7 @@ const load = new Function(body + '; return loadLegacyGraph;')();
     result = subprocess.run(
         [NODE, "-e", script, str(DASHBOARD)], cwd=ROOT,
         capture_output=True, text=True, check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"marker": "quality", "id": "quality", "requests": 2}
@@ -10747,6 +10753,7 @@ def test_graph_engine_is_syntactically_valid_when_node_is_installed() -> None:
         capture_output=True,
         text=True,
         check=False,
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
 

@@ -932,6 +932,28 @@
     if (inferred && inferred.node !== node) return inferred.node;
     return carrier && carrier !== node ? carrier : null;
   }
+  /* Local velocity repair is hierarchical: a moon must see the already-repaired velocity of
+     its planet, and a planet must see the already-repaired velocity of its star. Payload order
+     is not a hierarchy (filtered/API responses commonly put children first), so all callers
+     that mutate orbital phase use this stable parent-before-child order. */
+  function orderedGalaxyLocalOrbitMembers(members, carrier, byId) {
+    const lookup = byId || new Map((members || []).map(item => [String(item.id), item]));
+    const depths = new Map();
+    const visiting = new Set();
+    const depthOf = node => {
+      if (!node || node === carrier) return 0;
+      if (depths.has(node)) return depths.get(node);
+      if (visiting.has(node)) return 1;
+      visiting.add(node);
+      const parent = galaxyLocalOrbitParent(node, members, carrier, lookup);
+      const depth = parent && parent !== node ? depthOf(parent) + 1 : 1;
+      visiting.delete(node);
+      depths.set(node, depth);
+      return depth;
+    };
+    return (members || []).slice().sort((left, right) => depthOf(left) - depthOf(right)
+      || String(left.id).localeCompare(String(right.id)));
+  }
   /* A community anchor can itself be an explicit black-hole satellite. Keep its declared
      stellar children in the same central carrier group so support translates the local system
      together instead of leaving the planet group to orbit its already-detached star. */
@@ -1095,7 +1117,7 @@
       const carrier = galaxySystemAnchor(members);
       if (!carrier || members.length < 2) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
-      members.forEach(node => {
+      orderedGalaxyLocalOrbitMembers(members, carrier, byId).forEach(node => {
         if (node === carrier || node.ghost || node.id === opts.fixedNodeId
           || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
         const parent = galaxyLocalOrbitParent(node, members, carrier, byId) || carrier;
@@ -4799,6 +4821,18 @@
         ? initialState.radius : initialState);
       if (!Number.isFinite(initialRadius)
         || !Number.isFinite(center.x) || !Number.isFinite(center.y)) return;
+      /* The server layout authors a minimum orbital radius per system via
+         galactic_target_radius on the carrier node. Convergence must never pull
+         a system inside this floor — doing so destroys the even angular spacing
+         that the Python layout computed. Read the floor from the carrier or
+         any node in the system that carries it. */
+      let minimumRadius = 0;
+      for (let i = 0; i < center.nodes.length; i++) {
+        const nodeTarget = Number(center.nodes[i].galactic_target_radius);
+        if (Number.isFinite(nodeTarget) && nodeTarget > 0) {
+          minimumRadius = Math.max(minimumRadius, nodeTarget);
+        }
+      }
       const dx = center.x - anchorX, dy = center.y - anchorY;
       const candidateRadius = Math.hypot(dx, dy);
       if (!Number.isFinite(candidateRadius)) return;
@@ -4807,8 +4841,10 @@
       /* Follow the gravity-selected track exactly. When the field is enabled, an outward
          attempted move must finish at least 10% inward from its starting radius. */
       const outwardCeiling = initialRadius - outwardDistance * GALAXY_OUTWARD_OVERRIDE;
-      const finalRadius = Math.max(0, outwardDistance > 0
+      const convergedRadius = Math.max(0, outwardDistance > 0
         && factor < 1 ? Math.min(scheduledRadius, outwardCeiling) : scheduledRadius);
+      const finalRadius = minimumRadius > 0
+        ? Math.max(minimumRadius, convergedRadius) : convergedRadius;
       const unitX = candidateRadius > 1e-9 ? dx / candidateRadius : 1;
       const unitY = candidateRadius > 1e-9 ? dy / candidateRadius : 0;
       const finalX = anchorX + unitX * finalRadius;
@@ -5455,7 +5491,7 @@
       const localAnchor = carrier;
       if (!localAnchor) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
-      members.forEach(node => {
+      orderedGalaxyLocalOrbitMembers(members, localAnchor, byId).forEach(node => {
         if (node === localAnchor || node.id === opts.fixedNodeId) return;
         const parent = galaxyLocalOrbitParent(node, members, localAnchor, byId)
           || localAnchor;
@@ -6894,7 +6930,7 @@
       }),
       minDegree: 1, showUnlinked: true, focusId: null, depth: 2, layers: { temporal: true, entity: true, causal: true, semantic: true, code: false },
       path: null, asOf: null, ghost: true, sizeBy: 'mass', bridges: false, suggestions: false,
-      collapse: 'auto', renderMode: opts.renderMode === 'full' ? 'full' : 'overview'
+      collapse: 'auto', renderMode: opts.renderMode === 'full' || opts.renderMode === 'all' ? 'full' : 'overview'
     };
     let raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
     const galaxyServerPhase = new Map();
@@ -9521,7 +9557,7 @@
       render(false, false);
     };
     api.setRenderMode = mode => {
-      const next = mode === 'full' ? 'full' : 'overview';
+      const next = mode === 'full' || mode === 'all' ? 'full' : 'overview';
       if (state.renderMode === next) return;
       state.renderMode = next;
       if (next === 'full') {
