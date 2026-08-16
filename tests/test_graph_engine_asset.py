@@ -932,7 +932,8 @@ def test_galaxy_gravity_slider_controls_galactic_field_not_local_orbits() -> Non
     assert report["galacticAtZero"] > 0
     assert report["galacticAtTwoHundred"] > report["galacticAtZero"]
     assert report["convergenceAtZero"] == pytest.approx(1)
-    assert report["convergenceAtTwoHundred"] < report["convergenceAtZero"]
+    # Convergence is disabled (rate=0) for stable orbits; factor is 1 at all gravity settings.
+    assert report["convergenceAtTwoHundred"] == pytest.approx(report["convergenceAtZero"])
 
 
 @requires_node
@@ -2837,17 +2838,20 @@ def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track
         """
     )
     assert report["nodes"] == 300
-    assert report["monotone"] is True
+    # Convergence is disabled (rate=0); orbits remain stable under physics alone.
+    # Radii oscillate naturally around their seeded values — no forced inward track.
+    expected_track = report["expectedTrack"]
+    assert expected_track == pytest.approx(1)
     # The established emergency cap remains 48.  At this >2x-default stress field, inner
     # encounters may touch it for a bounded minority of ticks without owning the simulation.
     assert report["speedCaps"] < 1800 * 0.3
     assert report["maxSpeed"] <= 48 + 1e-10
-    # A full wall-clock minute follows the same monotone response curve as the helper. The
-    # 0–200 carrier control range is deliberately independent from local stellar orbit support.
-    expected_track = report["expectedTrack"]
-    assert report["ratioMedian"] == pytest.approx(expected_track, abs=1e-8)
-    assert report["ratioMax"] <= expected_track + 1e-8
-    assert report["ratioMin"] > expected_track * 0.75
+    # Stable orbits: median ratio near 1.0, bounded drift within +/-15%.  The former
+    # monotone-inward contract was the bug — 25%/minute convergence collapsed every
+    # system into the black hole regardless of orbital velocity balance.
+    assert report["ratioMedian"] == pytest.approx(1.0, abs=0.15)
+    assert report["ratioMax"] <= 1.15
+    assert report["ratioMin"] > 0.85
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
     assert report["finite"] is True
 
@@ -6073,18 +6077,21 @@ def test_opt_in_inward_convergence_helper_is_bounded_and_keeps_local_frames_tang
         });
         """
     )
-    # This low-level legacy helper remains bounded when explicitly requested.  Live Galaxy
-    # motion does not opt into it: carriers use circular support and envelope admission instead
-    # of a compulsory inward-only projector.
+    # Convergence is disabled (rate=0) for stable orbits: factor is 1 and rate is 0
+    # at every gravity setting.  The helper still runs but performs no movement.
     assert report["factors"][0] == pytest.approx(1)
-    assert report["factors"][0] > report["factors"][1] > report["factors"][2] > 0
+    assert report["factors"][1] == pytest.approx(1)
+    assert report["factors"][2] == pytest.approx(1)
     assert report["rates"][0] == pytest.approx(0)
-    assert 0 < report["rates"][1] < report["rates"][2]
-    assert report["minuteRadius"] == pytest.approx(120 * report["factors"][1], abs=1e-8)
-    assert report["monotone"] is True
+    assert report["rates"][1] == pytest.approx(0)
+    assert report["rates"][2] == pytest.approx(0)
+    # With convergence disabled, carrier support injects tangential velocity and the body
+    # enters an orbit rather than falling straight in. Radius oscillates — this is correct.
+    assert report["minuteRadius"] > 0
+    assert report["minuteRadius"] < 240
+    # monotone is False because the orbit oscillates, which is the desired stable behavior.
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
-    # The optional inward projector remains disabled at zero, but the restored shallow orbital
-    # floor contributes a small physical inward acceleration.
+    # The optional inward projector is a no-op at rate=0; escape trajectory is ballistic.
     candidate_radius = 100 + 30 * 0.021328125
     assert 100 < report["escapedRadius"] <= candidate_radius
     assert 0 <= report["counteracted"] < 0.01
@@ -6095,7 +6102,8 @@ def test_opt_in_inward_convergence_helper_is_bounded_and_keeps_local_frames_tang
         report["relativeVelocityBefore"], abs=1e-12
     )
     assert report["finite"] is True
-    assert report["denseApplied"] == 512
+    # Factor=1 triggers the early-return path: applied=0, no convergence work done.
+    assert report["denseApplied"] == 0
     assert report["convergence"]["overrides"] == 0
 
 
