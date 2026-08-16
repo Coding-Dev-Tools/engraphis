@@ -397,7 +397,7 @@
   const GALAXY_EVENT_HORIZON_BAND_LIMIT = 24;
   /* Visual emphasis must not leak into collision, packing, or event-horizon geometry. */
   const GALAXY_BLACK_HOLE_PAINT_SCALE = 2;
-  const GALAXY_EVENT_HORIZON_DECAY_RATE = 0.12;
+  const GALAXY_EVENT_HORIZON_DECAY_RATE = 0.005;
   const GALAXY_EVENT_HORIZON_INWARD_ACCELERATION = 0.28;
   const GALAXY_TIDAL_STRENGTH_FRACTION = 0.18;
   const GALAXY_TIDAL_ACCELERATION_CAP = 0.16;
@@ -430,7 +430,7 @@
      the previous default left 75% of a radius. The motion-rate exponent below now advances
      that same physical trajectory at 68% speed, matching the faster leapfrog clock without
      weakening the force field itself. */
-  const GALAXY_INWARD_CONVERGENCE_PER_MINUTE = 0.25;
+  const GALAXY_INWARD_CONVERGENCE_PER_MINUTE = 0;
   const GALAXY_INWARD_CONVERGENCE_SECONDS = 60;
   const GALAXY_OUTWARD_OVERRIDE = 0.10;
 
