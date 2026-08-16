@@ -970,7 +970,7 @@ def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
         assert "function graphThemeColors()" in ledger.text
         assert "graph.setThemeColors(graphThemeColors());" in ledger.text
         assert "state.graphEngine.setThemeColors(graphThemeColors());" in ledger.text
-        assert "renderMode: opts.renderMode === 'full' ? 'full' : 'overview'" in engine.text
+        assert "renderMode: opts.renderMode === 'full' || opts.renderMode === 'all' ? 'full' : 'overview'" in engine.text
         assert "function pinFullGraphLayout(data)" in engine.text
 
 

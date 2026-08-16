@@ -22,6 +22,7 @@
     lastCameraKey: '', lastVisibleNodes: new Uint32Array(0), lastVisibleEdges: new Uint32Array(0),
     lastVisibleLabels: new Uint32Array(0), canvasFallback: false, showBridges: true, showGhosts: true, paintOrder: new Uint32Array(0),
     layoutSettings: {}, labelDensity: 24,
+    anchorRoles: [], systemAnchorIds: [],
     scope: { minDegree: 1, showUnlinked: true, depth: 2 }, collapseMode: false,
     collapsed: false, lastVisibleMask: new Uint8Array(0), layoutRevision: 0,
   };
@@ -99,23 +100,32 @@
     const repelSpread = 0.58 + repel / 72;
     const gravityTightening = 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
     const spaceSpread = 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
-    const spread = modeScale * clamp(repelSpread * gravityTightening * spaceSpread, 0.42, 3.2);
+    const spread = modeScale * clamp(
+      repelSpread * gravityTightening * spaceSpread,
+      mode === 'galaxy' ? 0.92 : 0.42,
+      3.2,
+    );
     const baseBounds = makeBounds(state.basePositions), centerX = (baseBounds.minX + baseBounds.maxX) / 2, centerY = (baseBounds.minY + baseBounds.maxY) / 2;
     state.positions = new Float32Array(state.basePositions.length);
     for (let index = 0; index < state.basePositions.length; index += 2) {
       let x = state.basePositions[index] - centerX, y = state.basePositions[index + 1] - centerY;
       if (mode === 'radial') { const angle = Math.atan2(y, x), radius = Math.hypot(x, y) * spread; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius; }
       else if (mode === 'constellation') { x *= spread; y = y * spread * 0.72 + Math.sin(index * GOLDEN_ANGLE + state.layoutRevision) * 8; }
-      else if (mode === 'galaxy') { const radius = Math.hypot(x, y) * spread, angle = Math.atan2(y, x) + radius * 0.0007; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius * 0.72; }
+      else if (mode === 'galaxy') {
+        /* Galaxy coordinates are authored by the scene builder. Keep each system's
+           internal offsets intact; the bounded motion pass below is the only source
+           of orbital movement. */
+        x *= spread; y *= spread;
+      }
       else { x *= spread; y *= spread; }
-      if (state.layoutRevision) {
+      if (state.layoutRevision && mode !== 'galaxy') {
         const phase = (index / 2 + 1) * GOLDEN_ANGLE + state.layoutRevision * 0.73;
         const jitter = Math.min(10, 1.5 + link * 0.08);
         x += Math.cos(phase) * jitter; y += Math.sin(phase) * jitter;
       }
       state.positions[index] = x + centerX; state.positions[index + 1] = y + centerY;
     }
-    if (state.edgeSources.length) {
+    if (state.edgeSources.length && mode !== 'galaxy') {
       const nodeCount = state.positions.length / 2;
       const desired = clamp(10 + link * 1.25, 14, 112);
       const springForce = clamp(0.025 + spring * 0.018, 0.025, 0.2)
@@ -148,6 +158,124 @@
     }
     rebuildGrid(); state.lastCameraKey = '';
     if (notify) { const positions = state.positions.slice(); self.postMessage({ type: 'layout', positions, bounds: makeBounds(state.positions), fit }, [positions.buffer]); }
+  }
+  function rotatePoint(index, centerX, centerY, angle) {
+    const offset = index * 2;
+    const dx = state.positions[offset] - centerX, dy = state.positions[offset + 1] - centerY;
+    const cosine = Math.cos(angle), sine = Math.sin(angle);
+    state.positions[offset] = centerX + dx * cosine - dy * sine;
+    state.positions[offset + 1] = centerY + dx * sine + dy * cosine;
+  }
+  function advanceGalaxyMotion(deltaMs) {
+    if (key(state.layoutSettings.mode || 'communities') !== 'galaxy'
+      || !state.positions.length || state.layoutSettings.frozen === true
+      || state.layoutSettings.orbitPaused === true) return;
+    const elapsed = clamp(finite(deltaMs, 34), 1, 100);
+    const repel = Math.max(0, finite(state.layoutSettings.repel, 60));
+    const orbitalSpeed = (0.00022 + repel * 0.0000024) * elapsed;
+    const localSpeed = orbitalSpeed * 1.8;
+    const globalSpeed = orbitalSpeed * 0.42;
+    const groups = new Map(), indexById = new Map();
+    for (let index = 0; index < state.ids.length; index += 1) {
+      indexById.set(state.ids[index], index);
+      const group = state.communities[index] || '';
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(index);
+    }
+    let globalAnchor = -1;
+    for (let index = 0; index < state.anchorRoles.length; index += 1) {
+      if (state.anchorRoles[index] === 'global') { globalAnchor = index; break; }
+    }
+    /* Global rotation must always run in galaxy mode regardless of gravity settings.
+       When no explicit global anchor exists, fall back to the centroid of all nodes. */
+    let globalX = 0, globalY = 0;
+    if (globalAnchor >= 0) {
+      globalX = state.positions[globalAnchor * 2];
+      globalY = state.positions[globalAnchor * 2 + 1];
+    } else {
+      for (let index = 0; index < state.ids.length; index += 1) {
+        globalX += state.positions[index * 2];
+        globalY += state.positions[index * 2 + 1];
+      }
+      const n = state.ids.length || 1;
+      globalX /= n; globalY /= n;
+    }
+
+    /* Resolve the authored hierarchy instead of inferring the orbit center from the
+       community. A system may contain nested bodies (star -> planet -> moon), and a
+       community is only a display grouping, not an orbital parent. */
+    const anchors = new Int32Array(state.ids.length);
+    anchors.fill(-1);
+    for (let index = 0; index < state.ids.length; index += 1) {
+      const anchorId = state.systemAnchorIds[index];
+      if (anchorId && anchorId !== state.ids[index] && indexById.has(anchorId)) {
+        anchors[index] = indexById.get(anchorId);
+      }
+    }
+    const localOrder = [];
+    const visiting = new Uint8Array(state.ids.length), visited = new Uint8Array(state.ids.length);
+    const visit = index => {
+      if (visited[index]) return;
+      if (visiting[index]) { anchors[index] = -1; return; }
+      visiting[index] = 1;
+      const anchor = anchors[index];
+      if (anchor >= 0 && anchor !== globalAnchor) visit(anchor);
+      visiting[index] = 0; visited[index] = 1;
+      localOrder.push(index);
+    };
+    for (let index = 0; index < state.ids.length; index += 1) visit(index);
+
+    /* Parent-first is important for nested systems: a moon must use the planet's
+       already-updated position, not the planet's stale position from the prior tick. */
+    const explicitlyAnchored = new Uint8Array(state.ids.length);
+    const preLocalPositions = state.positions.slice();
+    localOrder.forEach(index => {
+      const anchor = anchors[index];
+      if (anchor < 0) return;
+      explicitlyAnchored[index] = 1;
+      if (anchor === globalAnchor) return;
+      /* The parent may already have advanced in its own local frame. Carry this child
+         with that parent before rotating the child's own orbit, otherwise a nested
+         planet/moon is rotated around the parent's new position from its stale world
+         position and its local radius silently expands or contracts. */
+      state.positions[index * 2] += state.positions[anchor * 2]
+        - preLocalPositions[anchor * 2];
+      state.positions[index * 2 + 1] += state.positions[anchor * 2 + 1]
+        - preLocalPositions[anchor * 2 + 1];
+      rotatePoint(index, state.positions[anchor * 2], state.positions[anchor * 2 + 1], localSpeed);
+    });
+    groups.forEach(members => {
+      let localAnchor = -1;
+      for (let cursor = 0; cursor < members.length; cursor += 1) {
+        const index = members[cursor];
+        if (state.anchorRoles[index] === 'community') { localAnchor = index; break; }
+      }
+      if (localAnchor >= 0) {
+        const centerX = state.positions[localAnchor * 2], centerY = state.positions[localAnchor * 2 + 1];
+        members.forEach(index => {
+          if (index !== localAnchor && index !== globalAnchor && !explicitlyAnchored[index]) {
+            rotatePoint(index, centerX, centerY, localSpeed);
+          }
+        });
+      } else if (members.length > 1 && !(globalAnchor >= 0 && members.some(index =>
+        index !== globalAnchor && anchors[index] === globalAnchor))) {
+        const center = members.reduce((point, index) => ({
+          x: point.x + state.positions[index * 2], y: point.y + state.positions[index * 2 + 1],
+        }), { x: 0, y: 0 });
+        center.x /= members.length; center.y /= members.length;
+        members.forEach(index => {
+          if (index !== globalAnchor && !explicitlyAnchored[index]) rotatePoint(index, center.x, center.y, localSpeed);
+        });
+      }
+    });
+    /* Global rotation: every node orbits the black hole (or centroid fallback).
+       Unconditional in galaxy mode — rotation must not depend on gravity. */
+    for (let index = 0; index < state.ids.length; index += 1) {
+      if (index !== globalAnchor) rotatePoint(index, globalX, globalY, globalSpeed);
+    }
+    rebuildGrid(); state.lastCameraKey = '';
+    const positions = state.positions.slice();
+    self.postMessage({ type: 'motion', positions, bounds: makeBounds(state.positions) }, [positions.buffer]);
   }
   function edgeAllowed(edge) {
     if (state.layers && state.layers[state.edgeLayers[edge]] === false) return false;
@@ -182,6 +310,8 @@
     state.layoutRevision = 0;
     state.lastVisibleMask = new Uint8Array(ids.length);
     const communities = nodes.map(node => key(node && (node.community_id != null ? node.community_id : node.community)));
+    const anchorRoles = nodes.map(node => key(node && node.anchor_role));
+    const systemAnchorIds = nodes.map(node => key(node && node.system_anchor_id));
     const types = nodes.map(node => key(node && (node.etype || node.type || 'person_or_concept')));
     const previewPositions = state.positions.slice();
     const previewGhosts = nodeGhosts.slice();
@@ -203,7 +333,7 @@
       betweenness[index] = Math.max(0, finite(node && (node.betweenness || node.bridge_score), 0));
       evidenceMass[index] = Math.max(0, finite(node && (node.evidence_mass || node.evidenceMass || node.mass), degrees[index] || 0));
     });
-    state.ids = ids; state.labels = labels; state.types = types; state.degrees = degrees; state.betweenness = betweenness; state.evidenceMass = evidenceMass; state.nodeGhosts = nodeGhosts; state.communities = communities;
+    state.ids = ids; state.labels = labels; state.types = types; state.degrees = degrees; state.betweenness = betweenness; state.evidenceMass = evidenceMass; state.nodeGhosts = nodeGhosts; state.communities = communities; state.anchorRoles = anchorRoles; state.systemAnchorIds = systemAnchorIds;
     state.edgeSources = new Uint32Array(edges.map(edge => edge.source)); state.edgeTargets = new Uint32Array(edges.map(edge => edge.target));
     state.edgeStrength = new Float32Array(edges.map(edge => edge.strength)); state.edgeLayers = edges.map(edge => edge.layer); state.edgeBridges = new Uint8Array(edges.map(edge => edge.bridge ? 1 : 0)); state.edgeGhosts = new Uint8Array(edges.map(edge => edge.ghost ? 1 : 0)); state.edgeOrder = new Uint32Array(order); state.edgeRank = edgeRank;
     applyLayout(false);
@@ -412,6 +542,8 @@
       state.layoutRevision += 1;
       applyLayout(true, false);
       state.lastCameraKey = '';
+    } else if (message.type === 'tick') {
+      advanceGalaxyMotion(message.deltaMs);
     } else if (message.type === 'bridges') {
       state.showBridges = message.value !== false; state.lastCameraKey = '';
     } else if (message.type === 'ghosts') {

@@ -421,7 +421,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2'),
+        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260816-galaxy-even-orbits-2'),
         'EngraphisAllGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -455,7 +455,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260816-galaxy-even-orbits-2'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
