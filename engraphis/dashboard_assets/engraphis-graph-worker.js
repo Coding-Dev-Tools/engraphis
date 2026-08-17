@@ -328,9 +328,11 @@
       state.nodeSeen[values[index]] = state.nodeStamp;
     }
     const retained = [];
+    const focused = state.focusIndex;
+    if (focused >= 0 && state.nodeSeen[focused] === state.nodeStamp) retained.push(focused);
     for (let index = 0; index < state.topNodes.length && retained.length < limit; index += 1) {
       const node = state.topNodes[index];
-      if (state.nodeSeen[node] === state.nodeStamp) retained.push(node);
+      if (node !== focused && state.nodeSeen[node] === state.nodeStamp) retained.push(node);
     }
     retained.sort((left, right) => left - right);
     return new Uint32Array(retained);

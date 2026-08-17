@@ -90,6 +90,36 @@ def test_all_worker_enforces_hysteretic_progressive_node_budgets():
     assert result["lod"]["highNodes"] <= 5_000
 
 
+def test_all_worker_reserves_a_focused_node_when_the_lod_budget_is_full():
+    source = json.dumps(WORKER.read_text(encoding="utf-8"))
+    nodes = [{"id": f"leaf-{index}"} for index in range(6_000)]
+    nodes.extend([{"id": "hub"}, {"id": "focused"}])
+    links = [{"source": "focused", "target": "hub"}]
+    links.extend({"source": "hub", "target": f"leaf-{index}"} for index in range(6_000))
+    payload = json.dumps({"nodes": nodes, "links": links})
+    script = f"""
+const vm = require('vm'); const messages = [];
+const context = {{ self: {{ postMessage: message => messages.push(message) }} }};
+vm.runInNewContext({source}, context);
+const send = data => context.self.onmessage({{ data }});
+const latest = type => messages.filter(message => message.type === type).at(-1);
+send({{ type: 'prepare', payload: {payload} }});
+const ready = latest('ready');
+const focused = ready.ids.indexOf('focused');
+send({{ type: 'focus', index: focused }});
+send({{ type: 'camera', x: 0, y: 0, scale: 0.8, width: 100000, height: 100000 }});
+const visible = latest('visible');
+console.log(JSON.stringify({{ count: visible.nodes.length, focused,
+  retained: Array.from(visible.nodes).includes(focused) }}));
+"""
+    result = subprocess.run(
+        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
+    )
+    report = json.loads(result.stdout)
+    assert report["count"] <= 3_000
+    assert report["retained"] is True
+
+
 def test_all_renderer_is_flat_worker_webgl_and_not_a_live_force_simulation():
     worker = WORKER.read_text(encoding="utf-8")
     renderer = RENDERER.read_text(encoding="utf-8")

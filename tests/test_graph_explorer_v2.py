@@ -3419,7 +3419,7 @@ def test_graph_entity_evidence_history_includes_closed_support_on_live_relation(
     assert [item["memory_id"] for item in detail["evidence"]] == [closed_memory]
 
 
-def test_graph_scene_history_visibility_scopes_to_requested_repo():
+def test_graph_scene_history_visibility_scopes_to_requested_repo(monkeypatch):
     """Regression: visibility preclassification must apply the same repo scope
     as the subsequent edge/entity queries so unrelated-repo edges cannot
     promote private entities into the candidate set."""
@@ -3454,6 +3454,8 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo():
         workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": memory_a},
     ))
+    # The unrelated beta edge must not consume the selected repository's visibility budget.
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
 
     scene = service.graph_scene(
         workspace="acme", repo="alpha", include_history=True,
