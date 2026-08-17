@@ -61,6 +61,29 @@ def test_cors_default_origins_follow_configured_port():
     assert config._parse_origins("https://app.example.com", 9000) == [
         "https://app.example.com"]
 
+def test_cors_wildcard_origin_is_explicitly_accepted():
+    """A literal ``*`` must pass through _parse_origins so CORSMiddleware can
+    enable public access.  The dashboard disables credentials when ``*`` is
+    present; this test pins the parser half of that contract."""
+    assert config._parse_origins("*", 8700) == ["*"]
+    # Wildcard mixed with explicit origins: both survive so the operator can
+    # gradually migrate without an all-or-nothing cutover.
+    assert config._parse_origins("*,https://app.example.com", 8700) == [
+        "*", "https://app.example.com"]
+
+def test_cors_schemeless_origins_are_rejected_with_diagnostic():
+    """Bare hostnames or dangerous values like ``null`` must be dropped so
+    an operator typo cannot open the CORS allow-list to an attacker."""
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        result = config._parse_origins("evil.com,null,https://safe.example.com", 8700)
+    assert result == ["https://safe.example.com"]
+    assert "scheme" in buf.getvalue().lower() or "CORS" in buf.getvalue()
+    # Credential-like values must never appear in the diagnostic.
+    assert "evil.com" not in buf.getvalue()
+    assert "null" not in buf.getvalue()
+
 
 def test_cors_origins_use_engraphis_port_env(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_CORS_ORIGINS", raising=False)
