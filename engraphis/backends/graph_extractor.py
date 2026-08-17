@@ -350,8 +350,9 @@ def get_graph_extractor(kind: str = "none", *, require_exact: bool = False):
         return NullGraphExtractor()
     if require_exact:
         raise RuntimeError(
-            f"Unknown graph extractor kind '{kind}' and require_exact_backends=True "
-            f"prevents silent fallback to NullGraphExtractor"
+            "Configured graph extractor selector is not recognized and "
+            "require_exact_backends=True prevents silent fallback to NullGraphExtractor "
+            "(valid kinds: none, regex)"
         )
     return NullGraphExtractor()
 

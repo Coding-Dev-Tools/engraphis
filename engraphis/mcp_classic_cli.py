@@ -25,8 +25,9 @@ def main(argv=None) -> None:
         raise SystemExit(error)
 
     # Import after argparse so --help works without the optional MCP dependency.
-    from engraphis.mcp_server import classic_mcp
+    from engraphis.mcp_server import _eager_exact_backend_check, classic_mcp
 
+    _eager_exact_backend_check()
     classic_mcp.run()
 
 

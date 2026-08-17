@@ -113,7 +113,7 @@ def main(argv=None) -> None:
 
     # Import only after --help and dependency validation: FastMCP registers tools at
     # module import time, so importing it eagerly would make even help unusable.
-    from engraphis.mcp_server import mcp
+    from engraphis.mcp_server import _eager_exact_backend_check, mcp
 
     server = mcp
     if args.classic:
@@ -123,6 +123,7 @@ def main(argv=None) -> None:
     server.settings.host = args.host
     server.settings.port = args.port
     server.settings.transport_security = _transport_security(args.host, args.port)
+    _eager_exact_backend_check()
     server.run(transport=args.transport)
 
 

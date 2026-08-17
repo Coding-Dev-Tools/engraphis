@@ -877,8 +877,9 @@ def get_extractor(
     if kind not in ("none", "chunk", "llm", "llm_structured"):
         if require_exact:
             raise RuntimeError(
-                f"Unknown extractor kind '{kind}' and require_exact_backends=True "
-                f"prevents silent fallback to passthrough"
+                "Configured extractor selector is not recognized and "
+                "require_exact_backends=True prevents silent fallback to passthrough "
+                "(valid kinds: none, chunk, llm, llm_structured)"
             )
         return PassthroughExtractor()
     if kind == "none":
