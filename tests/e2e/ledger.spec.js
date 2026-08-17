@@ -2076,3 +2076,21 @@ test('successful retry after readiness failure commits exactly one new renderer'
   await expect(page.locator('#graph-count')).toContainText('entities');
   expect(allAssetAttempts).toBe(2);
 });
+
+test('renderer construction failure removes its candidate host', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  await page.waitForFunction(() => typeof (window.EngraphisGraph || {}).create === 'function');
+  await page.evaluate(() => {
+    window.EngraphisGraph.create = () => {
+      throw new Error('renderer construction failed');
+    };
+  });
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-empty')).toContainText('renderer construction failed', { timeout: 10_000 });
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  await expect(page.locator('#graph-count')).toContainText('entities');
+});
