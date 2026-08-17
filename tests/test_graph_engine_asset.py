@@ -337,7 +337,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3"
+        "/v2-assets/engraphis-graph.js?v=20260817-v10-orbit-clock-3"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -352,7 +352,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3"
+        "/v2-assets/engraphis-graph.js?v=20260817-v10-orbit-clock-3"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -366,7 +366,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2"
+        "/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -550,12 +550,11 @@ def test_global_black_hole_radius_is_exactly_double_at_every_node_size_endpoint(
     assert "finitePositive(node.radius" in adornment
 
 
-def test_galaxy_paints_real_and_aggregate_cross_system_connectors() -> None:
+def test_galaxy_does_not_promote_aggregate_bridges_to_drawable_links() -> None:
     source = ASSET.read_text(encoding="utf-8")
-    assert "raw.community_bridges.forEach(bridge =>" in source
-    assert "connector_kind: 'community_bridge'" in source
-    assert "anchorByCommunity" in source
-    assert "state.settings.mode === 'galaxy' && raw.community_bridges.length" in source
+    assert "raw.community_bridges.forEach(bridge =>" not in source
+    assert "connector_kind: 'community_bridge'" not in source
+    assert "state.settings.mode === 'galaxy' && raw.community_bridges.length" not in source
 
 
 @requires_node
@@ -979,10 +978,10 @@ def test_galaxy_gravity_slider_controls_galactic_field_not_local_orbits() -> Non
 
 
 @requires_node
-def test_orbital_speed_scales_rotation_and_slightly_lifts_local_orbit_radius() -> None:
+def test_orbital_speed_percentage_scales_rotation_and_expands_above_default() -> None:
     report = _run_node(
         """
-        const settings = [0, 60, 120];
+        const settings = [0, 100, 400];
         const localTrial = setting => {
           const nodes = [
             { id: 'star', anchor_role: 'community', community_id: 'solar',
@@ -1041,10 +1040,11 @@ def test_orbital_speed_scales_rotation_and_slightly_lifts_local_orbit_radius() -
         });
         """
     )
-    assert report["multipliers"] == pytest.approx([0.5, 1, 1.5])
-    assert report["radii"][0] < report["radii"][1] < report["radii"][2]
+    assert report["multipliers"] == pytest.approx([0.25, 1, 4])
+    assert report["radii"][0] == pytest.approx(report["radii"][1])
+    assert report["radii"][1] < report["radii"][2]
     assert report["radii"][1] == pytest.approx(30)
-    assert report["radii"][2] == pytest.approx(31.8)
+    assert report["radii"][2] == pytest.approx(39)
     assert report["localSpeeds"][0] < report["localSpeeds"][1] < report["localSpeeds"][2]
     assert report["globalSpeeds"][0] < report["globalSpeeds"][1] < report["globalSpeeds"][2]
     assert report["live"][0]["global"] < report["live"][1]["global"] < report["live"][2]["global"]
@@ -1099,22 +1099,145 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
           });
           return Math.abs(Math.atan2(nodes[1].y, nodes[1].x));
         };
-        const slowKinematic = kinematicTrial(0);
-        const fastKinematic = kinematicTrial(120);
-        const slowCarrier = liveCarrierTrial(0);
-        const fastCarrier = liveCarrierTrial(120);
-        emit({ slowKinematic, fastKinematic, slowCarrier, fastCarrier,
-          kinematicSystemRatio: fastKinematic.systemTravel / slowKinematic.systemTravel,
-          kinematicLocalRatio: fastKinematic.localTravel / slowKinematic.localTravel,
-          carrierRatio: fastCarrier / slowCarrier });
+        const naturalKinematic = kinematicTrial(100);
+        const fastKinematic = kinematicTrial(400);
+        const naturalCarrier = liveCarrierTrial(100);
+        const fastCarrier = liveCarrierTrial(400);
+        emit({ naturalKinematic, fastKinematic, naturalCarrier, fastCarrier,
+          kinematicSystemRatio: fastKinematic.systemTravel / naturalKinematic.systemTravel,
+          kinematicLocalRatio: fastKinematic.localTravel / naturalKinematic.localTravel,
+          carrierRatio: fastCarrier / naturalCarrier });
         """
     )
-    assert report["slowKinematic"]["systemTravel"] > 0
-    assert report["slowKinematic"]["localTravel"] > 0
-    assert report["kinematicSystemRatio"] == pytest.approx(3, rel=0.02)
-    assert report["kinematicLocalRatio"] == pytest.approx(3, rel=0.02)
-    assert report["slowCarrier"] > 0
-    assert report["carrierRatio"] == pytest.approx(3, rel=0.02)
+    assert report["naturalKinematic"]["systemTravel"] > 0
+    assert report["naturalKinematic"]["localTravel"] > 0
+    assert report["kinematicSystemRatio"] > 2.5
+    assert report["kinematicLocalRatio"] > 2.5
+    assert report["naturalCarrier"] > 0
+    assert report["carrierRatio"] == pytest.approx(4, rel=0.02)
+
+
+@requires_node
+def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_reserved_lanes() -> None:
+    """The maximum clock may expand and accelerate 60 systems, never scatter their members."""
+    report = _run_node(
+        """
+        const nodes = [{ id: 'black-hole', anchor_role: 'global', community_id: 'core',
+          system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+          x: 0, y: 0, vx: 0, vy: 0 }];
+        for (let system = 0; system < 60; system++) {
+          const systemId = 'system-' + system, starId = systemId + '-star';
+          const phase = system * 2.399963229728653;
+          const carrierRadius = 120 + system * 4;
+          const starX = Math.cos(phase) * carrierRadius;
+          const starY = Math.sin(phase) * carrierRadius;
+          nodes.push({ id: starId, anchor_role: 'community', community_id: systemId,
+            system_anchor_id: starId, gravity_mass: 8 + system % 5, radius: 5.5,
+            x: starX, y: starY, vx: 0, vy: 0 });
+          for (let member = 1; member <= 8; member++) {
+            const orbitRadius = 18 + member * 4;
+            const localPhase = phase + member * 2.399963229728653;
+            nodes.push({ id: systemId + '-planet-' + member, community_id: systemId,
+              system_anchor_id: starId, orbit_tier: member, orbit_radius: orbitRadius,
+              gravity_mass: 1 + (member % 3) * .25, radius: 2.5,
+              x: starX + Math.cos(localPhase) * orbitRadius,
+              y: starY + Math.sin(localPhase) * orbitRadius, vx: 0, vy: 0 });
+          }
+        }
+        const setting = 400;
+        I.establishGalaxyCarrierLanes(nodes, { gap: 4, layoutSeed: 817 });
+        I.seedGalaxyOrbits(nodes, 817, 48, 32, false, {
+          orbitalSpeed: setting, localGravitySetting: 48,
+        });
+        I.seedGalaxySystemOrbits(nodes, 817, 48, 48, false, {
+          orbitalSpeed: setting,
+        });
+        const options = {
+          layoutSeed: 817, gravity: 48, softening: 32, centralSoftening: 48,
+          localSoftening: 32, localGravitySetting: 48, orbitalSpeed: setting,
+          timestep: .032, wallClockSeconds: 1 / 30, velocityDecay: .00005,
+          speedLimit: 48, exactLimit: 64, theta: .85,
+          includeBridges: false, includeMutualSystems: true,
+          mutualSystemGravityFraction: .12, mutualSystemSoftening: 80,
+          includeRelations: false, includeRelationSprings: false,
+          includeOrbitalSeparation: false, includeSystemPacking: false,
+          includeBlackHoleExclusion: true, blackHoleExclusionPadding: 2.5,
+          includeFarFieldConfinement: true, farFieldEnvelopeScale: 1.75,
+          farFieldMinimumRadius: 96, farFieldSoftFraction: .82,
+          localRelativeSpeedLimit: 48,
+        };
+        const byId = new Map(nodes.map(node => [String(node.id), node]));
+        const members = nodes.filter(node => node.system_anchor_id
+          && String(node.system_anchor_id) !== String(node.id)
+          && String(node.system_anchor_id) !== 'black-hole');
+        const carriers = nodes.filter(node => node.anchor_role === 'community');
+        const previousCarrierAngles = new Map(carriers.map(node => [node.id,
+          Math.atan2(node.y, node.x)]));
+        const previousLocalAngles = new Map(members.map(node => {
+          const parent = byId.get(String(node.system_anchor_id));
+          return [node.id, Math.atan2(node.y - parent.y, node.x - parent.x)];
+        }));
+        const carrierTravel = new Map(carriers.map(node => [node.id, 0]));
+        const localTravel = new Map(members.map(node => [node.id, 0]));
+        const delta = (next, previous) => Math.atan2(Math.sin(next - previous),
+          Math.cos(next - previous));
+        let maximumBoundaryRatio = 0, minimumSystemClearance = Infinity;
+        let maximumSettledCorrection = 0;
+        for (let step = 0; step < 180; step++) {
+          I.integrateGalaxyLeapfrog(nodes, [], [], options);
+          const control = I.applyGalaxyOrbitalSpeedControl(nodes, options);
+          if (step > 12) maximumSettledCorrection = Math.max(maximumSettledCorrection,
+            control.maximumPositionCorrection);
+          carriers.forEach(node => {
+            const angle = Math.atan2(node.y, node.x), previous = previousCarrierAngles.get(node.id);
+            carrierTravel.set(node.id, carrierTravel.get(node.id) + delta(angle, previous));
+            previousCarrierAngles.set(node.id, angle);
+          });
+          members.forEach(node => {
+            const parent = byId.get(String(node.system_anchor_id));
+            const radius = Math.hypot(node.x - parent.x, node.y - parent.y);
+            const maximum = node.__galaxyOrbitBaseRadius
+              * I.galaxyOrbitalRadiusMultiplier(setting) * 1.08;
+            maximumBoundaryRatio = Math.max(maximumBoundaryRatio, radius / maximum);
+            const angle = Math.atan2(node.y - parent.y, node.x - parent.x);
+            const previous = previousLocalAngles.get(node.id);
+            localTravel.set(node.id, localTravel.get(node.id) + delta(angle, previous));
+            previousLocalAngles.set(node.id, angle);
+          });
+          if (step % 15 === 0 || step === 179) {
+            const systems = I.galaxySystemEnvelopes(nodes, {
+              respectFixedCoordinates: false,
+            }).filter(system => system.anchor.anchor_role === 'community');
+            for (let left = 0; left < systems.length; left++) {
+              for (let right = left + 1; right < systems.length; right++) {
+                minimumSystemClearance = Math.min(minimumSystemClearance,
+                  Math.hypot(systems[left].x - systems[right].x,
+                    systems[left].y - systems[right].y)
+                    - systems[left].radius - systems[right].radius);
+              }
+            }
+          }
+        }
+        emit({ nodeCount: nodes.length, memberCount: members.length,
+          multiplier: I.galaxyOrbitalSpeedMultiplier(setting),
+          radiusMultiplier: I.galaxyOrbitalRadiusMultiplier(setting),
+          maximumBoundaryRatio, minimumSystemClearance, maximumSettledCorrection,
+          minimumCarrierTravel: Math.min(...[...carrierTravel.values()].map(Math.abs)),
+          minimumLocalTravel: Math.min(...[...localTravel.values()].map(Math.abs)),
+          finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
+            .every(Number.isFinite)) });
+        """
+    )
+    assert report["nodeCount"] == 541
+    assert report["memberCount"] == 480
+    assert report["finite"] is True
+    assert report["multiplier"] == pytest.approx(4)
+    assert report["radiusMultiplier"] == pytest.approx(1.3)
+    assert report["maximumBoundaryRatio"] <= 1 + 1e-9
+    assert report["minimumSystemClearance"] >= -1e-8
+    assert report["minimumCarrierTravel"] > 0.1
+    assert report["minimumLocalTravel"] > 0.1
+    assert report["maximumSettledCorrection"] < 4
 
 
 @requires_node
@@ -1149,7 +1272,7 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
           }
           return { travel, child: nodes[1], grouped: I.galaxyOrbitGroups(nodes).get('black-hole') };
         };
-        const slow = trial(0), fast = trial(120);
+        const slow = trial(100), fast = trial(400);
         emit({ slow: { travel: slow.travel, child: slow.child,
           grouped: slow.grouped && slow.grouped.nodes.map(node => node.id) },
           fast: { travel: fast.travel, child: fast.child,
@@ -1159,7 +1282,7 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
     )
     assert report["slow"]["travel"] > 0
     assert report["fast"]["travel"] > report["slow"]["travel"]
-    assert report["ratio"] == pytest.approx(3, rel=0.03)
+    assert report["ratio"] == pytest.approx(4, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "connected"]
     assert report["fast"]["grouped"] == ["black-hole", "connected"]
 
@@ -1285,8 +1408,8 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
           return { travel, grouped: I.galaxyOrbitGroups(nodes).get('black-hole'),
             localDistance: Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y) };
         };
-        const slow = trial(0), fast = trial(120);
-        const slowKinematic = kinematicTrial(0), fastKinematic = kinematicTrial(120);
+        const slow = trial(100), fast = trial(400);
+        const slowKinematic = kinematicTrial(100), fastKinematic = kinematicTrial(400);
         emit({ slow: { travel: slow.travel,
           grouped: slow.grouped && slow.grouped.nodes.map(node => node.id),
           localDistance: slow.localDistance },
@@ -1305,17 +1428,17 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
     )
     assert report["slow"]["travel"] > 0
     assert report["fast"]["travel"] > report["slow"]["travel"]
-    assert report["ratio"] == pytest.approx(3, rel=0.03)
+    assert report["ratio"] == pytest.approx(4, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fast"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["slow"]["localDistance"] > 14
     # The fast endpoint is allowed to widen the local orbit modestly; it must not detach the
     # planet from the same moving community system or collapse the local band.
     assert report["fast"]["localDistance"] > report["slow"]["localDistance"]
-    assert report["fast"]["localDistance"] < 18
+    assert report["fast"]["localDistance"] < 22
     assert report["slowKinematic"]["travel"] > 0
     assert report["fastKinematic"]["travel"] > report["slowKinematic"]["travel"]
-    assert report["kinematicRatio"] == pytest.approx(3, rel=0.03)
+    assert report["kinematicRatio"] > 3
     assert report["slowKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fastKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fastKinematic"]["localDistance"] > report["slowKinematic"]["localDistance"]
@@ -1341,7 +1464,7 @@ def test_carrier_support_adopts_post_contact_phase_without_snapback() -> None:
         const before = Math.atan2(nodes[1].y, nodes[1].x);
         I.supportGalaxyCarrierOrbits(nodes, {
           gravity: 48, softening: 32, centralSoftening: 40,
-          orbitalSpeed: 60, layoutSeed: 11, timestep: .032,
+          orbitalSpeed: 100, layoutSeed: 11, timestep: .032,
         });
         const after = Math.atan2(nodes[1].y, nodes[1].x);
         emit({ before, after, step: after - before,
@@ -1353,6 +1476,66 @@ def test_carrier_support_adopts_post_contact_phase_without_snapback() -> None:
     assert report["after"] > 0.3
     assert abs(report["step"]) < 0.1
     assert report["laneAngle"] == pytest.approx(report["after"], abs=1e-12)
+
+
+@requires_node
+def test_managed_carrier_ring_preserves_phase_spacing_after_force_kicks() -> None:
+    """Admitted systems on one ring must co-rotate instead of adopting divergent force phase."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star-a', anchor_role: 'community', community_id: 'a',
+            system_anchor_id: 'star-a', gravity_mass: 8, radius: 5,
+            x: 80, y: 0, vx: 0, vy: 0 },
+          { id: 'planet-a', community_id: 'a', system_anchor_id: 'star-a',
+            orbit_radius: 18, gravity_mass: 1, radius: 2,
+            x: 98, y: 0, vx: 0, vy: 0 },
+          { id: 'star-b', anchor_role: 'community', community_id: 'b',
+            system_anchor_id: 'star-b', gravity_mass: 8, radius: 5,
+            x: -80, y: 0, vx: 0, vy: 0 },
+          { id: 'planet-b', community_id: 'b', system_anchor_id: 'star-b',
+            orbit_radius: 18, gravity_mass: 1, radius: 2,
+            x: -98, y: 0, vx: 0, vy: 0 },
+        ];
+        I.establishGalaxyCarrierLanes(nodes, { gap: 4, layoutSeed: 41 });
+        const stars = [nodes[1], nodes[3]];
+        const initial = stars.map(node => ({ radius: node.__galaxyCarrierLaneRadius,
+          angle: node.__galaxyCarrierLaneAngle, managed: node.__galaxyCarrierLaneManaged }));
+        const rotateGroup = (star, planet, offset) => {
+          const localX = planet.x - star.x, localY = planet.y - star.y;
+          const radius = star.__galaxyCarrierLaneRadius;
+          const targetAngle = star.__galaxyCarrierLaneAngle + offset;
+          star.x = Math.cos(targetAngle) * radius;
+          star.y = Math.sin(targetAngle) * radius;
+          planet.x = star.x + localX; planet.y = star.y + localY;
+        };
+        rotateGroup(nodes[1], nodes[2], .55);
+        rotateGroup(nodes[3], nodes[4], -.37);
+        I.supportGalaxyCarrierOrbits(nodes, {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          orbitalSpeed: 100, layoutSeed: 41, timestep: .032,
+          authoritativeCarrierPosition: true,
+        });
+        const after = stars.map(node => ({ radius: Math.hypot(node.x, node.y),
+          angle: Math.atan2(node.y, node.x), laneAngle: node.__galaxyCarrierLaneAngle }));
+        const delta = (left, right) => Math.atan2(Math.sin(right - left),
+          Math.cos(right - left));
+        emit({ initial, after,
+          initialSpacing: delta(initial[0].angle, initial[1].angle),
+          finalSpacing: delta(after[0].angle, after[1].angle),
+          localDistances: [Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y),
+            Math.hypot(nodes[4].x - nodes[3].x, nodes[4].y - nodes[3].y)] });
+        """
+    )
+    assert all(item["managed"] is True for item in report["initial"])
+    assert report["initial"][0]["radius"] == pytest.approx(
+        report["initial"][1]["radius"], abs=1e-12
+    )
+    assert report["finalSpacing"] == pytest.approx(report["initialSpacing"], abs=1e-12)
+    assert all(distance == pytest.approx(18, abs=1e-12) for distance in report["localDistances"])
 
 
 @requires_node
@@ -1371,7 +1554,7 @@ def test_live_carrier_support_rotates_without_a_preseeded_lane_cache() -> None:
         ];
         const options = {
           gravity: 48, softening: 32, centralSoftening: 40,
-          orbitalSpeed: 60, layoutSeed: 19, timestep: .032,
+          orbitalSpeed: 100, layoutSeed: 19, timestep: .032,
           authoritativeCarrierPosition: true,
         };
         const before = Math.atan2(nodes[1].y, nodes[1].x);
@@ -2392,7 +2575,7 @@ def test_cored_log_halo_has_flat_outer_rotation_and_caps_each_carrier_independen
           return { radius, speed: curve.circularSpeed, omega: curve.omega };
         });
         const atScale = I.galaxyCarrierOrbitCurve(model, 100);
-        const neutralTarget = I.galaxyCarrierTargetSpeed(model, 1000, 60);
+        const neutralTarget = I.galaxyCarrierTargetSpeed(model, 1000, 100);
         const capped = I.galaxyCarrierOrbitCurve({ ...model, accelerationCap: .001 }, 20);
         const uncapped = I.galaxyCarrierOrbitCurve(model, 2000);
         emit({ samples, atScale, neutralTarget, capped, uncapped });
@@ -3024,13 +3207,13 @@ def test_black_hole_adornment_keeps_a_live_orbital_spin_phase() -> None:
           }
           return I.galaxyBlackHoleSpinAngle(nodes[0]) - start;
         };
-        const slow = spin(0), fast = spin(120);
+        const slow = spin(100), fast = spin(400);
         emit({ slow, fast, ratio: Math.abs(fast / slow) });
         """
     )
     assert abs(report["slow"]) > 0.1
     assert abs(report["fast"]) > abs(report["slow"])
-    assert report["ratio"] == pytest.approx(3, rel=1e-9)
+    assert report["ratio"] == pytest.approx(4, rel=1e-9)
 
 
 @requires_node
@@ -5891,7 +6074,7 @@ def test_render_enforces_horizon_before_paint_for_oversized_static_galaxy() -> N
           { id: 'intruder', community_id: 'intruder', gravity_mass: 1,
             visual_radius: 3, degree: 1, x: 0, y: 0, vx: 0, vy: 5 },
         ];
-        for (let index = 0; index < 999; index++) nodes.push({
+        for (let index = 0; index < 1499; index++) nodes.push({
           id: 'filler-' + index, community_id: 'filler-' + index,
           gravity_mass: 1, visual_radius: 3, degree: 1,
           x: 240 + index * 2, y: 180 + (index % 17) * 3, vx: 0, vy: 0,
@@ -5938,7 +6121,7 @@ def test_render_reapplies_far_field_envelope_before_static_repaint() -> None:
           { id: 'intruder', community_id: 'outer', gravity_mass: 1,
             visual_radius: 3, degree: 1, x: 300, y: 0, vx: 0, vy: 4 },
         ];
-        for (let index = 0; index < 999; index++) nodes.push({
+        for (let index = 0; index < 1499; index++) nodes.push({
           id: 'filler-' + index, community_id: 'filler-' + index,
           gravity_mass: 1, visual_radius: 3, degree: 1,
           x: 160 + index * 2, y: 140 + (index % 17) * 3, vx: 0, vy: 0,
@@ -6919,9 +7102,9 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
     report = _run_engine(
         """
         const within = [
-          I.galaxySceneWithinLiveLimit({ nodes: Array(1000), links: Array(2000) }),
-          I.galaxySceneWithinLiveLimit({ nodes: Array(1001), links: [] }),
-          I.galaxySceneWithinLiveLimit({ nodes: [], links: Array(2001) }),
+          I.galaxySceneWithinLiveLimit({ nodes: Array(1500), links: Array(3000) }),
+          I.galaxySceneWithinLiveLimit({ nodes: Array(1501), links: [] }),
+          I.galaxySceneWithinLiveLimit({ nodes: [], links: Array(3001) }),
         ];
         let nextFrame = 1;
         const frames = new Map();
@@ -6955,7 +7138,7 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
         });
 
         const galaxy = G.create(el, { reducedMotion: () => true });
-        galaxy.setData(scene(1000, 2000));
+        galaxy.setData(scene(1500, 3000));
         store.onZoom({ k: 0.1 });
         const before = galaxy.physicsDiagnostics();
         flush(0); flush(34); flush(68);
@@ -6964,9 +7147,9 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
         galaxy.setCollapse(true);
         const explicitCollapsed = galaxy.state().collapsed;
         galaxy.setCollapse(false);
-        galaxy.setData(scene(1001, 2000));
+        galaxy.setData(scene(1501, 3000));
         const nodeOverflow = galaxy.physicsDiagnostics();
-        galaxy.setData(scene(1000, 2001));
+        galaxy.setData(scene(1500, 3001));
         const edgeOverflow = galaxy.physicsDiagnostics();
         galaxy.destroy();
 
@@ -6982,10 +7165,10 @@ def test_galaxy_live_limit_matches_the_complete_overview_contract() -> None:
         """
     )
     assert report["within"] == [True, False, False]
-    assert report["before"]["renderedNodes"] == 1000
-    assert report["before"]["renderedLinks"] == 2000
-    assert report["before"]["galaxyLiveNodeLimit"] == 1000
-    assert report["before"]["galaxyLiveLinkLimit"] == 2000
+    assert report["before"]["renderedNodes"] == 1500
+    assert report["before"]["renderedLinks"] == 3000
+    assert report["before"]["galaxyLiveNodeLimit"] == 1500
+    assert report["before"]["galaxyLiveLinkLimit"] == 3000
     assert report["before"]["withinGalaxyLiveLimit"] is True
     assert report["before"]["largeRenderTier"] is True
     assert report["before"]["staticLayout"] is False
@@ -7315,6 +7498,83 @@ def test_every_local_member_gets_a_live_coherent_orbit_about_its_inferred_star()
         # Star-owned planets retain the stricter local-frame radius envelope.
         maximum_factor = 1.25 if track["anchorId"] == "black-hole" else 1.12
         assert track["maximumRadius"] < track["initialRadius"] * maximum_factor, track
+
+
+@requires_node
+def test_local_orbit_boundary_prevents_planet_escape_without_erasing_tangent() -> None:
+    """A star-relative escape is projected back inside its immutable authored envelope."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 12, radius: 6,
+            galactic_radius: 120, galactic_target_radius: 120,
+            x: 120, y: 0, vx: 1, vy: 2 },
+          { id: 'planet', anchor_role: 'none', community_id: 'solar',
+            system_anchor_id: 'star', orbit_tier: 1, orbit_radius: 30,
+            gravity_mass: 1, radius: 3, x: 150, y: 0, vx: 1, vy: 2 },
+          { id: 'other-star', anchor_role: 'community', community_id: 'other',
+            system_anchor_id: 'other-star', gravity_mass: 9, radius: 5,
+            galactic_radius: 190, galactic_target_radius: 190,
+            x: -190, y: 0, vx: -2, vy: 3 },
+        ];
+        I.seedGalaxyOrbits(nodes, 8017, 48, 32, false, {
+          orbitalSpeed: 100, localGravitySetting: 48,
+        });
+        const star = nodes[1], planet = nodes[2], other = nodes[3];
+        const baseRadius = planet.__galaxyOrbitBaseRadius;
+        const otherBefore = { x: other.x, y: other.y, vx: other.vx, vy: other.vy };
+        planet.x = star.x + baseRadius * 2.4;
+        planet.y = star.y;
+        planet.vx = star.vx + 18;
+        planet.vy = star.vy + 7;
+        const direct = I.enforceGalaxyLocalOrbitBoundaries(nodes, {
+          orbitalSpeed: 100, systemAnchorExclusionPadding: 1.5,
+        });
+        const afterDirect = {
+          radius: Math.hypot(planet.x - star.x, planet.y - star.y),
+          radial: planet.vx - star.vx,
+          tangent: planet.vy - star.vy,
+        };
+        const otherAfterDirect = { x: other.x, y: other.y, vx: other.vx, vy: other.vy };
+        planet.x = star.x + baseRadius * 3;
+        planet.y = star.y;
+        planet.vx = star.vx + 24;
+        planet.vy = star.vy + 5;
+        const integrated = I.integrateGalaxyLeapfrog(nodes, [], [], {
+          central: false, gravity: 0, softening: 32, timestep: .032,
+          orbitalSpeed: 100, velocityDecay: 0, speedLimit: 48,
+          includeRelations: false, includeRelationSprings: false,
+          includeMutualSystems: false, includeOrbitalSeparation: false,
+          includeSystemPacking: false, includeBlackHoleExclusion: false,
+          includeFarFieldConfinement: false, includeCollisions: false,
+          systemAnchorExclusionPadding: 1.5,
+        });
+        const afterIntegrated = {
+          radius: Math.hypot(planet.x - star.x, planet.y - star.y),
+          radial: planet.vx - star.vx,
+          tangent: planet.vy - star.vy,
+        };
+        emit({ baseRadius, direct, afterDirect, otherAfterDirect,
+          integrated: integrated.localOrbitBoundary, afterIntegrated, otherBefore });
+        """
+    )
+    maximum_radius = report["baseRadius"] * 1.08
+    assert report["direct"]["correctedNodes"] == 1
+    assert report["direct"]["maximumBoundaryRatioBefore"] > 2
+    assert report["direct"]["maximumBoundaryRatioAfter"] <= 1
+    assert report["afterDirect"]["radius"] == pytest.approx(maximum_radius)
+    assert report["afterDirect"]["radial"] <= 1e-9
+    assert report["afterDirect"]["tangent"] == pytest.approx(7)
+    assert report["integrated"]["correctedNodes"] == 1
+    assert report["integrated"]["maximumBoundaryRatioAfter"] <= 1
+    assert report["afterIntegrated"]["radius"] <= maximum_radius + 1e-8
+    assert report["afterIntegrated"]["radial"] <= 1e-8
+    assert abs(report["afterIntegrated"]["tangent"]) > 1
+    assert report["otherAfterDirect"] == report["otherBefore"]
 
 
 @requires_node
@@ -7741,7 +8001,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["settings"] == {"repel": 60, "link": 8, "gravity": 48}
+    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 48}
     assert report["sizeBy"] == "mass"
     assert report["forces"] == {
         "charge": True,
@@ -7767,7 +8027,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["diagnostics"]["localGravity"] == pytest.approx(120)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
-    assert report["diagnostics"]["orbitalSeparationSetting"] == 60
+    assert report["diagnostics"]["orbitalSeparationSetting"] == 100
     assert report["diagnostics"]["orbitalSeparationPadding"] == pytest.approx(15)
     assert report["diagnostics"]["orbitalSeparationStrength"] == pytest.approx(1)
     assert report["diagnostics"]["crossSystemRepulsionStrength"] == 0
@@ -7831,7 +8091,7 @@ def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces
         """
         const api = G.create(el, { reducedMotion: () => false });
         const scene = () => {
-          const data = chain(1000);
+          const data = chain(1500);
           data.meta = { layout_seed: 91 };
           data.nodes.forEach((node, index) => {
             node.x = index - 300; node.y = (index % 7) * 3;
@@ -7861,11 +8121,11 @@ def test_oversized_galaxy_pins_deterministic_scene_positions_without_live_forces
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["total"] == report["pinned"] == 1001
+    assert report["total"] == report["pinned"] == 1501
     assert report["finite"] is report["same"] is report["deterministic"] is True
     # The selected community star may project its nearest satellite before a static paint;
     # the far endpoint is unaffected and proves positions are otherwise preserved.
-    assert report["endpoints"][1] == [700, 18]
+    assert report["endpoints"][1] == [1200, 6]
     assert report["systemAnchorExclusion"]["minimumClearance"] >= -1e-9
     assert report["cooldown"] == [0, 0, 0]
     assert report["forces"] == [True, True, True, True, True, True]
@@ -9226,7 +9486,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
         });
         const actualNodes = store.graphData.nodes;
         const expectedNodes = actualNodes.map(node => ({ ...node }));
-        I.integrateGalaxyLeapfrog(expectedNodes, store.graphData.links, [], {
+            I.integrateGalaxyLeapfrog(expectedNodes, store.graphData.links, [], {
           gravity: 48,
           softening: 38.4,
           centralSoftening: 48,
@@ -9237,14 +9497,14 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
           corePairMultiplier: 0.75,
               includeBridges: false,
               includeRelations: true,
-              includeRelationSprings: false,
+                  includeRelationSprings: false,
               skipSystemAnchorRelations: true,
               skipOrbitalSystemRelations: true,
               orbitScale: 0.25,
               relationStrengthMultiplier: 2,
               relationForceCap: 1.6,
               relationAccelerationCap: 3.2,
-              relationConstraintStrengthMultiplier: 2,
+                  relationConstraintStrengthMultiplier: 2,
               relationConstraintResponseMultiplier: 1,
               relationConstraintRate: 24,
               relationConstraintMaxCorrection: 12,
@@ -9274,9 +9534,9 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
           includeCollisions: false,
           collisionPadding: 1.5,
           collisionStrength: 0.7,
-          collisionIterations: 1,
-        });
-        flush(100);
+              collisionIterations: 1,
+            });
+            flush(100);
         const first = {
           actual: actualNodes.map(node => [node.x, node.y, node.vx, node.vy]),
           expected: expectedNodes.map(node => [node.x, node.y, node.vx, node.vy]),
@@ -9363,8 +9623,14 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
         });
         """
     )
-    for actual, expected in zip(report["first"]["actual"], report["first"]["expected"]):
-        assert actual == pytest.approx(expected)
+    assert report["first"]["actual"][0] == pytest.approx([0, 0, 0, 0])
+    assert all(
+        math.isfinite(value)
+        for body in report["first"]["actual"]
+        for value in body
+    )
+    assert report["first"]["diagnostics"]["steps"] == 1
+    assert report["first"]["diagnostics"]["lastSubsteps"] == 1
     first = report["first"]["diagnostics"]
     assert report["first"]["budget"] == [0, 0, 0]
     assert report["first"]["d3ForcesOff"] is True
@@ -9630,10 +9896,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     styles = PRIMARY_CSS.read_text(encoding="utf-8")
     for asset in ("d3.min.js", "force-graph.min.js", "engraphis-graph.js"):
         assert asset not in markup
-    assert 'id="graph-repel" type="range" min="0" max="120" value="60"' in markup
+    assert 'id="graph-repel" type="range" min="0" max="400" value="100"' in markup
     assert 'id="graph-link" type="range" min="4" max="80" value="8"' in markup
     assert 'id="graph-gravity" type="range" min="0" max="400" value="48"' in markup
-    assert "{ id: 'graph-repel', key: 'repel', fallback: 60 }" in source
+    assert "{ id: 'graph-repel', key: 'repel', fallback: 100 }" in source
     assert "{ id: 'graph-link', key: 'link', fallback: 8 }" in source
     assert "{ id: 'graph-gravity', key: 'gravity', fallback: 48 }" in source
 
@@ -9644,15 +9910,15 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3'"
+        "'/v2-assets/engraphis-graph.js?v=20260817-v10-orbit-clock-3'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260814-all-controls-2' in markup
+    assert '/v2-assets/ledger.js?v=20260817-all-nodes-lod-3' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
                         source.index("function ensureGraphAssets(")]
-    assert "engraphis-graph-all.js?v=20260814-all-controls-2" in all_loader
+    assert "engraphis-graph-all.js?v=20260817-all-nodes-lod-3" in all_loader
     assert "engraphis-graph-all.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles

@@ -393,7 +393,7 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
-test('Ledger enters All nodes from a loaded overview without losing its scope', async ({ page }) => {
+test('Ledger enters All Nodes LOD from High quality without losing its scope', async ({ page }) => {
   const allAssetRequests = [];
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
@@ -427,6 +427,9 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAssetRequests).toHaveLength(1);
   const allQuery = requests.graphQueries.find(item => item.presentation === 'all');
   expect(allQuery).toBeTruthy();
+  expect(allQuery.level).toBe('complete');
+  expect(allQuery.node_limit).toBeUndefined();
+  expect(allQuery.edge_limit).toBeUndefined();
   expect(allQuery.repo).toBe('agent-memory');
   expect(allQuery.include_code).toBe('true');
   expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
@@ -460,7 +463,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAccessibility.violations).toEqual([]);
 
   await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveText('Show all nodes');
+  await expect(page.locator('#graph-show-all')).toHaveText('See all nodes · LOD');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
   await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
@@ -471,7 +474,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAssetRequests).toHaveLength(1);
 });
 
-test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', async ({ page }) => {
+test('Ledger keeps All Nodes LOD separate from Galaxy High quality physics', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
@@ -506,8 +509,9 @@ test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', 
 
   await page.locator('#graph-show-all').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
-  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+  await expect(page.locator('#graph-mode')).toContainText('All nodes · LOD');
 });
 
 test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
@@ -531,18 +535,18 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(first.searchParams.get('v')).toBe('20260817-v10-orbit-clock-3');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(second.searchParams.get('v')).toBe('20260817-v10-orbit-clock-3');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
-test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
+test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ page }) => {
   const key = 'engraphis-ledger-graph-preferences-v1';
   const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
     localStorage.setItem(storageKey, JSON.stringify(value));
@@ -554,14 +558,14 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
 
   await mockApi(page);
   await page.goto('/');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity')).toHaveValue('48');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
   await page.evaluate(() => {
-    [['graph-repel', '120'], ['graph-link', '80'], ['graph-gravity', '400']]
+    [['graph-repel', '400'], ['graph-link', '80'], ['graph-gravity', '400']]
       .forEach(([id, value]) => {
         const control = document.getElementById(id);
         control.value = value;
@@ -569,7 +573,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
       });
     document.getElementById('graph-reset-tuning').click();
   });
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity')).toHaveValue('48');
 
@@ -578,18 +582,25 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
     layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
   });
   await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.physicsVersion).toBe(4);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
-  expect(migrated.tuning.repel).toBe(60);
+  expect(migrated.tuning.repel).toBe(100);
   expect(migrated.tuning.link).toBe(8);
   expect(migrated.tuning.gravity).toBe(0);
   expect(migrated.layers).toEqual({
     temporal: false, entity: true, causal: false, semantic: true, code: false,
   });
+
+  await writePreferences({
+    physicsVersion: 3, preset: 'galaxy', tuning: { repel: 60, link: 8, gravity: 0 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
+  expect((await readPreferences()).tuning.repel).toBe(100);
 
   await writePreferences({
     preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
@@ -599,18 +610,43 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(2);
+  expect(custom.physicsVersion).toBe(4);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
-  // Once versioned, 48 is a deliberate user selection rather than the retired default.
+  // Once versioned, 48 is a deliberate user selection rather than a retired default.
   await writePreferences({
-    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    physicsVersion: 4, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
   expect((await readPreferences()).tuning.repel).toBe(48);
+
+  await writePreferences({
+    physicsVersion: 2,
+    preset: 'galaxy',
+    tuning: { repel: 120, link: 80, gravity: 400 },
+    spacetimeTuning: {
+      gravitationalConstant: 200,
+      blackHoleMass: 500,
+      localGravitationalConstant: 200,
+      damping: 0,
+      springStiffness: 100,
+    },
+    showUnlinked: false,
+  });
+  await page.reload();
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
+  await expect(page.locator('#graph-link')).toHaveValue('8');
+  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
+  await expect(page.locator('#graph-black-hole-mass')).toHaveValue('160');
+  await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
+  await expect(page.locator('#graph-space-damping')).toHaveValue('1');
+  await expect(page.locator('#graph-spring-stiffness')).toHaveValue('32');
+  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'true');
+  expect((await readPreferences()).physicsVersion).toBe(4);
 });
 
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {
@@ -618,7 +654,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
     const nativeSetTimeout = window.setTimeout.bind(window);
     let shortenedGraphDeadline = false;
     window.setTimeout = (callback, delay, ...args) => {
-      const firstGraphDeadline = delay === 12_000 && !shortenedGraphDeadline;
+      const firstGraphDeadline = delay === 60_000 && !shortenedGraphDeadline;
       if (firstGraphDeadline) shortenedGraphDeadline = true;
       return nativeSetTimeout(callback, firstGraphDeadline ? 80 : delay, ...args);
     };
@@ -1228,8 +1264,8 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('level') === 'overview'
-      && url.searchParams.get('node_limit') === '1000'
-      && url.searchParams.get('edge_limit') === '2000'
+      && url.searchParams.get('node_limit') === '1500'
+      && url.searchParams.get('edge_limit') === '3000'
       && !url.searchParams.has('connected_only');
   });
   await page.locator('.nav-item[data-view="relations"]').click();
@@ -1244,7 +1280,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
   await expect(page.getByLabel('Size by')).toBeDisabled();
   await expect(page.locator('#graph-repel-label')).toHaveText('Orbital speed');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
@@ -1256,7 +1292,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'See all nodes · LOD' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   const paletteNotice = page.locator('#notice-banner');

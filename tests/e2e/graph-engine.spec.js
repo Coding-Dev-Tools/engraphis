@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260814-galaxy-gravity-3';
+const stellarOrbitAssetVersion = '20260817-v10-orbit-clock-3';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -526,17 +526,22 @@ async function renderedSystemEnvelopeSnapshot(page) {
       return { id: String(star.id), x: point.x, y: point.y, radius, visible,
         pixelsPerGraphUnit: Math.hypot(unit.x - point.x, unit.y - point.y), members: members.length };
     });
-    let minimumClearance = Infinity, overlaps = 0;
+    let minimumClearance = Infinity, overlaps = 0, worstPair = null;
     for (let left = 0; left < systems.length; left += 1) for (let right = left + 1;
       right < systems.length; right += 1) {
       const a = systems[left], b = systems[right];
       // The runtime gap is eight graph units, converted using the smaller local screen scale.
       const clearance = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
       const required = 8 * Math.min(a.pixelsPerGraphUnit, b.pixelsPerGraphUnit);
-      minimumClearance = Math.min(minimumClearance, clearance - required);
+      const margin = clearance - required;
+      if (margin < minimumClearance) {
+        minimumClearance = margin;
+        worstPair = { ids: [a.id, b.id], clearance, required, margin,
+          radii: [a.radius, b.radius] };
+      }
       if (clearance < required - .75) overlaps += 1;
     }
-    return { systems, minimumClearance, overlaps,
+    return { systems, minimumClearance, overlaps, worstPair,
       finite: systems.every(system => [system.x, system.y, system.radius,
         system.pixelsPerGraphUnit].every(Number.isFinite)) };
   });
@@ -1734,9 +1739,9 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 48, repel: 60, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 48, repel: 100, link: 8,
       });
-      expect(diagnostics.orbitalSeparationSetting).toBe(60);
+      expect(diagnostics.orbitalSeparationSetting).toBe(100);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
       expect(diagnostics.orbitalSeparationStrength).toBe(1);
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
@@ -1983,9 +1988,14 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
       const visibilityDebug = samples.map(sample => {
         const invisible = new Set(sample.envelopes.systems.filter(system => !system.visible)
           .map(system => system.id));
+        const worstIds = new Set(sample.envelopes.worstPair?.ids || []);
         return { steps: sample.global.diagnostics.steps,
           packing: sample.global.diagnostics.systemPacking,
           support: sample.global.diagnostics.carrierOrbitSupport,
+          overlaps: sample.envelopes.overlaps,
+          minimumClearance: sample.envelopes.minimumClearance,
+          worstPair: sample.envelopes.worstPair,
+          worstBodies: sample.global.members.filter(body => worstIds.has(body.id)),
           invisible: [...invisible], carriers: sample.global.members.filter(body =>
             invisible.has(String(body.id))).map(body => ({
             id: body.id, radius: body.radius, angle: body.angle, tangent: body.tangent,
@@ -3088,10 +3098,10 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   const baseline = await gravityTrial(page, 48);
   const strong = await gravityTrial(page, 200);
-  const compactOrbits = await orbitalSeparationTrial(page, 0);
-  const separatedOrbits = await orbitalSeparationTrial(page, 120, 16);
+  const naturalOrbits = await orbitalSeparationTrial(page, 100);
+  const fastOrbits = await orbitalSeparationTrial(page, 400, 16);
   await testInfo.attach('orbital-speed-convergence.json', {
-    body: Buffer.from(JSON.stringify({ compactOrbits, separatedOrbits }, null, 2)),
+    body: Buffer.from(JSON.stringify({ naturalOrbits, fastOrbits }, null, 2)),
     contentType: 'application/json',
   });
   const immediate = await page.evaluate(scene => {
@@ -3165,39 +3175,34 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
   expect(strong.before.diagnostics.localGravity).toBe(120);
-  expect(compactOrbits.before.diagnostics.orbitalSeparationSetting).toBe(0);
-  expect(compactOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(0.5);
-  expect(compactOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(0.94, 12);
-  expect(compactOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
-  expect(compactOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
-  expect(separatedOrbits.before.diagnostics.orbitalSeparationSetting).toBe(120);
-  expect(separatedOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1.5);
-  expect(separatedOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.06, 12);
-  expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
-  expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
-  expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
-  expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
-  expect(separatedOrbits.starPlanetBefore).toBeGreaterThan(compactOrbits.starPlanetBefore);
-  expect(separatedOrbits.starPlanetBefore).toBeCloseTo(
-    compactOrbits.starPlanetBefore * (1.06 / 0.94), 6,
+  expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
+  expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
+  expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);
+  expect(naturalOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
+  expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
+  expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
+  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(4);
+  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.3, 12);
+  expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
+  expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
+  expect(fastOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
+  expect(fastOrbits.maximumSeparations).toBeGreaterThan(0);
+  expect(fastOrbits.starPlanetBefore).toBeGreaterThan(naturalOrbits.starPlanetBefore);
+  expect(fastOrbits.starPlanetBefore).toBeCloseTo(
+    naturalOrbits.starPlanetBefore * 1.3, 6,
   );
   // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
   // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
-  expect(separatedOrbits.starPlanetAfter).toBeGreaterThan(compactOrbits.starPlanetAfter);
-  expect(separatedOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
-  expect(Math.max(...separatedOrbits.corrections.slice(-4))).toBeLessThan(
-    Math.max(...separatedOrbits.corrections.slice(0, 4)) * 0.05,
+  expect(fastOrbits.starPlanetAfter).toBeGreaterThan(naturalOrbits.starPlanetAfter);
+  expect(fastOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
+  expect(Math.max(...fastOrbits.corrections.slice(-4))).toBeLessThan(
+    Math.max(...fastOrbits.corrections.slice(0, 4)) * 0.05,
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-  // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
-  // the central field and inward convergence grow with the Galaxy setting.
-  expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
-  expect(physicalField.densityFactors[1]).toBeLessThan(physicalField.densityFactors[0]);
-  expect(physicalField.densityFactors[2]).toBeCloseTo(0.75 ** 0.68, 12);
-  expect(physicalField.densityFactors[3]).toBeCloseTo(
-    0.75 ** (11.430769230769231 * 0.68), 12,
-  );
+  // Forced inward convergence is disabled at every gravity setting; the circular carrier field
+  // and permanent lanes own density without collapsing the disk toward the black hole.
+  expect(physicalField.densityFactors).toEqual([1, 1, 1, 1]);
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
     // Updating gravity alters carrier support, never teleports a solar system inward.
