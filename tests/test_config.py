@@ -74,7 +74,8 @@ def test_cors_wildcard_origin_is_explicitly_accepted():
 def test_cors_schemeless_origins_are_rejected_with_diagnostic():
     """Bare hostnames or dangerous values like ``null`` must be dropped so
     an operator typo cannot open the CORS allow-list to an attacker."""
-    import io, contextlib
+    import contextlib
+    import io
     buf = io.StringIO()
     with contextlib.redirect_stderr(buf):
         result = config._parse_origins("evil.com,null,https://safe.example.com", 8700)

@@ -3536,6 +3536,17 @@ class Store:
             # Explicit shutdown retains the historical error contract. Detach only after
             # close succeeds so a failed close still gets one best-effort finalizer attempt.
             self.conn.close()
+            # Drop the encryption key pragma reference if the connector supports explicit
+            # cleanup. Best-effort: swallow any exception so shutdown never fails on a
+            # resource that GC will reclaim anyway.
+            connector = getattr(self, "_connect", None)
+            if connector is not None:
+                closer = getattr(connector, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:  # noqa: BLE001
+                        pass
             finalizer.detach()
 
     def __enter__(self) -> "Store":
