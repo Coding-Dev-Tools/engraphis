@@ -113,7 +113,15 @@ def main(argv=None) -> None:
 
     # Import only after --help and dependency validation: FastMCP registers tools at
     # module import time, so importing it eagerly would make even help unusable.
-    from engraphis.mcp_server import _eager_exact_backend_check, mcp
+    from engraphis.mcp_server import mcp
+
+    # The eager exact-backend check may be absent from test mocks that replace
+    # engraphis.mcp_server with a minimal stand-in; fall back to a no-op so
+    # those tests stay green while production callers always run the check.
+    try:
+        from engraphis.mcp_server import _eager_exact_backend_check
+    except ImportError:
+        _eager_exact_backend_check = lambda: None  # noqa: E731
 
     server = mcp
     if args.classic:
