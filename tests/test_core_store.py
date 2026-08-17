@@ -3180,3 +3180,52 @@ def test_context_savings_handles_workspace_ids_above_sqlite_variable_limit(
     assert store.context_savings(workspace_ids=[])["receipt_count"] == 0
     deduped = store.context_savings(workspace_ids=included_ids + included_ids)
     assert deduped["receipt_count"] == len(included_ids)
+
+def test_close_validity_on_nonexistent_memory_is_idempotent_and_audits(store):
+    """Closing a memory that does not exist must not raise; governance audit still records
+    the attempt so MCP forget remains non-idempotent-but-evidenced."""
+    # Must not raise.
+    store.close_validity("mem_does_not_exist", actor="system", reason="test")
+    row = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE target=? AND action='invalidate'",
+        ("mem_does_not_exist",),
+    ).fetchone()
+    assert row["n"] == 1
+
+
+def test_close_validity_twice_keeps_original_close_time_and_re_audits(store, monkeypatch):
+    """A second close must not widen or shift the existing valid_to; it must still
+    append an audit row so repeated governance requests retain evidence."""
+    from engraphis.core import store as store_mod
+    monkeypatch.setattr(store_mod, "now_ts", lambda: 1_000.0)
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(id="", content="fact", workspace_id=wid))
+    store.close_validity(mid, at=1_000.0, reason="first")
+    first_close = store.get_memory(mid).valid_to
+    assert first_close == 1_000.0
+
+    monkeypatch.setattr(store_mod, "now_ts", lambda: 2_000.0)
+    store.close_validity(mid, at=2_000.0, reason="second")
+    second_record = store.get_memory(mid)
+    # The earlier close time is preserved; the UPDATE guard prevents widening.
+    assert second_record.valid_to == first_close
+    audits = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE target=? AND action='invalidate'",
+        (mid,),
+    ).fetchone()
+    assert audits["n"] == 2
+
+
+def test_close_validity_at_boundary_equal_to_valid_from_succeeds(store, monkeypatch):
+    """Closing at exactly valid_from is permitted (the interval becomes zero-width);
+    only strictly earlier timestamps are rejected."""
+    from engraphis.core import store as store_mod
+    monkeypatch.setattr(store_mod, "now_ts", lambda: 500.0)
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="boundary", workspace_id=wid, valid_from=500.0,
+    ))
+    # Equal to valid_from: accepted.
+    store.close_validity(mid, at=500.0)
+    rec = store.get_memory(mid)
+    assert rec.valid_to == 500.0

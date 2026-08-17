@@ -736,4 +736,17 @@ class SyncTransport(Protocol):
     def list_names(self) -> list[str]: ...
 
 
+@runtime_checkable
+class CodeIndexer(Protocol):
+    """Extracts code symbols and edges from source files (§3.8).
+
+    Two concrete backends ship in ``engraphis.backends.codegraph``:
+    ``TreeSitterSymbolIndexer`` (AST-based, optional dependency) and
+    ``RegexSymbolIndexer`` (dependency-free fallback).  ``CompositeSymbolIndexer``
+    routes per-language to the best available backend.
+    """
+    def supports(self, lang: str) -> bool: ...
+    def index_file(self, file_path: str, content: str, lang: str) -> Any: ...
+
+
 # Interface contracts only; concrete implementations live in engraphis.backends.
