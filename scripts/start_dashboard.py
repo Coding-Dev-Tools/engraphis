@@ -200,7 +200,14 @@ def _startup_error(exc: BaseException, db: str) -> str:
                 f"Check your config file at {db.rsplit('/', 1)[0]}/.engraphis/config.env "
                 f"and environment variables."
             )
-        return f"Configuration error: {error_msg}"
+        # Unknown ValueError from an optional loader (e.g. AutoTokenizer,
+        # embed-model probe) can embed configured paths or endpoint URLs.
+        # Emit a value-free diagnostic; the operator can run engraphis-init
+        # --check for the full detail.
+        return (
+            f"Configuration error ({type(exc).__name__}). "
+            "Run engraphis-init --check for diagnostics."
+        )
     if isinstance(exc, (ImportError, ModuleNotFoundError)):
         return ("The server extra is required: pip install \"engraphis[server]\""
                 " (needs Python 3.10+)")
@@ -227,7 +234,13 @@ def _startup_error(exc: BaseException, db: str) -> str:
                 f"Either install the required dependencies or remove "
                 f"require_exact_backends=True from your configuration."
             )
-        return error_msg
+        # Unknown RuntimeError from a backend or provider can embed proxy
+        # credentials, certificate paths, or endpoint URLs. Redact to the
+        # exception type so operator logs stay value-free.
+        return (
+            f"Backend initialization failed ({type(exc).__name__}). "
+            "Run engraphis-init --check for diagnostics."
+        )
     return "Dashboard initialization failed. Run engraphis-init --check for diagnostics."
 
 
