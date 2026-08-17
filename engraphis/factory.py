@@ -142,7 +142,7 @@ def create_memory_engine(
         ):
             extracted = None
         graph = (
-            get_graph_extractor(graph_extractor)
+            get_graph_extractor(graph_extractor, require_exact=require_exact_backends)
             if graph_extractor and graph_extractor != "none"
             else None
         )

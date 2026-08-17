@@ -874,7 +874,14 @@ def get_extractor(
                 "ENGRAPHIS_LLM_API_KEY when require_exact_backends=True"
             )
         return StructuredLLMExtractor(llm)
-    if kind != "llm":
+    if kind not in ("none", "chunk", "llm", "llm_structured"):
+        if require_exact:
+            raise RuntimeError(
+                f"Unknown extractor kind '{kind}' and require_exact_backends=True "
+                f"prevents silent fallback to passthrough"
+            )
+        return PassthroughExtractor()
+    if kind == "none":
         return PassthroughExtractor()
     created_client = False
     if llm is None:
