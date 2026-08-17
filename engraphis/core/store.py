@@ -3536,17 +3536,13 @@ class Store:
             # Explicit shutdown retains the historical error contract. Detach only after
             # close succeeds so a failed close still gets one best-effort finalizer attempt.
             self.conn.close()
-            # Drop the encryption key pragma reference if the connector supports explicit
-            # cleanup. Best-effort: swallow any exception so shutdown never fails on a
-            # resource that GC will reclaim anyway.
-            connector = getattr(self, "_connect", None)
-            if connector is not None:
-                closer = getattr(connector, "close", None)
-                if callable(closer):
-                    try:
-                        closer()
-                    except Exception:  # noqa: BLE001
-                        pass
+            # An injected connector (``connect`` parameter) may be shared across
+            # multiple Store instances — closing it here would blank the key
+            # pragma and break the surviving stores' subsequent _open_connection()
+            # calls (verified backups, secure-erasure helpers). The injector
+            # owns the lifecycle, so we never close what we didn't create.
+            # When self._connect is None, Store opened its own stdlib sqlite3
+            # connection above; no connector object exists to clean up.
             finalizer.detach()
 
     def __enter__(self) -> "Store":
