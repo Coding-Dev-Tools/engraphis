@@ -1065,7 +1065,7 @@ def _parse_origins(raw: str, port: int = 8700) -> list:
             continue
         if not (origin.startswith("http://") or origin.startswith("https://")):
             print(
-                "[engraphis] CORS origin rejected (missing scheme): %r" % token.strip(),
+                "[engraphis] CORS origin rejected (must use http:// or https://)",
                 file=sys.stderr,
             )
             continue

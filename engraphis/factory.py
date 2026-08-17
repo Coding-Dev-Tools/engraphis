@@ -148,7 +148,9 @@ def create_memory_engine(
         )
         if graph is not None:
             owned.append(graph)
-        supervisor = get_retention_supervisor(retention_supervisor)
+        supervisor = get_retention_supervisor(
+            retention_supervisor, require_exact=require_exact_backends,
+        )
         if supervisor is not None:
             owned.append(supervisor)
 
