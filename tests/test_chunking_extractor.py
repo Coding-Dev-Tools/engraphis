@@ -36,6 +36,27 @@ def test_factory_selects_chunker_and_reads_env(monkeypatch):
     assert ex.target_tokens == 77 and ex.overlap_tokens == 9 and ex.max_chunks == 5
 
 
+@pytest.mark.parametrize("kind", ["llm", "llm_structured"])
+def test_exact_llm_extractor_rejects_missing_credentials(monkeypatch, kind):
+    closed = []
+
+    class FakeLLMClient:
+        api_key = ""
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "engraphis.llm.client",
+        types.SimpleNamespace(LLMClient=FakeLLMClient),
+    )
+
+    with pytest.raises(RuntimeError, match="ENGRAPHIS_LLM_API_KEY"):
+        get_extractor(kind, require_exact=True)
+    assert closed == [True]
+
+
 def test_factory_loads_explicit_pinned_reader_tokenizer(monkeypatch):
     requests = []
 

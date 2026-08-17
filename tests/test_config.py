@@ -220,6 +220,17 @@ def test_customer_relay_url_is_not_rewritten():
     url = "https://relay.customer.example/team/"
     assert config.canonicalize_relay_url(url) == url.rstrip("/")
 
+
+def test_invalid_relay_url_error_does_not_echo_credentials(monkeypatch):
+    secret_url = "ftp://relay-user:relay-token@example.test"
+    monkeypatch.setenv("ENGRAPHIS_RELAY_URL", secret_url)
+
+    with pytest.raises(ValueError) as caught:
+        Settings()
+
+    assert secret_url not in str(caught.value)
+    assert "relay-token" not in str(caught.value)
+
 def test_invalid_service_mode_exits_process(monkeypatch):
     """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
     monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")

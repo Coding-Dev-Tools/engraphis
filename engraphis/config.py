@@ -1022,7 +1022,7 @@ class Settings:
             )
         if self.relay_url and not self.relay_url.startswith(("http://", "https://")):
             raise ValueError(
-                f"ENGRAPHIS_RELAY_URL must start with http:// or https://, got {self.relay_url!r}"
+                "ENGRAPHIS_RELAY_URL must start with http:// or https://"
             )
 
 

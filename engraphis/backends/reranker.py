@@ -114,10 +114,10 @@ def get_reranker(
             # paths, and model identifiers. Keep diagnostics actionable but redacted.
             if require_exact:
                 raise RuntimeError(
-                    f"Configured cross-encoder reranker {model_name!r} is unavailable "
+                    f"Configured cross-encoder reranker is unavailable "
                     f"({type(exc).__name__}) and require_exact_backends=True prevents "
                     f"fallback to identity reranker"
-                ) from exc
+                ) from None
             logger.warning(
                 "Configured cross-encoder reranker unavailable (%s); using identity reranker",
                 type(exc).__name__,

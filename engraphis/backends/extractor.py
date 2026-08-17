@@ -848,31 +848,51 @@ def get_extractor(
             token_counter_identity=token_counter_identity,
         )
     if kind == "llm_structured":
+        created_client = False
         if llm is None:
             try:
                 from engraphis.llm.client import LLMClient
                 llm = LLMClient()
+                created_client = True
             except Exception as exc:
                 if require_exact:
                     raise RuntimeError(
                         f"Configured extractor 'llm_structured' requires LLM client but "
                         f"initialization failed ({type(exc).__name__}) and "
                         f"require_exact_backends=True prevents fallback to passthrough"
-                    ) from exc
+                    ) from None
                 return PassthroughExtractor(fallback_from=kind)
+        if require_exact and created_client and not getattr(llm, "api_key", ""):
+            close = getattr(llm, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError(
+                "Configured extractor 'llm_structured' requires "
+                "ENGRAPHIS_LLM_API_KEY when require_exact_backends=True"
+            )
         return StructuredLLMExtractor(llm)
     if kind != "llm":
         return PassthroughExtractor()
+    created_client = False
     if llm is None:
         try:
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
+            created_client = True
         except Exception as exc:
             if require_exact:
                 raise RuntimeError(
                     f"Configured extractor 'llm' requires LLM client but initialization "
                     f"failed ({type(exc).__name__}) and require_exact_backends=True "
                     f"prevents fallback to passthrough"
-                ) from exc
+                ) from None
             return PassthroughExtractor(fallback_from=kind)
+    if require_exact and created_client and not getattr(llm, "api_key", ""):
+        close = getattr(llm, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(
+            "Configured extractor 'llm' requires ENGRAPHIS_LLM_API_KEY "
+            "when require_exact_backends=True"
+        )
     return LLMExtractor(llm)
