@@ -1225,23 +1225,28 @@ class MemoryService:
                     f"{len(alive)} graph index worker(s) did not stop before shutdown"
                 )
 
-            close_engine = getattr(self.engine, "close", None)
-            if callable(close_engine):
-                close_engine()
-            else:
-                self.store.close()
-            # Close the encrypted connector we created (if any) so the SQLCipher
-            # key pragma is cleared from memory. Injected connectors are owned by
-            # the caller and must not be closed here.
-            connector = self._owned_connector
-            if connector is not None:
-                close_conn = getattr(connector, "close", None)
-                if callable(close_conn):
-                    try:
-                        close_conn()
-                    except Exception:  # noqa: BLE001
-                        pass
-            self._closed = True
+            # The owned connector must be closed even when engine shutdown raises
+            # (e.g. a backend cleanup failure). try/finally guarantees the key
+            # pragma is cleared regardless of the engine close path.
+            try:
+                close_engine = getattr(self.engine, "close", None)
+                if callable(close_engine):
+                    close_engine()
+                else:
+                    self.store.close()
+            finally:
+                # Close the encrypted connector we created (if any) so the SQLCipher
+                # key pragma is cleared from memory. Injected connectors are owned
+                # by the caller and must not be closed here.
+                connector = self._owned_connector
+                if connector is not None:
+                    close_conn = getattr(connector, "close", None)
+                    if callable(close_conn):
+                        try:
+                            close_conn()
+                        except Exception:  # noqa: BLE001
+                            pass
+                self._closed = True
 
     def _graph_scene_revision(self) -> tuple[int, int, int]:
         row = self.store.conn.execute("PRAGMA data_version").fetchone()
