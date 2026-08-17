@@ -3138,6 +3138,9 @@
       const destroyCandidate = () => {
         if (!candidateEngine) {
           candidateOverlay = null;
+          if (candidateHost && candidateHost.parentNode) {
+            candidateHost.remove();
+          }
           candidateHost = null;
           return;
         }
