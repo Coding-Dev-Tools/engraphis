@@ -456,6 +456,7 @@ console.log(JSON.stringify({{ initial, relayout, reheated }}));
 def test_ledger_restores_the_committed_renderer_after_post_readiness_stale_exit():
     ledger = LEDGER.read_text(encoding="utf-8")
     assert "destroyCandidate();\n            restoreCommittedRenderer();\n            return;" in ledger
+    assert "destroyCandidate();\n          restoreCommittedRenderer();\n          return;" in ledger
 
 
 def test_all_renderer_bounds_camera_work_and_exposes_readiness():
