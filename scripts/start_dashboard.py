@@ -192,17 +192,13 @@ def _reuse_or_report_occupied_port(
 
 def _startup_error(exc: BaseException, db: str) -> str:
     if isinstance(exc, ValueError):
-        # Config validation errors should be actionable and not echo sensitive values
-        error_msg = str(exc)
-        if "trusted config" in error_msg or "environment variable" in error_msg.lower():
-            return (
-                f"Configuration error: {error_msg}. "
-                f"Check your config file at {db.rsplit('/', 1)[0]}/.engraphis/config.env "
-                f"and environment variables."
-            )
-        # Unknown ValueError from an optional loader (e.g. AutoTokenizer,
-        # embed-model probe) can embed configured paths or endpoint URLs.
-        # Emit a value-free diagnostic; the operator can run engraphis-init
+        # Any ValueError from dashboard construction can embed configured paths,
+        # model names, or endpoint URLs (e.g. AutoTokenizer.from_pretrained,
+        # embed-model probes, third-party config loaders). Substring heuristics
+        # like "trusted config" are themselves a leak vector: a third-party
+        # library raising ValueError("environment variable failure loading
+        # C:/tenant/private/...") would pass the check. Emit a value-free
+        # diagnostic unconditionally; the operator can run engraphis-init
         # --check for the full detail.
         return (
             f"Configuration error ({type(exc).__name__}). "
