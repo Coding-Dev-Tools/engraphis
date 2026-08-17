@@ -2810,19 +2810,22 @@ def engraphis_conflict_review(
 # The standard module export and dashboard mount are the zero-configuration Smart surface.
 mcp = smart_mcp
 
+def _eager_exact_backend_check() -> None:
+    """Construct the service eagerly when exact mode is enabled.
 
-def main() -> None:
-    """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio.
-
-    When ``ENGRAPHIS_REQUIRE_EXACT_BACKENDS=true``, the service is constructed
-    eagerly so a missing model, credential, or retention supervisor fails the
-    process before the transport accepts traffic. Without this, the lazy
-    ``service()`` factory would surface the same failure only on the first
-    tool invocation — after the agent host has already committed to talking
-    to us — contradicting the documented startup-failure contract.
+    Every MCP launcher (stdio, HTTP, classic) calls this before accepting
+    traffic so a missing model, credential, or retention supervisor fails
+    the process immediately — matching the documented startup-failure
+    contract. Without this, the lazy ``service()`` factory surfaces the
+    same failure only on the first tool invocation.
     """
     if bool(getattr(settings, "require_exact_backends", False)):
         service()
+
+
+def main() -> None:
+    """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
+    _eager_exact_backend_check()
     mcp.run()
 
 

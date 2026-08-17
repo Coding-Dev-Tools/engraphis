@@ -186,7 +186,7 @@ def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
 
     smart_server = server()
     classic_server = server()
-    fake_module = SimpleNamespace(mcp=smart_server, classic_mcp=classic_server)
+    fake_module = SimpleNamespace(mcp=smart_server, classic_mcp=classic_server, _eager_exact_backend_check=lambda: None)
     monkeypatch.setitem(sys.modules, "engraphis.mcp_server", fake_module)
     monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
 

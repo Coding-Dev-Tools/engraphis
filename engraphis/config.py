@@ -1028,6 +1028,18 @@ class Settings:
             raise ValueError(
                 "ENGRAPHIS_RELAY_URL must start with http:// or https://"
             )
+        if self.require_exact_backends:
+            # _parse_vector_backend silently replaces typos with 'numpy' so the
+            # default path keeps working. In exact mode that hides a configuration
+            # error; re-check the raw env value against the known set and refuse.
+            raw_vector = _env("ENGRAPHIS_VECTOR_BACKEND", "auto")
+            normalized_vector = (raw_vector or "").strip().lower()
+            if normalized_vector and normalized_vector not in {"numpy", "sqlite-vec", "auto"}:
+                raise ValueError(
+                    "Configured vector backend selector is not recognized and "
+                    "require_exact_backends=True prevents silent fallback to numpy "
+                    "(valid: numpy, sqlite-vec, auto)"
+                )
 
 
 def _parse_headers(raw: str) -> dict:
