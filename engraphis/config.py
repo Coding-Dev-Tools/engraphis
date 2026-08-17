@@ -63,7 +63,7 @@ def trusted_env_path() -> Path:
 def _trusted_env_syntax_error(line_number: int) -> ValueError:
     """Return a value-free parse error so configuration secrets are never echoed."""
     return ValueError(
-        f"trusted config at {_CONFIG_ENV_PATH} contains invalid syntax on line {line_number}"
+        f"trusted config file contains invalid syntax on line {line_number}"
     )
 
 
