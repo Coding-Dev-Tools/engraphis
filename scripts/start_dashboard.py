@@ -242,8 +242,14 @@ def main(argv=None) -> None:
         _ = _config.settings
     except ValueError as exc:
         sys.exit(f"Error: Configuration validation failed: {exc}\n")
-    except Exception as exc:
-        sys.exit(f"Error: Failed to load configuration: {type(exc).__name__}: {exc}\n")
+    except Exception as exc:  # noqa: BLE001 - never echo config paths or values
+        # UnsafeStateFile and other OSError subclasses can embed the configured
+        # ENGRAPHIS_ENV_FILE path; emit a value-free diagnostic so tenant-identifying
+        # or secret-bearing paths never reach service logs.
+        sys.exit(
+            f"Error: Failed to load configuration ({type(exc).__name__}). "
+            "Run engraphis-init --check for diagnostics.\n"
+        )
 
     ap = argparse.ArgumentParser(description="Start the Engraphis WebUI.")
     ap.add_argument("--host", default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"),
