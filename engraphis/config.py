@@ -1024,7 +1024,7 @@ class Settings:
             raise ValueError(
                 f"ENGRAPHIS_EMBED_DIM must be positive or 0 (for None), got {self.embed_dim}"
             )
-        if self.relay_url and not self.relay_url.startswith(("http://", "https://")):
+        if self.relay_url and not self.relay_url.lower().startswith(("http://", "https://")):
             raise ValueError(
                 "ENGRAPHIS_RELAY_URL must start with http:// or https://"
             )

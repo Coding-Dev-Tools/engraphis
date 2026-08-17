@@ -2812,7 +2812,17 @@ mcp = smart_mcp
 
 
 def main() -> None:
-    """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
+    """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio.
+
+    When ``ENGRAPHIS_REQUIRE_EXACT_BACKENDS=true``, the service is constructed
+    eagerly so a missing model, credential, or retention supervisor fails the
+    process before the transport accepts traffic. Without this, the lazy
+    ``service()`` factory would surface the same failure only on the first
+    tool invocation — after the agent host has already committed to talking
+    to us — contradicting the documented startup-failure contract.
+    """
+    if bool(getattr(settings, "require_exact_backends", False)):
+        service()
     mcp.run()
 
 
