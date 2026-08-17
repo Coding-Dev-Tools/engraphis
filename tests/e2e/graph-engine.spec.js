@@ -3192,13 +3192,12 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
   // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
-  // the central field and inward convergence grow with the Galaxy setting.
+  // the central field grows with the Galaxy setting; forced inward convergence is disabled so
+  // stable orbits are not collapsed into the black hole.
   expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
-  expect(physicalField.densityFactors[1]).toBeLessThan(physicalField.densityFactors[0]);
-  expect(physicalField.densityFactors[2]).toBeCloseTo(0.75 ** 0.68, 12);
-  expect(physicalField.densityFactors[3]).toBeCloseTo(
-    0.75 ** (11.430769230769231 * 0.68), 12,
-  );
+  expect(physicalField.densityFactors[1]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[2]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[3]).toBeCloseTo(1, 12);
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
     // Updating gravity alters carrier support, never teleports a solar system inward.

@@ -3198,6 +3198,30 @@ def test_graph_analysis_candidate_limit_fails_bounded(monkeypatch):
         service.graph_scene(workspace="acme")
 
 
+def test_graph_scene_all_profile_filters_entity_types_before_candidate_cap(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    person_a = service.store.upsert_entity(Node(
+        id="", name="Person A", ntype="person", workspace_id=workspace_id,
+    ))
+    person_b = service.store.upsert_entity(Node(
+        id="", name="Person B", ntype="person", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_people", src=person_a, dst=person_b, relation="knows",
+        workspace_id=workspace_id,
+    ))
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ALL_NODES", 3)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False, entity_types=["concept"],
+    )
+
+    assert len(scene["nodes"]) == 3
+    assert {node["label"] for node in scene["nodes"]} == {"Alpha", "Beta", "Gamma"}
+
+
 def test_graph_route_bounds_csv_filter_cardinality():
     service, _alpha, _beta, _gamma = _seed_service()
     app = FastAPI()
