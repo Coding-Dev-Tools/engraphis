@@ -1018,23 +1018,25 @@ class Settings:
             raise ValueError("ENGRAPHIS_HOST must be a non-empty hostname or IP address")
         if not (1 <= self.port <= 65535):
             raise ValueError(
-                f"ENGRAPHIS_PORT must be between 1 and 65535, got {self.port}"
+                "ENGRAPHIS_PORT must be between 1 and 65535"
             )
         if self.embed_dim is not None and self.embed_dim <= 0:
             raise ValueError(
-                f"ENGRAPHIS_EMBED_DIM must be positive or 0 (for None), got {self.embed_dim}"
+                "ENGRAPHIS_EMBED_DIM must be positive or 0 (for None)"
             )
         if self.relay_url and not self.relay_url.lower().startswith(("http://", "https://")):
             raise ValueError(
                 "ENGRAPHIS_RELAY_URL must start with http:// or https://"
             )
         if self.require_exact_backends:
-            # _parse_vector_backend silently replaces typos with 'numpy' so the
-            # default path keeps working. In exact mode that hides a configuration
-            # error; re-check the raw env value against the known set and refuse.
+            # _parse_vector_backend silently replaces typos (and blank values)
+            # with 'numpy' so the default path keeps working. In exact mode
+            # that hides a configuration error; re-check the raw env value
+            # against the known set and refuse — including blank/whitespace,
+            # which would otherwise pass the truthiness guard below.
             raw_vector = _env("ENGRAPHIS_VECTOR_BACKEND", "auto")
             normalized_vector = (raw_vector or "").strip().lower()
-            if normalized_vector and normalized_vector not in {"numpy", "sqlite-vec", "auto"}:
+            if normalized_vector not in {"numpy", "sqlite-vec", "auto"}:
                 raise ValueError(
                     "Configured vector backend selector is not recognized and "
                     "require_exact_backends=True prevents silent fallback to numpy "
