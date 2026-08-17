@@ -1340,6 +1340,15 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(repoFilter).toHaveValue('agent-memory');
   await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
+  // Clearing the filter schedules a debounced scene reload (250ms + fetch).
+  // Wait for that request so the DOM reflects the unfiltered scene before
+  // the assertion, rather than racing against the in-flight reload from
+  // the preceding 'Reload data' click.
+  await page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && !url.searchParams.get('repo');
+  });
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   await page.getByRole('tab', { name: 'Analyse' }).click();
