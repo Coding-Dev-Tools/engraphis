@@ -329,9 +329,9 @@ def get_embedder(
             LAST_EMBEDDER_ERROR = error_kind
             if require_exact:
                 raise RuntimeError(
-                    f"Configured semantic embedder {model_name!r} is unavailable ({error_kind}) "
+                    f"Configured semantic embedder is unavailable ({error_kind}) "
                     f"and require_exact_backends=True prevents fallback to deterministic mode"
-                ) from exc
+                ) from None
             log = logging.getLogger("engraphis")
             emit = log.info if isinstance(exc, ModuleNotFoundError) else log.warning
             emit(
