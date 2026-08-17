@@ -8156,10 +8156,32 @@ class MemoryService:
         if lower_time is not None and upper_time is not None and lower_time > upper_time:
             raise ValidationError("time_from must be less than or equal to time_to")
 
-        # Classify public endpoint visibility before applying the entity candidate cap.
-        # A repository filter scopes the expensive support join; the endpoint-only scan
-        # below still preserves workspace-wide private-edge classification.
+        # Classify public endpoint visibility before applying the edge candidate cap.
+        # Build the same repository/time/type candidate relation used by the later entity
+        # query so unrelated repository edges cannot consume the selected scene's budget.
         visibility_sql = (
+            "WITH visibility_candidates AS ("
+            "SELECT selected_entity.id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
+        )
+        visibility_params: list[Any] = [wid]
+        if repo_id:
+            visibility_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            visibility_params.append(repo_id)
+        visibility_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        visibility_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            if clean_types:
+                marks = ",".join("?" for _ in clean_types)
+                visibility_sql += f"AND selected_entity.etype IN ({marks}) "
+                visibility_params.extend(clean_types)
+        visibility_sql += (
+            ") "
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
             "WHEN visibility_support.edge_id IS NULL THEN 1 "
@@ -8167,13 +8189,17 @@ class MemoryService:
             "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
             "ELSE 0 END) AS public_edge "
             "FROM edges visibility_edge "
+            "JOIN visibility_candidates visibility_src "
+            "ON visibility_src.id=visibility_edge.src "
+            "JOIN visibility_candidates visibility_dst "
+            "ON visibility_dst.id=visibility_edge.dst "
             "LEFT JOIN edge_supports visibility_support "
             "ON visibility_support.edge_id=visibility_edge.id "
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
         )
-        visibility_params: list[Any] = [wid]
+        visibility_params.append(wid)
         if repo_id:
             visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
             visibility_params.append(repo_id)
