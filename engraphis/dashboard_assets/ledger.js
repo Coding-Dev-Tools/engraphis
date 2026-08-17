@@ -3315,6 +3315,7 @@
           await Promise.race([candidateEngine.whenReady(), timeoutPromise]);
           if (!isCurrentGraphLoad(request)) {
             destroyCandidate();
+            restoreCommittedRenderer();
             return;
           }
         }

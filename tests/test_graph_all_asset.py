@@ -417,7 +417,7 @@ def test_ledger_routes_every_shared_sidebar_control_to_the_dedicated_all_rendere
     assert 'id="graph-lod-note"' in markup
 
 
-def test_all_worker_preserves_server_coordinates_for_galaxy_relayout_and_reheat():
+def test_all_worker_refines_authored_galaxy_coordinates_with_force_controls():
     source = json.dumps(WORKER.read_text(encoding="utf-8"))
     payload = json.dumps({
         "nodes": [
@@ -432,10 +432,12 @@ const context = {{ self: {{ postMessage: message => messages.push(message) }} }}
 vm.runInNewContext({source}, context);
 const send = data => context.self.onmessage({{ data }});
 const latest = type => messages.filter(message => message.type === type).at(-1);
-send({{ type: 'settings', settings: {{ mode: 'galaxy' }}, relayout: false }});
-send({{ type: 'prepare', payload: {payload} }});
-const initial = Array.from(latest('ready').positions);
-send({{ type: 'settings', settings: {{ gravity: 400, repel: 120 }}, relayout: true }});
+    send({{ type: 'settings', settings: {{ mode: 'galaxy' }}, relayout: false }});
+    send({{ type: 'prepare', payload: {payload} }});
+    const initial = Array.from(latest('ready').positions);
+send({{ type: 'settings', settings: {{ gravity: 400, repel: 120, link: 40,
+  gravitationalConstant: 2, blackHoleMass: 2, localGravitationalConstant: 2,
+  damping: 0, springStiffness: 2 }}, relayout: true }});
 const relayout = Array.from(latest('layout').positions);
 send({{ type: 'reheat' }});
 const reheated = Array.from(latest('layout').positions);
@@ -447,8 +449,13 @@ console.log(JSON.stringify({{ initial, relayout, reheated }}));
     report = json.loads(result.stdout)
     expected = [11.25, -7.5, 83.75, 42.5]
     assert report["initial"] == expected
-    assert report["relayout"] == expected
-    assert report["reheated"] == expected
+    assert report["relayout"] != expected
+    assert report["reheated"] == report["relayout"]
+
+
+def test_ledger_restores_the_committed_renderer_after_post_readiness_stale_exit():
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "destroyCandidate();\n            restoreCommittedRenderer();\n            return;" in ledger
 
 
 def test_all_renderer_bounds_camera_work_and_exposes_readiness():

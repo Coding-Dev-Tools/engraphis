@@ -91,22 +91,12 @@
   function applyLayout(notify = false, fit = false) {
     if (!state.basePositions.length) return;
     const settings = state.layoutSettings || {}, mode = key(settings.mode || 'communities');
-    /* Galaxy coordinates and hierarchy are server-authored. Full-mode LOD may cull and paint
-       them, but it must not run a second client layout or spiral transform over that scene. */
-    if (mode === 'galaxy') {
-      state.positions = state.basePositions.slice();
-      rebuildGrid();
-      state.lastCameraKey = '';
-      if (notify) {
-        const positions = state.positions.slice();
-        self.postMessage(
-          { type: 'layout', positions, bounds: makeBounds(state.positions), fit },
-          [positions.buffer],
-        );
-      }
-      return;
-    }
-    const repel = Math.max(0, finite(settings.repel, 48)), link = Math.max(1, finite(settings.link, 16));
+    const galaxyMode = mode === 'galaxy';
+    /* Galaxy coordinates and hierarchy are server-authored. Each bounded refinement starts
+       from those coordinates, preserving the authored scene while allowing the shared force
+       controls to make a deterministic, hierarchy-preserving adjustment. */
+    const repel = Math.max(0, finite(settings.repel, galaxyMode ? 60 : 48));
+    const link = Math.max(1, finite(settings.link, galaxyMode ? 8 : 16));
     const gravity = Math.max(0, finite(settings.gravity, 48));
     const galacticGravity = Math.max(0, finite(settings.gravitationalConstant, 1));
     const blackHoleMass = Math.max(0.1, finite(settings.blackHoleMass, 1));
@@ -117,19 +107,32 @@
     /* The All profile stays deterministic and worker-only, but its controls are real forces:
        repel expands the initial envelope, link is the spring target below, and gravity pulls
        the settled result toward the global centre. The bounded passes are O(nodes + links). */
-    const repelSpread = 0.58 + repel / 72;
-    const gravityTightening = 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
-    const spaceSpread = 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
-    const spread = modeScale * clamp(repelSpread * gravityTightening * spaceSpread, 0.42, 3.2);
+    /* Galaxy's server coordinates are the neutral point for the full-node profile. Relative
+       controls keep the authored scene unchanged at the default preset while making every
+       exposed force a bounded refinement around that hierarchy. */
+    const repelSpread = galaxyMode
+      ? (0.58 + repel / 72) / (0.58 + 60 / 72)
+      : 0.58 + repel / 72;
+    const gravityTightening = galaxyMode
+      ? (0.72 + 48 / 128 + 0.05)
+        / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05)
+      : 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
+    const spaceSpread = galaxyMode
+      ? (0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035)
+        / (0.86 + 0.07 - 0.035)
+      : 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
+    const linkSpread = galaxyMode ? 1 + (link - 8) * 0.01 : 1;
+    const spread = (galaxyMode ? 1 : modeScale)
+      * clamp(repelSpread * gravityTightening * spaceSpread * linkSpread, 0.42, 3.2);
     const baseBounds = makeBounds(state.basePositions), centerX = (baseBounds.minX + baseBounds.maxX) / 2, centerY = (baseBounds.minY + baseBounds.maxY) / 2;
     state.positions = new Float32Array(state.basePositions.length);
     for (let index = 0; index < state.basePositions.length; index += 2) {
       let x = state.basePositions[index] - centerX, y = state.basePositions[index + 1] - centerY;
       if (mode === 'radial') { const angle = Math.atan2(y, x), radius = Math.hypot(x, y) * spread; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius; }
       else if (mode === 'constellation') { x *= spread; y = y * spread * 0.72 + Math.sin(index * GOLDEN_ANGLE + state.layoutRevision) * 8; }
-      else if (mode === 'galaxy') { const radius = Math.hypot(x, y) * spread, angle = Math.atan2(y, x) + radius * 0.0007; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius * 0.72; }
+      else if (mode === 'galaxy') { x *= spread; y *= spread; }
       else { x *= spread; y *= spread; }
-      if (state.layoutRevision) {
+      if (state.layoutRevision && !galaxyMode) {
         const phase = (index / 2 + 1) * GOLDEN_ANGLE + state.layoutRevision * 0.73;
         const jitter = Math.min(10, 1.5 + link * 0.08);
         x += Math.cos(phase) * jitter; y += Math.sin(phase) * jitter;
@@ -138,8 +141,10 @@
     }
     if (state.edgeSources.length) {
       const nodeCount = state.positions.length / 2;
-      const desired = clamp(10 + link * 1.25, 14, 112);
-      const springForce = clamp(0.025 + spring * 0.018, 0.025, 0.2)
+      const desired = clamp((galaxyMode ? 20 : 10) + link * 1.25
+        - (galaxyMode ? 8 * 1.25 : 0), 14, 112);
+      const springForce = clamp((galaxyMode ? Math.abs(spring - 1) * 0.018 : 0.025 + spring * 0.018),
+        galaxyMode ? 0 : 0.025, 0.2)
         * (mode === 'compact' ? 1.22 : mode === 'original' ? 0.72 : 1);
       const settle = 1 / (1 + Math.min(12, damping) * 0.18);
       const passes = nodeCount > 12000 ? 1 : 2;
@@ -158,7 +163,9 @@
           delta[target * 2] -= dx * pull; delta[target * 2 + 1] -= dy * pull;
           counts[source] += 1; counts[target] += 1;
         }
-        const centrePull = clamp((gravity / 400 + galacticGravity * blackHoleMass * 0.035) * 0.05, 0, 0.075);
+        const centrePull = clamp((galaxyMode
+          ? (Math.abs(gravity - 48) / 400 + Math.abs(galacticGravity * blackHoleMass - 1) * 0.035)
+          : gravity / 400 + galacticGravity * blackHoleMass * 0.035) * 0.05, 0, 0.075);
         for (let index = 0; index < nodeCount; index += 1) {
           const offset = index * 2, divisor = Math.max(1, counts[index]);
           const x = state.positions[offset], y = state.positions[offset + 1];
