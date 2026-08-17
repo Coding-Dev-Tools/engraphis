@@ -865,7 +865,10 @@ def get_extractor(
         if require_exact and created_client and not getattr(llm, "api_key", ""):
             close = getattr(llm, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - preserve the sanitized diagnostic
+                    pass
             raise RuntimeError(
                 "Configured extractor 'llm_structured' requires "
                 "ENGRAPHIS_LLM_API_KEY when require_exact_backends=True"
@@ -890,7 +893,10 @@ def get_extractor(
     if require_exact and created_client and not getattr(llm, "api_key", ""):
         close = getattr(llm, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - preserve the sanitized diagnostic
+                pass
         raise RuntimeError(
             "Configured extractor 'llm' requires ENGRAPHIS_LLM_API_KEY "
             "when require_exact_backends=True"
