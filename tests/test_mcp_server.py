@@ -261,6 +261,26 @@ def _module_with_memory_db(monkeypatch):
     return srv
 
 
+def test_lazy_mcp_factory_forwards_exact_backend_mode(monkeypatch):
+    import engraphis.mcp_server as srv
+
+    captured = {}
+
+    class FakeService:
+        pass
+
+    def fake_create(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeService()
+
+    monkeypatch.setattr(srv.MemoryService, "create", fake_create)
+    monkeypatch.setattr(srv, "_service", None)
+    monkeypatch.setattr(srv.settings, "require_exact_backends", True, raising=False)
+
+    assert isinstance(srv.service(), FakeService)
+    assert captured["require_exact_backends"] is True
+
+
 def test_link_symbol_retry_is_stable_and_truthfully_idempotent(monkeypatch):
     import asyncio
 

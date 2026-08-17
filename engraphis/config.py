@@ -701,9 +701,8 @@ def _parse_vector_backend(value: str) -> str:
     if normalized in {"numpy", "sqlite-vec", "auto"}:
         return normalized
     _logger.warning(
-        "ENGRAPHIS_VECTOR_BACKEND contains unsupported value %r; "
-        "using default 'numpy' (supported: numpy, sqlite-vec, auto)",
-        value,
+        "ENGRAPHIS_VECTOR_BACKEND contains an unsupported value; "
+        "using default 'numpy' (supported: numpy, sqlite-vec, auto)"
     )
     return "numpy"
 
@@ -735,8 +734,8 @@ def _env_int(key: str, default: int) -> int:
         return int(raw.strip())
     except (TypeError, ValueError):
         _logger.warning(
-            "Environment variable %s contains invalid integer value %r; using default %d",
-            key, raw, default
+            "Environment variable %s contains an invalid integer; using the default %d",
+            key, default
         )
         return default
 
@@ -749,14 +748,14 @@ def _env_float(key: str, default: float) -> float:
         value = float(raw.strip())
     except (TypeError, ValueError):
         _logger.warning(
-            "Environment variable %s contains invalid float value %r; using default %f",
-            key, raw, default
+            "Environment variable %s contains an invalid float; using the default %f",
+            key, default
         )
         return default
     if not math.isfinite(value):
         _logger.warning(
-            "Environment variable %s contains non-finite value %r; using default %f",
-            key, raw, default
+            "Environment variable %s contains a non-finite value; using the default %f",
+            key, default
         )
         return default
     return value
@@ -776,8 +775,8 @@ def _env_bool(key: str, default: bool) -> bool:
     if normalized in _FALSY_ENV:
         return False
     _logger.warning(
-        "Environment variable %s contains unrecognized boolean value %r; using default %s",
-        key, raw, default
+        "Environment variable %s contains an unrecognized boolean; using the default %s",
+        key, default
     )
     return default
 
@@ -900,6 +899,11 @@ class Settings:
     # 40-hex commits before their optional loaders import or contact the Hub. Local paths remain valid.
     require_immutable_models: bool = field(
         default_factory=lambda: _env_bool("ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS", False)
+    )
+    # When enabled, configured optional backends fail startup instead of silently
+    # falling back to the deterministic local implementation.
+    require_exact_backends: bool = field(
+        default_factory=lambda: _env_bool("ENGRAPHIS_REQUIRE_EXACT_BACKENDS", False)
     )
     embed_dim: Optional[int] = field(
         default_factory=lambda: (
