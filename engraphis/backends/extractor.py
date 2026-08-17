@@ -808,6 +808,7 @@ def get_extractor(
     token_counter: Optional[Callable[[str], int]] = None,
     token_counter_identity: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
+    require_exact: bool = False,
 ) -> Extractor:
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
@@ -820,6 +821,10 @@ def get_extractor(
     settings. ``kind='llm_structured'`` returns a schema-validated extractor with
     entity/relation extraction. Anything else — including an LLM kind with no usable
     client — returns the offline passthrough.
+
+    Args:
+        require_exact: When True, raise an error if the configured LLM extractor cannot
+            be initialized instead of falling back to passthrough.
     """
     kind = (kind or "none").lower()
     if kind == "chunk":
@@ -847,7 +852,13 @@ def get_extractor(
             try:
                 from engraphis.llm.client import LLMClient
                 llm = LLMClient()
-            except Exception:
+            except Exception as exc:
+                if require_exact:
+                    raise RuntimeError(
+                        f"Configured extractor 'llm_structured' requires LLM client but "
+                        f"initialization failed ({type(exc).__name__}) and "
+                        f"require_exact_backends=True prevents fallback to passthrough"
+                    ) from exc
                 return PassthroughExtractor(fallback_from=kind)
         return StructuredLLMExtractor(llm)
     if kind != "llm":
@@ -856,6 +867,12 @@ def get_extractor(
         try:
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
-        except Exception:
+        except Exception as exc:
+            if require_exact:
+                raise RuntimeError(
+                    f"Configured extractor 'llm' requires LLM client but initialization "
+                    f"failed ({type(exc).__name__}) and require_exact_backends=True "
+                    f"prevents fallback to passthrough"
+                ) from exc
             return PassthroughExtractor(fallback_from=kind)
     return LLMExtractor(llm)

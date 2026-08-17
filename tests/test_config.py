@@ -348,7 +348,7 @@ def test_trusted_env_parser_supports_documented_values_without_interpolation() -
     ],
 )
 def test_trusted_env_parser_rejects_malformed_syntax_without_echoing_values(raw) -> None:
-    with pytest.raises(ValueError, match="trusted config contains invalid syntax") as caught:
+    with pytest.raises(ValueError, match=r"trusted config .* contains invalid syntax") as caught:
         config._parse_trusted_env(raw)
 
     assert "do-not-print" not in str(caught.value)

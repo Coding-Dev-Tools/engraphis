@@ -1087,3 +1087,90 @@ def test_receipt_tools(monkeypatch):
     assert verified["valid"] is True
     exported = json.loads(srv.engraphis_export_receipts(workspace="acme"))
     assert exported["verification"]["valid"] is True
+
+
+def test_remember_max_length_content_boundary(monkeypatch):
+    """Content at exactly the 100k char limit must succeed; one char over must fail."""
+    srv = _module_with_memory_db(monkeypatch)
+    max_content = "x" * 100_000
+    result = json.loads(srv.engraphis_remember(content=max_content, workspace="acme"))
+    assert result.get("stored") is True
+
+    over = "x" * 100_001
+    err = srv.engraphis_remember(content=over, workspace="acme")
+    assert err.startswith("Error:")
+
+
+def test_recall_empty_query_returns_error(monkeypatch):
+    """Empty or whitespace-only queries violate the min_length=1 constraint."""
+    srv = _module_with_memory_db(monkeypatch)
+    for query in ("", "   "):
+        err = srv.engraphis_recall(query=query, workspace="acme")
+        assert err.startswith("Error:")
+
+
+def test_grounded_recall_empty_query_returns_error_via_mcp(monkeypatch):
+    """A whitespace-only query is stripped to empty by the service layer, producing
+    a validation error rather than a hallucinated answer."""
+    srv = _module_with_memory_db(monkeypatch)
+    srv.engraphis_remember(content="Stored fact.", workspace="acme")
+    err = srv.engraphis_recall_grounded(query="   ", workspace="acme")
+    assert err.startswith("Error:")
+    assert "empty" in err.lower() or "query" in err.lower()
+
+
+def test_remember_invalid_scope_returns_actionable_error(monkeypatch):
+    """An unrecognized scope value must produce an actionable Error: string, not a crash."""
+    srv = _module_with_memory_db(monkeypatch)
+    err = srv.engraphis_remember(
+        content="fact", workspace="acme", scope="galactic",
+    )
+    assert err.startswith("Error:")
+    assert "scope" in err.lower() or "galactic" in err.lower()
+
+
+def test_remember_invalid_mtype_returns_actionable_error(monkeypatch):
+    """An unrecognized memory type must produce an actionable Error: string."""
+    srv = _module_with_memory_db(monkeypatch)
+    err = srv.engraphis_remember(
+        content="fact", workspace="acme", mtype="telepathic",
+    )
+    assert err.startswith("Error:")
+
+
+def test_smart_gateway_classifies_timeout_as_retryable(monkeypatch):
+    """TimeoutError and 'database is locked' exceptions map to E_RETRYABLE."""
+    from engraphis.mcp_server import _classify_gateway_exception
+    timeout_result = _classify_gateway_exception(TimeoutError("connection timed out"))
+    assert timeout_result.isError is True
+    text = timeout_result.content[0].text
+    parsed = json.loads(text)
+    assert parsed["error"]["code"] == "E_RETRYABLE"
+    assert parsed["error"]["retryable"] is True
+
+    locked_result = _classify_gateway_exception(RuntimeError("database is locked"))
+    locked_text = locked_result.content[0].text
+    locked_parsed = json.loads(locked_text)
+    assert locked_parsed["error"]["code"] == "E_RETRYABLE"
+
+
+def test_smart_gateway_classifies_validation_error_as_non_retryable(monkeypatch):
+    """ValidationError maps to E_VALIDATION (or E_NOT_FOUND) and is never retryable."""
+    from engraphis.mcp_server import _classify_gateway_exception
+    from engraphis.service import ValidationError
+    result = _classify_gateway_exception(ValidationError("content must not be empty"))
+    assert result.isError is True
+    parsed = json.loads(result.content[0].text)
+    assert parsed["error"]["code"] == "E_VALIDATION"
+    assert parsed["error"]["retryable"] is False
+    assert "content must not be empty" in parsed["error"]["message"]
+
+
+def test_smart_gateway_unknown_exception_never_leaks_internals(monkeypatch):
+    """Unknown exceptions produce a generic E_INTERNAL message without stack traces."""
+    from engraphis.mcp_server import _classify_gateway_exception
+    result = _classify_gateway_exception(RuntimeError("SECRET_API_KEY=abc123 /home/user/db"))
+    parsed = json.loads(result.content[0].text)
+    assert parsed["error"]["code"] == "E_INTERNAL"
+    assert "SECRET" not in parsed["error"]["message"]
+    assert "/home/user" not in parsed["error"]["message"]

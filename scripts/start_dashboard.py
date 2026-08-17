@@ -191,6 +191,16 @@ def _reuse_or_report_occupied_port(
 
 
 def _startup_error(exc: BaseException, db: str) -> str:
+    if isinstance(exc, ValueError):
+        # Config validation errors should be actionable and not echo sensitive values
+        error_msg = str(exc)
+        if "trusted config" in error_msg or "environment variable" in error_msg.lower():
+            return (
+                f"Configuration error: {error_msg}. "
+                f"Check your config file at {db.rsplit('/', 1)[0]}/.engraphis/config.env "
+                f"and environment variables."
+            )
+        return f"Configuration error: {error_msg}"
     if isinstance(exc, (ImportError, ModuleNotFoundError)):
         return ("The server extra is required: pip install \"engraphis[server]\""
                 " (needs Python 3.10+)")
@@ -209,7 +219,15 @@ def _startup_error(exc: BaseException, db: str) -> str:
             "writable SQLite file, then run engraphis-init --check." % db
         )
     if isinstance(exc, RuntimeError):
-        return str(exc)
+        # RuntimeErrors from factory include backend availability issues
+        error_msg = str(exc)
+        if "require_exact_backends" in error_msg or "unavailable" in error_msg:
+            return (
+                f"Backend initialization failed: {error_msg}. "
+                f"Either install the required dependencies or remove "
+                f"require_exact_backends=True from your configuration."
+            )
+        return error_msg
     return "Dashboard initialization failed. Run engraphis-init --check for diagnostics."
 
 
@@ -218,7 +236,14 @@ def main(argv=None) -> None:
     # a desktop/CLI launch can overwrite trusted embed-model, host, and port
     # values with built-in defaults before dashboard_app is imported, which can turn an
     # offline install or an existing workspace into an apparent startup failure.
-    from engraphis import config as _config  # noqa: F401  # loads trusted config once
+    try:
+        from engraphis import config as _config  # noqa: F401  # loads trusted config once
+        # Validate config eagerly so errors surface before we attempt to bind ports
+        _ = _config.settings
+    except ValueError as exc:
+        sys.exit(f"Error: Configuration validation failed: {exc}\n")
+    except Exception as exc:
+        sys.exit(f"Error: Failed to load configuration: {type(exc).__name__}: {exc}\n")
 
     ap = argparse.ArgumentParser(description="Start the Engraphis WebUI.")
     ap.add_argument("--host", default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"),

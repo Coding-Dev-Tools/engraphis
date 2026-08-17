@@ -6,6 +6,7 @@ entry point that delegates to this provider.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from engraphis.backends.codegraph import (
@@ -27,6 +28,8 @@ from engraphis.backends.retention import get_retention_supervisor
 from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.interfaces import GraphTraversalPolicy, QueryPlanner
 from engraphis.core.store import Store
+
+_logger = logging.getLogger("engraphis.factory")
 
 
 def _feed_graph(
@@ -89,8 +92,15 @@ def create_memory_engine(
     graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
     query_planner: Optional[QueryPlanner] = None,
     read_only: bool = False,
+    require_exact_backends: bool = False,
 ):
-    """Construct a ``MemoryEngine`` and transfer ownership of all resources to it."""
+    """Construct a ``MemoryEngine`` and transfer ownership of all resources to it.
+
+    Args:
+        require_exact_backends: When True, raise an error if any configured backend
+            is unavailable instead of falling back to degraded alternatives. Use this
+            for production deployments where silent degradation is unacceptable.
+    """
     if engine_cls is None:
         from engraphis.core.engine import MemoryEngine
 
@@ -104,6 +114,7 @@ def create_memory_engine(
             embed_dim,
             revision=embed_revision,
             require_immutable_models=require_immutable_models,
+            require_exact=require_exact_backends,
         )
         owned.append(embedder)
 
@@ -116,11 +127,13 @@ def create_memory_engine(
             rerank_model,
             revision=rerank_revision,
             require_immutable_models=require_immutable_models,
+            require_exact=require_exact_backends,
         )
         owned.append(reranker)
         extracted = get_extractor(
             extractor,
             require_immutable_models=require_immutable_models,
+            require_exact=require_exact_backends,
         )
         owned.append(extracted)
         if (
