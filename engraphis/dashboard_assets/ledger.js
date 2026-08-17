@@ -3120,10 +3120,21 @@
       });
       // Transactional candidate tracking: host/engine/overlay live here until commit.
       // destroyCandidate() is the single cleanup path for stale, error, and timeout outcomes.
+      const restoreCommittedRenderer = () => {
+        /* A newer request owns the committed renderer while it is replacing this one. Do not
+           thaw that renderer from a stale response; its own transaction will settle it. */
+        if (state.graphEngine !== oldEngine
+          || (state.graphLoadController && state.graphLoadController !== controller)) return;
+        if (oldEngine && typeof oldEngine.freeze === 'function') {
+          oldEngine.freeze(state.graphFrozen);
+        }
+        if (oldOverlay) oldOverlay.setEnabled(graphIsGalaxy());
+      };
       let candidateHost = null;
       let candidateEngine = null;
       let candidateOverlay = null;
       let candidateStats = null;
+      let candidateMetrics = null;
       const destroyCandidate = () => {
         if (!candidateEngine) {
           candidateOverlay = null;
@@ -3181,7 +3192,10 @@
           ]),
           timeoutPromise,
         ]);
-        if (!isCurrentGraphLoad(request)) return;
+        if (!isCurrentGraphLoad(request)) {
+          restoreCommittedRenderer();
+          return;
+        }
         if (payload && payload.error) throw new Error(String(payload.error));
         const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : payload;
         const data = {
@@ -3233,6 +3247,7 @@
           onMetrics: metrics => {
             if (state.graphEngine === candidateEngine
               && state.graphLoadRequest === request.id) graphMetricsChanged(metrics);
+            else if (state.graphLoadRequest === request.id) candidateMetrics = metrics;
           },
           onError: error => {
             if (state.graphEngine !== candidateEngine || !fullGraph
@@ -3337,6 +3352,7 @@
         // renderer transaction commits. Raw payload counts are wrong when a frozen renderer
         // has already applied repository, layer, ghost, or collapse visibility filters.
         graphStatsChanged(candidateStats || { nodes: data.nodes.length, links: data.links.length });
+        if (candidateMetrics) graphMetricsChanged(candidateMetrics);
         updateGraphLayerCounts(data, scene.layers || payload.layers);
       } catch (error) {
         if (!isCurrentGraphLoad(request)) {

@@ -8201,6 +8201,16 @@ class MemoryService:
             )
             touching_params.append(repo_id)
         touching_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        touching_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            if clean_types:
+                marks = ",".join("?" for _ in clean_types)
+                touching_sql += f"AND selected_entity.etype IN ({marks}) "
+                touching_params.extend(clean_types)
+        touching_sql += (
             "AND (EXISTS (SELECT 1 FROM edges touching_edge "
             "WHERE touching_edge.workspace_id=? "
             "AND touching_edge.src=selected_entity.id) "

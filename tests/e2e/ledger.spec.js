@@ -521,6 +521,41 @@ test('Ledger keeps authored Galaxy coordinates in the All-node renderer', async 
   await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
 });
 
+test('Ledger keeps the committed All-node renderer visible when a superseded load resolves', async ({ page }) => {
+  let releaseFirstScene;
+  let deferredAllScenes = 0;
+  await mockApi(page, {
+    deferGraphRequest: async requestUrl => {
+      if (requestUrl.searchParams.get('presentation') !== 'all') return;
+      deferredAllScenes += 1;
+      if (deferredAllScenes !== 1) return;
+      await new Promise(resolve => {
+        releaseFirstScene = resolve;
+      });
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'true');
+  await expect.poll(() => deferredAllScenes).toBe(1);
+
+  const supersedingLoad = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('presentation') === 'all'
+      && url.searchParams.get('repo') === 'agent-memory';
+  });
+  await page.locator('#graph-repo-filter').fill('agent-memory');
+  await supersedingLoad;
+  releaseFirstScene();
+
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('#graph-count')).toContainText('All nodes · LOD');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  await expect(page.locator('#graph-empty')).toBeHidden();
+});
+
 test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
   await mockApi(page);
   const rendererRequests = [];
