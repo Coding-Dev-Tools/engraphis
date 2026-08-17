@@ -170,6 +170,40 @@ def test_model_provenance_settings_read_environment_and_are_documented(monkeypat
     assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 
+def test_exact_backend_mode_reads_environment_and_is_documented(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_REQUIRE_EXACT_BACKENDS", "true")
+
+    configured = Settings()
+
+    assert configured.require_exact_backends is True
+    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_invalid_configuration_warnings_do_not_echo_values(monkeypatch, caplog):
+    secrets = {
+        "ENGRAPHIS_PORT": "port-secret",
+        "ENGRAPHIS_DECAY_HALFLIFE_DAYS": "float-secret",
+        "ENGRAPHIS_LLM_AUTO_EXTRACT": "bool-secret",
+        "ENGRAPHIS_VECTOR_BACKEND": "vector-secret",
+    }
+    for key, value in secrets.items():
+        monkeypatch.setenv(key, value)
+
+    with caplog.at_level("WARNING", logger="engraphis.config"):
+        configured = Settings()
+
+    assert configured.port == 8700
+    assert configured.decay_halflife_days == 7.0
+    assert configured.llm_auto_extract is False
+    assert configured.vector_backend == "numpy"
+    assert all(value not in caplog.text for value in secrets.values())
+
+
 def test_server_vector_backend_defaults_to_safe_auto(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_VECTOR_BACKEND", raising=False)
     assert Settings().vector_backend == "auto"
