@@ -231,6 +231,12 @@ def test_invalid_relay_url_error_does_not_echo_credentials(monkeypatch):
     assert secret_url not in str(caught.value)
     assert "relay-token" not in str(caught.value)
 
+
+def test_invalid_cors_origin_diagnostic_does_not_echo_credentials(monkeypatch, capsys):
+    config._parse_origins("ftp://cors-user:cors-token@example.test")
+
+    assert "cors-token" not in capsys.readouterr().err
+
 def test_invalid_service_mode_exits_process(monkeypatch):
     """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
     monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")

@@ -91,11 +91,32 @@ class LLMRetentionSupervisor:
         )
 
 
-def get_retention_supervisor(mode: str = "none") -> Optional[RetentionSupervisor]:
+def get_retention_supervisor(
+    mode: str = "none", *, require_exact: bool = False,
+) -> Optional[RetentionSupervisor]:
     """Return the configured supervisor, or ``None`` for deterministic-only writes."""
     name = str(mode or "none").strip().lower()
     if name in ("", "none", "off", "disabled"):
         return None
     if name == "llm":
+        if require_exact:
+            try:
+                from engraphis.llm.client import LLMClient
+                client = LLMClient()
+                try:
+                    if not client.api_key:
+                        raise RuntimeError(
+                            "retention supervisor requires ENGRAPHIS_LLM_API_KEY"
+                        )
+                finally:
+                    client.close()
+            except RuntimeError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - redact provider setup failures
+                raise RuntimeError(
+                    "configured retention supervisor is unavailable "
+                    f"({type(exc).__name__}) and require_exact_backends=True prevents "
+                    "deferred fallback"
+                ) from None
         return LLMRetentionSupervisor()
     raise ValueError("retention supervisor must be 'none' or 'llm'")

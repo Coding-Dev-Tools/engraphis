@@ -1335,7 +1335,8 @@ class MemoryService:
                graph_extractor: Optional[str] = None,
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
-               query_planner=None, read_only: bool = False) -> "MemoryService":
+               query_planner=None, read_only: bool = False,
+               require_exact_backends: bool = False) -> "MemoryService":
         database_path = str(db_path)
         physical_db_path = _physical_database_path(database_path)
         migration_allowed = (
@@ -1378,6 +1379,7 @@ class MemoryService:
             retention_supervisor=retention_supervisor, connect=connect,
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
+            require_exact_backends=require_exact_backends,
         )
         if migration_allowed:
             try:
