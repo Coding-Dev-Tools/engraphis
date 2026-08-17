@@ -3361,6 +3361,7 @@
       } catch (error) {
         if (!isCurrentGraphLoad(request)) {
           destroyCandidate();
+          restoreCommittedRenderer();
           return;
         }
         destroyCandidate();
