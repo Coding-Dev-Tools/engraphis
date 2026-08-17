@@ -3722,7 +3722,9 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
     expect(systems.finite).toBe(true);
 
     const envelope = await renderedSystemEnvelopeSnapshot(page);
-    expect(envelope.systems.length).toBeGreaterThan(0);
+    expect(envelope.systems.length).toBe(3);
+    expect(envelope.systems.every(system => system.members === 2)).toBe(true);
+    expect(envelope.systems.every(system => system.visible)).toBe(true);
     expect(envelope.finite).toBe(true);
     expect(envelope.overlaps).toBe(0);
   });
