@@ -3128,6 +3128,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   // The net projection can be slightly negative when the orbital tangent dominates the gentle
   // radial pull over a 120ms window. Participation in dragFollowers and bounded displacement
   // (<64) are the real invariants; the directional sign is not guaranteed.
+  expect(during.unlinkedTowardDrag).toBeGreaterThan(-2);
   expect(during.unrelatedMovement).toBeGreaterThan(0);
   expect(during.unrelatedMovement).toBeLessThan(64);
   expect(during.unrelatedVelocityChange).toBeLessThan(48);

@@ -20,6 +20,13 @@ try:  # Python 3.11+
 except ImportError:  # pragma: no cover - supported Python 3.9/3.10
     tomllib = None
 
+try:  # Prefer the installed packaging module when available.
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import InvalidVersion, Version
+except ImportError:  # pragma: no cover - fallback for environments without top-level packaging
+    from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from pip._vendor.packaging.version import InvalidVersion, Version
+
 
 FORMAT = "engraphis-release-evidence/3"
 PACKAGE = "engraphis"
@@ -251,68 +258,16 @@ def _parse_requirement(requirement: str) -> tuple[str, str | None]:
     return (name, specifier)
 
 
-def _version_tuple(v: str) -> tuple[int, ...]:
-    """Parse a version string into a comparable integer tuple."""
-    v = v.lstrip("vV")
-    parts: list[int] = []
-    for part in re.split(r"[.\-]", v):
-        m = re.match(r"^(\d+)", part)
-        if m:
-            parts.append(int(m.group(1)))
-        else:
-            break
-    return tuple(parts) if parts else (0,)
-
-
 def _version_satisfies(version: str, specifier: str) -> bool:
-    """Check if *version* satisfies a PEP 440 specifier (basic subset).
-
-    Supports ==, !=, >=, <=, >, <, ~= and comma-separated constraints.
-    Does NOT support wildcards (==1.*) or environment markers.
-    """
+    """Check if *version* satisfies a PEP 440 specifier."""
     if not specifier:
         return True
-    ver = _version_tuple(version)
-    for constraint in specifier.split(","):
-        constraint = constraint.strip()
-        if not constraint:
-            continue
-        m = re.match(r"^(~=|==|!=|>=|<=|>|<)\s*(.+)$", constraint)
-        if not m:
-            continue
-        op, req_ver_str = m.groups()
-        req = _version_tuple(req_ver_str)
-        max_len = max(len(ver), len(req))
-        v = ver + (0,) * (max_len - len(ver))
-        r = req + (0,) * (max_len - len(req))
-        if op == "==":
-            if v != r:
-                return False
-        elif op == "!=":
-            if v == r:
-                return False
-        elif op == ">=":
-            if v < r:
-                return False
-        elif op == "<=":
-            if v > r:
-                return False
-        elif op == ">":
-            if v <= r:
-                return False
-        elif op == "<":
-            if v >= r:
-                return False
-        elif op == "~=":
-            if v < r:
-                return False
-            upper = list(req[:-1])
-            if upper:
-                upper[-1] += 1
-                u = tuple(upper) + (0,) * (max_len - len(upper))
-                if v >= u:
-                    return False
-    return True
+    try:
+        candidate = Version(version)
+        spec = SpecifierSet(specifier)
+    except (InvalidVersion, InvalidSpecifier):
+        return False
+    return candidate in spec
 
 
 def _declared_dependencies(root: Path) -> dict[str, str | None]:

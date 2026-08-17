@@ -567,6 +567,56 @@ def test_release_evidence_rejects_sbom_version_violating_declared_constraint(tmp
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_prerelease_versions_against_pep440_floors(tmp_path):
+    """A prerelease below the declared floor must not satisfy the constraint."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0", "numpy>=1.24"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nengraphis==1.2.3\nnumpy==1.24rc1\n",
+        encoding="utf-8",
+    )
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                    {
+                        "type": "library",
+                        "name": "numpy",
+                        "version": "1.24rc1",
+                        "purl": "pkg:pypi/numpy@1.24rc1",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_sbom_with_mismatched_root_purl(tmp_path):
     """An SBOM whose metadata.component PURL names a different package must fail."""
     root = _root(tmp_path)
