@@ -403,6 +403,7 @@ def test_trusted_env_parser_rejects_malformed_syntax_without_echoing_values(raw)
         config._parse_trusted_env(raw)
 
     assert "do-not-print" not in str(caught.value)
+    assert str(config._CONFIG_ENV_PATH) not in str(caught.value)
 
 
 def test_explicit_env_file_path_must_be_absolute(tmp_path) -> None:
