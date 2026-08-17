@@ -165,6 +165,7 @@ def test_response_budget_ignores_unbounded_citation_numbers():
 def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
         monkeypatch, host, host_header, origin, classic):
     import asyncio
+    import types
     from types import SimpleNamespace
 
     from mcp.server.transport_security import TransportSecurityMiddleware
@@ -186,7 +187,13 @@ def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
 
     smart_server = server()
     classic_server = server()
-    fake_module = SimpleNamespace(mcp=smart_server, classic_mcp=classic_server, _eager_exact_backend_check=lambda: None)
+    # Use a real ModuleType so ``from engraphis.mcp_server import X`` works
+    # across Python 3.10-3.14; SimpleNamespace lacks __spec__/__loader__ and
+    # the import machinery rejects it on some versions.
+    fake_module = types.ModuleType("engraphis.mcp_server")
+    fake_module.mcp = smart_server
+    fake_module.classic_mcp = classic_server
+    fake_module._eager_exact_backend_check = lambda: None
     monkeypatch.setitem(sys.modules, "engraphis.mcp_server", fake_module)
     monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
 
