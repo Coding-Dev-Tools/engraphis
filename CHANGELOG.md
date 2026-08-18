@@ -7,6 +7,16 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Graph & Relationships now opens in **All nodes · LOD** and keeps unlinked entities enabled,
+  loading the complete entity projection up to the existing renderer capacity. The saved choice
+  between All nodes and **Live physics focus** is preserved, capacity fallback is explicit, and
+  status text separates workspace, loaded, visible, filter-hidden, and visible-relation counts.
+  Both WebGL and Canvas use evidence-mass screen-space star floors with matching hit geometry and
+  an enlarged black-hole anchor. Canonical server coordinates remain centered on that anchor,
+  while compatibility payloads retain deterministic packing. Global orbit rings and spokes are
+  removed; bounded local guides appear only for the hovered, selected, or focused solar system.
+  Gravity, Link distance, Orbital separation, and deterministic Reflow remain active in both
+  presentation modes without recreating an artificial outer wall.
 
 - Direct black-hole children now receive compact, deterministic orbital lanes near the black
   hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
@@ -176,14 +186,14 @@ stronger release and evaluation evidence.
   force-directed settling. Galactic and local-system motion now uses a `0.021328125` fixed timestep,
   another 30% slower than the preceding `0.03046875` cadence, while direct pointer movement remains responsive.
   Every live seed coordinate and local orbit begins another 20% inward, putting
-  system centers at 40% of the original Galaxy radius. While live, the black-hole frame follows a
-  controlled inward spiral: Gravity 0 holds the loose seeded radius, and default/maximum convergence
-  now advances the same inward trajectory at 70% of its immediately preceding speed. Gravity slider input also
-  applies an immediate, reversible system-center response without changing local geometry or velocity:
+  system centers at 40% of the original Galaxy radius. The live black-hole frame now preserves
+  bounded orbital radii instead of forcing every system through a perpetual inward projector;
+  gravity changes the physical well and orbital support without collapsing angular momentum.
+  Gravity slider input also applies an immediate, reversible system-center response without changing local geometry or velocity:
   its full range spans 40% radius contraction, and default-to-maximum visibly contracts about 31%
   synchronously while maximum gravity retains its 3.6x field;
-  outward attempts still receive a 110% radial counter-projection and can never increase their
-  radius. Link distance now drives same-system evidence springs with twice the prior response and
+  the far-field and event-horizon constraints retain bounded systems without a monotone collapse.
+  Link distance now drives same-system evidence springs with twice the prior response and
   a squared scale curve. Its default is now `8`, giving connected nodes a 0.25x rest length, 75%
   tighter than the preceding default, while the full range still spans 1/16x tight orbits through
   25x loose orbits without allowing

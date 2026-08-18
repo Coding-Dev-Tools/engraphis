@@ -14,20 +14,27 @@
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const state = {
     ids: [], labels: [], types: [], positions: new Float32Array(0), basePositions: new Float32Array(0), degrees: new Float32Array(0), betweenness: new Float32Array(0), evidenceMass: new Float32Array(0), nodeGhosts: new Uint8Array(0),
-    communities: [], topNodes: new Uint32Array(0), edgeSources: new Uint32Array(0),
+    communities: [], anchorRoles: [], topNodes: new Uint32Array(0), edgeSources: new Uint32Array(0),
     edgeTargets: new Uint32Array(0), edgeStrength: new Float32Array(0), edgeLayers: [], edgeBridges: new Uint8Array(0), edgeGhosts: new Uint8Array(0),
     edgeOrder: new Uint32Array(0), edgeRank: new Uint32Array(0), adjacencyOffsets: new Uint32Array(0),
     adjacencyEdges: new Uint32Array(0), edgeSeen: new Uint32Array(0), edgeStamp: 0,
     allNodes: new Uint32Array(0), grid: new Map(), layers: null, focusIndex: -1,
     lastCameraKey: '', lastVisibleNodes: new Uint32Array(0), lastVisibleEdges: new Uint32Array(0),
     lastVisibleLabels: new Uint32Array(0), canvasFallback: false, showBridges: true, showGhosts: true, paintOrder: new Uint32Array(0),
-    layoutSettings: {}, labelDensity: 24,
+    layoutSettings: {}, labelDensity: 24, canonicalPositions: false,
     scope: { minDegree: 1, showUnlinked: true, depth: 2 }, collapseMode: false,
-    collapsed: false, lastVisibleMask: new Uint8Array(0), layoutRevision: 0,
+    collapsed: false, lastVisibleMask: new Uint8Array(0), filteredNodeCount: 0,
+    layoutRevision: 0,
   };
   const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const key = value => String(value == null ? '' : value);
+  function canonicalPosition(node) {
+    const value = node && (node.canonical_positions || node.canonical_position);
+    if (Array.isArray(value) && value.length >= 2) return [finite(value[0], NaN), finite(value[1], NaN)];
+    if (value && typeof value === 'object') return [finite(value.x, NaN), finite(value.y, NaN)];
+    return [finite(node && node.x, NaN), finite(node && node.y, NaN)];
+  }
   /* Preserve valid falsy ids such as 0 and false. A boolean fallback chain drops them and can
      stringify endpoint objects as "[object Object]" instead of reading their stable id. */
   function endpoint(link, side) {
@@ -68,7 +75,7 @@
       const groupRadius = count === 1 ? 0 : radius * (0.35 + 0.65 * Math.sqrt((groupNumber + 1) / count));
       const localRadius = Math.max(16, Math.sqrt((groups.get(group) || []).length) * 13);
       const localAngle = ordinal * GOLDEN_ANGLE, distance = Math.min(Math.sqrt(ordinal + 1) * 5.5, localRadius);
-      const x = finite(node && node.x, NaN), y = finite(node && node.y, NaN);
+      const canonical = canonicalPosition(node), x = canonical[0], y = canonical[1];
       result[index * 2] = Number.isFinite(x) ? x : Math.cos(angle) * groupRadius + Math.cos(localAngle) * distance;
       result[index * 2 + 1] = Number.isFinite(y) ? y : Math.sin(angle) * groupRadius * 0.72 + Math.sin(localAngle) * distance * 0.8;
     });
@@ -82,9 +89,14 @@
     }
     return { minX: Number.isFinite(minX) ? minX : 0, maxX: Number.isFinite(maxX) ? maxX : 0, minY: Number.isFinite(minY) ? minY : 0, maxY: Number.isFinite(maxY) ? maxY : 0 };
   }
-  function applyLayout(notify = false, fit = false) {
+  function applyLayout(notify = false, fit = false, preserveCanonical = false) {
     if (!state.basePositions.length) return;
     const settings = state.layoutSettings || {}, mode = key(settings.mode || 'communities');
+    if (state.canonicalPositions && preserveCanonical) {
+      state.positions = state.basePositions.slice();
+      rebuildGrid(); state.lastCameraKey = '';
+      return;
+    }
     const repel = Math.max(0, finite(settings.repel, 48)), link = Math.max(1, finite(settings.link, 16));
     const gravity = Math.max(0, finite(settings.gravity, 48));
     const galacticGravity = Math.max(0, finite(settings.gravitationalConstant, 1));
@@ -100,7 +112,10 @@
     const gravityTightening = 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
     const spaceSpread = 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
     const spread = modeScale * clamp(repelSpread * gravityTightening * spaceSpread, 0.42, 3.2);
-    const baseBounds = makeBounds(state.basePositions), centerX = (baseBounds.minX + baseBounds.maxX) / 2, centerY = (baseBounds.minY + baseBounds.maxY) / 2;
+    const baseBounds = makeBounds(state.basePositions);
+    const globalIndex = state.anchorRoles.findIndex(role => role === 'global');
+    const centerX = globalIndex >= 0 ? state.basePositions[globalIndex * 2] : (baseBounds.minX + baseBounds.maxX) / 2;
+    const centerY = globalIndex >= 0 ? state.basePositions[globalIndex * 2 + 1] : (baseBounds.minY + baseBounds.maxY) / 2;
     state.positions = new Float32Array(state.basePositions.length);
     for (let index = 0; index < state.basePositions.length; index += 2) {
       let x = state.basePositions[index] - centerX, y = state.basePositions[index + 1] - centerY;
@@ -175,6 +190,7 @@
       const group = key(node && (node.community_id != null ? node.community_id : node.community));
       if (!groups.has(group)) groups.set(group, []); groups.get(group).push(ids.length - 1);
     });
+    state.canonicalPositions = payload && payload.canonical_positions === true;
     const positions = makePositions(nodes, groups);
     const nodeGhosts = new Uint8Array(nodes.map(node => node && node.ghost === true ? 1 : 0));
     state.basePositions = positions.slice();
@@ -182,10 +198,11 @@
     state.layoutRevision = 0;
     state.lastVisibleMask = new Uint8Array(ids.length);
     const communities = nodes.map(node => key(node && (node.community_id != null ? node.community_id : node.community)));
+    const anchorRoles = nodes.map(node => key(node && node.anchor_role));
     const types = nodes.map(node => key(node && (node.etype || node.type || 'person_or_concept')));
     const previewPositions = state.positions.slice();
     const previewGhosts = nodeGhosts.slice();
-    self.postMessage({ type: 'preview', ids, labels, types, positions: previewPositions, communities, nodeGhosts: previewGhosts, bounds: makeBounds(state.positions), totalNodes: ids.length }, [previewPositions.buffer, previewGhosts.buffer]);
+    self.postMessage({ type: 'preview', ids, labels, types, positions: previewPositions, communities, anchorRoles, canonicalPositions: state.canonicalPositions, nodeGhosts: previewGhosts, bounds: makeBounds(state.positions), totalNodes: ids.length }, [previewPositions.buffer, previewGhosts.buffer]);
     const degrees = new Float32Array(ids.length), edges = [];
     inputLinks.forEach((link, ordinal) => {
       const source = endpoint(link, 'source');
@@ -201,12 +218,15 @@
     const betweenness = new Float32Array(ids.length), evidenceMass = new Float32Array(ids.length);
     nodes.forEach((node, index) => {
       betweenness[index] = Math.max(0, finite(node && (node.betweenness || node.bridge_score), 0));
-      evidenceMass[index] = Math.max(0, finite(node && (node.evidence_mass || node.evidenceMass || node.mass), degrees[index] || 0));
+      evidenceMass[index] = Math.max(0, finite(node && (node.gravity_mass ?? node.evidence_mass ?? node.evidenceMass ?? node.mass), degrees[index] || 0));
     });
-    state.ids = ids; state.labels = labels; state.types = types; state.degrees = degrees; state.betweenness = betweenness; state.evidenceMass = evidenceMass; state.nodeGhosts = nodeGhosts; state.communities = communities;
+    state.ids = ids; state.labels = labels; state.types = types; state.degrees = degrees; state.betweenness = betweenness; state.evidenceMass = evidenceMass; state.nodeGhosts = nodeGhosts; state.communities = communities; state.anchorRoles = anchorRoles;
     state.edgeSources = new Uint32Array(edges.map(edge => edge.source)); state.edgeTargets = new Uint32Array(edges.map(edge => edge.target));
     state.edgeStrength = new Float32Array(edges.map(edge => edge.strength)); state.edgeLayers = edges.map(edge => edge.layer); state.edgeBridges = new Uint8Array(edges.map(edge => edge.bridge ? 1 : 0)); state.edgeGhosts = new Uint8Array(edges.map(edge => edge.ghost ? 1 : 0)); state.edgeOrder = new Uint32Array(order); state.edgeRank = edgeRank;
-    applyLayout(false);
+    /* Ledger installs the saved preset/settings before the scene arrives. Preserve canonical
+       server coordinates for this initial prepare regardless of those preloaded controls;
+       later user-driven settings and Reflow calls use the bounded worker transform. */
+    applyLayout(false, false, true);
     const incidence = new Uint32Array(ids.length);
     edges.forEach(edge => { incidence[edge.source] += 1; incidence[edge.target] += 1; });
     const adjacencyOffsets = new Uint32Array(ids.length + 1);
@@ -219,18 +239,29 @@
       adjacencyEdges.set(segment, start);
     }
     state.adjacencyOffsets = adjacencyOffsets; state.adjacencyEdges = adjacencyEdges; state.edgeSeen = new Uint32Array(edges.length); state.edgeStamp = 0;
+    updateFilteredNodeCount();
     state.topNodes = new Uint32Array(Array.from({ length: ids.length }, (_v, index) => index).sort((a, b) => degrees[b] - degrees[a] || a - b));
     state.allNodes = new Uint32Array(ids.length); for (let index = 0; index < ids.length; index += 1) state.allNodes[index] = index;
     rebuildPaintOrder();
     rebuildGrid();
     state.lastCameraKey = '';
     const positionsOut = state.positions.slice(), degreesOut = degrees.slice(), betweennessOut = betweenness.slice(), evidenceMassOut = evidenceMass.slice(), nodeGhostsOut = nodeGhosts.slice(), edgeSourcesOut = state.edgeSources.slice(), edgeTargetsOut = state.edgeTargets.slice(), edgeStrengthOut = state.edgeStrength.slice(), edgeBridgesOut = state.edgeBridges.slice(), topNodesOut = state.topNodes.slice();
-    self.postMessage({ type: 'ready', ids, labels, types, positions: positionsOut, degrees: degreesOut, betweenness: betweennessOut, evidenceMass: evidenceMassOut, nodeGhosts: nodeGhostsOut, communities, bounds: makeBounds(state.positions), edgeSources: edgeSourcesOut, edgeTargets: edgeTargetsOut, edgeStrength: edgeStrengthOut, edgeBridges: edgeBridgesOut, edgeLayers: state.edgeLayers, topNodes: topNodesOut, totalNodes: ids.length, totalLinks: edges.length }, [positionsOut.buffer, degreesOut.buffer, betweennessOut.buffer, evidenceMassOut.buffer, nodeGhostsOut.buffer, edgeSourcesOut.buffer, edgeTargetsOut.buffer, edgeStrengthOut.buffer, edgeBridgesOut.buffer, topNodesOut.buffer]);
+    self.postMessage({ type: 'ready', ids, labels, types, positions: positionsOut, degrees: degreesOut, betweenness: betweennessOut, evidenceMass: evidenceMassOut, anchorRoles, canonicalPositions: state.canonicalPositions, nodeGhosts: nodeGhostsOut, communities, bounds: makeBounds(state.positions), edgeSources: edgeSourcesOut, edgeTargets: edgeTargetsOut, edgeStrength: edgeStrengthOut, edgeBridges: edgeBridgesOut, edgeLayers: state.edgeLayers, topNodes: topNodesOut, totalNodes: ids.length, totalLinks: edges.length }, [positionsOut.buffer, degreesOut.buffer, betweennessOut.buffer, evidenceMassOut.buffer, nodeGhostsOut.buffer, edgeSourcesOut.buffer, edgeTargetsOut.buffer, edgeStrengthOut.buffer, edgeBridgesOut.buffer, topNodesOut.buffer]);
   }
   function inViewport(index, camera, padding = 1) {
     const scale = Math.max(0.01, finite(camera && camera.scale, 1)), width = Math.max(1, finite(camera && camera.width, 1)), height = Math.max(1, finite(camera && camera.height, 1));
     const halfWidth = width / scale / 2 * padding, halfHeight = height / scale / 2 * padding, x = state.positions[index * 2], y = state.positions[index * 2 + 1];
     return x >= finite(camera && camera.x, 0) - halfWidth && x <= finite(camera && camera.x, 0) + halfWidth && y >= finite(camera && camera.y, 0) - halfHeight && y <= finite(camera && camera.y, 0) + halfHeight;
+  }
+  function nodeScreenRadius(index, scale) {
+    const mass = Math.max(0, state.evidenceMass[index] || 0);
+    const base = (2.4 + Math.min(7, Math.log1p(mass) * 0.9))
+      * (0.74 + Math.max(1, finite(state.layoutSettings.size, 3)) * 0.22);
+    const anchorBoost = state.anchorRoles[index] === 'global' ? 2 : 1;
+    /* WebGL gl_PointSize and Canvas use this value as a diameter. Return the painted radius so
+       the worker's spatial hit target is derived from exactly the same screen geometry. */
+    return clamp(base * anchorBoost * Math.min(1, Math.max(0.05, scale)),
+      state.anchorRoles[index] === 'global' ? 5 : 2.5, 16) / 2;
   }
   function focusMask() {
     if (state.focusIndex < 0 || state.focusIndex >= state.ids.length) return null;
@@ -259,6 +290,14 @@
     const degree = state.degrees[index] || 0;
     return (degree > 0 && degree >= state.scope.minDegree)
       || (degree === 0 && state.scope.showUnlinked);
+  }
+  function updateFilteredNodeCount() {
+    const focused = focusMask();
+    let count = 0;
+    for (let index = 0; index < state.ids.length; index += 1) {
+      if (nodeAllowed(index, focused)) count += 1;
+    }
+    state.filteredNodeCount = count;
   }
   function setCollapsed(value) {
     const next = value === true;
@@ -363,18 +402,20 @@
     state.lastVisibleMask = visibleMask;
     self.postMessage({ type: 'visible', nodes, edges, labels, edgePositions,
       totalLinks: state.edgeSources.length, drawnLinks: edges.length,
-      visibleNodeCount: nodes.length, collapsed: state.collapsed },
+      visibleNodeCount: nodes.length, filteredNodeCount: state.filteredNodeCount,
+      collapsed: state.collapsed },
     [nodes.buffer, edges.buffer, labels.buffer, edgePositions.buffer]);
   }
   function hit(message) {
-    const x = finite(message && message.x, 0), y = finite(message && message.y, 0), cellX = Math.floor(x / CELL_SIZE), cellY = Math.floor(y / CELL_SIZE), maxDistance = Math.max(8, 12 / Math.max(0.01, finite(message && message.scale, 1))), maxSquared = maxDistance * maxDistance;
+    const x = finite(message && message.x, 0), y = finite(message && message.y, 0), scale = Math.max(0.01, finite(message && message.scale, 1)), cellX = Math.floor(x / CELL_SIZE), cellY = Math.floor(y / CELL_SIZE), maxDistance = 11 / scale, maxSquared = maxDistance * maxDistance;
     let best = -1, distance = maxSquared;
     const cellRadius = Math.max(1, Math.ceil(maxDistance / CELL_SIZE));
     for (let dx = -cellRadius; dx <= cellRadius; dx += 1) for (let dy = -cellRadius; dy <= cellRadius; dy += 1) (state.grid.get(`${cellX + dx},${cellY + dy}`) || []).forEach(index => {
       const deltaX = state.positions[index * 2] - x, deltaY = state.positions[index * 2 + 1] - y, next = deltaX * deltaX + deltaY * deltaY;
       if ((!state.showGhosts && state.nodeGhosts[index])
         || (state.lastVisibleMask.length && !state.lastVisibleMask[index])) return;
-      if (next < distance) { best = index; distance = next; }
+      const radius = (nodeScreenRadius(index, scale) + 3) / scale;
+      if (next < radius * radius && next < distance) { best = index; distance = next; }
     });
     self.postMessage({ type: 'hit', request: message && message.request, index: best });
   }
@@ -385,6 +426,7 @@
     else if (message.type === 'hit') hit(message);
     else if (message.type === 'focus') {
       state.focusIndex = Number.isInteger(message.index) ? message.index : -1;
+      updateFilteredNodeCount();
       state.lastCameraKey = '';
     } else if (message.type === 'layers') {
       state.layers = message.layers || null; rebuildPaintOrder(); state.lastCameraKey = '';
@@ -403,6 +445,7 @@
         showUnlinked: scope.showUnlinked !== false,
         depth: clamp(Math.round(finite(scope.depth, state.scope.depth)), 1, 4),
       };
+      updateFilteredNodeCount();
       state.lastCameraKey = '';
     } else if (message.type === 'collapse') {
       state.collapseMode = message.value === true ? true : message.value === 'auto' ? 'auto' : false;
@@ -415,7 +458,8 @@
     } else if (message.type === 'bridges') {
       state.showBridges = message.value !== false; state.lastCameraKey = '';
     } else if (message.type === 'ghosts') {
-      state.showGhosts = message.value !== false; rebuildPaintOrder(); state.lastCameraKey = '';
+      state.showGhosts = message.value !== false; rebuildPaintOrder();
+      updateFilteredNodeCount(); state.lastCameraKey = '';
     }
   };
 })();

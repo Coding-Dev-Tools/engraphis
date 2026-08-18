@@ -1832,6 +1832,7 @@ def test_scene_hash_versions_physics_and_index_generation():
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
     assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["canonical_positions"] is True
 
 
 def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
@@ -1855,6 +1856,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
     )
 
     assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["canonical_positions"] is True
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True
@@ -1863,6 +1865,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
     alpha_node = next(node for node in baseline["nodes"] if node["id"] == alpha)
     assert alpha_node["repo_names"] == ["product"]
     assert complete["meta"]["node_projection"] == "entities"
+    assert complete["meta"]["canonical_positions"] is True
     assert complete["meta"]["include_memory_nodes"] is False
     assert {node["node_kind"] for node in complete["nodes"]} == {"entity"}
 

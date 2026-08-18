@@ -9,7 +9,7 @@
    with both the dashboard adapter and standalone scene payloads. */
 (function () {
   const PRESETS = {
-    galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
+    galaxy: { label: 'Galaxy gravity', repel: 200, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
     original: { label: 'Original force', repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40, curve: 0, particles: 0 },
     compact: { label: 'Compact clusters', repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30, curve: 0.08, particles: 0 },
     communities: { label: 'Community islands', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
@@ -147,12 +147,12 @@
   }
   /* A fit-to-view galaxy compresses stellar and galactic distances onto one canvas, so using
      one physical clock made a valid planet orbit visually disappear under its system's
-     black-hole sweep. Give independent community stars a 3.25x angular clock by multiplying
+     black-hole sweep. Give independent community stars a 2.5x angular clock by multiplying
      their gravitational parameter by clock^2. Both the circular seed and every live
      inverse-square sample consume this same constant: the result is a faster bound central
      orbit, not a per-frame carousel or an unbalanced tangential kick. The global anchor keeps
      the original local scale because its surrounding bulge belongs to the black-hole well. */
-  const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;
+  const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;
   const GALAXY_FALLBACK_STELLAR_ORBIT_CLOCK = 2.5;
   /* The dashboard's Gravity control owns the black-hole well. A saved zero value must not
      erase either level of the hierarchy: eligible community stars retain the calibrated
@@ -255,6 +255,9 @@
      whose physically sampled circular speed exceeds the retired 10-unit presentation cap to
      visibly orbit the black hole. */
   const GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT = 18;
+  /* Presentation speed must never become escape energy. The old high endpoint launched
+     sparse-system carriers into the hard outer safety boundary and painted a false ring. */
+  const GALAXY_BOUND_CARRIER_SPEED_RATIO = 1.32;
   /* Carrier support follows the same circular-speed law as the galactic field. Presentation
      speed is controlled only by the explicit orbital-speed clock; no hidden visual boost is
      allowed to make a carrier super-circular relative to the acceleration that governs it. */
@@ -274,24 +277,42 @@
   const GALAXY_DRAG_POSITION_MAX_PULL = 2;
   const GALAXY_ORBITAL_SEPARATION_MULTIPLIER = 2;
   /* `graph-repel` remains the persisted key for saved-view compatibility. In Galaxy, 100 is
-     the natural orbital rate; increases above it receive 20% more angular response than the
-     former linear clock. Radius growth is independently gentler, so faster rotation does not
-     turn a solar system into an ever-widening Newtonian launch. */
-  const GALAXY_ORBITAL_SPEED_DEFAULT = 100;
+     the natural orbital rate and the shipped 200 setting is exactly twice that clock. The
+     upper half then accelerates smoothly to the existing bounded 4.6x endpoint. Radius growth
+     begins only above the shipped default, so doubling speed does not resize solar systems. */
+  const GALAXY_ORBITAL_SPEED_NATURAL_SETTING = 100;
+  const GALAXY_ORBITAL_SPEED_DEFAULT_SETTING = 200;
   const GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING = 400;
-  const GALAXY_ORBITAL_SPEED_MINIMUM = 0.25;
-  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 1.2;
+  /* Keep the zero-slider presentation alive at half of the natural orbital clock. This is a
+     100% increase over the former 0.25 floor, so planets and nested moons remain visibly in
+     motion without changing the bounded high endpoint. */
+  const GALAXY_ORBITAL_SPEED_MINIMUM = 0.5;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
   const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.24;
+  /* Equal-mass authored systems often share identical radii. A single global local-orbit clock
+     then makes every planet advance in lockstep even though each system is physically isolated.
+     Give every immediate parent a stable, bounded clock offset: the shipped speed remains the
+     mean, while planets and nested moons visibly advance independently without changing lanes. */
+  const GALAXY_LOCAL_ORBIT_CLOCK_VARIANCE = 0.18;
+  function galaxyLocalOrbitClock(parent, layoutSeed) {
+    const identity = parent && parent.id !== undefined && parent.id !== null
+      ? String(parent.id) : 'fallback';
+    const sample = seededHash(layoutSeed, 'local-orbit-clock:' + identity) / 0xffffffff;
+    return 1 - GALAXY_LOCAL_ORBIT_CLOCK_VARIANCE
+      + sample * GALAXY_LOCAL_ORBIT_CLOCK_VARIANCE * 2;
+  }
   function galaxyOrbitalSpeedMultiplier(setting) {
     const raw = Number(setting);
     const value = Number.isFinite(raw)
       ? Math.max(0, Math.min(GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING, raw))
-      : GALAXY_ORBITAL_SPEED_DEFAULT;
-    const multiplier = value <= GALAXY_ORBITAL_SPEED_DEFAULT
-      ? value / GALAXY_ORBITAL_SPEED_DEFAULT
-      : 1 + (value - GALAXY_ORBITAL_SPEED_DEFAULT)
-        / GALAXY_ORBITAL_SPEED_DEFAULT * GALAXY_ORBITAL_SPEED_RESPONSE_GAIN;
+      : GALAXY_ORBITAL_SPEED_NATURAL_SETTING;
+    const defaultMultiplier = GALAXY_ORBITAL_SPEED_DEFAULT_SETTING
+      / GALAXY_ORBITAL_SPEED_NATURAL_SETTING;
+    const multiplier = value <= GALAXY_ORBITAL_SPEED_DEFAULT_SETTING
+      ? value / GALAXY_ORBITAL_SPEED_NATURAL_SETTING
+      : defaultMultiplier + (value - GALAXY_ORBITAL_SPEED_DEFAULT_SETTING)
+        / (GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING - GALAXY_ORBITAL_SPEED_DEFAULT_SETTING)
+        * (GALAXY_ORBITAL_SPEED_MAXIMUM - defaultMultiplier);
     return Math.max(GALAXY_ORBITAL_SPEED_MINIMUM,
       Math.min(GALAXY_ORBITAL_SPEED_MAXIMUM, multiplier));
   }
@@ -299,11 +320,11 @@
     const raw = Number(setting);
     const value = Number.isFinite(raw)
       ? Math.max(0, Math.min(GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING, raw))
-      : GALAXY_ORBITAL_SPEED_DEFAULT;
-    if (value <= GALAXY_ORBITAL_SPEED_DEFAULT) return 1;
+      : GALAXY_ORBITAL_SPEED_NATURAL_SETTING;
+    if (value <= GALAXY_ORBITAL_SPEED_DEFAULT_SETTING) return 1;
     return 1 + (GALAXY_ORBITAL_RADIUS_MAXIMUM - 1)
-      * (value - GALAXY_ORBITAL_SPEED_DEFAULT)
-      / (GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING - GALAXY_ORBITAL_SPEED_DEFAULT);
+      * (value - GALAXY_ORBITAL_SPEED_DEFAULT_SETTING)
+      / (GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING - GALAXY_ORBITAL_SPEED_DEFAULT_SETTING);
   }
   const GALAXY_ORBITAL_SEPARATION_BASE_SETTING = 60;
   /* Link distance is a physical scale, so doubled sensitivity uses the squared response
@@ -349,25 +370,21 @@
   /* Legacy telemetry retains this padding name, but cross-system clearance now belongs to the
      complete rigid envelope below—not arbitrary node-pair pressure. */
   const GALAXY_CROSS_SYSTEM_REPULSION_PADDING = 1.5;
-  /* Solar systems are packed by their complete painted envelopes, never by pushing arbitrary
-     cross-community node pairs.  Eight world units stays visible between two outer planets;
-     the bounded response lets live systems keep orbiting while their carrier frames separate. */
-  /* Default Galaxy admission should keep complete solar systems visually near the black-hole
-     interior. The v18 clearance band is another 20% tighter while remaining positive;
-     explicit higher gaps remain available through `systemPackingGap`. */
+  /* Default Galaxy admission keeps complete solar systems compact while retaining a visible
+     painted clearance band. Explicit higher gaps remain available through `systemPackingGap`. */
   const GALAXY_SYSTEM_PACKING_GAP = 1.92;
   const GALAXY_SYSTEM_PACKING_STRENGTH = 0.45;
   const GALAXY_SYSTEM_PACKING_MAX_CORRECTION = 6;
   /* The orbital-speed control can expand local radii by at most 6%. Keep a small additional
      margin, but do not reserve the old 12% by default because that needlessly adds outer rings. */
-  const GALAXY_CARRIER_LANE_SLACK = 1.0384;
+  const GALAXY_CARRIER_LANE_SLACK = 1.08;
   /* Tiny solver drift should keep the deterministic lane phase shared across a ring. A larger
      displacement is an actual contact/boundary correction and is allowed to become phase. */
   const GALAXY_LANE_PHASE_CORRECTION_DISTANCE = 0.5;
   const GALAXY_BRIDGE_SCALE = 0.35;
   const GALAXY_CENTER_ACCELERATION_CAP = 2.5;
   /* The visible black hole is a contact boundary as well as a gravity source. Its skin must
-     exceed one emergency-speed drift (48 * 0.032 = 1.536 world units), so a body cannot
+     exceed one emergency-speed drift (48 * 0.021328125 = 1.02375 world units), so a body cannot
      tunnel through the painted edge between fixed steps. The constraint never adds an outward
      kick; deep corrections preserve angular momentum instead of manufacturing orbital speed. */
   const GALAXY_BLACK_HOLE_EXCLUSION_PADDING = 2.5;
@@ -389,14 +406,14 @@
   const galaxyFarFieldEnvelopeCache = typeof WeakMap === 'function' ? new WeakMap() : null;
   const galaxyBlackHoleSpinCache = typeof WeakMap === 'function' ? new WeakMap() : null;
   /* Galaxy has its own physical clock. Thirty fixed steps per second bounds main-thread work,
-     while a 0.032 leapfrog slice makes both levels of the hierarchy visibly rotate without
+     while a 0.021328125 leapfrog slice makes both levels of the hierarchy visibly rotate without
      changing their circular initial conditions or force balance. This is a time-scale increase,
      not an extra tangential kick: planets still orbit only their dominant star and whole systems
      still orbit the black hole. Damping removes numerical noise over minutes rather than erasing
      the seeded angular momentum during the opening animation. */
   const GALAXY_FRAME_INTERVAL_MS = 1000 / 30;
   const GALAXY_MOTION_RATE = 0.68;
-  const GALAXY_FIXED_TIMESTEP = 0.032;
+  const GALAXY_FIXED_TIMESTEP = 0.021328125;
   /* The black hole remains the chart's fixed origin, but its visible accretion disk must not
      read as a frozen node when the central community has no separately painted satellites. */
   const GALAXY_BLACK_HOLE_SPIN_RATE = 1.2;
@@ -1628,7 +1645,8 @@
       const authoredCarrierClock = item.core ? 1 : GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK;
       const speed = Math.min(
         GALAXY_SYSTEM_ORBIT_SEED_SPEED_LIMIT * orbitalSpeed * authoredCarrierClock,
-        item.circularSpeed * tangentFactor * orbitalSpeed * authoredCarrierClock
+        item.circularSpeed * tangentFactor * orbitalSpeed * authoredCarrierClock,
+        item.circularSpeed * GALAXY_BOUND_CARRIER_SPEED_RATIO
       );
       const kick = {
         vx: tangentX * speed + outwardX * speed * radialFactor,
@@ -2490,14 +2508,17 @@
 
   function galaxyCarrierTargetSpeed(field, radius, orbitalSpeed) {
     const multiplier = galaxyOrbitalSpeedMultiplier(orbitalSpeed);
+    const circularSpeed = galaxyCarrierOrbitCurve(field, radius).circularSpeed;
     return Math.min(GALAXY_CARRIER_FRAME_SPEED_LIMIT * multiplier,
-      galaxyCarrierOrbitCurve(field, radius).circularSpeed
-        * multiplier);
+      circularSpeed * multiplier,
+      circularSpeed * GALAXY_BOUND_CARRIER_SPEED_RATIO);
   }
   const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;
   function galaxyAuthoredCarrierTargetSpeed(field, radius, orbitalSpeed) {
-    return galaxyCarrierTargetSpeed(field, radius, orbitalSpeed)
-      * GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK;
+    const circularSpeed = galaxyCarrierOrbitCurve(field, radius).circularSpeed;
+    return Math.min(galaxyCarrierTargetSpeed(field, radius, orbitalSpeed)
+      * GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK,
+    circularSpeed * GALAXY_BOUND_CARRIER_SPEED_RATIO);
   }
 
   /* A galaxy is not a collection of peer point masses. The black hole and smooth evidence halo
@@ -2963,9 +2984,10 @@
         defaultGalaxySystemAccelerationCap(parent, opts.gravity, opts.localGravitySetting,
           authoredHierarchy)
           * Math.max(0.25, localGravityMultiplier), rawAcceleration);
+      const localClock = galaxyLocalOrbitClock(parent, opts.layoutSeed);
       const omega = Math.min(
-        Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed,
-        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
+        Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed * localClock,
+        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed * localClock / localRadius);
       local.angle += local.direction * omega * timestep;
       const localSpeed = omega * localRadius;
       const offsetX = Math.cos(local.angle) * localRadius;
@@ -5727,10 +5749,10 @@
     const globalAnchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
     const stats = { systems: 0, localSatellites: 0, multiplier: orbitalSpeed,
       radiusMultiplier: orbitalRadius, positionCorrections: 0, maximumPositionCorrection: 0 };
-    /* 100 is the shipped orbit rate. The live integrator already supports the galactic carrier
-       at that clock, so a second carrier correction is unnecessary once motion exists. Local
-       planet control must still run: it owns each cached star-relative direction and prevents
-       contact or boundary projections from turning a prograde orbit retrograde. */
+    /* The natural 1x rate is the low-level force baseline. The live integrator already supports
+       the galactic carrier at that clock, so a second correction is unnecessary once motion
+       exists. Local planet control must still run: it owns each cached star-relative direction
+       and prevents contact or boundary projections from turning a prograde orbit retrograde. */
     const neutralPhase = Math.abs(orbitalSpeed - 1) <= 1e-9
       && bodies.some(node => Math.hypot(
         Number.isFinite(node.vx) ? node.vx : 0,
@@ -5764,7 +5786,7 @@
     field.systems.forEach(item => {
       const members = item.nodes;
       const carrier = item.carrier;
-      /* Carrier support already runs inside the live integrator at the neutral 100% clock.
+      /* Carrier support already runs inside the live integrator at the natural 1x clock.
          Keep that frame untouched here, but never skip the local controller: its cached
          direction is what prevents a planet from reversing around its authored star after
          contact or boundary corrections. */
@@ -5849,10 +5871,12 @@
           phase = setGalaxyKinematicPhase(node, '__galaxySpeedControlPhase', {
             anchorId: parentId, angle: currentAngle, direction: sign,
             multiplier: orbitalSpeed, radiusMultiplier: orbitalRadius,
+            localClock: galaxyLocalOrbitClock(parent, opts.layoutSeed),
           });
         } else {
           phase.multiplier = orbitalSpeed;
           phase.radiusMultiplier = orbitalRadius;
+          phase.localClock = galaxyLocalOrbitClock(parent, opts.layoutSeed);
         }
         /* Pointer ownership is the one temporary exception to exact lane projection. Let the
            existing bounded drag field pull followers instead of copying the star's pointer
@@ -5865,16 +5889,18 @@
            collision, and relation work may translate the whole system, but they cannot turn
            a planet backward or pull it onto a chord through the star. */
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
-        const angularSpeed = baseSpeed * orbitalSpeed / Math.max(1e-6, targetRadius);
+        const localClock = galaxyLocalOrbitClock(parent, opts.layoutSeed);
+        const angularSpeed = baseSpeed * orbitalSpeed * localClock
+          / Math.max(1e-6, targetRadius);
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
-          + tangentX * baseSpeed * orbitalSpeed;
+          + tangentX * baseSpeed * orbitalSpeed * localClock;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
-          + tangentY * baseSpeed * orbitalSpeed;
+          + tangentY * baseSpeed * orbitalSpeed * localClock;
         const shiftX = targetX - node.x, shiftY = targetY - node.y;
         const velocityShiftX = targetVx - (Number.isFinite(node.vx) ? node.vx : 0);
         const velocityShiftY = targetVy - (Number.isFinite(node.vy) ? node.vy : 0);
@@ -7265,6 +7291,8 @@
       anchorId: String(lane.anchor.id), x: lane.anchor.x, y: lane.anchor.y,
       tier: lane.tier, radius: lane.radius / Math.max(1, lane.samples),
       members: lane.samples, color: lane.anchor.color,
+      anchorMass: finitePositive(lane.anchor.gravity_mass, 1, 1000),
+      anchorRole: lane.anchor.anchor_role || null,
     })).sort((left, right) => left.anchorId.localeCompare(right.anchorId)
       || left.tier - right.tier);
   }
@@ -7287,21 +7315,139 @@
       .map(lane => String(lane.anchorId)));
   }
 
-  function paintGalaxyOrbitLanes(ctx, nodes, scale, accent, preparedLanes) {
+  /* A Galaxy can legitimately contain hundreds of visible entities but only a handful of
+     enabled relations. Its camera must still fit the complete physical disk, which can reduce
+     world-space evidence radii below one device pixel. Keep mass/collision geometry untouched
+     and apply a bounded screen-space floor only while painting and hit-testing. The evidence
+     lift prevents a sparse overview from turning every star into an identical dot. */
+  function galaxyNodeScreenRadiusFloor(node) {
+    if (!node) return 2.25;
+    if (node.ghost) return 1.5;
+    if (node.cluster) {
+      return 5 + Math.min(2.5, Math.log2(1 + Math.max(1, Number(node.members) || 1)) * 0.35);
+    }
+    const mass = finitePositive(node.gravity_mass, 1, 1000);
+    const evidenceLift = Math.min(2.4, Math.log2(Math.max(1, mass)) * 0.55);
+    if (node.anchor_role === 'global') return 10 + evidenceLift;
+    if (node.anchor_role === 'community') return 3.5 + evidenceLift;
+    return 2.25 + evidenceLift;
+  }
+
+  function galaxyNodePaintRadius(node, scale, galaxyMode) {
+    const radius = finitePositive(node && node.radius,
+      finitePositive(node && node.visual_radius, 1, 160), 160);
+    if (galaxyMode !== true) return radius;
+    const zoom = Math.max(0.01, Number(scale) || 1);
+    return Math.max(radius, galaxyNodeScreenRadiusFloor(node) / zoom);
+  }
+
+  /* Orbit lanes explain a small solar system, but hundreds of equally prominent circles erase
+     the stars they are meant to clarify. Preserve every physical lane and every anchor; this
+     helper only chooses a bounded, low-contrast presentation subset for a distant overview. */
+  function galaxyOrbitLaneContext(nodes, hilite, hoverSet, focusId) {
+    const values = Array.isArray(nodes) ? nodes.filter(Boolean) : [];
+    const byId = new Map(values.map(node => [String(node.id), node]));
+    const seeds = new Set();
+    if (hilite != null) seeds.add(String(hilite));
+    if (focusId != null) seeds.add(String(focusId));
+    if (hoverSet instanceof Set) hoverSet.forEach(id => seeds.add(String(id)));
+    if (!seeds.size) return null;
+    const anchors = new Set();
+    seeds.forEach(seed => {
+      let node = byId.get(seed);
+      const seen = new Set();
+      while (node && !seen.has(String(node.id))) {
+        const id = String(node.id);
+        seen.add(id);
+        const parent = node.system_anchor_id == null ? '' : String(node.system_anchor_id);
+        if (parent && parent !== id) anchors.add(parent);
+        if (!parent || parent === id) break;
+        node = byId.get(parent);
+      }
+      /* A focused community anchor is itself the lane anchor. */
+      if (byId.has(seed) && byId.get(seed).anchor_role === 'community') anchors.add(seed);
+      if (byId.has(seed) && byId.get(seed).anchor_role === 'global') anchors.add(seed);
+    });
+    return anchors;
+  }
+
+  function galaxyOrbitLanePresentation(lanes, nodeCount, scale, contextAnchors) {
+    const values = Array.isArray(lanes) ? lanes.filter(Boolean) : [];
+    const count = Math.max(0, Number(nodeCount) || 0);
+    const zoom = Math.max(0.01, Number(scale) || 1);
+    /* Orbit lanes are contextual annotation, never a second layout boundary. */
+    if (!(contextAnchors instanceof Set) || !contextAnchors.size) {
+      return { lanes: [], opacity: 0, lineWidth: 0, total: values.length, contextual: false };
+    }
+    const contextual = values.filter(lane => contextAnchors.has(String(lane.anchorId)));
+    if (!contextual.length) {
+      return { lanes: [], opacity: 0, lineWidth: 0, total: values.length, contextual: true };
+    }
+    const contextualValues = contextual;
+    const reduced = count > 600 || zoom < 0.22;
+    const moderate = !reduced && (count > 300 || zoom < 0.4);
+    if (!reduced && !moderate) {
+      return { lanes: contextualValues.slice(0, 12), opacity: 0.16, lineWidth: 0.55,
+        total: values.length, contextual: true };
+    }
+    const cap = reduced ? 12 : 18;
+    const useful = contextualValues.filter(lane => {
+      const screenRadius = Math.max(0, Number(lane.radius) || 0) * zoom;
+      return screenRadius >= (reduced ? 4 : 3)
+        && screenRadius <= (reduced ? 360 : 520);
+    });
+    const candidates = useful.length ? useful : contextualValues;
+    const ranked = candidates.slice().sort((left, right) => {
+      const leftGlobal = left.anchorRole === 'global' ? 1 : 0;
+      const rightGlobal = right.anchorRole === 'global' ? 1 : 0;
+      if (leftGlobal !== rightGlobal) return rightGlobal - leftGlobal;
+      const mass = (Number(right.anchorMass) || 0) - (Number(left.anchorMass) || 0);
+      if (Math.abs(mass) > 1e-9) return mass;
+      const members = (Number(right.members) || 0) - (Number(left.members) || 0);
+      if (members) return members;
+      const target = reduced ? 56 : 88;
+      const leftDistance = Math.abs((Number(left.radius) || 0) * zoom - target);
+      const rightDistance = Math.abs((Number(right.radius) || 0) * zoom - target);
+      return leftDistance - rightDistance || String(left.anchorId).localeCompare(String(right.anchorId));
+    });
+    /* Prefer one explanatory lane per stellar anchor before spending the budget on a second
+       planet around the same star. */
+    const selected = [], used = new Set();
+    ranked.forEach(lane => {
+      if (selected.length >= cap || used.has(String(lane.anchorId))) return;
+      used.add(String(lane.anchorId));
+      selected.push(lane);
+    });
+    if (selected.length < cap) ranked.forEach(lane => {
+      if (selected.length >= cap || selected.includes(lane)) return;
+      selected.push(lane);
+    });
+    return {
+      lanes: selected,
+      opacity: reduced ? 0.055 : 0.09,
+      lineWidth: reduced ? 0.34 : 0.44,
+      total: values.length,
+      contextual: true,
+    };
+  }
+
+  function paintGalaxyOrbitLanes(ctx, nodes, scale, accent, preparedLanes, contextAnchors) {
     if (!ctx) return 0;
     const lanes = Array.isArray(preparedLanes)
       ? preparedLanes : galaxyOrbitLaneGeometry(nodes);
+    const presentation = galaxyOrbitLanePresentation(lanes,
+      Array.isArray(nodes) ? nodes.length : 0, scale, contextAnchors);
     const inverseScale = 1 / Math.max(0.1, Number(scale) || 1);
     ctx.save();
-    ctx.lineWidth = 0.55 * inverseScale;
-    lanes.forEach(lane => {
-      ctx.strokeStyle = alpha(lane.color || accent || '#9d7bff', 0.16);
+    ctx.lineWidth = presentation.lineWidth * inverseScale;
+    presentation.lanes.forEach(lane => {
+      ctx.strokeStyle = alpha(lane.color || accent || '#9d7bff', presentation.opacity);
       ctx.beginPath();
       ctx.arc(lane.x, lane.y, lane.radius, 0, 6.2832);
       ctx.stroke();
     });
     ctx.restore();
-    return lanes.length;
+    return presentation.lanes.length;
   }
 
   function galaxyAnchorAdornmentEligible(node, laneAnchorIds) {
@@ -7328,11 +7474,11 @@
       ? 'radial' : 'internal';
   }
 
-  function paintGalaxyAnchorAdornment(ctx, node, scale, accent, foreground) {
+  function paintGalaxyAnchorAdornment(ctx, node, scale, accent, foreground, paintRadius) {
     if (!ctx || !node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return 0;
     const role = node.anchor_role;
     if (role !== 'global' && role !== 'community') return 0;
-    const radius = finitePositive(node.radius, 3, 160);
+    const radius = finitePositive(paintRadius, finitePositive(node.radius, 3, 160), Infinity);
     const color = accent || node.color || '#9d7bff';
     const inverseScale = 1 / Math.max(0.1, Number(scale) || 1);
     if (role === 'community') {
@@ -7446,6 +7592,7 @@
     let galaxyFrame = 0, galaxyLastFrameTime = null, galaxyAccumulator = 0;
     let galaxyFrames = 0, galaxySteps = 0, galaxyLastSubsteps = 0;
     let galaxyReheatStepsRemaining = 0, galaxyReheatActivations = 0;
+    let galaxyReheatRepairs = 0;
     let galaxyReheatStepsApplied = 0, galaxyLastReheatSubsteps = 0, galaxyKinematicSteps = 0;
     let galaxyLastKinetic = 0, galaxyLastCollisions = 0, galaxyLastRelationCorrections = 0;
     let galaxyLastRelationDistance = 0, galaxyLastOrbitalRelationSkips = 0;
@@ -8210,7 +8357,9 @@
     function styleNode(node, ctx, scale) {
       if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id), dim = focus && !neighbor;
-      let r = node.radius;
+      /* Paint size is camera-aware in Galaxy mode. Physical evidence radius remains on
+         node.radius for gravity, exclusion and collision calculations. */
+      const r = galaxyNodePaintRadius(node, scale, state.settings.mode === 'galaxy');
       const col = node.color;
       const spacetimeFade = state.settings.mode === 'galaxy' && node.anchor_role !== 'global'
         ? 1 - 0.55 * Math.max(0, Math.min(1, Number(node.__galaxySpacetimeWarp) || 0))
@@ -8258,7 +8407,7 @@
         && (node.anchor_role === 'global' || galaxyPrimaryNodeIds.has(String(node.id)));
       const communityStar = galaxyAnchor && node.anchor_role === 'community';
       if (galaxyAnchor) paintGalaxyAnchorAdornment(
-        ctx, node, scale, state.themeColors.accent || col, false
+        ctx, node, scale, state.themeColors.accent || col, false, r
       );
       if (communityStar) {
         /* A real multi-planet star gets the same oversampled gradient/grain/bezel pipeline as
@@ -8293,7 +8442,7 @@
         if (node.hub) { ctx.lineWidth = 0.8 / scale; ctx.strokeStyle = node.stroke; ctx.stroke(); }
       }
       if (galaxyAnchor) paintGalaxyAnchorAdornment(
-        ctx, node, scale, state.themeColors.accent || nodeMaterial.identity, true
+        ctx, node, scale, state.themeColors.accent || nodeMaterial.identity, true, r
       );
       if (node.id === hilite) {
         /* Hover lifts exposure without changing the material or rotating its light. The two
@@ -8492,6 +8641,7 @@
       };
       galaxyReheatStepsRemaining = 0;
       galaxyReheatActivations = 0;
+      galaxyReheatRepairs = 0;
       galaxyReheatStepsApplied = 0;
       galaxyLastReheatSubsteps = 0;
       galaxyKinematicSteps = 0;
@@ -8672,6 +8822,7 @@
         /* Live Galaxy owns the carrier position phase even when a filtered payload skipped
            one-shot lane admission. Low-level helper callers retain force-only semantics unless
            they opt into this browser clock contract. */
+        authoritativeCarrierPosition: true,
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
         velocityDecay: GALAXY_VELOCITY_DECAY
           * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
@@ -8819,6 +8970,7 @@
         timestep: GALAXY_FIXED_TIMESTEP,
         maxSubsteps: GALAXY_MAX_SUBSTEPS,
         reheatActivations: galaxyReheatActivations,
+        reheatRepairs: galaxyReheatRepairs,
         reheatStepsRemaining: galaxyReheatStepsRemaining,
         reheatStepsApplied: galaxyReheatStepsApplied,
         lastReheatSubsteps: galaxyLastReheatSubsteps,
@@ -8883,15 +9035,16 @@
         const data = fg.graphData() || { nodes: [], links: [] };
         for (let index = 0; index < substeps; index++) {
           const kinematicFallback = staticFullLayout || collapsed;
+          const stepOptions = galaxyIntegratorOptions();
           const report = kinematicFallback
-            ? advanceGalaxyKinematicOrbits(data.nodes || [], galaxyIntegratorOptions())
+            ? advanceGalaxyKinematicOrbits(data.nodes || [], stepOptions)
             : integrateGalaxyLeapfrog(
               data.nodes || [], data.links || [], raw.community_bridges || [],
-              galaxyIntegratorOptions()
+              stepOptions
             );
           if (!kinematicFallback) {
             report.orbitalSpeed = applyGalaxyOrbitalSpeedControl(
-              data.nodes || [], galaxyIntegratorOptions());
+              data.nodes || [], stepOptions);
           }
           galaxySteps++;
           if (kinematicFallback) {
@@ -8998,6 +9151,37 @@
         );
       });
       ensureGalaxyPositions(raw.nodes, raw.meta && raw.meta.layout_seed);
+    }
+
+    function restoreGalaxyServerPhase() {
+      galaxySavedPhase.clear();
+      raw.nodes.forEach(node => {
+        const server = galaxyServerPhase.get(node.id);
+        node.x = server && Number.isFinite(server.x) ? server.x : undefined;
+        node.y = server && Number.isFinite(server.y) ? server.y : undefined;
+        node.vx = 0;
+        node.vy = 0;
+        node.fx = undefined;
+        node.fy = undefined;
+        [
+          '__galaxyOrbitSeeded', '__galaxySystemOrbitSeeded',
+          '__galaxyOrbitSpeedMultiplier', '__galaxySystemOrbitSpeedMultiplier',
+          '__galaxySpeedControlPhase', '__galaxyCarrierLaneAngle',
+          '__galaxyCarrierLaneRadius', '__galaxyCarrierLaneManaged',
+          '__galaxyKinematicGlobalOrbit', '__galaxyKinematicLocalOrbit',
+          '__galaxyKinematicCoreOrbit', '__galaxyKinematicCoreLocalOrbit',
+          '__galaxyFarFieldEnvelope', '__galaxyHaloScale', '__galaxySpacetimeWarp',
+        ].forEach(key => {
+          try { delete node[key]; } catch (_) { /* compatibility payload */ }
+        });
+      });
+      ensureGalaxyPositions(raw.nodes, raw.meta && raw.meta.layout_seed);
+      const anchor = galaxyGlobalAnchor(raw.nodes);
+      if (anchor) {
+        if (galaxyFarFieldEnvelopeCache) galaxyFarFieldEnvelopeCache.delete(anchor);
+        if (galaxyBlackHoleSpinCache) galaxyBlackHoleSpinCache.delete(anchor);
+      }
+      galaxyPhaseRestorePending = false;
     }
 
     function transitionGalaxyMode(previousMode, nextMode) {
@@ -9191,7 +9375,17 @@
              envelope is cached; the later field is then sized from the already-clear scene. */
           const authoredGalaxy = data.nodes.some(node => node.anchor_role === 'global')
             && data.nodes.filter(node => node.anchor_role === 'community').length > 1;
-          if (authoredGalaxy) {
+          const canonicalGalaxy = authoredGalaxy
+            && raw.meta && raw.meta.canonical_positions === true
+            && data.nodes.every(node =>
+            Number.isFinite(Number(node.galactic_target_radius))
+            && node.system_anchor_id !== undefined && node.system_anchor_id !== null
+          );
+          if (authoredGalaxy && !canonicalGalaxy) {
+            /* Compatibility payloads need admission packing. Canonical scene coordinates have
+               already passed the server's deterministic hierarchy/overlap policy; packing them
+               again turns hundreds of sparse systems into one artificial outer ring and makes
+               the fitted graph look empty. */
             establishGalaxyCarrierLanes(data.nodes, {
               gap: GALAXY_SYSTEM_PACKING_GAP,
               layoutSeed: raw.meta && raw.meta.layout_seed,
@@ -9553,8 +9747,10 @@
             const lanes = galaxyOrbitLaneGeometry(currentData.nodes || []);
             galaxyVisibleStarIds = galaxyStarAnchorIds(lanes);
             galaxyPrimaryNodeIds = galaxyPrimaryAnchorIds(lanes);
+            const contextAnchors = galaxyOrbitLaneContext(currentData.nodes || [], hilite,
+              hoverSet, state.focusId);
             paintGalaxyOrbitLanes(ctx, currentData.nodes || [], scale,
-              state.themeColors.accent, lanes);
+              state.themeColors.accent, lanes, contextAnchors);
           } else {
             galaxyVisibleStarIds = new Set();
             galaxyPrimaryNodeIds = new Set();
@@ -9596,8 +9792,9 @@
       .nodePointerAreaPaint((node, color, ctx) => {
         if (!Number.isFinite(node.x) || !Number.isFinite(node.y)
           || !Number.isFinite(node.radius)) return;
+        const radius = galaxyNodePaintRadius(node, zoom, state.settings.mode === 'galaxy');
         ctx.fillStyle = color; ctx.beginPath();
-        ctx.arc(node.x, node.y, node.radius + 2, 0, 6.2832); ctx.fill();
+        ctx.arc(node.x, node.y, radius + 3 / Math.max(0.1, zoom), 0, 6.2832); ctx.fill();
       })
       .linkColor(l => {
         const focus = hoverSet && hoverSet.size > 1;
@@ -9764,7 +9961,9 @@
         (fg.graphData().nodes || []).forEach(node => {
           if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
           const d = Math.hypot(node.x - point.x, node.y - point.y);
-          const hitRadius = (node.radius || 1) + 5 / Math.max(zoom, 0.1);
+          const hitRadius = galaxyNodePaintRadius(
+            node, zoom, state.settings.mode === 'galaxy'
+          ) + 5 / Math.max(zoom, 0.1);
           if (d <= hitRadius && d < distance) { candidate = node; distance = d; }
         });
         if (!dragNodeEligible(candidate)) return;
@@ -10162,7 +10361,7 @@
         })),
       };
     };
-    api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
+    api.fit = () => { if (!destroyed) autoFit(reduced() ? 0 : 500, 40); };
     api.physicsDiagnostics = () => physicsDiagnostics();
     api.graphToScreen = (x, y) => {
       if (!fg.graph2ScreenCoords) return { x: Number(x) || 0, y: Number(y) || 0 };
@@ -10229,8 +10428,50 @@
       cancelAutoFit();
       if (!staticFullLayout) raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       if (state.settings.mode === 'galaxy') {
-        /* Persistent physics has no cold alpha to restart. Wake its ordinary fixed clock while
-           preserving phase and velocity; never inject bonus slices that fast-forward all orbits. */
+        /* Galaxy has no D3 temperature. Reheat is therefore an explicit layout recovery: return
+           to the canonical server phase, rebuild physically bound tangents once, and resume the
+           ordinary fixed clock. This repairs an escaped/corrupted view without adding bonus
+           integration steps, random impulses, or a hidden whole-graph alpha wake. */
+        const data = fg.graphData() || {};
+        if (Array.isArray(data.nodes) && data.nodes.length) {
+          const anchor = galaxyGlobalAnchor(data.nodes);
+          const authoredGalaxy = anchor && anchor.anchor_role === 'global'
+            && data.nodes.some(node => node && node.anchor_role === 'community');
+          if (authoredGalaxy) {
+            cancelGalaxyDynamics(true);
+            restoreGalaxyServerPhase();
+            markGalaxyBlackHoleChildren(data.nodes, data.links || []);
+            seedGalaxyOrbits(
+              data.nodes, raw.meta && raw.meta.layout_seed,
+              state.settings.gravity, galaxyLiveSoftening(), reduced(), {
+                orbitalSpeed: state.settings.repel,
+                gravitationalConstant: state.settings.gravitationalConstant,
+                localGravitationalConstant: state.settings.localGravitationalConstant,
+                localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
+              }
+            );
+            seedGalaxySystemOrbits(
+              data.nodes, raw.meta && raw.meta.layout_seed,
+              state.settings.gravity, Math.max(36, galaxySoftening() * 5), reduced(), {
+                gravitationalConstant: state.settings.gravitationalConstant,
+                blackHoleMass: state.settings.blackHoleMass,
+                orbitalSpeed: state.settings.repel,
+                localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
+              }
+            );
+            applyGalaxySystemAnchorExclusion(data.nodes, {
+              padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+              fixAnchors: true,
+            });
+            applyGalaxyBlackHoleExclusion(data.nodes, {
+              padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
+            });
+            recenterGalaxyOnAnchor(data.nodes);
+            galaxyReheatRepairs++;
+            invalidate();
+            autoFit(reduced() ? 0 : 400, 40);
+          }
+        }
         galaxyReheatStepsRemaining = Math.max(galaxyReheatStepsRemaining,
           large ? GALAXY_REHEAT_LARGE_STEPS : GALAXY_REHEAT_STEPS);
         galaxyReheatActivations++;
@@ -10504,6 +10745,7 @@
       galaxyGravityStrengthMultiplier,
       galaxyBlackHoleGravityConstant, galaxyBlackHoleGravitySetting,
       galaxyCarrierTargetSpeed, galaxyAuthoredCarrierTargetSpeed,
+      galaxyBoundCarrierSpeedRatio: GALAXY_BOUND_CARRIER_SPEED_RATIO,
       galaxyBlackHoleSpinAngle, advanceGalaxyBlackHoleSpin,
       galaxyGlobalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       galaxyLocalGravityConstant,
@@ -10514,6 +10756,7 @@
       defaultGalaxyStellarAccelerationCap, defaultGalaxySystemAccelerationCap,
       galaxySceneWithinLiveLimit,
       galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier, galaxyOrbitalRadiusMultiplier,
+      galaxyLocalOrbitClock,
       applyGalaxyOrbitalSpeedControl,
       galaxyOrbitalSeparationPadding, galaxyOrbitalSeparationStrength,
       communityKey, communityCenters, galaxyOrbitGroups, ensureGalaxyPositions,
@@ -10551,7 +10794,9 @@
       fallbackCommunityBridges, paintFlowArrow,
       nodeName, linkEndpoint, asOfValue, materialRecipe, materialTier,
       paintMaterialDirect, paintMaterialSurface, paintGalaxyAnchorAdornment,
-      galaxyOrbitLaneGeometry, paintGalaxyOrbitLanes, galaxyOrbitalLinkRole,
+      galaxyNodeScreenRadiusFloor, galaxyNodePaintRadius,
+      galaxyOrbitLaneGeometry, galaxyOrbitLaneContext, galaxyOrbitLanePresentation,
+      paintGalaxyOrbitLanes, galaxyOrbitalLinkRole,
       galaxyAnchorAdornmentEligible, galaxyStarAnchorIds, galaxyPrimaryAnchorIds,
       renderMaterialSample, sampleMaterialColour,
       materialCacheStats, clearMaterialCache, setMaterialCanvasFactory
