@@ -26,6 +26,23 @@ def _response_tokens(payload):
     return RegexTokenCounter()(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
 
 
+def test_mcp_json_responses_are_compact_without_changing_the_payload():
+    """MCP results are model context, so formatting must not consume it."""
+    from engraphis.mcp_server import _ok
+
+    payload = {
+        "query": "deployment procedure",
+        "sources": [{"id": "mem_1", "title": "Deploy safely", "tokens": 24}],
+        "usage": {"context_tokens": 24, "saved_tokens": 120},
+    }
+    rendered = _ok(payload)
+    pretty = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    assert json.loads(rendered) == payload
+    assert "\n" not in rendered
+    assert len(rendered.encode("utf-8")) < len(pretty.encode("utf-8"))
+
+
 def test_response_budget_one_character_body_always_makes_progress():
     from engraphis.mcp_server import _apply_response_budget
 

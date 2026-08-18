@@ -996,7 +996,7 @@ def test_skewed_evidence_keeps_mass_and_radius_contrast_after_top_n_cap():
             1.0 + 15.0 * node["mass_score"] ** 2, abs=1e-6
         )
         assert node["visual_radius"] == pytest.approx(
-            1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0), abs=2e-6
+            1.2 * (1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0)), abs=2e-6
         )
 
 
@@ -1011,10 +1011,16 @@ def test_visual_mass_mapping_preserves_live_fit_to_view_contrast():
     heavy_radius = graph_scene_module._visual_radius(heavy_mass)
 
     assert heavy_radius / light_radius >= 2.7
-    assert heavy_radius < 13.0
+    assert heavy_radius < 15.6
 
 
 def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
+    assert graph_scene_module.BASE_NODE_RADIUS_SCALE == 1.2
+    assert graph_scene_module.LOCAL_ORBIT_INITIAL_COMPACTNESS == 0.48
+    assert graph_scene_module.GALACTIC_INITIAL_COMPACTNESS == 0.384
+    assert graph_scene_module.GALACTIC_RADIUS_SCALE == 0.192
+    assert graph_scene_module.GALAXY_LOCAL_GAP_SCALE == 0.6
+    assert graph_scene_module.GALAXY_SYSTEM_MIN_GAP == 23.04
     nodes = {}
     member_ids = []
     for index in range(21):
@@ -1071,8 +1077,8 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
     assert (core["x"], core["y"]) == (0.0, 0.0)
     assert core["galactic_radius"] == 0.0
     assert core["galactic_target_radius"] == 0.0
-    assert core["galactic_radius_scale"] == 0.4
-    assert core["galactic_initial_compactness"] == 0.8
+    assert core["galactic_radius_scale"] == 0.192
+    assert core["galactic_initial_compactness"] == 0.384
     assert core["galactic_clearance_adjusted"] is False
     assert core["galactic_overlap"] is False
     assert core["galactic_arm"] == -1
@@ -1106,11 +1112,11 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
     for left_index, left in enumerate(node_list):
         for right in node_list[left_index + 1:]:
             assert math.dist((left["x"], left["y"]), (right["x"], right["y"])) >= (
-                left["visual_radius"] + right["visual_radius"] + 7.9
+                left["visual_radius"] + right["visual_radius"] + 4.7
             )
     assert scene["communities"][0]["radius"] >= max(
         node["orbit_radius"] + node["visual_radius"] for node in by_id.values()
-    ) + 5.9
+    ) + 3.5
 
     # Recreate the clearance-aware hierarchy using the emitted scene seed. Compactness
     # remains preferred, but dense rings may expand to preserve painted-disk clearance.
@@ -1138,6 +1144,68 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
         )
 
 
+def test_orbit_hierarchy_uses_nearest_larger_connected_parent_for_moons():
+    specs = {
+        "star": (16.0, 12.0),
+        "planet-a": (10.0, 7.0),
+        "planet-b": (8.0, 5.0),
+        "moon-a": (3.0, 2.0),
+        "moon-b": (2.0, 1.0),
+    }
+    nodes = {
+        node_id: {
+            "id": node_id,
+            "gravity_mass": mass,
+            "scene_rank": mass / 16.0,
+            "weighted_degree": degree,
+            "visual_radius": graph_scene_module._visual_radius(mass),
+            "community_id": "solar",
+            "anchor_role": "community" if node_id == "star" else "none",
+            "ghost": False,
+        }
+        for node_id, (mass, degree) in specs.items()
+    }
+    edges = [
+        {"source": "star", "target": "planet-a", "strength": 1.0},
+        {"source": "star", "target": "planet-b", "strength": 0.9},
+        # moon-a can see both bodies; the nearest larger connected body is its planet.
+        {"source": "star", "target": "moon-a", "strength": 0.2},
+        {"source": "planet-a", "target": "moon-a", "strength": 0.8},
+        {"source": "planet-a", "target": "moon-b", "strength": 0.7},
+    ]
+
+    slots, system_radii = graph_scene_module._assign_orbit_hierarchy(
+        nodes, {"solar": list(nodes)}, {"solar": "star"}, edges=edges
+    )
+
+    assert nodes["star"]["system_anchor_id"] == "star"
+    assert nodes["star"]["orbit_tier"] == 0
+    assert nodes["planet-a"]["system_anchor_id"] == "star"
+    assert nodes["planet-b"]["system_anchor_id"] == "star"
+    assert nodes["planet-a"]["orbit_tier"] == 1
+    assert nodes["moon-a"]["system_anchor_id"] == "planet-a"
+    assert nodes["moon-b"]["system_anchor_id"] == "planet-a"
+    assert nodes["moon-a"]["orbit_tier"] == 2
+    assert nodes["moon-b"]["orbit_tier"] == 2
+
+    positions = graph_scene_module._orbital_layout_positions(
+        nodes, {"solar": list(nodes)}, {"solar": "star"},
+        {"solar": (0.0, 0.0)}, slots, 4107,
+    )
+    for child_id, parent_id in {
+        "planet-a": "star", "planet-b": "star",
+        "moon-a": "planet-a", "moon-b": "planet-a",
+    }.items():
+        distance = math.dist(positions[child_id], positions[parent_id])
+        assert 0.87 * nodes[child_id]["orbit_radius"] <= distance
+        assert distance <= nodes[child_id]["orbit_radius"] + 1e-5
+    assert system_radii["solar"] >= (
+        nodes["planet-a"]["orbit_radius"]
+        + nodes["moon-a"]["orbit_radius"]
+        + nodes["moon-a"]["visual_radius"]
+    )
+
+
 def test_community_spiral_packs_compact_preferred_targets_without_envelope_overlap():
     communities = [
         {"id": f"system-{index:02d}", "mass": 100.0 - index, "radius": radius}
@@ -1154,8 +1222,8 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     assert positions["system-00"] == (0.0, 0.0)
     assert hints["system-00"]["galactic_radius"] == 0.0
     assert hints["system-00"]["galactic_target_radius"] == 0.0
-    assert hints["system-00"]["galactic_radius_scale"] == 0.4
-    assert hints["system-00"]["galactic_initial_compactness"] == 0.8
+    assert hints["system-00"]["galactic_radius_scale"] == 0.192
+    assert hints["system-00"]["galactic_initial_compactness"] == 0.384
     assert hints["system-00"]["galactic_overlap"] is False
     assert hints["system-00"]["galactic_arm"] == -1
     outer_hints = [hint for community_id, hint in hints.items() if community_id != "system-00"]
@@ -1763,7 +1831,7 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v10-even-orbital-spacing"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
 
 
 def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
@@ -1786,7 +1854,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v10-even-orbital-spacing"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True
