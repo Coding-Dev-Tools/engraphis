@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -47,6 +48,14 @@ MAX_PULL_FAILURE_CHARS = 200
 # bundles would only mask the refusal and hammer the relay. 401/403 authentication and
 # authorization, 402 inactive hosted entitlement, 429 backpressure.
 FATAL_PULL_STATUSES = frozenset({401, 402, 403, 429})
+# Transient relay failures eligible for bounded retry. Server-side outages (502/503/504)
+# and transport-level reachability failures are retried with exponential backoff so one
+# blip does not abort the push half of a sync round. 401/402/403/429 remain fatal —
+# retrying those only amplifies a refusal the operator must resolve.
+TRANSIENT_PUSH_STATUSES = frozenset({502, 503, 504})
+MAX_PUSH_RETRIES = 2
+PUSH_RETRY_BASE_DELAY = 1.0
+PUSH_RETRY_MAX_DELAY = 8.0
 MAX_SYNC_TOKEN_BYTES = 8192
 MAX_SYNC_POLICY_BYTES = 64
 SYNC_E2EE_PROTOCOL = "v1"
@@ -549,40 +558,92 @@ class RelayTransport:
         if data is not None:
             headers["Content-Type"] = "application/octet-stream"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
-            # URL scheme/host safety is enforced by _validated_base_url().
-            with _urlopen_no_redirect(req, timeout=self.timeout) as resp:
-                body = resp.read(max_response_bytes + 1)
-                if len(body) > max_response_bytes:
-                    raise RelayError("relay response exceeded the client safety limit")
-                return body
-        except urllib.error.HTTPError as exc:
-            # Never propagate an untrusted relay response body or the HTTPError's
-            # request URL. Either can contain PII, signed query data, or reflected
-            # credentials and these errors are surfaced by sync APIs and CLIs.
-            # HTTPError owns the failing response stream but does not participate in
-            # the successful response context manager above. Close it without reading
-            # its untrusted body so repeated authorization/relay failures cannot leak
-            # sockets or file descriptors (and cannot allocate attacker-controlled
-            # error payloads merely for diagnostics).
+        last_exc: Optional[Exception] = None
+        attempts = 1 + MAX_PUSH_RETRIES if method == "POST" else 1
+        for attempt in range(attempts):
             try:
-                exc.close()
-            except Exception:  # noqa: BLE001 - error cleanup must not mask the status
-                pass
-            if exc.code == 402:
-                raise RelayError(
-                    "Cloud Sync entitlement is inactive (upgrade or renew required)",
-                    status=402,
-                ) from None
-            raise RelayError("relay request failed (HTTP %s)" % exc.code,
-                             status=exc.code) from None
-        except urllib.error.URLError:
-            raise RelayUnreachable("could not reach the relay") from None
-        except (TimeoutError, OSError):
-            # urllib can surface socket timeouts and low-level TLS/socket failures
-            # directly rather than wrapping them in URLError. Normalize them to the
-            # sanitized transport class so callers never expose provider text.
-            raise RelayUnreachable("could not reach the relay") from None
+                # URL scheme/host safety is enforced by _validated_base_url().
+                with _urlopen_no_redirect(req, timeout=self.timeout) as resp:
+                    body = resp.read(max_response_bytes + 1)
+                    if len(body) > max_response_bytes:
+                        raise RelayError("relay response exceeded the client safety limit")
+                    return body
+            except urllib.error.HTTPError as exc:
+                # Never propagate an untrusted relay response body or the HTTPError's
+                # request URL. Either can contain PII, signed query data, or reflected
+                # credentials and these errors are surfaced by sync APIs and CLIs.
+                # HTTPError owns the failing response stream but does not participate in
+                # the successful response context manager above. Close it without reading
+                # its untrusted body so repeated authorization/relay failures cannot leak
+                # sockets or file descriptors (and cannot allocate attacker-controlled
+                # error payloads merely for diagnostics).
+                try:
+                    exc.close()
+                except Exception:  # noqa: BLE001 - error cleanup must not mask the status
+                    pass
+                if exc.code == 402:
+                    raise RelayError(
+                        "Cloud Sync entitlement is inactive (upgrade or renew required)",
+                        status=402,
+                    ) from None
+                if (
+                    method == "POST"
+                    and exc.code in TRANSIENT_PUSH_STATUSES
+                    and attempt < MAX_PUSH_RETRIES
+                ):
+                    wait = min(
+                        PUSH_RETRY_MAX_DELAY,
+                        PUSH_RETRY_BASE_DELAY * (2 ** attempt),
+                    )
+                    logger.warning(
+                        "relay push returned %d; retrying in %.1fs (attempt %d/%d)",
+                        exc.code, wait, attempt + 1, MAX_PUSH_RETRIES,
+                    )
+                    time.sleep(wait)
+                    last_exc = RelayError(
+                        "relay request failed (HTTP %s)" % exc.code,
+                        status=exc.code,
+                    )
+                    continue
+                raise RelayError("relay request failed (HTTP %s)" % exc.code,
+                                 status=exc.code) from None
+            except urllib.error.URLError:
+                if method == "POST" and attempt < MAX_PUSH_RETRIES:
+                    wait = min(
+                        PUSH_RETRY_MAX_DELAY,
+                        PUSH_RETRY_BASE_DELAY * (2 ** attempt),
+                    )
+                    logger.warning(
+                        "relay unreachable; retrying in %.1fs (attempt %d/%d)",
+                        wait, attempt + 1, MAX_PUSH_RETRIES,
+                    )
+                    time.sleep(wait)
+                    last_exc = RelayUnreachable("could not reach the relay")
+                    continue
+                raise RelayUnreachable("could not reach the relay") from None
+            except (TimeoutError, OSError):
+                # urllib can surface socket timeouts and low-level TLS/socket failures
+                # directly rather than wrapping them in URLError. Normalize them to the
+                # sanitized transport class so callers never expose provider text.
+                if method == "POST" and attempt < MAX_PUSH_RETRIES:
+                    wait = min(
+                        PUSH_RETRY_MAX_DELAY,
+                        PUSH_RETRY_BASE_DELAY * (2 ** attempt),
+                    )
+                    logger.warning(
+                        "relay transport error; retrying in %.1fs (attempt %d/%d)",
+                        wait, attempt + 1, MAX_PUSH_RETRIES,
+                    )
+                    time.sleep(wait)
+                    last_exc = RelayUnreachable("could not reach the relay")
+                    continue
+                raise RelayUnreachable("could not reach the relay") from None
+        # Unreachable in practice — the loop always returns or raises inside. The
+        # sentinel is here so a future edit that skips both branches still surfaces
+        # a structured error rather than returning None.
+        if last_exc is not None:
+            raise last_exc
+        raise RelayError("relay request exhausted without a response")
 
     # ── SyncTransport protocol ───────────────────────────────────────────────────────
     def push(self, name: str, data: bytes) -> None:

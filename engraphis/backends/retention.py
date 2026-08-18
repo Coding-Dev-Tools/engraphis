@@ -91,11 +91,41 @@ class LLMRetentionSupervisor:
         )
 
 
-def get_retention_supervisor(mode: str = "none") -> Optional[RetentionSupervisor]:
+def get_retention_supervisor(
+    mode: str = "none", *, require_exact: bool = False,
+) -> Optional[RetentionSupervisor]:
     """Return the configured supervisor, or ``None`` for deterministic-only writes."""
     name = str(mode or "none").strip().lower()
     if name in ("", "none", "off", "disabled"):
         return None
     if name == "llm":
+        if require_exact:
+            _missing_key_msg = "retention supervisor requires ENGRAPHIS_LLM_API_KEY"
+            try:
+                from engraphis.llm.client import LLMClient
+                client = LLMClient()
+                try:
+                    if not client.api_key:
+                        raise RuntimeError(_missing_key_msg)
+                finally:
+                    client.close()
+            except RuntimeError as exc:
+                # Only our own missing-key message is value-free and safe to re-raise.
+                # Every other RuntimeError (provider setup, proxy credentials, TLS
+                # failures surfaced by the client constructor) must be redacted so
+                # operator logs cannot leak third-party detail.
+                if str(exc) == _missing_key_msg:
+                    raise
+                raise RuntimeError(
+                    "configured retention supervisor is unavailable "
+                    f"({type(exc).__name__}) and require_exact_backends=True prevents "
+                    "deferred fallback"
+                ) from None
+            except Exception as exc:  # noqa: BLE001 - redact provider setup failures
+                raise RuntimeError(
+                    "configured retention supervisor is unavailable "
+                    f"({type(exc).__name__}) and require_exact_backends=True prevents "
+                    "deferred fallback"
+                ) from None
         return LLMRetentionSupervisor()
     raise ValueError("retention supervisor must be 'none' or 'llm'")

@@ -1340,6 +1340,19 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(repoFilter).toHaveValue('agent-memory');
   await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
+  // Clearing the filter updates the client-side renderer immediately via
+  // setRepoFilter(), but the #graph-count text reflects the last server
+  // scene response. In overview mode without code overlay, the debounced
+  // scheduleGraphRepositoryReload() does not fire, so the count stays at
+  // the previous filtered value. Click Reload data to fetch the unfiltered
+  // scene and wait for the response before asserting.
+  const unfilteredScene = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && !url.searchParams.get('repo');
+  });
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await unfilteredScene;
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   await page.getByRole('tab', { name: 'Analyse' }).click();
