@@ -449,7 +449,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260817-v10-orbit-clock-3'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260818-v20-main-node-material-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2452,6 +2452,17 @@
     }, { orbitPaused: state.graphOrbitPaused });
   }
 
+  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
+  function graphBlackHoleMassMultiplier(controlValue) {
+    const value = number(controlValue);
+    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
+       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
+       Local stellar wells remain owned exclusively by Local solar gravity. */
+    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
+      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
+  }
+
   function graphSpacetimeSettings() {
     /* The control surface is expressed in intelligible 0–200 / 20–500 ranges while the
        integrator uses dimensionless multipliers. These baseline divisors are deliberate:
@@ -2459,7 +2470,7 @@
     const controls = graphSpacetimeControlSettings();
     return {
       gravitationalConstant: controls.gravitationalConstant / 100,
-      blackHoleMass: controls.blackHoleMass / 160,
+      blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
       localGravitationalConstant: controls.localGravitationalConstant / 100,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,

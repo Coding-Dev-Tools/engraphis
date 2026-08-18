@@ -16,26 +16,27 @@ from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
-ALGORITHM_VERSION = "galaxy-v10-even-orbital-spacing"
+ALGORITHM_VERSION = "galaxy-v12-responsive-compact-orbits"
 PUBLIC_REFERENCE_ID_LIMIT = 200
 PUBLIC_FACET_LIMIT = 100
 PUBLIC_REPO_NAME_LIMIT = 100
 GOLDEN_ANGLE = math.pi * (3.0 - math.sqrt(5.0))
 ORBIT_MIN_ECCENTRICITY = 0.88
-# v6 begins every live star at 80% of its v5 radial placement.  Community
-# centres use the accumulated .4 scale (v5's .5 times this compactness) while
-# local orbital bands apply the same .8 factor independently.  That makes each
-# emitted coordinate exactly .8 of the corresponding uncontracted seed rather
-# than merely making the system anchors appear closer.
-GALACTIC_INITIAL_COMPACTNESS = 0.8
+# Local solar-system spacing retains the v11 compact target. Galaxy-wide carrier spacing is
+# another 20% tighter in v12. Painted-surface and complete-envelope clearance remain hard floors,
+# so compactness never permits nodes or solar systems to overlap to hit the preferred target.
+LOCAL_ORBIT_INITIAL_COMPACTNESS = 0.48
+GALACTIC_INITIAL_COMPACTNESS = 0.384
 GALACTIC_RADIUS_SCALE = 0.5 * GALACTIC_INITIAL_COMPACTNESS
+BASE_NODE_RADIUS_SCALE = 1.2
+GALAXY_LOCAL_GAP_SCALE = 0.6
 # Keep complete solar-system envelopes just outside one another while avoiding the
 # large empty radial bands that made most systems appear beyond the black-hole interior.
 # This matches the dashboard's default painted carrier gap (4 units) as a small
 # proportional envelope allowance instead of adding a blanket 15% radial tax.
-GALAXY_ENVELOPE_CLEARANCE_FACTOR = 1.04
+GALAXY_ENVELOPE_CLEARANCE_FACTOR = 1.032
 # Minimum radial distance beyond the outermost core ring where non-global systems begin
-GALAXY_SYSTEM_MIN_GAP = 48.0
+GALAXY_SYSTEM_MIN_GAP = 23.04
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
     "is", "it", "of", "on", "or", "that", "the", "this", "to", "was", "were",
@@ -221,10 +222,12 @@ def _visual_radius(gravity_mass: float) -> float:
 
     A square-root mapping compressed ordinary live scenes to roughly a 2:1 painted range,
     which made evidence-distinct stars read as uniform after the full galaxy was fitted.
-    The bounded mass contract (1..16) keeps this two-thirds-power view modest (3.5..14.2px)
-    while making the strongest observed stars about three times wider than light ones.
+    The bounded mass contract (1..16) keeps this two-thirds-power view modest (4.2..17.0px)
+    after the 20% base-size lift, while preserving the same evidence contrast ratio.
     """
-    return 1.5 + 2.0 * max(0.0, gravity_mass) ** (2.0 / 3.0)
+    return BASE_NODE_RADIUS_SCALE * (
+        1.5 + 2.0 * max(0.0, gravity_mass) ** (2.0 / 3.0)
+    )
 
 
 def _public_mass_metrics(mass_score: float) -> tuple[float, float, float]:
@@ -389,25 +392,27 @@ def _assign_orbit_hierarchy(
     community_members: Mapping[str, Sequence[str]],
     community_anchors: Mapping[str, str],
     *,
+    edges: Optional[Sequence[Mapping[str, Any]]] = None,
     radius_scale: Optional[float] = None,
 ) -> tuple[dict[str, dict[str, int | float]], dict[str, float]]:
-    """Assign deterministic, mass-ranked orbital bands without changing node mass.
+    """Assign a deterministic star -> planet -> moon hierarchy from graph structure.
 
-    Four heavy satellites occupy the inner band, then band capacity doubles up to 32.
-    Radii account for the actual evidence-derived node radii before the uniform v6
-    compactness factor is applied.  This keeps the rank/band hierarchy stable while
-    making every local orbital offset an exact fraction of its uncontracted seed.
-    Ring radii are expanded when the compactness target would make painted disks touch.
-    The clearance uses the minimum ellipse eccentricity emitted by ``_orbit_position``
-    and the largest visual radius in the ring, so it remains safe at every deterministic
-    phase and rotation.
+    The community anchor remains the root. Every other live node prefers the nearest
+    less-dominant *connected* parent that was already admitted to the hierarchy; this
+    makes a small hub orbit the star while its lower-mass neighbours orbit that hub.
+    Strict dominance order makes cycles impossible. Nodes without a structural parent
+    retain the compatibility fallback of orbiting the community anchor directly.
+
+    Each parent owns independent, clearance-aware orbital bands. Child subtree envelopes
+    are packed bottom-up, so a planet's moons cannot intersect the star or a neighbouring
+    planet merely because the planet body itself is small.
     """
     slots: dict[str, dict[str, int | float]] = {}
     system_radii: dict[str, float] = {}
     clean_radius_scale = _clamp(
         _finite_float(
-            GALACTIC_INITIAL_COMPACTNESS if radius_scale is None else radius_scale,
-            GALACTIC_INITIAL_COMPACTNESS,
+            LOCAL_ORBIT_INITIAL_COMPACTNESS if radius_scale is None else radius_scale,
+            LOCAL_ORBIT_INITIAL_COMPACTNESS,
         ),
         0.05,
         2.0,
@@ -434,82 +439,135 @@ def _assign_orbit_hierarchy(
                 node_id,
             ),
         )
-        anchor_radius = max(
-            2.0, _finite_float(nodes[anchor_id].get("visual_radius"), 2.0)
-        )
+        hierarchy_order = [anchor_id, *satellites]
+        hierarchy_index = {
+            node_id: index for index, node_id in enumerate(hierarchy_order)
+        }
+        live_set = set(live_ids)
+        adjacency: dict[str, dict[str, float]] = defaultdict(dict)
+        for edge in edges or ():
+            if edge.get("ghost") or str(edge.get("relation") or "") == "co_occurs":
+                continue
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            if (source == target or source not in live_set or target not in live_set
+                    or nodes[source].get("ghost") or nodes[target].get("ghost")):
+                continue
+            strength = max(0.0, _finite_float(edge.get("strength"), 0.0))
+            adjacency[source][target] = max(adjacency[source].get(target, 0.0), strength)
+            adjacency[target][source] = max(adjacency[target].get(source, 0.0), strength)
+
+        parents: dict[str, str] = {anchor_id: anchor_id}
+        children: dict[str, list[str]] = defaultdict(list)
+        depths: dict[str, int] = {anchor_id: 0}
+        for node_id in satellites:
+            earlier_neighbours = [
+                candidate for candidate in adjacency.get(node_id, {})
+                if hierarchy_index.get(candidate, len(hierarchy_order))
+                < hierarchy_index[node_id]
+            ]
+            if earlier_neighbours:
+                # The least-dominant eligible neighbour is the nearest larger body. Edge
+                # strength and stable id resolve the rare equal-order compatibility case.
+                parent_id = max(earlier_neighbours, key=lambda candidate: (
+                    hierarchy_index[candidate],
+                    adjacency[node_id].get(candidate, 0.0),
+                    candidate,
+                ))
+            else:
+                parent_id = anchor_id
+            parents[node_id] = parent_id
+            children[parent_id].append(node_id)
+            depths[node_id] = depths[parent_id] + 1
+
         nodes[anchor_id].update({
             "system_anchor_id": anchor_id,
             "orbit_tier": 0,
             "orbit_radius": 0.0,
         })
-        slots[anchor_id] = {"tier": 0, "slot": 0, "count": 1, "radius": 0.0}
+        slots[anchor_id] = {
+            "tier": 0, "depth": 0, "ring": 0,
+            "slot": 0, "count": 1, "radius": 0.0,
+        }
 
-        previous_outer = anchor_radius
-        compact_outer = anchor_radius
-        outermost_ring_max_radius = anchor_radius
-        offset = 0
-        tier = 1
-        while offset < len(satellites):
-            first_radius = max(2.0, _finite_float(
-                nodes[satellites[offset]].get("visual_radius"), 2.0
-            ))
-            gap = max(8.0, 0.55 * anchor_radius)
-            nominal_radius = previous_outer + first_radius + gap
-            if tier <= 3:
-                capacity = 4 * (2 ** (tier - 1))
-            else:
-                angular_footprint = max(8.0, 2.0 * first_radius + 0.5 * gap)
-                capacity = max(32, int(math.tau * nominal_radius / angular_footprint))
-            ring_ids = satellites[offset:offset + capacity]
-            ring_max_radius = max(
-                max(2.0, _finite_float(nodes[node_id].get("visual_radius"), 2.0))
-                for node_id in ring_ids
+        subtree_radii = {
+            node_id: max(2.0, _finite_float(nodes[node_id].get("visual_radius"), 2.0))
+            for node_id in live_ids
+        }
+        parent_order = sorted(
+            live_ids, key=lambda node_id: (-depths[node_id], hierarchy_index[node_id])
+        )
+        for parent_id in parent_order:
+            child_ids = sorted(
+                children.get(parent_id, []), key=lambda node_id: hierarchy_index[node_id]
             )
-            nominal_radius = previous_outer + ring_max_radius + gap
-            # Compactness is a preferred visual target, not permission to intersect.  The
-            # radial floor keeps this ring outside the previous painted ring; the angular
-            # floor keeps adjacent disks clear on the ellipse's compressed axis.  Both use
-            # the largest radius in the ring so later phase/rotation changes remain safe.
-            # Rings may use different deterministic ellipse rotations.  Bound them by
-            # their enclosing circles: the next ring's minimum radial distance is
-            # eccentricity * radius, while the prior ring's maximum is its semimajor
-            # radius.  This is conservative but keeps systems collision-free regardless
-            # of phase and per-tier rotation.
-            radial_clearance = (
-                previous_outer + ring_max_radius + gap
-            ) / ORBIT_MIN_ECCENTRICITY
-            angular_clearance = 0.0
-            if len(ring_ids) > 1:
-                angular_clearance = (
-                    2.0 * ring_max_radius + gap
-                ) / (
-                    2.0 * ORBIT_MIN_ECCENTRICITY
-                    * math.sin(math.pi / len(ring_ids))
+            if not child_ids:
+                continue
+            parent_radius = max(
+                2.0, _finite_float(nodes[parent_id].get("visual_radius"), 2.0)
+            )
+            previous_outer = parent_radius
+            local_outer = parent_radius
+            offset = 0
+            ring = 1
+            while offset < len(child_ids):
+                first_extent = subtree_radii[child_ids[offset]]
+                gap = GALAXY_LOCAL_GAP_SCALE * max(8.0, 0.55 * parent_radius)
+                nominal_radius = previous_outer + first_extent + gap
+                if ring <= 3:
+                    capacity = 4 * (2 ** (ring - 1))
+                else:
+                    angular_footprint = max(8.0, 2.0 * first_extent + 0.5 * gap)
+                    capacity = max(
+                        32, int(math.tau * nominal_radius / angular_footprint)
+                    )
+                ring_ids = child_ids[offset:offset + capacity]
+                ring_max_extent = max(subtree_radii[node_id] for node_id in ring_ids)
+                nominal_radius = previous_outer + ring_max_extent + gap
+                radial_clearance = (
+                    previous_outer + ring_max_extent + gap
+                ) / ORBIT_MIN_ECCENTRICITY
+                angular_clearance = 0.0
+                if len(ring_ids) > 1:
+                    angular_clearance = (
+                        2.0 * ring_max_extent + gap
+                    ) / (
+                        2.0 * ORBIT_MIN_ECCENTRICITY
+                        * math.sin(math.pi / len(ring_ids))
+                    )
+                compact_radius = max(
+                    nominal_radius * clean_radius_scale,
+                    radial_clearance,
+                    angular_clearance,
                 )
-            compact_radius = max(
-                nominal_radius * clean_radius_scale,
-                radial_clearance,
-                angular_clearance,
-            )
-            for slot, node_id in enumerate(ring_ids):
-                nodes[node_id].update({
-                    "system_anchor_id": anchor_id,
-                    "orbit_tier": tier,
-                    "orbit_radius": round(compact_radius, 6),
-                })
-                slots[node_id] = {
-                    "tier": tier,
-                    "slot": slot,
-                    "count": len(ring_ids),
-                    "radius": compact_radius,
-                }
-            previous_outer = compact_radius + ring_max_radius
-            compact_outer = max(compact_outer, compact_radius + ring_max_radius)
-            outermost_ring_max_radius = ring_max_radius
-            offset += len(ring_ids)
-            tier += 1
+                for slot, node_id in enumerate(ring_ids):
+                    depth = depths[node_id]
+                    tier = depth + ring - 1
+                    nodes[node_id].update({
+                        "system_anchor_id": parent_id,
+                        "orbit_tier": tier,
+                        "orbit_radius": round(compact_radius, 6),
+                    })
+                    slots[node_id] = {
+                        "tier": tier,
+                        "depth": depth,
+                        "ring": ring,
+                        "slot": slot,
+                        "count": len(ring_ids),
+                        "radius": compact_radius,
+                    }
+                previous_outer = compact_radius + ring_max_extent
+                local_outer = max(local_outer, compact_radius + ring_max_extent)
+                offset += len(ring_ids)
+                ring += 1
+            subtree_radii[parent_id] = max(subtree_radii[parent_id], local_outer)
         system_radii[community_id] = round(
-            _clamp(compact_outer + outermost_ring_max_radius, 36.0, 10_000.0), 6
+            _clamp(
+                subtree_radii[anchor_id] + 6.0 * GALAXY_LOCAL_GAP_SCALE,
+                36.0,
+                10_000.0,
+            ),
+            6,
         )
     return slots, system_radii
 
@@ -525,10 +583,11 @@ def _orbit_position(
     tier = int(slot["tier"])
     if tier <= 0:
         return center_x, center_y
+    ring = int(slot.get("ring", tier))
     count = max(1, int(slot["count"]))
     ordinal = int(slot["slot"])
     digest = hashlib.sha256(
-        f"{ALGORITHM_VERSION}:{layout_seed}:{community_id}:{tier}".encode("utf-8")
+        f"{ALGORITHM_VERSION}:{layout_seed}:{community_id}:{ring}".encode("utf-8")
     ).digest()
     phase = int.from_bytes(digest[:8], "big") / float(1 << 64) * math.tau
     direction = -1.0 if digest[8] & 1 else 1.0
@@ -543,6 +602,44 @@ def _orbit_position(
         center_x + local_x * cos_rotation - local_y * sin_rotation,
         center_y + local_x * sin_rotation + local_y * cos_rotation,
     )
+
+
+def _orbital_layout_positions(
+    nodes: Mapping[str, Mapping[str, Any]],
+    community_members: Mapping[str, Sequence[str]],
+    community_anchors: Mapping[str, str],
+    community_positions: Mapping[str, tuple[float, float]],
+    orbit_slots: Mapping[str, Mapping[str, int | float]],
+    layout_seed: int,
+) -> dict[str, tuple[float, float]]:
+    """Seed every live child relative to its immediate authored orbital parent."""
+    positions: dict[str, tuple[float, float]] = {}
+    for community_id, member_ids in sorted(community_members.items()):
+        center = community_positions.get(community_id)
+        anchor_id = community_anchors.get(community_id, "")
+        if center is None or not anchor_id:
+            continue
+        live_ids = [
+            node_id for node_id in member_ids
+            if node_id in nodes and not nodes[node_id].get("ghost")
+            and node_id in orbit_slots
+        ]
+        for node_id in sorted(live_ids, key=lambda value: (
+            int(orbit_slots[value].get(
+                "depth", nodes[value].get("orbit_tier") or 0
+            )),
+            value,
+        )):
+            if node_id == anchor_id:
+                positions[node_id] = center
+                continue
+            parent_id = str(nodes[node_id].get("system_anchor_id") or anchor_id)
+            parent_x, parent_y = positions.get(parent_id, center)
+            orbit_context = community_id if parent_id == anchor_id else parent_id
+            positions[node_id] = _orbit_position(
+                parent_x, parent_y, orbit_context, orbit_slots[node_id], layout_seed
+            )
+    return positions
 
 
 def _community_positions(
@@ -1259,7 +1356,9 @@ def build_canonical_graph(
             "core_affinity": round(affinity, 6),
             "scene_rank": round(_clamp(0.75 * node["mass_score"] + 0.25 * affinity), 6),
         })
-    _assign_orbit_hierarchy(nodes, community_members, community_anchors)
+    _assign_orbit_hierarchy(
+        nodes, community_members, community_anchors, edges=edges
+    )
 
     for edge in edges:
         source_radius = nodes[edge["source"]]["visual_radius"]
@@ -2053,15 +2152,14 @@ def _build_complete_scene(
         all_nodes[anchor_id]["anchor_role"] = "community"
     if global_anchor:
         all_nodes[global_anchor]["anchor_role"] = "global"
-    orbit_slots, system_radii = _assign_orbit_hierarchy(
-        all_nodes, community_members, community_anchors
-    )
-
     complete_edges = sorted(
         [*raw_relations, *evidence_edges, *memory_link_edges, *code_memory_edges],
         key=lambda edge: (
             edge["connector_kind"], -float(edge["strength"]), edge["id"]
         ),
+    )
+    orbit_slots, system_radii = _assign_orbit_hierarchy(
+        all_nodes, community_members, community_anchors, edges=complete_edges
     )
     if connected_only:
         connected_ids = {
@@ -2106,7 +2204,7 @@ def _build_complete_scene(
         if global_anchor:
             all_nodes[global_anchor]["anchor_role"] = "global"
         orbit_slots, system_radii = _assign_orbit_hierarchy(
-            all_nodes, community_members, community_anchors
+            all_nodes, community_members, community_anchors, edges=complete_edges
         )
     internal_strength: dict[str, float] = defaultdict(float)
     external_strength: dict[str, float] = defaultdict(float)
@@ -2212,6 +2310,10 @@ def _build_complete_scene(
     )
     for community in communities:
         community.update(community_hints[community["id"]])
+    seeded_positions = _orbital_layout_positions(
+        all_nodes, community_members, community_anchors, positions,
+        orbit_slots, layout_seed,
+    )
     scene_nodes = []
     for node_id in sorted(all_nodes, key=lambda value: (
         -all_nodes[value]["scene_rank"], value
@@ -2222,14 +2324,8 @@ def _build_complete_scene(
             x, y = _ghost_position(
                 layout_seed, node_id, 82.0 * math.sqrt(len(communities) + 1)
             )
-        elif node_id == community_anchors[community_id]:
-            x, y = positions[community_id]
         else:
-            center_x, center_y = positions[community_id]
-            x, y = _orbit_position(
-                center_x, center_y, community_id,
-                orbit_slots[node_id], layout_seed,
-            )
+            x, y = seeded_positions[node_id]
         node["x"], node["y"] = round(x, 6), round(y, 6)
         if community_id in community_hints:
             node.update(community_hints[community_id])
@@ -2454,7 +2550,8 @@ def build_graph_scene(
     if graph["global_anchor"]:
         graph["nodes"][graph["global_anchor"]]["anchor_role"] = "global"
     orbit_slots, _system_radii = _assign_orbit_hierarchy(
-        graph["nodes"], graph["community_members"], graph["community_anchors"]
+        graph["nodes"], graph["community_members"], graph["community_anchors"],
+        edges=graph["edges"],
     )
     if level == "complete":
         return _build_complete_scene(
@@ -2758,6 +2855,10 @@ def build_graph_scene(
     layout_positions, layout_hints = _community_positions(
         layout_communities, global_community_id, layout_seed, spacing=98.0
     )
+    seeded_positions = _orbital_layout_positions(
+        graph["nodes"], graph["community_members"], graph["community_anchors"],
+        layout_positions, orbit_slots, layout_seed,
+    )
     community_positions = {
         community_id: layout_positions[community_id]
         for community_id in {community["id"] for community in communities}
@@ -2778,14 +2879,8 @@ def build_graph_scene(
             x, y = _ghost_position(
                 layout_seed, node_id, 98.0 * math.sqrt(len(communities) + 1)
             )
-        elif node_id == graph["community_anchors"][community_id]:
-            x, y = community_positions[community_id]
         else:
-            center_x, center_y = community_positions[community_id]
-            x, y = _orbit_position(
-                center_x, center_y, community_id,
-                orbit_slots[node_id], layout_seed,
-            )
+            x, y = seeded_positions[node_id]
         node["x"], node["y"] = round(x, 6), round(y, 6)
         if community_id in community_hints:
             node.update(community_hints[community_id])
