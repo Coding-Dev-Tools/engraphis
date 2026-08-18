@@ -13,7 +13,8 @@
     "layout_seed": 1779033703,
     "index_state": "ready",
     "filters": {},
-    "algorithm_version": "galaxy-v6"
+    "algorithm_version": "galaxy-v6",
+    "canonical_positions": true
   },
   "nodes": [
     {
