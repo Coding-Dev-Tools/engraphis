@@ -109,6 +109,7 @@ def service() -> MemoryService:
             embed_model=settings.embed_model or None,
             embed_revision=getattr(settings, "embed_revision", "") or None,
             require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+            require_exact_backends=bool(getattr(settings, "require_exact_backends", False)),
             embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
             vector_backend=settings.vector_backend,
             rerank_model=getattr(settings, "rerank_model", "") or None,
@@ -2809,9 +2810,22 @@ def engraphis_conflict_review(
 # The standard module export and dashboard mount are the zero-configuration Smart surface.
 mcp = smart_mcp
 
+def _eager_exact_backend_check() -> None:
+    """Construct the service eagerly when exact mode is enabled.
+
+    Every MCP launcher (stdio, HTTP, classic) calls this before accepting
+    traffic so a missing model, credential, or retention supervisor fails
+    the process immediately — matching the documented startup-failure
+    contract. Without this, the lazy ``service()`` factory surfaces the
+    same failure only on the first tool invocation.
+    """
+    if bool(getattr(settings, "require_exact_backends", False)):
+        service()
+
 
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
+    _eager_exact_backend_check()
     mcp.run()
 
 
