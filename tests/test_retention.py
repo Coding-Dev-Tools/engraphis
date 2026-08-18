@@ -1,4 +1,6 @@
 import pytest
+import sys
+import types
 
 from engraphis.backends.retention import LLMRetentionSupervisor, get_retention_supervisor
 from engraphis.core.engine import MemoryEngine
@@ -179,3 +181,23 @@ def test_llm_supervisor_rejects_non_finite_or_wrongly_typed_output():
 def test_unknown_retention_backend_is_actionable():
     with pytest.raises(ValueError, match="none.*llm"):
         get_retention_supervisor("mystery")
+
+
+def test_exact_llm_retention_requires_credentials(monkeypatch):
+    closed = []
+
+    class FakeLLMClient:
+        api_key = ""
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "engraphis.llm.client",
+        types.SimpleNamespace(LLMClient=FakeLLMClient),
+    )
+
+    with pytest.raises(RuntimeError, match="ENGRAPHIS_LLM_API_KEY"):
+        get_retention_supervisor("llm", require_exact=True)
+    assert closed == [True]
