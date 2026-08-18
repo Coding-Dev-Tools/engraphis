@@ -43,6 +43,7 @@ from engraphis.core.graph_scene import (
     ALGORITHM_VERSION as GRAPH_SCENE_ALGORITHM_VERSION,
     build_canonical_graph,
     build_graph_scene,
+    project_all_presentation,
     is_broad_search_fragment,
     strongest_path,
 )
@@ -252,6 +253,10 @@ MAX_GRAPH_ALL_NODES = 20_000
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
 MAX_GRAPH_COMPLETE_MEMORIES = 100_000
+# Prompt eligibility is a Python security predicate over two JSON envelopes. Bound
+# the raw candidate walk independently so rejected imports cannot force an unbounded
+# parse while still leaving room for eligible rows behind rejected candidates.
+MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES = 200_000
 MAX_GRAPH_COMPLETE_MEMORY_LINKS = 300_000
 MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS = 300_000
 MAX_GRAPH_COMPLETE_PAYLOAD_BYTES = 128 * 1024 * 1024
@@ -271,6 +276,11 @@ GRAPH_ENTITY_EVIDENCE_LIMIT = 100
 GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT = 400
 GRAPH_ENTITY_HISTORY_LIMIT = 50
 CONFLICT_REVIEW_SCAN_LIMIT = 10_000
+def _sqlite_prompt_eligible(provenance: object, metadata: object) -> int:
+    """Expose the exact Python prompt-security predicate to scoped SQLite joins."""
+    return int(prompt_eligible(_loads(provenance, {}), _loads(metadata, {})))
+
+
 
 
 
@@ -1144,6 +1154,11 @@ class MemoryService:
                  owned_connector: Optional[Any] = None) -> None:
         self.engine = engine
         self.store = engine.store
+        connection = getattr(self.store, "conn", None)
+        if connection is not None:
+            connection.create_function(
+                "_engraphis_prompt_eligible", 2, _sqlite_prompt_eligible,
+            )
         # Connector created by MemoryService.create() — closed in close() so the
         # SQLCipher key pragma doesn't outlive the service. None means the caller
         # injected a connector and owns its lifecycle.
@@ -8165,10 +8180,32 @@ class MemoryService:
         if lower_time is not None and upper_time is not None and lower_time > upper_time:
             raise ValidationError("time_from must be less than or equal to time_to")
 
-        # Classify public endpoint visibility before applying the entity candidate cap.
-        # A repository filter scopes the expensive support join; the endpoint-only scan
-        # below still preserves workspace-wide private-edge classification.
+        # Classify public endpoint visibility before applying the edge candidate cap.
+        # Build the same repository/time/type candidate relation used by the later entity
+        # query so unrelated repository edges cannot consume the selected scene's budget.
         visibility_sql = (
+            "WITH visibility_candidates AS ("
+            "SELECT selected_entity.id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
+        )
+        visibility_params: list[Any] = [wid]
+        if repo_id:
+            visibility_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            visibility_params.append(repo_id)
+        visibility_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        visibility_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            if clean_types:
+                marks = ",".join("?" for _ in clean_types)
+                visibility_sql += f"AND selected_entity.etype IN ({marks}) "
+                visibility_params.extend(clean_types)
+        visibility_sql += (
+            ") "
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
             "WHEN visibility_support.edge_id IS NULL THEN 1 "
@@ -8176,33 +8213,95 @@ class MemoryService:
             "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
             "ELSE 0 END) AS public_edge "
             "FROM edges visibility_edge "
+            "JOIN visibility_candidates visibility_src "
+            "ON visibility_src.id=visibility_edge.src "
+            "JOIN visibility_candidates visibility_dst "
+            "ON visibility_dst.id=visibility_edge.dst "
             "LEFT JOIN edge_supports visibility_support "
             "ON visibility_support.edge_id=visibility_edge.id "
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
             "WHERE visibility_edge.workspace_id=? "
         )
-        visibility_params: list[Any] = [wid]
+        visibility_params.append(wid)
         if repo_id:
             visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
             visibility_params.append(repo_id)
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst"
+            "visibility_edge.src, visibility_edge.dst LIMIT ?"
         )
+        visibility_params.append(MAX_GRAPH_ANALYSIS_EDGES + 1)
         visibility_rows = self.store.conn.execute(
             visibility_sql, visibility_params,
         ).fetchall()
-        # Workspace-wide endpoints still prevent an unrelated private edge from
-        # promoting a workspace-scoped entity into the selected repository.
+        # Privacy classification remains workspace-wide even for a repository view:
+        # a shared entity touched only by an unrelated repo's session-private edge must
+        # stay hidden. Bound the scan by selected candidate entities, not by every
+        # unrelated relation in the workspace.
+        touching_entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
+        touching_sql = (
+            "SELECT selected_entity.id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
+        )
+        touching_params: list[Any] = [wid]
+        if repo_id:
+            touching_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            touching_params.append(repo_id)
+        touching_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        touching_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            if clean_types:
+                marks = ",".join("?" for _ in clean_types)
+                touching_sql += f"AND selected_entity.etype IN ({marks}) "
+                touching_params.extend(clean_types)
+        touching_sql += (
+            "AND (EXISTS (SELECT 1 FROM edges touching_edge "
+            "WHERE touching_edge.workspace_id=? "
+            "AND touching_edge.src=selected_entity.id) "
+            "OR EXISTS (SELECT 1 FROM edges touching_edge "
+            "WHERE touching_edge.workspace_id=? "
+            "AND touching_edge.dst=selected_entity.id)) "
+            "ORDER BY selected_entity.id LIMIT ?"
+        )
+        touching_params.extend((wid, wid, touching_entity_cap + 1))
         touching_rows = self.store.conn.execute(
-            "SELECT src, dst FROM edges WHERE workspace_id=?", (wid,)
+            touching_sql, touching_params,
         ).fetchall()
+        if len(visibility_rows) > MAX_GRAPH_ANALYSIS_EDGES:
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="visibility relation rows",
+                    count=MAX_GRAPH_ANALYSIS_EDGES + 1,
+                    limit=MAX_GRAPH_ANALYSIS_EDGES,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the relation visibility limit; "
+                "filter or reduce the workspace graph"
+            )
+        if len(touching_rows) > touching_entity_cap:
+            if all_mode_entity_cap is not None:
+                raise GraphSceneCapacityExceeded(
+                    resource="all-mode entity nodes",
+                    count=touching_entity_cap + 1,
+                    limit=touching_entity_cap,
+                )
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="entity rows",
+                    count=touching_entity_cap + 1,
+                    limit=touching_entity_cap,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the entity candidate limit; filter by repository"
+            )
         historical_touching_ids = {
-            str(row[key])
-            for row in touching_rows
-            for key in ("src", "dst")
-            if row[key]
+            str(row["id"]) for row in touching_rows if row["id"]
         }
         historically_public_ids = {
             str(row[key])
@@ -8643,15 +8742,25 @@ class MemoryService:
             }
             historical_supports: list[dict] = []
             for start in range(0, len(edge_ids), 500):
+                remaining = (
+                    MAX_GRAPH_ANALYSIS_SUPPORTS
+                    - len(support_rows) - len(historical_supports)
+                )
+                if remaining < 0:
+                    break
                 chunk = edge_ids[start:start + 500]
                 if not chunk:
                     continue
                 marks = ",".join("?" for _ in chunk)
+                # Query only rows absent from the live support arm, and collapse repeated
+                # historical versions to one evidence key before applying the global cap.
+                # This prevents live duplicates from consuming the page that should carry a
+                # later closed support while retaining live supports of a closed relation.
                 historical_sql = (
-                    "SELECT support.edge_id, support.memory_id, support.source_kind, "
-                    "support.confidence, support.valid_from, support.valid_to, "
-                    "support.valid_to_recorded_at, support.ingested_at, "
-                    "support.expired_at, support.provenance FROM edge_supports support "
+                    "WITH historical_keys AS ("
+                    "SELECT MAX(support.id) AS support_id "
+                    "FROM edge_supports support "
+                    "JOIN edges historical_edge ON historical_edge.id=support.edge_id "
                     "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE support.edge_id IN ({marks}) "
                     "AND (support.valid_from IS NULL OR support.valid_from<=?) "
@@ -8662,20 +8771,67 @@ class MemoryService:
                     "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "AND memory.workspace_id=? "
+                    "AND ("
+                    "(support.valid_to IS NOT NULL AND support.valid_to<=? "
+                    "AND (support.valid_to_recorded_at IS NULL "
+                    "OR support.valid_to_recorded_at<=?)) "
+                    "OR (historical_edge.valid_to IS NOT NULL "
+                    "AND historical_edge.valid_to<=? "
+                    "AND (historical_edge.valid_to_recorded_at IS NULL "
+                    "OR historical_edge.valid_to_recorded_at<=?))) "
+                    # An older version of a currently visible evidence key belongs
+                    # to the live arm already. Exclude it before LIMIT so duplicate
+                    # keys cannot consume the global historical-support budget.
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM edge_supports current_support "
+                    "JOIN edges current_edge ON current_edge.id=current_support.edge_id "
+                    "WHERE current_support.edge_id=support.edge_id "
+                    "AND current_support.memory_id=support.memory_id "
+                    "AND current_support.source_kind=support.source_kind "
+                    "AND (current_support.valid_from IS NULL "
+                    "OR current_support.valid_from<=?) "
+                    "AND (current_support.valid_to IS NULL OR ?<current_support.valid_to "
+                    "OR (current_support.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<current_support.valid_to_recorded_at)) "
+                    "AND (current_support.ingested_at IS NULL "
+                    "OR current_support.ingested_at<=?) "
+                    "AND (current_support.expired_at IS NULL "
+                    "OR ?<current_support.expired_at) "
+                    "AND (current_edge.valid_from IS NULL OR current_edge.valid_from<=?) "
+                    "AND (current_edge.valid_to IS NULL OR ?<current_edge.valid_to "
+                    "OR (current_edge.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<current_edge.valid_to_recorded_at)) "
+                    "AND (current_edge.ingested_at IS NULL "
+                    "OR current_edge.ingested_at<=?) "
+                    "AND (current_edge.expired_at IS NULL OR ?<current_edge.expired_at)) "
                 )
                 historical_params: list[Any] = [
                     *chunk, t, known_t, known_t, t, known_t, known_t, wid,
+                    t, known_t, t, known_t,
+                    t, t, known_t, known_t, known_t,
+                    t, t, known_t, known_t, known_t,
                 ]
                 if repo_id:
                     historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
                     historical_params.append(repo_id)
                 historical_sql += (
-                    "ORDER BY support.edge_id, support.memory_id, support.source_kind"
+                    "GROUP BY support.edge_id, support.memory_id, support.source_kind"
+                    ") SELECT support.edge_id, support.memory_id, support.source_kind, "
+                    "support.confidence, support.valid_from, support.valid_to, "
+                    "support.valid_to_recorded_at, support.ingested_at, "
+                    "support.expired_at, support.provenance "
+                    "FROM historical_keys "
+                    "JOIN edge_supports support ON support.id=historical_keys.support_id "
+                    "ORDER BY support.edge_id, support.memory_id, support.source_kind "
+                    "LIMIT ?"
                 )
+                historical_params.append(remaining + 1)
                 rows = self.store.conn.execute(
                     historical_sql, historical_params,
                 ).fetchall()
                 historical_supports.extend(dict(row) for row in rows)
+                if len(rows) > remaining:
+                    break
             for support in support_rows:
                 support["ghost"] = temporal_ghost(support)
             for support in historical_supports:
@@ -8834,14 +8990,57 @@ class MemoryService:
                 memory_where.append("COALESCE(valid_from, ingested_at, 0)<=?")
                 memory_params.append(upper_time)
             scoped_memory_sql = "SELECT id FROM memories WHERE " + " AND ".join(memory_where)
-            memory_rows = [dict(row) for row in self.store.conn.execute(
-                "SELECT id, repo_id, session_id, scope, mtype, title, "
-                "substr(content, 1, 160) AS content, substr(summary, 1, 160) AS summary, "
-                "importance, valid_from, valid_to, valid_to_recorded_at, "
-                "ingested_at, expired_at, pinned FROM memories WHERE "
-                + " AND ".join(memory_where) + " ORDER BY id LIMIT ?",
-                [*memory_params, MAX_GRAPH_COMPLETE_MEMORIES + 1],
-            ).fetchall()]
+            # Keep the separately bounded Python candidate scan above, but make connector
+            # capacity count only the exact approved IDs. Otherwise links from quarantined
+            # or pending memories can exhaust a visible-scene limit without producing nodes.
+            eligible_memory_sql = (
+                scoped_memory_sql
+                + " AND _engraphis_prompt_eligible(provenance, metadata)=1"
+            )
+            memory_rows = []
+            memory_candidate_count = 0
+            last_memory_id: Optional[str] = None
+            while memory_candidate_count <= MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES:
+                batch_where = list(memory_where)
+                batch_params = list(memory_params)
+                if last_memory_id is not None:
+                    batch_where.append("id>?")
+                    batch_params.append(last_memory_id)
+                batch_limit = min(
+                    500,
+                    MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES + 1 - memory_candidate_count,
+                )
+                raw_memory_rows = self.store.conn.execute(
+                    "SELECT id, repo_id, session_id, scope, mtype, title, "
+                    "substr(content, 1, 160) AS content, "
+                    "substr(summary, 1, 160) AS summary, importance, valid_from, "
+                    "valid_to, valid_to_recorded_at, ingested_at, expired_at, pinned, "
+                    "metadata, provenance FROM memories WHERE "
+                    + " AND ".join(batch_where) + " ORDER BY id LIMIT ?",
+                    [*batch_params, batch_limit],
+                ).fetchall()
+                if not raw_memory_rows:
+                    break
+                memory_candidate_count += len(raw_memory_rows)
+                if memory_candidate_count > MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES:
+                    raise GraphSceneCapacityExceeded(
+                        resource="memory candidate rows",
+                        count=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES + 1,
+                        limit=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES,
+                    )
+                for row in raw_memory_rows:
+                    memory = dict(row)
+                    metadata = _loads(memory.pop("metadata", None), {})
+                    provenance = _loads(memory.pop("provenance", None), {})
+                    if not prompt_eligible(provenance, metadata):
+                        continue
+                    memory_rows.append(memory)
+                    if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
+                        break
+                if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES \
+                        or len(raw_memory_rows) < batch_limit:
+                    break
+                last_memory_id = str(raw_memory_rows[-1]["id"])
             if include_history:
                 for memory in memory_rows:
                     valid_to_value = memory.get("valid_to")
@@ -8861,7 +9060,7 @@ class MemoryService:
                 )
 
             memory_link_sql = (
-                "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                "WITH selected_memory AS (" + eligible_memory_sql + ") "
                 "SELECT links.a, links.b, links.relation, links.layer, links.reason, "
                 "links.created_at, links.valid_from, links.valid_to, "
                 "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
@@ -8914,7 +9113,7 @@ class MemoryService:
 
             if include_code:
                 code_sql = (
-                    "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                    "WITH selected_memory AS (" + eligible_memory_sql + ") "
                     "SELECT links.id, links.repo_id, links.symbol_id, links.memory_id, "
                     "links.relation, links.confidence, links.valid_from, links.valid_to, "
                     "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
@@ -9156,8 +9355,12 @@ class MemoryService:
         )
         if cached is not None and (
                 both_anchored or time.time() < cached[0]):
-            self._graph_scene_cache.move_to_end(cache_key)
-            scene = copy.deepcopy(cached[1])
+            if clean_presentation == "all":
+                cached_scene = cached[1]
+                scene = dict(cached_scene)
+                scene["meta"] = dict(cached_scene["meta"])
+            else:
+                scene = copy.deepcopy(cached[1])
             scene["meta"]["cache_hit"] = True
             scene["meta"]["query_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3
@@ -9226,6 +9429,8 @@ class MemoryService:
             include_memory_nodes=clean_include_memory_nodes,
             filters=filters, index_generation=int(index_info["generation"]),
         )
+        if clean_presentation == "all":
+            scene = project_all_presentation(scene)
         scene["meta"]["index_state"] = index_info["state"]
         scene["meta"]["presentation"] = clean_presentation
         if clean_presentation == "all" and len(scene.get("nodes", [])) > MAX_GRAPH_ALL_NODES:
@@ -9243,6 +9448,7 @@ class MemoryService:
                 "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
                 "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
                 "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,
+                "memory_candidate_rows": MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES,
                 "memory_connectors": MAX_GRAPH_COMPLETE_MEMORY_LINKS,
                 "code_memory_connectors": MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS,
                 "payload_bytes": MAX_GRAPH_COMPLETE_PAYLOAD_BYTES,
@@ -9276,11 +9482,16 @@ class MemoryService:
         if clean_level == "complete":
             for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
                 self._graph_scene_cache.pop(key, None)
-        self._graph_scene_cache[cache_key] = (valid_until, copy.deepcopy(scene))
+        cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
+        response_scene = scene
+        if clean_presentation == "all":
+            response_scene = dict(scene)
+            response_scene["meta"] = dict(scene["meta"])
+        self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
         self._graph_scene_cache.move_to_end(cache_key)
         while len(self._graph_scene_cache) > 16:
             self._graph_scene_cache.popitem(last=False)
-        return scene
+        return response_scene
 
     def graph_suggest(self, query: str, *, workspace: str, limit: int = 8,
                       repo: Optional[str] = None,

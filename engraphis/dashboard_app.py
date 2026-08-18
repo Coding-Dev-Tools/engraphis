@@ -25,6 +25,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from engraphis import licensing
@@ -346,6 +347,9 @@ def create_app() -> FastAPI:
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
     app.state.mcp_over_http = _mcp_asgi is not None
     app.add_middleware(_RequestBodyLimitMiddleware)
+    # Complete all-node scenes are the largest dashboard response. Compress them (and any other
+    # sizeable JSON/static response) before they cross the browser boundary.
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
 
     # Honour the advertised allow-list on the actual GA dashboard entrypoint.  A
     # wildcard can never carry browser credentials.

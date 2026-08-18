@@ -25,9 +25,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   relation labels no longer suppress direct star/system motion.
 - Galaxy physics ticks now explicitly invalidate the canvas camera, so advancing orbital
   coordinates repaints visibly even when force-graph's automatic redraw loop is paused.
-- Complete graph capacity is doubled to 40,000 entity nodes and 200,000 raw relationships,
-  with matching evidence, connector, payload, and full-loader ceilings; live-render safety
-  thresholds remain unchanged so oversized scenes stay on the static/kinematic path.
+- Complete graph analysis now scans up to 40,000 entity rows and 200,000 raw relationships,
+  while the explicit all-node renderer retains its 20,000-node, 200,000-link refusal ceiling.
+  Live-render safety thresholds remain unchanged so oversized scenes stay on the static path.
 - Show all nodes now keeps the complete sidebar live: deterministic worker layouts respond to
   repel, link-distance, gravity, and advanced force controls; minimum relations, unlinked nodes,
   focus depth, relation layers, ghosts, and auto-collapse filter the LOD scene without a reload.

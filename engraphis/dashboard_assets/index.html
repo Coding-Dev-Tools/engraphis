@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260814-all-controls-2">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260815-merge-ready-1">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -273,8 +273,8 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load all entity nodes with progressive level-of-detail rendering">Show all nodes</button>
-                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
+                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load all entity nodes with progressive level-of-detail rendering">All nodes</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
@@ -330,7 +330,7 @@
                 <h2 id="graph-motion-title">Motion</h2>
                 <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>direction</small></div>
                 <div class="graph-motion-row"><button id="graph-labels" class="graph-switch" type="button" role="switch" aria-label="Entity labels" aria-checked="false"><span></span></button><span>Entity labels</span><small>names</small></div>
-                <div class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span id="graph-freeze-label">Freeze simulation</span><small id="graph-freeze-detail">pause physics</small></div>
+                <div id="graph-freeze-row" class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span id="graph-freeze-label">Freeze simulation</span><small id="graph-freeze-detail">pause physics</small></div>
                 <label class="graph-motion-speed" for="graph-flow-speed"><span>Flow speed</span><input id="graph-flow-speed" type="range" min="0" max="100" value="45" aria-label="Flow speed"><output id="graph-flow-speed-output" class="sr-only">45</output></label>
               </section>
 
@@ -375,7 +375,7 @@
                     <label for="graph-space-damping"><span id="graph-space-damping-label">Space friction</span><input id="graph-space-damping" type="range" min="0" max="15" step="0.1" value="1"><output id="graph-space-damping-output">1.0</output></label>
                     <label for="graph-spring-stiffness"><span id="graph-spring-stiffness-label">Spring stiffness</span><input id="graph-spring-stiffness" type="range" min="0" max="100" value="32"><output id="graph-spring-stiffness-output">32</output></label>
                   </div>
-                  <div class="graph-motion-row graph-orbit-pause"><button id="graph-orbits-pause" class="graph-switch" type="button" role="switch" aria-label="Pause orbital physics" aria-checked="false"><span></span></button><span id="graph-orbits-pause-label">Pause orbits</span><small id="graph-orbits-pause-detail">physics</small></div>
+                  <div id="graph-orbit-pause-row" class="graph-motion-row graph-orbit-pause"><button id="graph-orbits-pause" class="graph-switch" type="button" role="switch" aria-label="Pause orbital physics" aria-checked="false"><span></span></button><span id="graph-orbits-pause-label">Pause orbits</span><small id="graph-orbits-pause-detail">physics</small></div>
                   <p id="graph-spacetime-note" class="graph-note">Drag and release a node to slingshot it into a new orbit.</p>
                 </details>
                 <button id="graph-reset-tuning" class="graph-action" type="button">Reset to preset defaults</button>
@@ -707,6 +707,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260814-all-controls-2"></script>
+  <script src="/v2-assets/ledger.js?v=20260815-merge-ready-1"></script>
 </body>
 </html>

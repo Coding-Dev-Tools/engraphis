@@ -2626,6 +2626,73 @@ def build_graph_scene(
         "facets": _facets(graph),
     }
 
+_ALL_PRESENTATION_NODE_FIELDS = (
+    "id", "label", "type", "node_kind", "community_id", "ghost", "member_ids",
+    "x", "y", "gravity_mass", "visual_radius", "mass_score",
+    "weighted_degree", "pagerank", "support_count", "scene_rank",
+    "anchor_role", "system_anchor_id", "orbit_tier", "orbit_radius",
+)
+_ALL_PRESENTATION_EDGE_FIELDS = (
+    "id", "source", "target", "relation", "layer", "ghost", "strength",
+    "rest_length", "spring_strength",
+)
+_ALL_PRESENTATION_META_FIELDS = (
+    "workspace", "level", "scene_hash", "index_generation",
+    "total_nodes", "total_edges", "shown_nodes", "shown_edges", "truncated",
+    "query_ms", "layout_seed", "index_state", "connected_only",
+    "include_history", "include_memory_nodes", "algorithm_version",
+)
+
+
+def project_all_presentation(scene: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the compact renderer contract for ``presentation=all``.
+
+    Complete analytical scenes retain provenance, temporal evidence, and inspector fields.
+    The all-node renderer needs only stable identity, canonical layout/hierarchy, display
+    metrics, and relation physics. Keeping this projection explicit prevents multi-megabyte
+    evidence arrays from crossing the HTTP/worker boundary only to be discarded.
+    """
+    nodes = []
+    for node in scene.get("nodes", ()):
+        projected_node = {
+            key: node[key] for key in _ALL_PRESENTATION_NODE_FIELDS
+            if key != "member_ids" and key in node
+        }
+        if node.get("ghost"):
+            member_ids = node.get("member_ids")
+            if isinstance(member_ids, Sequence) and not isinstance(member_ids, (str, bytes)):
+                member_id = next((
+                    value for value in member_ids
+                    if isinstance(value, str) and value
+                ), "")
+                if member_id:
+                    projected_node["member_ids"] = [member_id]
+        nodes.append(projected_node)
+    communities = {
+        str(node.get("id") or ""): str(node.get("community_id") or "")
+        for node in nodes
+    }
+    edges = []
+    for edge in scene.get("edges", ()):
+        projected = {
+            key: edge[key] for key in _ALL_PRESENTATION_EDGE_FIELDS if key in edge
+        }
+        source_community = communities.get(str(projected.get("source") or ""), "")
+        target_community = communities.get(str(projected.get("target") or ""), "")
+        projected["bridge"] = bool(
+            source_community and target_community
+            and source_community != target_community
+        )
+        edges.append(projected)
+    meta = {
+        key: scene.get("meta", {})[key]
+        for key in _ALL_PRESENTATION_META_FIELDS
+        if key in scene.get("meta", {})
+    }
+    meta["all_projected"] = True
+    return {"meta": meta, "nodes": nodes, "edges": edges}
+
+
 
 def strongest_path(graph: dict[str, Any], source: str, target: str, *,
                    max_hops: int = 8, max_visits: int = 10_000) -> dict[str, Any]:

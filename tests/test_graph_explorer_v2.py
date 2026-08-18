@@ -1513,6 +1513,7 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
         "raw_relations": 200_000,
         "evidence_rows": 500_000,
         "memory_nodes": 100_000,
+        "memory_candidate_rows": 200_000,
         "memory_connectors": 300_000,
         "code_memory_connectors": 300_000,
         "payload_bytes": 128 * 1024 * 1024,
@@ -2401,6 +2402,26 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
 
 
+def test_all_presentation_cache_isolated_from_response_metadata_mutation():
+    service, _alpha, _beta, _gamma = _seed_service()
+
+    first = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False,
+    )
+    first["meta"]["degraded"] = True
+    first["meta"]["requested_include_code"] = True
+
+    warm = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False,
+    )
+
+    assert warm["meta"]["cache_hit"] is True
+    assert "degraded" not in warm["meta"]
+    assert "requested_include_code" not in warm["meta"]
+
+
 def test_graph_scene_cache_separates_algorithm_contract(monkeypatch):
     service, _alpha, _beta, _gamma = _seed_service()
 
@@ -3177,6 +3198,30 @@ def test_graph_analysis_candidate_limit_fails_bounded(monkeypatch):
         service.graph_scene(workspace="acme")
 
 
+def test_graph_scene_all_profile_filters_entity_types_before_candidate_cap(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    person_a = service.store.upsert_entity(Node(
+        id="", name="Person A", ntype="person", workspace_id=workspace_id,
+    ))
+    person_b = service.store.upsert_entity(Node(
+        id="", name="Person B", ntype="person", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_people", src=person_a, dst=person_b, relation="knows",
+        workspace_id=workspace_id,
+    ))
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ALL_NODES", 3)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", presentation="all",
+        include_memory_nodes=False, entity_types=["concept"],
+    )
+
+    assert len(scene["nodes"]) == 3
+    assert {node["label"] for node in scene["nodes"]} == {"Alpha", "Beta", "Gamma"}
+
+
 def test_graph_route_bounds_csv_filter_cardinality():
     service, _alpha, _beta, _gamma = _seed_service()
     app = FastAPI()
@@ -3374,7 +3419,7 @@ def test_graph_entity_evidence_history_includes_closed_support_on_live_relation(
     assert [item["memory_id"] for item in detail["evidence"]] == [closed_memory]
 
 
-def test_graph_scene_history_visibility_scopes_to_requested_repo():
+def test_graph_scene_history_visibility_scopes_to_requested_repo(monkeypatch):
     """Regression: visibility preclassification must apply the same repo scope
     as the subsequent edge/entity queries so unrelated-repo edges cannot
     promote private entities into the candidate set."""
@@ -3409,6 +3454,8 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo():
         workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": memory_a},
     ))
+    # The unrelated beta edge must not consume the selected repository's visibility budget.
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
 
     scene = service.graph_scene(
         workspace="acme", repo="alpha", include_history=True,
@@ -3644,3 +3691,298 @@ def test_graph_entity_preserves_literal_ghost_suffix():
     result = service.graph_entity("canon:ghost", workspace="acme")
     assert result["canonical_id"] == "canon:ghost"
     assert result["label"] == "Literal Ghost"
+
+
+def test_complete_scene_excludes_pending_memory_nodes():
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    pending = MemoryRecord(
+        id="", content="Unapproved graph memory.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    )
+    service.store.add_memory(pending)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", presentation="quality",
+        include_memory_nodes=True,
+    )
+
+    assert pending.id not in {node["id"] for node in scene["nodes"]}
+
+def test_complete_scene_excludes_prompt_ineligible_memory_nodes():
+    """Complete scenes must not pack pending, quarantined, or untrusted memories
+    even when include_memory_nodes is True. The prompt_eligible gate at the SQL
+    fetch stage prevents multi-megabyte ineligible payloads from crossing into
+    the scene builder."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    approved = service.store.add_memory(MemoryRecord(
+        id="", content="Approved fact.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "agent", "trusted": True, "review_state": "approved"},
+    ))
+    pending = service.store.add_memory(MemoryRecord(
+        id="", content="Pending import.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    ))
+    quarantined = service.store.add_memory(MemoryRecord(
+        id="", content="Quarantined payload.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "import", "trusted": False, "quarantined": True},
+    ))
+    scene = service.graph_scene(
+        workspace="acme", level="complete", presentation="quality",
+        include_memory_nodes=True,
+    )
+    memory_ids = {node["id"] for node in scene["nodes"] if node.get("node_kind") == "memory"}
+    assert approved in memory_ids
+    assert pending not in memory_ids
+    assert quarantined not in memory_ids
+
+
+def test_complete_scene_bounds_prompt_ineligible_memory_candidates(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES", 2)
+    for index in range(3):
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Rejected import {index}.", workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            provenance={
+                "source": "import", "trusted": False, "review_state": "pending",
+            },
+        ))
+
+    with pytest.raises(GraphSceneCapacityExceeded, match="memory candidate rows"):
+        service.graph_scene(
+            workspace="acme", level="complete", presentation="quality",
+            include_memory_nodes=True,
+        )
+
+
+def test_complete_scene_connector_caps_ignore_prompt_ineligible_memories(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    repo_id = service.store.get_or_create_repo(workspace_id, "web")
+    rejected = [
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Rejected import {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={
+                "source": "import", "trusted": False, "review_state": "pending",
+            },
+        ))
+        for index in range(2)
+    ]
+    approved = [
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Approved fact {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={"source": "agent", "trusted": True, "review_state": "approved"},
+        ))
+        for index in range(2)
+    ]
+    service.store.add_link(rejected[0], rejected[1], relation="rejected")
+    service.store.add_link(approved[0], approved[1], relation="approved")
+    symbol_id = service.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="target", fqname="target",
+        file="target.py", span="1:1-2:1", lang="python", commit=False,
+    )
+    service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=rejected[0],
+        relation="rejected", commit=False,
+    )
+    service.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=approved[0],
+        relation="approved", commit=False,
+    )
+    service.store.conn.commit()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_MEMORY_LINKS", 1)
+    monkeypatch.setattr(service_module, "MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS", 1)
+
+    scene = service.graph_scene(
+        workspace="acme", repo="web", level="complete",
+        presentation="quality", include_code=True, include_memory_nodes=True,
+    )
+
+    memory_links = [
+        edge for edge in scene["edges"] if edge.get("connector_kind") == "memory_link"
+    ]
+    code_links = [
+        edge for edge in scene["edges"] if edge.get("connector_kind") == "code_memory"
+    ]
+    assert {(edge["source"], edge["target"]) for edge in memory_links} == {
+        (approved[0], approved[1]),
+    }
+    assert {edge["source"] for edge in code_links} == {approved[0]}
+
+def test_visibility_classification_caps_edge_scan_without_giant_allocation(monkeypatch):
+    """Visibility preclassification must honor MAX_GRAPH_ANALYSIS_EDGES and
+    raise a capacity error rather than materializing an unbounded edge set."""
+    service, _alpha, _beta, _gamma = _seed_service()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
+    # Seed three edges so the visibility scan exceeds the patched cap.
+    workspace_id = service.store.get_or_create_workspace("acme")
+    delta = service.store.upsert_entity(Node(
+        id="ent_delta", name="Delta", ntype="concept", workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_ad", src=_alpha, dst=delta, relation="links",
+        workspace_id=workspace_id,
+    ))
+    with pytest.raises(GraphSceneCapacityExceeded, match="visibility relation rows"):
+        service.graph_scene(workspace="acme", level="complete", include_memory_nodes=False)
+
+
+def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
+    service, _alpha, _beta, gamma = _seed_service()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
+    workspace_id = service.store.get_or_create_workspace("acme")
+    service.store.get_or_create_repo(workspace_id, "selected")
+    noisy_repo = service.store.get_or_create_repo(workspace_id, "noisy")
+    noisy = service.store.upsert_entity(Node(
+        id="ent_noisy", name="Noisy", ntype="concept",
+        workspace_id=workspace_id, repo_id=noisy_repo,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_noisy", src=gamma, dst=noisy, relation="mentions",
+        workspace_id=workspace_id, repo_id=noisy_repo,
+    ))
+
+    scene = service.graph_scene(
+        workspace="acme", repo="selected", level="complete",
+        include_memory_nodes=False,
+    )
+
+    assert noisy not in {node["id"] for node in scene["nodes"]}
+    assert "edge_noisy" not in {edge["id"] for edge in scene["edges"]}
+
+
+def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
+    service, _alpha, _beta, gamma = _seed_service()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_SUPPORTS", 3)
+    workspace_id = service.store.get_or_create_workspace("acme")
+    history_memory = service.store.add_memory(MemoryRecord(
+        id="", content="Gamma used Delta.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    delta = service.store.upsert_entity(Node(
+        id="ent_history_delta", name="History Delta", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_zz_history", src=gamma, dst=delta, relation="uses",
+        workspace_id=workspace_id,
+        provenance={"source": "manual", "memory_id": history_memory},
+    ))
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=0, ingested_at=0, "
+        "valid_to=NULL, valid_to_recorded_at=NULL, expired_at=NULL"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_to=100, valid_to_recorded_at=100 "
+        "WHERE id='edge_zz_history'"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_to=100, valid_to_recorded_at=100 "
+        "WHERE edge_id='edge_zz_history'"
+    )
+    live_supports = service.store.conn.execute(
+        "SELECT support.edge_id, support.memory_id, support.source_kind, "
+        "support.confidence, support.provenance FROM edge_supports support "
+        "JOIN edges edge ON edge.id=support.edge_id "
+        "WHERE support.valid_to IS NULL AND edge.valid_to IS NULL "
+        "ORDER BY support.edge_id, support.memory_id, support.source_kind"
+    ).fetchall()
+    assert len(live_supports) == 2
+    for support in live_supports:
+        service.store.conn.execute(
+            "INSERT INTO edge_supports("
+            "edge_id, memory_id, source_kind, confidence, valid_from, valid_to, "
+            "valid_to_recorded_at, ingested_at, expired_at, provenance"
+            ") VALUES (?, ?, ?, ?, 0, 100, 100, 0, NULL, ?)",
+            (
+                support["edge_id"], support["memory_id"], support["source_kind"],
+                support["confidence"], support["provenance"],
+            ),
+        )
+    service.store.conn.commit()
+
+    rows = service._graph_scene_rows(
+        workspace="acme", valid_at=200, known_at=200, include_history=True,
+        include_memory_nodes=False,
+    )
+    support_keys = {
+        (support["edge_id"], support["memory_id"], support["source_kind"])
+        for support in rows[4]
+    }
+
+    assert len(support_keys) == 3
+    assert any(
+        edge_id == "edge_zz_history" and memory_id == history_memory
+        for edge_id, memory_id, _source_kind in support_keys
+    )
+
+def test_all_presentation_allowlist_excludes_server_only_fields():
+    """project_all_presentation must drop every server-only field and retain
+    only the explicit renderer allowlist. Adding a new private field to the
+    analytical scene must not accidentally leak it to the all-node renderer."""
+    from engraphis.core.graph_scene import (
+        _ALL_PRESENTATION_EDGE_FIELDS,
+        _ALL_PRESENTATION_META_FIELDS,
+        _ALL_PRESENTATION_NODE_FIELDS,
+        project_all_presentation,
+    )
+    scene = {
+        "meta": {
+            "workspace": "acme", "level": "complete", "scene_hash": "h",
+            "index_generation": 1, "total_nodes": 1, "total_edges": 1,
+            "shown_nodes": 1, "shown_edges": 1, "truncated": False,
+            "query_ms": 0.0, "layout_seed": 0, "index_state": "ready",
+            "connected_only": False, "include_history": False,
+            "include_memory_nodes": False, "algorithm_version": "galaxy-v8",
+            "private_server_field": "must-not-leak",
+        },
+        "nodes": [{
+            "id": "n1", "label": "N", "type": "concept", "node_kind": "entity",
+            "community_id": "c1", "ghost": False, "x": 0.0, "y": 0.0,
+            "gravity_mass": 1.0, "visual_radius": 2.0, "mass_score": 0.5,
+            "weighted_degree": 1, "pagerank": 0.1, "support_count": 1,
+            "scene_rank": 1, "anchor_role": "none", "system_anchor_id": None,
+            "orbit_tier": 0, "orbit_radius": 0.0,
+            "private_evidence": [{"memory": "secret"}],
+            "repo_names": ["private-repo"],
+        }],
+        "edges": [{
+            "id": "e1", "source": "n1", "target": "n1", "layer": "semantic",
+            "ghost": False, "strength": 1.0, "rest_length": 1.0,
+            "spring_strength": 1.0,
+            "support_ids": ["mem_private"],
+            "confidence": 0.9,
+        }],
+        "communities": [], "community_bridges": [], "facets": {},
+    }
+    projected = project_all_presentation(scene)
+    assert set(projected) == {"meta", "nodes", "edges"}
+    assert "private_server_field" not in projected["meta"]
+    assert "private_evidence" not in projected["nodes"][0]
+    assert "repo_names" not in projected["nodes"][0]
+    assert "support_ids" not in projected["edges"][0]
+    assert "confidence" not in projected["edges"][0]
+    allowed_node_keys = set(_ALL_PRESENTATION_NODE_FIELDS)
+    allowed_edge_keys = set(_ALL_PRESENTATION_EDGE_FIELDS) | {"bridge"}
+    allowed_meta_keys = set(_ALL_PRESENTATION_META_FIELDS) | {"all_projected"}
+    assert set(projected["nodes"][0].keys()) <= allowed_node_keys
+    assert set(projected["edges"][0].keys()) <= allowed_edge_keys
+    assert set(projected["meta"].keys()) <= allowed_meta_keys

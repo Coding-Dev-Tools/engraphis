@@ -11,6 +11,9 @@
   const CANVAS_HIGH_ZOOM_EDGE_LIMIT = 25000;
   const LABEL_LIMIT = 220;
   const CELL_SIZE = 48;
+  const FAR_ENTER = 0.35, FAR_EXIT = 0.45;
+  const MEDIUM_ENTER = 0.9, MEDIUM_EXIT = 1.2;
+  const FAR_NODE_BUDGET = 500, MEDIUM_NODE_BUDGET = 3000;
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const state = {
     ids: [], labels: [], types: [], positions: new Float32Array(0), basePositions: new Float32Array(0), degrees: new Float32Array(0), betweenness: new Float32Array(0), evidenceMass: new Float32Array(0), nodeGhosts: new Uint8Array(0),
@@ -18,12 +21,14 @@
     edgeTargets: new Uint32Array(0), edgeStrength: new Float32Array(0), edgeLayers: [], edgeBridges: new Uint8Array(0), edgeGhosts: new Uint8Array(0),
     edgeOrder: new Uint32Array(0), edgeRank: new Uint32Array(0), adjacencyOffsets: new Uint32Array(0),
     adjacencyEdges: new Uint32Array(0), edgeSeen: new Uint32Array(0), edgeStamp: 0,
+    nodeSeen: new Uint32Array(0), nodeStamp: 0,
     allNodes: new Uint32Array(0), grid: new Map(), layers: null, focusIndex: -1,
     lastCameraKey: '', lastVisibleNodes: new Uint32Array(0), lastVisibleEdges: new Uint32Array(0),
     lastVisibleLabels: new Uint32Array(0), canvasFallback: false, showBridges: true, showGhosts: true, paintOrder: new Uint32Array(0),
     layoutSettings: {}, labelDensity: 24,
     scope: { minDegree: 1, showUnlinked: true, depth: 2 }, collapseMode: false,
-    collapsed: false, lastVisibleMask: new Uint8Array(0), layoutRevision: 0,
+    collapsed: false, lodTier: 'medium', lastVisibleMask: new Uint8Array(0),
+    layoutRevision: 0,
   };
   const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -53,6 +58,7 @@
       state.layers ? JSON.stringify(state.layers) : '',
       state.scope.minDegree, state.scope.showUnlinked, state.scope.depth,
       state.collapseMode || '', state.showGhosts,
+      state.lodTier,
     ].join('|');
   }
   function makePositions(nodes, groups) {
@@ -85,7 +91,12 @@
   function applyLayout(notify = false, fit = false) {
     if (!state.basePositions.length) return;
     const settings = state.layoutSettings || {}, mode = key(settings.mode || 'communities');
-    const repel = Math.max(0, finite(settings.repel, 48)), link = Math.max(1, finite(settings.link, 16));
+    const galaxyMode = mode === 'galaxy';
+    /* Galaxy coordinates and hierarchy are server-authored. Each bounded refinement starts
+       from those coordinates, preserving the authored scene while allowing the shared force
+       controls to make a deterministic, hierarchy-preserving adjustment. */
+    const repel = Math.max(0, finite(settings.repel, galaxyMode ? 60 : 48));
+    const link = Math.max(1, finite(settings.link, galaxyMode ? 8 : 16));
     const gravity = Math.max(0, finite(settings.gravity, 48));
     const galacticGravity = Math.max(0, finite(settings.gravitationalConstant, 1));
     const blackHoleMass = Math.max(0.1, finite(settings.blackHoleMass, 1));
@@ -96,19 +107,32 @@
     /* The All profile stays deterministic and worker-only, but its controls are real forces:
        repel expands the initial envelope, link is the spring target below, and gravity pulls
        the settled result toward the global centre. The bounded passes are O(nodes + links). */
-    const repelSpread = 0.58 + repel / 72;
-    const gravityTightening = 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
-    const spaceSpread = 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
-    const spread = modeScale * clamp(repelSpread * gravityTightening * spaceSpread, 0.42, 3.2);
+    /* Galaxy's server coordinates are the neutral point for the full-node profile. Relative
+       controls keep the authored scene unchanged at the default preset while making every
+       exposed force a bounded refinement around that hierarchy. */
+    const repelSpread = galaxyMode
+      ? (0.58 + repel / 72) / (0.58 + 60 / 72)
+      : 0.58 + repel / 72;
+    const gravityTightening = galaxyMode
+      ? (0.72 + 48 / 128 + 0.05)
+        / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05)
+      : 1 / (0.72 + gravity / 128 + galacticGravity * blackHoleMass * 0.05);
+    const spaceSpread = galaxyMode
+      ? (0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035)
+        / (0.86 + 0.07 - 0.035)
+      : 0.86 + localGravity * 0.07 - Math.min(2, damping) * 0.035;
+    const linkSpread = galaxyMode ? 1 + (link - 8) * 0.01 : 1;
+    const spread = (galaxyMode ? 1 : modeScale)
+      * clamp(repelSpread * gravityTightening * spaceSpread * linkSpread, 0.42, 3.2);
     const baseBounds = makeBounds(state.basePositions), centerX = (baseBounds.minX + baseBounds.maxX) / 2, centerY = (baseBounds.minY + baseBounds.maxY) / 2;
     state.positions = new Float32Array(state.basePositions.length);
     for (let index = 0; index < state.basePositions.length; index += 2) {
       let x = state.basePositions[index] - centerX, y = state.basePositions[index + 1] - centerY;
       if (mode === 'radial') { const angle = Math.atan2(y, x), radius = Math.hypot(x, y) * spread; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius; }
       else if (mode === 'constellation') { x *= spread; y = y * spread * 0.72 + Math.sin(index * GOLDEN_ANGLE + state.layoutRevision) * 8; }
-      else if (mode === 'galaxy') { const radius = Math.hypot(x, y) * spread, angle = Math.atan2(y, x) + radius * 0.0007; x = Math.cos(angle) * radius; y = Math.sin(angle) * radius * 0.72; }
+      else if (mode === 'galaxy') { x *= spread; y *= spread; }
       else { x *= spread; y *= spread; }
-      if (state.layoutRevision) {
+      if (state.layoutRevision && !galaxyMode) {
         const phase = (index / 2 + 1) * GOLDEN_ANGLE + state.layoutRevision * 0.73;
         const jitter = Math.min(10, 1.5 + link * 0.08);
         x += Math.cos(phase) * jitter; y += Math.sin(phase) * jitter;
@@ -117,8 +141,10 @@
     }
     if (state.edgeSources.length) {
       const nodeCount = state.positions.length / 2;
-      const desired = clamp(10 + link * 1.25, 14, 112);
-      const springForce = clamp(0.025 + spring * 0.018, 0.025, 0.2)
+      const desired = clamp((galaxyMode ? 20 : 10) + link * 1.25
+        - (galaxyMode ? 8 * 1.25 : 0), 14, 112);
+      const springForce = clamp((galaxyMode ? Math.abs(spring - 1) * 0.018 : 0.025 + spring * 0.018),
+        galaxyMode ? 0 : 0.025, 0.2)
         * (mode === 'compact' ? 1.22 : mode === 'original' ? 0.72 : 1);
       const settle = 1 / (1 + Math.min(12, damping) * 0.18);
       const passes = nodeCount > 12000 ? 1 : 2;
@@ -137,7 +163,9 @@
           delta[target * 2] -= dx * pull; delta[target * 2 + 1] -= dy * pull;
           counts[source] += 1; counts[target] += 1;
         }
-        const centrePull = clamp((gravity / 400 + galacticGravity * blackHoleMass * 0.035) * 0.05, 0, 0.075);
+        const centrePull = clamp((galaxyMode
+          ? (Math.abs(gravity - 48) / 400 + Math.abs(galacticGravity * blackHoleMass - 1) * 0.035)
+          : gravity / 400 + galacticGravity * blackHoleMass * 0.035) * 0.05, 0, 0.075);
         for (let index = 0; index < nodeCount; index += 1) {
           const offset = index * 2, divisor = Math.max(1, counts[index]);
           const x = state.positions[offset], y = state.positions[offset + 1];
@@ -181,8 +209,10 @@
     state.positions = positions.slice();
     state.layoutRevision = 0;
     state.lastVisibleMask = new Uint8Array(ids.length);
-    const communities = nodes.map(node => key(node && (node.community_id != null ? node.community_id : node.community)));
-    const types = nodes.map(node => key(node && (node.etype || node.type || 'person_or_concept')));
+    const communities = nodes.map(node => key(
+      node && (node.community_id != null ? node.community_id : node.community)));
+    const types = nodes.map(node => key(
+      node && (node.etype || node.type || 'person_or_concept')));
     const previewPositions = state.positions.slice();
     const previewGhosts = nodeGhosts.slice();
     self.postMessage({ type: 'preview', ids, labels, types, positions: previewPositions, communities, nodeGhosts: previewGhosts, bounds: makeBounds(state.positions), totalNodes: ids.length }, [previewPositions.buffer, previewGhosts.buffer]);
@@ -200,8 +230,11 @@
     order.forEach((edge, rank) => { edgeRank[edge] = rank; });
     const betweenness = new Float32Array(ids.length), evidenceMass = new Float32Array(ids.length);
     nodes.forEach((node, index) => {
-      betweenness[index] = Math.max(0, finite(node && (node.betweenness || node.bridge_score), 0));
-      evidenceMass[index] = Math.max(0, finite(node && (node.evidence_mass || node.evidenceMass || node.mass), degrees[index] || 0));
+      betweenness[index] = Math.max(0, finite(
+        node && (node.betweenness || node.bridge_score || node.pagerank), 0));
+      evidenceMass[index] = Math.max(0, finite(
+        node && (node.evidence_mass || node.evidenceMass || node.gravity_mass
+          || node.mass_score || node.mass), degrees[index] || 0));
     });
     state.ids = ids; state.labels = labels; state.types = types; state.degrees = degrees; state.betweenness = betweenness; state.evidenceMass = evidenceMass; state.nodeGhosts = nodeGhosts; state.communities = communities;
     state.edgeSources = new Uint32Array(edges.map(edge => edge.source)); state.edgeTargets = new Uint32Array(edges.map(edge => edge.target));
@@ -219,6 +252,7 @@
       adjacencyEdges.set(segment, start);
     }
     state.adjacencyOffsets = adjacencyOffsets; state.adjacencyEdges = adjacencyEdges; state.edgeSeen = new Uint32Array(edges.length); state.edgeStamp = 0;
+    state.nodeSeen = new Uint32Array(ids.length); state.nodeStamp = 0;
     state.topNodes = new Uint32Array(Array.from({ length: ids.length }, (_v, index) => index).sort((a, b) => degrees[b] - degrees[a] || a - b));
     state.allNodes = new Uint32Array(ids.length); for (let index = 0; index < ids.length; index += 1) state.allNodes[index] = index;
     rebuildPaintOrder();
@@ -279,6 +313,37 @@
     }
     return new Uint32Array([...representatives.values()].sort((a, b) => a - b));
   }
+  function resolveLodTier(scale) {
+    const current = state.lodTier;
+    if (current === 'far') {
+      if (scale < FAR_EXIT) return 'far';
+      return scale >= MEDIUM_EXIT ? 'near' : 'medium';
+    }
+    if (current === 'near') {
+      if (scale >= MEDIUM_ENTER) return 'near';
+      return scale < FAR_ENTER ? 'far' : 'medium';
+    }
+    if (scale < FAR_ENTER) return 'far';
+    if (scale >= MEDIUM_EXIT) return 'near';
+    return 'medium';
+  }
+  function boundedNodes(values, limit) {
+    if (values.length <= limit) return values;
+    state.nodeStamp = (state.nodeStamp + 1) >>> 0;
+    if (!state.nodeStamp) { state.nodeSeen.fill(0); state.nodeStamp = 1; }
+    for (let index = 0; index < values.length; index += 1) {
+      state.nodeSeen[values[index]] = state.nodeStamp;
+    }
+    const retained = [];
+    const focused = state.focusIndex;
+    if (focused >= 0 && state.nodeSeen[focused] === state.nodeStamp) retained.push(focused);
+    for (let index = 0; index < state.topNodes.length && retained.length < limit; index += 1) {
+      const node = state.topNodes[index];
+      if (node !== focused && state.nodeSeen[node] === state.nodeStamp) retained.push(node);
+    }
+    retained.sort((left, right) => left - right);
+    return new Uint32Array(retained);
+  }
   function visibleNodes(camera) {
     const scale = Math.max(0.01, finite(camera && camera.scale, 1));
     const focused = focusMask();
@@ -289,36 +354,49 @@
       }
       return new Uint32Array(result);
     };
-    const shouldCollapse = state.focusIndex < 0
-      && (state.collapseMode === true || (state.collapseMode === 'auto' && scale < 0.42));
-    if (scale < 0.42) {
+    const shouldCollapse = state.focusIndex < 0 && (
+      state.collapseMode === true
+      || (state.collapseMode === 'auto' && state.lodTier === 'far')
+    );
+    if (state.lodTier === 'far') {
       const values = allVisibleNodes();
       setCollapsed(shouldCollapse);
-      return shouldCollapse ? collapseRepresentatives(values) : values;
+      const representatives = shouldCollapse ? collapseRepresentatives(values) : values;
+      return boundedNodes(representatives, FAR_NODE_BUDGET);
     }
-    const width = Math.max(1, finite(camera && camera.width, 1)), height = Math.max(1, finite(camera && camera.height, 1));
+    const width = Math.max(1, finite(camera && camera.width, 1));
+    const height = Math.max(1, finite(camera && camera.height, 1));
     const halfWidth = width / scale / 2 * 1.05, halfHeight = height / scale / 2 * 1.05;
-    const minCellX = Math.floor((finite(camera && camera.x, 0) - halfWidth) / CELL_SIZE), maxCellX = Math.floor((finite(camera && camera.x, 0) + halfWidth) / CELL_SIZE);
-    const minCellY = Math.floor((finite(camera && camera.y, 0) - halfHeight) / CELL_SIZE), maxCellY = Math.floor((finite(camera && camera.y, 0) + halfHeight) / CELL_SIZE);
+    const minCellX = Math.floor((finite(camera && camera.x, 0) - halfWidth) / CELL_SIZE);
+    const maxCellX = Math.floor((finite(camera && camera.x, 0) + halfWidth) / CELL_SIZE);
+    const minCellY = Math.floor((finite(camera && camera.y, 0) - halfHeight) / CELL_SIZE);
+    const maxCellY = Math.floor((finite(camera && camera.y, 0) + halfHeight) / CELL_SIZE);
+    let values;
     if (maxCellX - minCellX > 256 || maxCellY - minCellY > 256) {
-      const values = allVisibleNodes();
-      setCollapsed(shouldCollapse);
-      return shouldCollapse ? collapseRepresentatives(values) : values;
+      values = allVisibleNodes();
+    } else {
+      const result = [];
+      for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+          const bucket = state.grid.get(`${cellX},${cellY}`);
+          if (bucket) bucket.forEach(index => {
+            if (nodeAllowed(index, focused)) result.push(index);
+          });
+        }
+      }
+      values = new Uint32Array(result);
     }
-    const result = [];
-    for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
-      const bucket = state.grid.get(`${cellX},${cellY}`);
-      if (bucket) bucket.forEach(index => {
-        if (nodeAllowed(index, focused)) result.push(index);
-      });
-    }
-    const values = new Uint32Array(result);
     setCollapsed(shouldCollapse);
-    return shouldCollapse ? collapseRepresentatives(values) : values;
+    if (shouldCollapse) values = collapseRepresentatives(values);
+    return state.lodTier === 'medium'
+      ? boundedNodes(values, MEDIUM_NODE_BUDGET) : values;
   }
   function visibleEdges(camera, nodes) {
-    const scale = Math.max(0.01, finite(camera && camera.scale, 1));
-    const limit = scale < 0.42 ? LOW_ZOOM_EDGE_LIMIT : scale < 1.1 ? (state.canvasFallback ? CANVAS_MEDIUM_ZOOM_EDGE_LIMIT : MEDIUM_ZOOM_EDGE_LIMIT) : (state.canvasFallback ? CANVAS_HIGH_ZOOM_EDGE_LIMIT : HIGH_ZOOM_EDGE_LIMIT);
+    const tier = state.lodTier;
+    const limit = tier === 'far' ? LOW_ZOOM_EDGE_LIMIT
+      : tier === 'medium'
+        ? (state.canvasFallback ? CANVAS_MEDIUM_ZOOM_EDGE_LIMIT : MEDIUM_ZOOM_EDGE_LIMIT)
+        : (state.canvasFallback ? CANVAS_HIGH_ZOOM_EDGE_LIMIT : HIGH_ZOOM_EDGE_LIMIT);
     if (!limit) return new Uint32Array(0);
     const visible = new Uint8Array(state.ids.length);
     for (let index = 0; index < nodes.length; index += 1) visible[nodes[index]] = 1;
@@ -345,7 +423,7 @@
     return new Uint32Array(result);
   }
   function visibleLabels(camera, nodes) {
-    if (finite(camera && camera.scale, 1) < 0.9) return new Uint32Array(0);
+    if (state.lodTier === 'far') return new Uint32Array(0);
     const density = Math.max(0.25, Math.min(3, finite(state.labelDensity, 24) / 24));
     const limit = Math.min(LABEL_LIMIT, Math.max(12, Math.floor(80 * finite(camera && camera.scale, 1) * density))), result = [], visible = new Uint8Array(state.ids.length);
     for (let index = 0; index < nodes.length; index += 1) visible[nodes[index]] = 1;
@@ -353,7 +431,14 @@
     return new Uint32Array(result);
   }
   function camera(message) {
-    const nextKey = cameraKey(message); if (nextKey === state.lastCameraKey) return; state.lastCameraKey = nextKey;
+    const scale = Math.max(0.01, finite(message && message.scale, 1));
+    state.lodTier = resolveLodTier(scale);
+    const nextKey = cameraKey(message);
+    if (nextKey === state.lastCameraKey) {
+      self.postMessage({ type: 'camera-ack', revision: message && message.revision });
+      return;
+    }
+    state.lastCameraKey = nextKey;
     const nodes = visibleNodes(message), edges = visibleEdges(message, nodes), labels = visibleLabels(message, nodes);
     const visibleMask = new Uint8Array(state.ids.length);
     for (let index = 0; index < nodes.length; index += 1) visibleMask[nodes[index]] = 1;
@@ -361,9 +446,10 @@
     for (let index = 0; index < edges.length; index += 1) { const edge = edges[index], source = state.edgeSources[edge], target = state.edgeTargets[edge], offset = index * 4; edgePositions[offset] = state.positions[source * 2]; edgePositions[offset + 1] = state.positions[source * 2 + 1]; edgePositions[offset + 2] = state.positions[target * 2]; edgePositions[offset + 3] = state.positions[target * 2 + 1]; }
     state.lastVisibleNodes = nodes; state.lastVisibleEdges = edges; state.lastVisibleLabels = labels;
     state.lastVisibleMask = visibleMask;
-    self.postMessage({ type: 'visible', nodes, edges, labels, edgePositions,
-      totalLinks: state.edgeSources.length, drawnLinks: edges.length,
-      visibleNodeCount: nodes.length, collapsed: state.collapsed },
+    self.postMessage({ type: 'visible', revision: message && message.revision,
+      nodes, edges, labels, edgePositions, totalLinks: state.edgeSources.length,
+      drawnLinks: edges.length, visibleNodeCount: nodes.length,
+      collapsed: state.collapsed, lodTier: state.lodTier },
     [nodes.buffer, edges.buffer, labels.buffer, edgePositions.buffer]);
   }
   function hit(message) {

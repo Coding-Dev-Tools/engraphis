@@ -76,10 +76,12 @@ async function mockLocalClient(
   automationPostStatus = null,
   license = hostedLicense,
   cloudErrorCode = null,
+  bootstrapFailures = 0,
 ) {
   const calls = [];
   let syncLast = null;
   let activeSyncRunStatus = syncRunStatus;
+  let remainingBootstrapFailures = bootstrapFailures;
   calls.setSyncRunStatus = status => { activeSyncRunStatus = status; };
 
   await page.route('**/api/**', async route => {
@@ -91,7 +93,11 @@ async function mockLocalClient(
     let status = 200;
     let body = {};
 
-    if (path === '/bootstrap') {
+    if (path === '/bootstrap' && remainingBootstrapFailures > 0) {
+      remainingBootstrapFailures -= 1;
+      status = 503;
+      body = { detail: 'temporary bootstrap failure' };
+    } else if (path === '/bootstrap') {
       body = {
         license,
         workspaces: [],
@@ -198,6 +204,24 @@ async function mockLocalClient(
 
   return calls;
 }
+
+test('Classic bootstrap retry preserves and recovers the application DOM', async ({ page }) => {
+  const calls = await mockLocalClient(
+    page, 402, null, null, hostedLicense, null, 1,
+  );
+
+  await page.goto('/classic');
+  const retry = page.getByRole('button', { name: 'Retry' });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeFocused();
+  await expect(page.locator('#stat-grid')).toHaveCount(1);
+
+  await retry.click();
+
+  await expect(page.locator('#stat-grid')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  expect(calls.filter(call => call.path === '/bootstrap')).toHaveLength(2);
+});
 
 test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade CTA', async ({ page }) => {
   const errors = recordBrowserErrors(page);

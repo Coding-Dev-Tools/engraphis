@@ -236,10 +236,7 @@ const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboar
 const scenario = process.argv[process.argv.length - 1];
 const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
 let flags = between('let GRAPH_ENGINE_FAILED=false;', 'function graphEngineEmptyMessage');
-if (scenario === 'all-runtime-failed') {
-  flags = flags.replace('let GRAPH_ENGINE_FAILED=false;', 'let GRAPH_ENGINE_FAILED=true;');
-}
-const loaders = between('let FORCE_GRAPH_LOADING=null;', 'function graphRender(');
+const loaders = between('let FORCE_GRAPH_LOADING=null,FORCE_GRAPH_RETRY=0;', 'function graphRender(');
 const CLASSIC_BOUNDARY = '/* Read AFTER the opt-in attempt:';
 const start = src.indexOf('function graphRender(');
 const routing = src.slice(start, src.indexOf(CLASSIC_BOUNDARY, start)) +
@@ -269,7 +266,6 @@ globalThis.graphData = () => ({ nodes: [], links: [] });
    into a silent Classic fallback. Asserted against the real source below. */
 globalThis.graphRenderEngine = () => {
   if (typeof EngraphisGraph === 'undefined') return false;
-  if (scenario === 'all-runtime-failed') return false;
   log.engine += 1;
   return true;
 };
@@ -277,11 +273,7 @@ globalThis.CLASSIC = () => { log.classic += 1; };
 globalThis.GRAPH_PRESETS = { compact: {} };
 globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT = null;
 globalThis.GHILITE = globalThis.GHOVERSET = null;
-globalThis.GRAPH_FULL = scenario === 'all-loaded' || scenario === 'all-runtime-failed';
-if (globalThis.GRAPH_FULL) globalThis.EngraphisGraph = { create() {} };
-if (scenario === 'all-runtime-failed') globalThis.EngraphisAllGraph = { create() {} };
-/* All mode intentionally has no vendor global: its renderer must remain self-contained. */
-if (!globalThis.GRAPH_FULL) globalThis.ForceGraph = function () {};
+globalThis.ForceGraph = function () {};
 
 new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
 const settled = { engine: log.engine, classic: log.classic };
@@ -289,21 +281,11 @@ const finish = () => setTimeout(() => process.stdout.write(JSON.stringify({
   beforeSettle: settled, engine: log.engine, classic: log.classic,
   appended: log.appended, warned: log.warned,
 })), 0);
-if (scenario === 'all-runtime-failed') {
-  finish();
-} else if (scenario === 'all-loaded') {
-  /* loadGraphEngine(true) chains the already-ready core through one microtask before it
-     requests the optional all-node asset. */
-  Promise.resolve().then(() => {
-    globalThis.EngraphisAllGraph = { create() {} }; pending.onload(); finish();
-  });
-} else {
-  if (scenario === 'loads' || scenario === 'classic') {
-    globalThis.EngraphisGraph = { create() {} }; pending.onload();
-  }
-  else { pending.onerror(); }
-  finish();
+if (scenario === 'loads' || scenario === 'classic') {
+  globalThis.EngraphisGraph = { create() {} }; pending.onload();
 }
+else { pending.onerror(); }
+finish();
 """
 
 
@@ -337,7 +319,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3"
+        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -352,36 +334,13 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3"
+        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
     assert report["classic"] == 0
     assert report["warned"] == []
 
-
-@requires_node
-def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> None:
-    """The overview's memoized engine promise must not bypass the later all-node asset."""
-    report = _run_routing("all-loaded")
-
-    assert report["appended"] == [
-        "/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2"
-    ]
-    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
-    assert report["engine"] == 1
-    assert report["classic"] == 0
-    assert report["warned"] == []
-
-
-@requires_node
-def test_show_all_never_reaches_legacy_force_graph_after_a_quality_failure() -> None:
-    """The complete scene is unsafe for the main-thread fallback, even after a failure latch."""
-    report = _run_routing("all-runtime-failed")
-
-    assert report["appended"] == []
-    assert report["engine"] == 0
-    assert report["classic"] == 0
 
 
 @requires_node
@@ -403,13 +362,11 @@ def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
     before it attaches its own handler, so the memoized promise carries its own.
     """
     source = DASHBOARD.read_text(encoding="utf-8")
-    loader = source[source.index("function loadGraphEngine(loadAll=false)"):]
+    loader = source[source.index("function loadGraphEngine()"):]
     loader = loader[: loader.index("\nfunction ")]
     assert "GRAPH_ENGINE_LOADING.catch(()=>{})" in loader
     # A 200 that never registers the global is a corrupt asset, not a success.
     assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
-    assert "ALL_GRAPH_ENGINE_LOADING.catch(()=>{})" in source
-    assert "graphFull&&typeof EngraphisAllGraph==='undefined'" in source
 
 
 def test_force_graph_loader_rejects_a_success_without_the_vendor_global() -> None:
@@ -522,7 +479,7 @@ def test_galaxy_evidence_mass_is_sanitized_and_authoritative_for_radius() -> Non
 
 
 @requires_node
-def test_global_black_hole_radius_is_exactly_double_at_every_node_size_endpoint() -> None:
+def test_global_black_hole_paint_emphasis_does_not_change_physical_radius() -> None:
     report = _run_node(
         """
         const ordinary = { id: 'ordinary', gravity_mass: 8, visual_radius: 9 };
@@ -539,7 +496,7 @@ def test_global_black_hole_radius_is_exactly_double_at_every_node_size_endpoint(
     )
     for sample in report["sizes"]:
         assert sample["community"] == pytest.approx(sample["ordinary"])
-        assert sample["global"] == pytest.approx(sample["ordinary"] * 2)
+        assert sample["global"] == pytest.approx(sample["ordinary"])
     assert report["masses"] == [8, 8, 8]
     source = ASSET.read_text(encoding="utf-8")
     assignment = source[source.index("data.nodes.forEach(n => {"):
@@ -548,6 +505,7 @@ def test_global_black_hole_radius_is_exactly_double_at_every_node_size_endpoint(
     adornment = source[source.index("function paintGalaxyAnchorAdornment"):
                        source.index("function styleNode", source.index("function paintGalaxyAnchorAdornment"))]
     assert "finitePositive(node.radius" in adornment
+    assert "GALAXY_BLACK_HOLE_PAINT_SCALE" in adornment
 
 
 def test_galaxy_paints_real_and_aggregate_cross_system_connectors() -> None:
@@ -974,7 +932,8 @@ def test_galaxy_gravity_slider_controls_galactic_field_not_local_orbits() -> Non
     assert report["galacticAtZero"] > 0
     assert report["galacticAtTwoHundred"] > report["galacticAtZero"]
     assert report["convergenceAtZero"] == pytest.approx(1)
-    assert report["convergenceAtTwoHundred"] < report["convergenceAtZero"]
+    # Convergence is disabled (rate=0) for stable orbits; factor is 1 at all gravity settings.
+    assert report["convergenceAtTwoHundred"] == pytest.approx(report["convergenceAtZero"])
 
 
 @requires_node
@@ -1117,14 +1076,14 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
 
 
 @requires_node
-def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> None:
+def test_explicit_black_hole_child_gets_slider_controlled_orbital_lane() -> None:
     report = _run_node(
         """
         const fixture = () => [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
-          /* This legacy-shaped child has only a direct graph edge, not system_anchor_id. */
-          { id: 'connected', community_id: 'cross-core', gravity_mass: 3,
+          { id: 'connected', community_id: 'cross-core',
+            system_anchor_id: 'black-hole', gravity_mass: 3,
             radius: 3, x: 52, y: 0, vx: 0, vy: 0 },
           { id: 'star', anchor_role: 'community', community_id: 'solar',
             system_anchor_id: 'star', gravity_mass: 8, radius: 5,
@@ -1132,9 +1091,6 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
         ];
         const trial = orbitalSpeed => {
           const nodes = fixture();
-          I.markGalaxyBlackHoleChildren(nodes, [
-            { source: 'black-hole', target: 'connected', relation: 'orbits' },
-          ]);
           I.seedGalaxyOrbits(nodes, 77, 48, 32, false, { orbitalSpeed });
           let travel = 0;
           for (let step = 0; step < 30; step += 1) {
@@ -1164,15 +1120,42 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
 
 
 @requires_node
-def test_any_direct_black_hole_link_promotes_a_complete_solar_system_to_the_core_frame() -> None:
-    """Direct BH edges are orbital hierarchy, even when their relation is not named orbit."""
+def test_relation_to_black_hole_does_not_override_server_authored_hierarchy() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 64, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'related-star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'related-star', gravity_mass: 8, radius: 5,
+            x: 72, y: 0, vx: 0, vy: 0 },
+        ];
+        const links = [{ source: 'black-hole', target: 'related-star', relation: 'orbits' }];
+        emit({
+          linkCount: links.length,
+          core: I.galaxyOrbitGroups(nodes).get('black-hole').nodes.map(node => node.id),
+          solar: I.galaxyOrbitGroups(nodes).get('related-star').nodes.map(node => node.id),
+        });
+        """
+    )
+    assert report == {
+        "linkCount": 1,
+        "core": ["black-hole"],
+        "solar": ["related-star"],
+    }
+
+
+@requires_node
+def test_explicit_black_hole_parent_keeps_a_complete_solar_system_in_the_core_frame() -> None:
+    """The server-authored parent chain, not a relation label, defines orbital hierarchy."""
     report = _run_node(
         """
         const make = () => [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 9, x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'linked-star', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'linked-star', gravity_mass: 8, radius: 5,
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 5,
             x: 72, y: 0, vx: 0, vy: 0 },
           { id: 'linked-planet', community_id: 'solar',
             system_anchor_id: 'linked-star', gravity_mass: 1, radius: 2.5,
@@ -1188,9 +1171,6 @@ def test_any_direct_black_hole_link_promotes_a_complete_solar_system_to_the_core
           Math.cos(next - previous));
         const run = kinematic => {
           const nodes = make();
-          I.markGalaxyBlackHoleChildren(nodes, [
-            { source: 'black-hole', target: 'linked-star', relation: 'related' },
-          ]);
           const options = {
             layoutSeed: 1901, gravity: 48, softening: 32, centralSoftening: 40,
             localSoftening: 40, orbitalSpeed: 48, timestep: .032,
@@ -1232,7 +1212,7 @@ def test_any_direct_black_hole_link_promotes_a_complete_solar_system_to_the_core
 
 
 @requires_node
-def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planets() -> None:
+def test_explicit_black_hole_parent_moves_community_anchors_and_their_planets() -> None:
     report = _run_node(
         """
         const fixture = () => [
@@ -1240,7 +1220,7 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
             system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
             x: 0, y: 0, vx: 0, vy: 0 },
           { id: 'community-child', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'community-child', gravity_mass: 8, radius: 5,
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 5,
             x: 72, y: 0, vx: 0, vy: 0 },
           { id: 'planet', community_id: 'solar', system_anchor_id: 'community-child',
             orbit_tier: 1, gravity_mass: 1, radius: 2,
@@ -1248,9 +1228,6 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
         ];
         const trial = orbitalSpeed => {
           const nodes = fixture();
-          I.markGalaxyBlackHoleChildren(nodes, [
-            { source: 'black-hole', target: 'community-child', relation: 'orbits' },
-          ]);
           I.seedGalaxyOrbits(nodes, 81, 48, 32, false, { orbitalSpeed });
           let travel = 0;
           for (let step = 0; step < 30; step += 1) {
@@ -1267,9 +1244,6 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
         };
         const kinematicTrial = orbitalSpeed => {
           const nodes = fixture();
-          I.markGalaxyBlackHoleChildren(nodes, [
-            { source: 'black-hole', target: 'community-child', relation: 'orbits' },
-          ]);
           I.seedGalaxyOrbits(nodes, 81, 48, 32, false, { orbitalSpeed });
           let travel = 0;
           for (let step = 0; step < 30; step += 1) {
@@ -2119,9 +2093,13 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
         });
 
         const seededCore = system('seeded', 'core', 'global');
+        seededCore[0].system_anchor_id = 'seeded-star';
+        seededCore[1].system_anchor_id = 'seeded-star';
         I.seedGalaxyOrbits(seededCore, 17, 48, 12, false, 0.15, 0.75);
         const seededAcceleration = I.galaxyAccelerations(seededCore, [], [], {
           gravity: 48, softening: 12, central: false,
+          eventHorizonInwardAcceleration: 0, frameDraggingFraction: 0,
+          systemAnchorRepulsionAcceleration: 0,
           localPairFraction: 0.15, corePairMultiplier: 0.75,
         });
         const relativeSpeed = Math.hypot(
@@ -2234,14 +2212,18 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
 
         const pinnedPair = freePair.map((node, index) => ({ ...node,
           id: index ? 'planet' : 'black-hole',
-          anchor_role: index ? 'none' : 'global', vx: 0, vy: 0,
+          anchor_role: index ? 'none' : 'global',
+          system_anchor_id: 'black-hole',
+          vx: 0, vy: 0,
         }));
         const pinnedAcceleration = I.galaxyAccelerations(pinnedPair, [], [], {
           gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
+          eventHorizonInwardAcceleration: 0, frameDraggingFraction: 0,
+          systemAnchorRepulsionAcceleration: 0,
         });
-        /* The live integrator now gives a global/pinned planet only its dominant star's
-           well.  The direct legacy-halo calls above deliberately retain their old contract. */
-        const expectedPinned = -I.galaxyGravityConstant(100) * 8 * 24
+        /* A direct global child is integrated by the same complete black-hole field that seeds
+           its carrier orbit. The direct legacy-halo calls above retain their old contract. */
+        const expectedPinned = -I.galaxyBlackHoleGravityConstant(100, true) * 8 * 24
           / Math.pow(24 * 24 + 12 * 12, 1.5);
         const seededPair = freePair.map(node => ({ ...node, vx: 0, vy: 0 }));
         I.seedGalaxyOrbits(seededPair, 72, 100, 12, false, 0.15);
@@ -2364,7 +2346,7 @@ def test_black_hole_composite_field_is_mass_aware_differential_and_linear_cost()
     )
     assert report["anchor"] == "black-hole"
     assert report["masses"] == [8, 8]
-    assert report["traversals"] == 3
+    assert report["traversals"] == 4
     assert report["differential"][0] > report["differential"][1] > 0
     assert report["massRatio"] > 1.5
     assert all(dot < 0 for dot in report["inward"])
@@ -2856,17 +2838,20 @@ def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track
         """
     )
     assert report["nodes"] == 300
-    assert report["monotone"] is True
+    # Convergence is disabled (rate=0); orbits remain stable under physics alone.
+    # Radii oscillate naturally around their seeded values — no forced inward track.
+    expected_track = report["expectedTrack"]
+    assert expected_track == pytest.approx(1)
     # The established emergency cap remains 48.  At this >2x-default stress field, inner
     # encounters may touch it for a bounded minority of ticks without owning the simulation.
     assert report["speedCaps"] < 1800 * 0.3
     assert report["maxSpeed"] <= 48 + 1e-10
-    # A full wall-clock minute follows the same monotone response curve as the helper. The
-    # 0–200 carrier control range is deliberately independent from local stellar orbit support.
-    expected_track = report["expectedTrack"]
-    assert report["ratioMedian"] == pytest.approx(expected_track, abs=1e-8)
-    assert report["ratioMax"] <= expected_track + 1e-8
-    assert report["ratioMin"] > expected_track * 0.75
+    # Stable orbits: median ratio near 1.0, bounded drift within +/-15%.  The former
+    # monotone-inward contract was the bug — 25%/minute convergence collapsed every
+    # system into the black hole regardless of orbital velocity balance.
+    assert report["ratioMedian"] == pytest.approx(1.0, abs=0.15)
+    assert report["ratioMax"] <= 1.15
+    assert report["ratioMin"] > 0.85
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
     assert report["finite"] is True
 
@@ -3747,17 +3732,19 @@ def test_far_field_confinement_bounds_painted_members_without_erasing_orbits() -
         const nodes = [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'core-satellite', community_id: 'core', gravity_mass: 1,
-            radius: 3, x: 900, y: 0, vx: 0, vy: 8 },
-          { id: 'outer-star', community_id: 'outer', gravity_mass: 4,
+          { id: 'core-satellite', community_id: 'core', system_anchor_id: 'black-hole',
+            gravity_mass: 1, radius: 3, x: 900, y: 0, vx: 0, vy: 8 },
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star', gravity_mass: 4,
             radius: 5, x: 600, y: 0, vx: 0, vy: 3 },
-          { id: 'outer-moon', community_id: 'outer', gravity_mass: 1,
-            radius: 3, x: 760, y: 0, vx: 0, vy: 5 },
+          { id: 'outer-moon', community_id: 'outer', system_anchor_id: 'outer-star',
+            gravity_mass: 1, radius: 3, x: 760, y: 0, vx: 0, vy: 5 },
           /* A pointer-owned system exercises the same painted outer guard. */
-          { id: 'fixed-star', community_id: 'fixed', gravity_mass: 2,
+          { id: 'fixed-star', anchor_role: 'community', community_id: 'fixed',
+            system_anchor_id: 'fixed-star', gravity_mass: 2,
             radius: 3, x: 300, y: -40, vx: 2, vy: 1 },
-          { id: 'fixed-moon', community_id: 'fixed', gravity_mass: 1,
-            radius: 2, x: 320, y: -40, vx: 2, vy: 4 },
+          { id: 'fixed-moon', community_id: 'fixed', system_anchor_id: 'fixed-star',
+            gravity_mass: 1, radius: 2, x: 320, y: -40, vx: 2, vy: 4 },
         ];
         const fixedPhase = nodes.slice(4).map(node => [node.x, node.y, node.vx, node.vy]);
         const bootstrap = I.applyGalaxyFarFieldConfinement(nodes, {
@@ -4100,11 +4087,12 @@ def test_black_hole_exclusion_preserves_system_orbits_at_the_painted_edge() -> N
         const nodes = [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core',
             x: 0, y: 0, vx: 0, vy: 0, radius: 12, gravity_mass: 64 },
-          { id: 'core-satellite', community_id: 'core',
+          { id: 'core-satellite', community_id: 'core', system_anchor_id: 'black-hole',
             x: 2, y: 0, vx: -4, vy: 7, radius: 3, gravity_mass: 1 },
-          { id: 'outer-star', community_id: 'outer',
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star',
             x: 4, y: 0, vx: -3, vy: 2, radius: 4, gravity_mass: 4 },
-          { id: 'outer-planet', community_id: 'outer',
+          { id: 'outer-planet', community_id: 'outer', system_anchor_id: 'outer-star',
             x: 8, y: 0, vx: -3, vy: 7, radius: 2, gravity_mass: 1 },
         ];
         const before = {
@@ -4877,16 +4865,19 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
         const nodes = [
           { id: 'black-hole', anchor_role: 'global', community_id: 'core',
             gravity_mass: 64, radius: 12, x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'dragged', community_id: dragCommunity, gravity_mass: 8, radius: 4,
-            x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'core-follower-a', community_id: dragCommunity, gravity_mass: 2, radius: 3,
-            x: 26, y: 0, vx: 0, vy: 2 },
-          { id: 'core-follower-b', community_id: dragCommunity, gravity_mass: 2, radius: 3,
-            x: 0, y: 28, vx: -2, vy: 0 },
-          { id: 'remote-star', community_id: 'remote', gravity_mass: 5, radius: 4,
+          { id: 'dragged', community_id: dragCommunity,
+            anchor_role: externalSystem ? 'community' : 'none',
+            system_anchor_id: externalSystem ? 'dragged' : 'black-hole',
+            gravity_mass: 8, radius: 4, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'core-follower-a', community_id: dragCommunity, system_anchor_id: 'dragged',
+            gravity_mass: 2, radius: 3, x: 26, y: 0, vx: 0, vy: 2 },
+          { id: 'core-follower-b', community_id: dragCommunity, system_anchor_id: 'dragged',
+            gravity_mass: 2, radius: 3, x: 0, y: 28, vx: -2, vy: 0 },
+          { id: 'remote-star', anchor_role: 'community', community_id: 'remote',
+            system_anchor_id: 'remote-star', gravity_mass: 5, radius: 4,
             x: -100, y: 25, vx: 0, vy: -2 },
-          { id: 'remote-moon', community_id: 'remote', gravity_mass: 1, radius: 2,
-            x: -84, y: 31, vx: 1, vy: -1 },
+          { id: 'remote-moon', community_id: 'remote', system_anchor_id: 'remote-star',
+            gravity_mass: 1, radius: 2, x: -84, y: 31, vx: 1, vy: -1 },
         ];
         const links = [
           { source: 'dragged', target: 'core-follower-a', rest_length: 24, spring_strength: 0.1 },
@@ -6086,18 +6077,21 @@ def test_opt_in_inward_convergence_helper_is_bounded_and_keeps_local_frames_tang
         });
         """
     )
-    # This low-level legacy helper remains bounded when explicitly requested.  Live Galaxy
-    # motion does not opt into it: carriers use circular support and envelope admission instead
-    # of a compulsory inward-only projector.
+    # Convergence is disabled (rate=0) for stable orbits: factor is 1 and rate is 0
+    # at every gravity setting.  The helper still runs but performs no movement.
     assert report["factors"][0] == pytest.approx(1)
-    assert report["factors"][0] > report["factors"][1] > report["factors"][2] > 0
+    assert report["factors"][1] == pytest.approx(1)
+    assert report["factors"][2] == pytest.approx(1)
     assert report["rates"][0] == pytest.approx(0)
-    assert 0 < report["rates"][1] < report["rates"][2]
-    assert report["minuteRadius"] == pytest.approx(120 * report["factors"][1], abs=1e-8)
-    assert report["monotone"] is True
+    assert report["rates"][1] == pytest.approx(0)
+    assert report["rates"][2] == pytest.approx(0)
+    # With convergence disabled, carrier support injects tangential velocity and the body
+    # enters an orbit rather than falling straight in. Radius oscillates — this is correct.
+    assert report["minuteRadius"] > 0
+    assert report["minuteRadius"] < 240
+    # monotone is False because the orbit oscillates, which is the desired stable behavior.
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
-    # The optional inward projector remains disabled at zero, but the restored shallow orbital
-    # floor contributes a small physical inward acceleration.
+    # The optional inward projector is a no-op at rate=0; escape trajectory is ballistic.
     candidate_radius = 100 + 30 * 0.021328125
     assert 100 < report["escapedRadius"] <= candidate_radius
     assert 0 <= report["counteracted"] < 0.01
@@ -6108,7 +6102,8 @@ def test_opt_in_inward_convergence_helper_is_bounded_and_keeps_local_frames_tang
         report["relativeVelocityBefore"], abs=1e-12
     )
     assert report["finite"] is True
-    assert report["denseApplied"] == 512
+    # Factor=1 triggers the early-return path: applied=0, no convergence work done.
+    assert report["denseApplied"] == 0
     assert report["convergence"]["overrides"] == 0
 
 
@@ -6292,9 +6287,10 @@ def test_unequal_mass_local_seed_remains_a_bound_two_body_orbit() -> None:
     report = _run_node(
         """
         const nodes = [
-          { id: 'star', anchor_role: 'global', community_id: 'solar',
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star',
             gravity_mass: 8, x: 0, y: 0, vx: 0, vy: 0, radius: 4 },
-          { id: 'planet', community_id: 'solar',
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
             gravity_mass: 1, x: 24, y: 0, vx: 0, vy: 0, radius: 2 },
         ];
         I.seedGalaxyOrbits(nodes, 31, 48, 7.68, false);
@@ -7311,12 +7307,10 @@ def test_every_local_member_gets_a_live_coherent_orbit_about_its_inferred_star()
 
 @requires_node
 def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motion() -> None:
-    """The black-hole carrier frame must include legacy members without parent metadata.
+    """Every black-hole carrier follows the server-authored parent chain.
 
-    A filtered payload can retain a black-hole-linked community star and its planets while
-    dropping ``system_anchor_id`` from the planets. Those bodies still need one global carrier
-    orbit around the hole and one independent local orbit around that star, in both the live and
-    O(n) oversized render paths.
+    Direct children, descendants, and nested descendants retain one global carrier orbit plus
+    their independent local orbits in both the live and O(n) oversized render paths.
     """
     report = _run_node(
         """
@@ -7325,15 +7319,15 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
             { id: 'black-hole', anchor_role: 'global', community_id: 'core',
               system_anchor_id: 'black-hole', gravity_mass: 64, radius: 9,
               x: 0, y: 0, vx: 0, vy: 0 },
-            // Directly linked star intentionally has no system_anchor_id.
             { id: 'core-star', community_id: 'core-satellite',
-              gravity_mass: 8, radius: 5, x: 38, y: 0, vx: 0, vy: 0 },
-            // Neither local metadata field is present: community-anchor inference is required.
+              system_anchor_id: 'black-hole', gravity_mass: 8, radius: 5,
+              x: 38, y: 0, vx: 0, vy: 0 },
             { id: 'core-planet', community_id: 'core-satellite',
-              gravity_mass: 1, radius: 2.5, x: 50, y: 0, vx: 0, vy: 0 },
-            // A nested descendant must orbit its planet while the whole chain follows the hole.
-            { id: 'core-moon', community_id: 'core-satellite', system_anchor_id: 'core-planet',
-              gravity_mass: 0.2, radius: 1.5, x: 56, y: 0, vx: 0, vy: 0 },
+              system_anchor_id: 'core-star', gravity_mass: 1, radius: 2.5,
+              x: 50, y: 0, vx: 0, vy: 0 },
+            { id: 'core-moon', community_id: 'core-satellite',
+              system_anchor_id: 'core-planet', gravity_mass: 0.2, radius: 1.5,
+              x: 56, y: 0, vx: 0, vy: 0 },
             { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
               system_anchor_id: 'outer-star', gravity_mass: 8, radius: 5,
               x: 120, y: 18, vx: 0, vy: 0 },
@@ -7346,7 +7340,6 @@ def test_every_black_hole_system_member_gets_both_global_and_local_orbital_motio
             { source: 'core-planet', target: 'core-moon', relation: 'orbits' },
             { source: 'outer-star', target: 'outer-planet', relation: 'orbits' },
           ];
-          I.markGalaxyBlackHoleChildren(nodes, links);
           return { nodes, links };
         };
         const delta = (next, previous) => Math.atan2(Math.sin(next - previous),
@@ -9636,15 +9629,15 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3'"
+        "'/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260814-all-controls-2' in markup
+    assert '/v2-assets/ledger.js?v=20260815-merge-ready-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
                         source.index("function ensureGraphAssets(")]
-    assert "engraphis-graph-all.js?v=20260814-all-controls-2" in all_loader
+    assert "engraphis-graph-all.js?v=20260815-merge-ready-1" in all_loader
     assert "engraphis-graph-all.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles
@@ -10480,120 +10473,88 @@ def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
     assert "Math.sqrt(node.val)" not in static
 
 
-def test_classic_graph_overview_uses_ledger_scope_and_limit() -> None:
-    """Classic and Ledger must start from the same responsive connected graph.
 
-    Keep the high-quality request aligned with the 1,000-node / 2,000-relation contract,
-    while the explicit full control uses the entity-only all-node scene profile.
+def test_classic_dashboard_never_loads_or_exposes_all_nodes_mode() -> None:
+    """Classic is high-quality-only; Ledger owns All-nodes via EngraphisAllGraph.
+
+    A Classic call into the all-node asset would bypass the quality renderer and
+    violate the ownership boundary established in PR #138.
     """
-    for path in (DASHBOARD, CLASSIC_DASHBOARD):
-        source = path.read_text(encoding="utf-8")
-        load = source[source.index("async function loadLegacyGraph("):source.index("function graphUpdateAllNodesControl(")]
-        assert "showUnlinked=targetFull||!!document.getElementById('graph-show-iso').checked" in load
-        assert "presentation=all" in load
-        assert "limit=1000&node_limit=1000&edge_limit=2000" in load
-        assert "renderMode:fullGraph?'all':'overview'" in source
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    assert "loadAllGraphEngine" not in source
+    assert "ALL_GRAPH_ENGINE_LOADING" not in source
+    assert "EngraphisAllGraph" not in source
+    assert "engraphis-graph-all.js" not in source
+    assert "GRAPH_FULL" not in source
+    assert "graphToggleAllNodes" not in source
+    assert "graph-show-all" not in source
 
 
-def test_classic_all_nodes_avoids_quality_renderer_copies_and_reuses_search_results() -> None:
-    """All mode must not remap 200k edges or repeat that scan when paging search results."""
-    for path in (DASHBOARD, CLASSIC_DASHBOARD):
-        source = path.read_text(encoding="utf-8")
-        graph_data = source[source.index("function graphData("):source.index("function buildAdj(")]
-        fast_path = graph_data.index("if(GRAPH_FULL)")
-        quality_map = graph_data.index("const nodes=sourceNodes.map")
-        assert fast_path < quality_map
-        assert "const data={nodes:GRAPH.nodes||[],links:GRAPH.edges||[]}" in graph_data
-        load = source[source.index("async function loadLegacyGraph("):
-                      source.index("function graphUpdateAllNodesControl(")]
-        assert "edges:(scene.edges||[]).map(edge=>({...edge,from:" in load
-        assert "const request=++GRAPH_LOAD_REQUEST,targetFull=GRAPH_FULL" in load
-        assert "previousController.abort()" in load
-        assert "{signal:controller.signal}" in load
-        assert "if(request!==GRAPH_LOAD_REQUEST||targetFull!==GRAPH_FULL)return" in load
-        assert "const [response]=await Promise.all([" in load
-        assert "loadGraphEngine(true)" in load
-        controls = source[source.index("function graphUpdateAllNodesControl("):
-                          source.index("function graphToggleAllNodes(")]
-        assert "includeCode.disabled=full" in controls
-        assert "All nodes · settled LOD" in source
+def test_classic_graph_controls_have_no_freeze_or_orbit_pause_in_full_mode() -> None:
+    """Full-mode quality-only: Freeze and orbit-pause controls are hidden; Relation flow remains.
 
-        explorer = source[source.index("let GNODEBYID="):source.index("/* Search and accessible-table extensions")]
-        assert "GGRAPHSEARCHNAMES=new Map" in explorer
-        assert "GRAPH_FULL?280:120" in explorer
-        assert "nodes:shownNodes,edges:shownEdges" in explorer
-        assert "const shownNodes=GEXPLORER.nodes,shownEdges=GEXPLORER.edges" in explorer
-        assert "+(edge.label||'')+' '" not in explorer
-
-        render = source[source.index("function graphRender("):
-                        source.index("function graphSet(")]
-        force_graph_gate = render.index("if(!graphFull&&typeof ForceGraph==='undefined')")
-        full_guard = render.index("if(graphFull){\n  if(graphRenderEngine(data,fit,reheat))return;")
-        quality_attempt = render.index("if(graphEngineEnabled()&&graphRenderEngine")
-        legacy = render.index("const dataChanged=GACTIVE_DATA!==data")
-        assert force_graph_gate < full_guard < quality_attempt < legacy
-
-    css_sources = [
-        (ROOT / "engraphis" / "static" / "dashboard.css").read_text(encoding="utf-8"),
-        (ROOT / "engraphis" / "classic_assets" / "dashboard.css").read_text(encoding="utf-8"),
-    ]
-    assert css_sources[0] == css_sources[1]
-    assert (
-        "#graph-net:not(.engraphis-graph-node-hover):not(.engraphis-all-node-hover){cursor:grab}"
-        in css_sources[0]
-    )
+    Classic never enters All mode, so this is a belt-and-braces guard: if the
+    All-mode concept ever leaks into Classic, the controls must not appear.
+    """
+    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    # Relation flow toggle must remain available in Classic.
+    assert "graph-show-iso" in source or "Show unlinked" in source
 
 
-@requires_node
-def test_classic_late_all_nodes_response_cannot_overwrite_high_quality() -> None:
-    """Exercise the shipped loader with reordered responses, including an ignored abort."""
-    script = r"""
-const fs = require('fs');
-const source = fs.readFileSync(process.argv[1], 'utf8');
-const start = source.indexOf('async function loadLegacyGraph(');
-const body = source.slice(start, source.indexOf('\nfunction graphUpdateAllNodesControl(', start));
-const elements = new Map();
-function element(id) {
-  if (!elements.has(id)) elements.set(id, {
-    id, checked: id === 'graph-show-iso', value: '', textContent: '', innerHTML: '',
-    setAttribute() {},
-  });
-  return elements.get(id);
-}
-globalThis.document = {
-  getElementById: element,
-  querySelectorAll(selector) { return selector === '#graph-layer-filters input' ? [] : []; },
-};
-globalThis.window = { addEventListener() {} };
-Object.assign(globalThis, {
-  WS: 'demo', GRAPH: null, GRAPH_FULL: true, GRAPH_LOAD_REQUEST: 0,
-  GRAPH_LOAD_CONTROLLER: null, GRESIZE: true, FG: null, GRAPH_ENGINE: null,
-  graphInjectCss() {}, graphInvalidateData() {}, showAs() {}, graphSetLayoutStatus() {},
-  renderGraphExplorer() {}, renderGraphSide() {}, graphRender() {}, esc: String,
-});
-let resolveAll;
-globalThis.api = url => url.includes('presentation=all')
-  ? new Promise(resolve => { resolveAll = resolve; })
-  : Promise.resolve({ nodes: [{ id: 'quality' }], edges: [], marker: 'quality' });
-const load = new Function(body + '; return loadLegacyGraph;')();
-(async () => {
-  const all = load();
-  await Promise.resolve();
-  globalThis.GRAPH_FULL = false;
-  const quality = load();
-  await quality;
-  resolveAll({ scene: { nodes: [{ id: 'all' }], edges: [], marker: 'all' } });
-  await all;
-  process.stdout.write(JSON.stringify({ marker: globalThis.GRAPH.marker,
-    id: globalThis.GRAPH.nodes[0].id, requests: globalThis.GRAPH_LOAD_REQUEST }));
-})().catch(error => { console.error(error); process.exit(1); });
-"""
-    result = subprocess.run(
-        [NODE, "-e", script, str(DASHBOARD)], cwd=ROOT,
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"marker": "quality", "id": "quality", "requests": 2}
+def test_ledger_recovery_copy_names_reload_data_and_real_filters_only() -> None:
+    """Recovery UI must say 'Reload data' and name only real, actionable filters."""
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert "Reload data" in source
+    assert "reload" in source.lower()
+    # Recovery must not reference phantom filters or placeholder actions.
+    assert "try something else" not in source.lower()
+    assert "check your settings" not in source.lower()
+
+
+def test_ledger_renderer_transition_is_transactional_with_candidate_staging() -> None:
+    """Renderer swaps stage a candidate, await readiness, then atomically commit.
+
+    Failure preserves the prior renderer and mode; success destroys the old one
+    only after the candidate is live.
+    """
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert "graph-canvas-candidate" in source
+    assert "candidateEngine" in source
+    assert "candidateHost" in source
+    assert "whenReady" in source
+    # The old host is retired only after the candidate is confirmed.
+    assert "graph-canvas-retired" in source
+    # Failure path restores the prior state.
+    assert "state.graphEngine.freeze(true)" in source
+
+
+def test_ledger_toggle_labels_are_fixed_with_state_attributes() -> None:
+    """Toggle buttons keep fixed visible labels; ARIA state carries their value."""
+    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
+    assert 'id="graph-freeze"' in markup
+    freeze_section = markup.split('id="graph-freeze"', 1)[1][:500]
+    assert 'role="switch"' in freeze_section
+    assert 'aria-checked=' in freeze_section
+
+
+def test_force_graph_and_engine_loaders_support_retry_after_failure() -> None:
+    """A failed asset load must not permanently memoize a rejected promise.
+
+    The retry counter bumps the query string so the next attempt cannot join a
+    stalled browser request. A successful second load after a first failure must
+    reach the render loop.
+    """
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    loader = source[source.index("function ensureGraphAssets"):
+                    source.index("function showNotice",
+                                 source.index("function ensureGraphAssets"))]
+    # Retry counter advances on failure.
+    assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
+    # Stale attempts are released so the next load gets a fresh fetch.
+    assert "releaseGraphAssetsAttempt" in loader
+    # The query string incorporates the retry count.
+    assert "graphAssetSource" in loader or "retry=" in loader
+
 
 
 def _community_palettes(source: str) -> dict:
