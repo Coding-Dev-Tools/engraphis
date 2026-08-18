@@ -111,3 +111,6 @@ internal/
 
 # Local curl/testing cookie jar — may contain live session cookies. Never commit.
 cookies.txt
+
+# uv lockfile (generated tooling, not a project dependency)
+uv.lock
