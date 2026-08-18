@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -228,6 +229,7 @@ class SentenceTransformerEmbedder:
                 "sentence-transformers model did not report a positive embedding dimension"
             )
         self._dim = int(dimension)
+        self._encode_lock = threading.Lock()
 
     @property
     def dim(self) -> int:
@@ -247,7 +249,12 @@ class SentenceTransformerEmbedder:
         if not texts:
             return np.empty((0, self._dim), dtype=np.float32)
         try:
-            vecs = self.model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+            encode_lock = getattr(self, "_encode_lock", None)
+            if encode_lock is None:
+                encode_lock = threading.Lock()
+                self._encode_lock = encode_lock
+            with encode_lock:
+                vecs = self.model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
             result = np.asarray(vecs, dtype=np.float32)
         except (TypeError, ValueError, OverflowError, RuntimeError):  # noqa: BLE001
             raise RuntimeError("sentence-transformers returned malformed embeddings") from None
@@ -274,6 +281,7 @@ def get_embedder(
     *,
     revision: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
+    require_exact: bool = False,
 ) -> Embedder:
     """Return a semantic model when available, else explicit lexical degradation.
 
@@ -281,6 +289,10 @@ def get_embedder(
     model.  That mode never asks sentence-transformers to download the model.  It
     is deliberately opt-in because a regular model identifier retains the existing
     behavior for operators who want sentence-transformers to resolve it normally.
+
+    Args:
+        require_exact: When True, raise an error if the configured model is unavailable
+            instead of falling back to the deterministic embedder.
     """
     global LAST_EMBEDDER_ERROR
     if model_name:
@@ -315,6 +327,11 @@ def get_embedder(
             # URLs, or filesystem paths. Keep only the exception class in diagnostics.
             error_kind = type(exc).__name__
             LAST_EMBEDDER_ERROR = error_kind
+            if require_exact:
+                raise RuntimeError(
+                    f"Configured semantic embedder is unavailable ({error_kind}) "
+                    f"and require_exact_backends=True prevents fallback to deterministic mode"
+                ) from None
             log = logging.getLogger("engraphis")
             emit = log.info if isinstance(exc, ModuleNotFoundError) else log.warning
             emit(
