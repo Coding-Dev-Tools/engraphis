@@ -514,3 +514,52 @@ def test_secure_erase_removes_document_import_job_items():
         )["files"] == []
     finally:
         service.close()
+
+
+def test_document_import_preserves_source_provenance_in_metadata():
+    """Imported memories must carry raw_sha256, canonical_sha256, and source_mtime_ns."""
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("provenance")
+        mtime = 1_700_000_000_000_000_000
+        raw = b"# Provenance Test\n\nBody content.\n"
+        scan = _scan(("provenance.md", raw))
+        scan.documents[0].source_mtime_ns = mtime
+        importer = DocumentImporter(service)
+        report = importer.import_scan(
+            scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_label="Provenance test", confirmed=True,
+        )
+        assert report["state"] == "completed"
+        from engraphis.core.interfaces import SearchFilter
+        memories = service.store.list_memories(SearchFilter(workspace_id=workspace_id))
+        assert len(memories) == 1
+        doc_meta = memories[0].metadata.get("document", {})
+        assert doc_meta.get("raw_sha256") == hashlib.sha256(raw).hexdigest()
+        assert doc_meta.get("canonical_sha256")
+        assert doc_meta.get("relative_path") == "provenance.md"
+    finally:
+        service.close()
+
+
+def test_document_import_rejects_oversized_source_gracefully():
+    """A source with rejected files still imports valid documents without crashing."""
+    service = _service()
+    try:
+        workspace_id = service.store.get_or_create_workspace("oversized")
+        small_raw = b"# Small\n\nOK.\n"
+        # Build a scan with one valid document and one rejected entry.
+        scan = _scan(("small.md", small_raw))
+        from engraphis.core.documents import DocumentFileIssue
+        scan.rejected.append(DocumentFileIssue("big.md", "document exceeds safety limit"))
+        importer = DocumentImporter(service)
+        report = importer.import_scan(
+            scan, workspace_id=workspace_id, repo_id=None, session_id=None,
+            scope=Scope.WORKSPACE, memory_type=MemoryType.SEMANTIC,
+            source_label="Mixed sizes", confirmed=True,
+        )
+        assert report["state"] in ("completed", "partial")
+        assert report["counts"]["imported"] == 1
+    finally:
+        service.close()

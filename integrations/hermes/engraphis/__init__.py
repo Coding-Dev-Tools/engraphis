@@ -94,7 +94,10 @@ class EngraphisMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         self._session_id = str(session_id or "")
-        self._open()
+        try:
+            self._open()
+        except Exception as exc:  # noqa: BLE001 - provider must not crash Hermes
+            logger.warning("Engraphis initialize failed (%s)", type(exc).__name__)
 
     def system_prompt_block(self) -> str:
         return (
@@ -243,7 +246,7 @@ class EngraphisMemoryProvider(MemoryProvider):
         try:
             from engraphis.config import settings
             return [settings.db_path]
-        except ImportError:
+        except Exception:  # noqa: BLE001 - best-effort; missing config must not crash
             return []
 
     def shutdown(self) -> None:

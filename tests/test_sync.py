@@ -3388,3 +3388,127 @@ def test_local_equal_hlc_conflict_provenance_converges_across_peers():
     assert fresh_conflict is not None
     assert fresh_conflict.provenance["source"] == "sync_conflict"
     assert fresh_conflict.provenance["conflict_of"] == "same-local-id"
+
+
+
+# ── relay push retry on transient failures ────────────────────────────────────
+
+def test_relay_push_retries_transient_502_and_succeeds(monkeypatch):
+    """A 502 on push is retried with backoff; a later success completes the round."""
+    from engraphis.backends.sync_relay import (
+        RelayTransport,
+    )
+
+    calls = {"count": 0}
+
+    def fake_urlopen(req, *, timeout):
+        calls["count"] += 1
+        if calls["count"] <= 1:
+            import urllib.error
+            import io
+            raise urllib.error.HTTPError(
+                req.full_url, 502, "Bad Gateway", {}, io.BytesIO(b""),
+            )
+        # Second call succeeds.
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+            def __exit__(self_inner, *a):
+                pass
+            def read(self_inner, n):
+                return b"ok"
+        return _Resp()
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay._urlopen_no_redirect", fake_urlopen,
+    )
+    monkeypatch.setattr("time.sleep", lambda s: None)  # skip real delays
+
+    transport = RelayTransport(
+        "https://relay.example.test", "ws", access_token="tok_" + "x" * 24,
+    )
+    transport.push("bundle-dev_a.json", b"payload")
+    assert calls["count"] == 2  # first 502 + one retry
+
+
+def test_relay_push_does_not_retry_fatal_401(monkeypatch):
+    """A 401 is a permanent refusal — retrying only amplifies the denial."""
+    import urllib.error
+    import io
+    from engraphis.backends.sync_relay import RelayTransport, RelayError
+
+    calls = {"count": 0}
+
+    def fake_urlopen(req, *, timeout):
+        calls["count"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 401, "Unauthorized", {}, io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay._urlopen_no_redirect", fake_urlopen,
+    )
+
+    transport = RelayTransport(
+        "https://relay.example.test", "ws", access_token="tok_" + "x" * 24,
+    )
+    with pytest.raises(RelayError, match="HTTP 401"):
+        transport.push("bundle-dev_a.json", b"payload")
+    assert calls["count"] == 1  # no retry
+
+
+def test_relay_get_does_not_retry_transient_errors(monkeypatch):
+    """Pull (GET) must not retry — per-bundle isolation handles partial failures."""
+    import urllib.error
+    import io
+    from engraphis.backends.sync_relay import RelayTransport, RelayError
+
+    calls = {"count": 0}
+
+    def fake_urlopen(req, *, timeout):
+        calls["count"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "Service Unavailable", {}, io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay._urlopen_no_redirect", fake_urlopen,
+    )
+
+    transport = RelayTransport(
+        "https://relay.example.test", "ws", access_token="tok_" + "x" * 24,
+    )
+    with pytest.raises(RelayError, match="HTTP 503"):
+        transport.list_names()  # GET request
+    assert calls["count"] == 1  # no retry for GET
+
+
+def test_relay_push_exhausts_retries_and_raises(monkeypatch):
+    """After MAX_PUSH_RETRIES transient failures, the last error is raised."""
+    import urllib.error
+    import io
+    from engraphis.backends.sync_relay import (
+        RelayTransport,
+        RelayError,
+        MAX_PUSH_RETRIES,
+    )
+
+    calls = {"count": 0}
+
+    def fake_urlopen(req, *, timeout):
+        calls["count"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "Service Unavailable", {}, io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_relay._urlopen_no_redirect", fake_urlopen,
+    )
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    transport = RelayTransport(
+        "https://relay.example.test", "ws", access_token="tok_" + "x" * 24,
+    )
+    with pytest.raises(RelayError, match="HTTP 503"):
+        transport.push("bundle-dev_a.json", b"payload")
+    assert calls["count"] == 1 + MAX_PUSH_RETRIES

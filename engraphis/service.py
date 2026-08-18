@@ -1150,7 +1150,8 @@ class MemoryService:
     """High-level, validated operations over a single Engraphis database."""
 
     def __init__(self, engine: MemoryEngine, *,
-                 allowed_workspaces: Optional[list] = None) -> None:
+                 allowed_workspaces: Optional[list] = None,
+                 owned_connector: Optional[Any] = None) -> None:
         self.engine = engine
         self.store = engine.store
         connection = getattr(self.store, "conn", None)
@@ -1158,6 +1159,10 @@ class MemoryService:
             connection.create_function(
                 "_engraphis_prompt_eligible", 2, _sqlite_prompt_eligible,
             )
+        # Connector created by MemoryService.create() — closed in close() so the
+        # SQLCipher key pragma doesn't outlive the service. None means the caller
+        # injected a connector and owns its lifecycle.
+        self._owned_connector = owned_connector
         # Server-side workspace binding (the hard isolation boundary). None means
         # unrestricted (single-tenant local default); a non-empty set means every scoped
         # read/write must target one of these workspaces — see ``_authorize_workspace``.
@@ -1235,12 +1240,28 @@ class MemoryService:
                     f"{len(alive)} graph index worker(s) did not stop before shutdown"
                 )
 
-            close_engine = getattr(self.engine, "close", None)
-            if callable(close_engine):
-                close_engine()
-            else:
-                self.store.close()
-            self._closed = True
+            # The owned connector must be closed even when engine shutdown raises
+            # (e.g. a backend cleanup failure). try/finally guarantees the key
+            # pragma is cleared regardless of the engine close path.
+            try:
+                close_engine = getattr(self.engine, "close", None)
+                if callable(close_engine):
+                    close_engine()
+                else:
+                    self.store.close()
+            finally:
+                # Close the encrypted connector we created (if any) so the SQLCipher
+                # key pragma is cleared from memory. Injected connectors are owned
+                # by the caller and must not be closed here.
+                connector = self._owned_connector
+                if connector is not None:
+                    close_conn = getattr(connector, "close", None)
+                    if callable(close_conn):
+                        try:
+                            close_conn()
+                        except Exception:  # noqa: BLE001
+                            pass
+                self._closed = True
 
     def _graph_scene_revision(self) -> tuple[int, int, int]:
         row = self.store.conn.execute("PRAGMA data_version").fetchone()
@@ -1350,7 +1371,8 @@ class MemoryService:
                graph_extractor: Optional[str] = None,
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
-               query_planner=None, read_only: bool = False) -> "MemoryService":
+               query_planner=None, read_only: bool = False,
+               require_exact_backends: bool = False) -> "MemoryService":
         database_path = str(db_path)
         physical_db_path = _physical_database_path(database_path)
         migration_allowed = (
@@ -1393,13 +1415,15 @@ class MemoryService:
             retention_supervisor=retention_supervisor, connect=connect,
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
+            require_exact_backends=require_exact_backends,
         )
         if migration_allowed:
             try:
                 _warn_if_db_empty_with_populated_sibling(physical_db_path)
             except Exception:  # noqa: BLE001 — diagnostics never block startup
                 pass
-        return cls(engine, allowed_workspaces=allowed_workspaces)
+        return cls(engine, allowed_workspaces=allowed_workspaces,
+                   owned_connector=connect)
 
     # ── name → id resolution ───────────────────────────────────────────────────
     def _lookup_workspace(self, name: str) -> Optional[str]:
