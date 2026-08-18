@@ -820,3 +820,82 @@ def test_pptx_extraction_falls_back_to_numeric_order_without_presentation():
     record = parse_document(pptx, "plain.pptx")
     assert record.body == "First slide\n\nSecond slide\n\nTenth slide"
     assert record.metadata["slides"] == 3
+
+
+def test_scan_rejects_files_exceeding_tree_byte_limit(monkeypatch, tmp_path):
+    """Cumulative scanned bytes must stop the scan and mark it incomplete."""
+    import engraphis.core.documents as documents_module
+
+    monkeypatch.setattr(documents_module, "MAX_DOCUMENT_TREE_BYTES", 50)
+    for index in range(5):
+        (tmp_path / f"note-{index}.txt").write_text("x" * 20, encoding="utf-8")
+    scan = scan_document_tree(tmp_path)
+    assert scan.complete is False
+    assert any(
+        "250000000 byte safety limit" in issue.reason or "byte safety limit" in issue.reason
+        for issue in scan.rejected
+    )
+
+
+def test_scan_rejects_files_exceeding_file_count_limit(monkeypatch, tmp_path):
+    """Scanning more than MAX_DOCUMENT_FILES must stop and mark incomplete."""
+    import engraphis.core.documents as documents_module
+
+    monkeypatch.setattr(documents_module, "MAX_DOCUMENT_FILES", 3)
+    # Use subdirectories so each directory has ≤ MAX_DOCUMENT_FILES entries,
+    # but the cumulative file count exceeds the limit.
+    for sub in ("a", "b"):
+        (tmp_path / sub).mkdir()
+        for index in range(2):
+            (tmp_path / sub / f"note-{index}.txt").write_text(f"content {index}", encoding="utf-8")
+    scan = scan_document_tree(tmp_path)
+    assert scan.complete is False
+    assert any(
+        "10000 file safety limit" in issue.reason or "file safety limit" in issue.reason
+        for issue in scan.rejected
+    )
+
+
+def test_archive_compression_ratio_is_rejected():
+    """A zip bomb with extreme compression ratio must fail closed."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Write a highly compressible payload: 1 byte compressed from 1MB of zeros.
+        zf.writestr("word/document.xml", "\x00" * 1_000_000)
+    raw = buf.getvalue()
+    with pytest.raises(DocumentParseError, match="compression ratio"):
+        parse_document(raw, "bomb.docx")
+
+
+def test_document_record_preserves_source_provenance_fields():
+    """raw_sha256, canonical_sha256, source_size, and source_mtime_ns are always set."""
+    raw = b"# Title\n\nBody text.\n"
+    mtime = 1_700_000_000_000_000_000
+    record = parse_document(raw, "provenance.md", source_mtime_ns=mtime)
+    assert record.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert record.canonical_sha256 == hashlib.sha256(record.content.encode("utf-8")).hexdigest()
+    assert record.source_size == len(raw)
+    assert record.source_mtime_ns == mtime
+    assert len(record.raw_sha256) == 64
+    assert len(record.canonical_sha256) == 64
+
+
+def test_adapter_must_return_matching_source_identity():
+    """An adapter that returns mismatched provenance fields is rejected."""
+    raw = b"%PDF-test"
+
+    def bad_identity_adapter(data, path, mtime):
+        text = "extracted"
+        return DocumentRecord(
+            relative_path=path, format="pdf", media_type="application/pdf",
+            title="Report", content=text, body=text,
+            raw_sha256="0" * 64,  # wrong hash
+            canonical_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            source_size=len(data), source_mtime_ns=mtime,
+        )
+
+    with pytest.raises(DocumentParseError, match="invalid source identity"):
+        parse_document(raw, "report.pdf", adapter=bad_identity_adapter)
