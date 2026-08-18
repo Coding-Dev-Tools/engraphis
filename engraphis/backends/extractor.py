@@ -808,6 +808,7 @@ def get_extractor(
     token_counter: Optional[Callable[[str], int]] = None,
     token_counter_identity: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
+    require_exact: bool = False,
 ) -> Extractor:
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
@@ -820,6 +821,10 @@ def get_extractor(
     settings. ``kind='llm_structured'`` returns a schema-validated extractor with
     entity/relation extraction. Anything else — including an LLM kind with no usable
     client — returns the offline passthrough.
+
+    Args:
+        require_exact: When True, raise an error if the configured LLM extractor cannot
+            be initialized instead of falling back to passthrough.
     """
     kind = (kind or "none").lower()
     if kind == "chunk":
@@ -843,19 +848,65 @@ def get_extractor(
             token_counter_identity=token_counter_identity,
         )
     if kind == "llm_structured":
+        created_client = False
         if llm is None:
             try:
                 from engraphis.llm.client import LLMClient
                 llm = LLMClient()
-            except Exception:
+                created_client = True
+            except Exception as exc:
+                if require_exact:
+                    raise RuntimeError(
+                        f"Configured extractor 'llm_structured' requires LLM client but "
+                        f"initialization failed ({type(exc).__name__}) and "
+                        f"require_exact_backends=True prevents fallback to passthrough"
+                    ) from None
                 return PassthroughExtractor(fallback_from=kind)
+        if require_exact and created_client and not getattr(llm, "api_key", ""):
+            close = getattr(llm, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - preserve the sanitized diagnostic
+                    pass
+            raise RuntimeError(
+                "Configured extractor 'llm_structured' requires "
+                "ENGRAPHIS_LLM_API_KEY when require_exact_backends=True"
+            )
         return StructuredLLMExtractor(llm)
-    if kind != "llm":
+    if kind not in ("none", "chunk", "llm", "llm_structured"):
+        if require_exact:
+            raise RuntimeError(
+                "Configured extractor selector is not recognized and "
+                "require_exact_backends=True prevents silent fallback to passthrough "
+                "(valid kinds: none, chunk, llm, llm_structured)"
+            )
         return PassthroughExtractor()
+    if kind == "none":
+        return PassthroughExtractor()
+    created_client = False
     if llm is None:
         try:
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
-        except Exception:
+            created_client = True
+        except Exception as exc:
+            if require_exact:
+                raise RuntimeError(
+                    f"Configured extractor 'llm' requires LLM client but initialization "
+                    f"failed ({type(exc).__name__}) and require_exact_backends=True "
+                    f"prevents fallback to passthrough"
+                ) from None
             return PassthroughExtractor(fallback_from=kind)
+    if require_exact and created_client and not getattr(llm, "api_key", ""):
+        close = getattr(llm, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - preserve the sanitized diagnostic
+                pass
+        raise RuntimeError(
+            "Configured extractor 'llm' requires ENGRAPHIS_LLM_API_KEY "
+            "when require_exact_backends=True"
+        )
     return LLMExtractor(llm)
