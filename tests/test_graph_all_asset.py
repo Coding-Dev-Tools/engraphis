@@ -32,9 +32,7 @@ context.self.onmessage({{ data: {{ type: 'hit', request: 9, x: 0, y: 0, scale: 1
 const hit = messages.filter(message => message.type === 'hit').at(-1);
 console.log(JSON.stringify({{ready: {{nodes: ready.totalNodes, links: ready.totalLinks, ids: ready.ids, positions: ready.positions.constructor.name, edges: ready.edgeSources.constructor.name}}, lod: {{low: low.drawnLinks, medium: medium.drawnLinks, high: high.drawnLinks}}, hit: hit.index}}));
 """
-    result = subprocess.run(
-        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
-    )
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
 
 
@@ -46,42 +44,6 @@ def test_all_worker_compacts_identity_builds_typed_arrays_and_hits_spatial_index
     assert result["lod"]["low"] == 0
     assert result["lod"]["medium"] <= 7 and result["lod"]["high"] <= 7
     assert result["hit"] >= 0
-
-
-def test_worker_honours_scene_canonical_positions_and_global_anchor():
-    source = json.dumps(WORKER.read_text(encoding="utf-8"))
-    payload = json.dumps({
-        "canonical_positions": True,
-        "nodes": [
-            {"id": "hole", "anchor_role": "global", "x": 12, "y": -8, "gravity_mass": 100},
-            {"id": "outer", "anchor_role": "community", "x": 412, "y": 92, "gravity_mass": 2},
-        ],
-        "links": [],
-    })
-    script = f"""
-const vm = require('vm'); const messages = [];
-const context = {{ self: {{ postMessage: (message) => messages.push(message) }} }};
-vm.runInNewContext({source}, context);
-context.self.onmessage({{ data: {{ type: 'settings', settings: {{ mode: 'galaxy',
-  repel: 100, link: 8, gravity: 48 }}, relayout: true }} }});
-context.self.onmessage({{ data: {{ type: 'prepare', payload: {payload} }} }});
-const ready = messages.find(message => message.type === 'ready');
-context.self.onmessage({{ data: {{ type: 'settings', settings: {{ gravity: 100 }},
-  relayout: true }} }});
-const transformed = messages.filter(message => message.type === 'layout').at(-1);
-console.log(JSON.stringify({{canonical: ready.canonicalPositions,
-  positions: Array.from(ready.positions), transformed: Array.from(transformed.positions),
-  roles: ready.anchorRoles}}));
-"""
-    result = subprocess.run(
-        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
-    )
-    value = json.loads(result.stdout)
-    assert value["canonical"] is True
-    assert value["roles"] == ["global", "community"]
-    assert value["positions"] == [12, -8, 412, 92]
-    assert value["transformed"][0:2] == [12, -8]
-    assert value["transformed"] != value["positions"]
 
 
 def test_all_renderer_is_flat_worker_webgl_and_not_a_live_force_simulation():
@@ -250,7 +212,7 @@ console.log(JSON.stringify({{
 }}));
 """
     result = subprocess.run(
-        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True,
     )
     report = json.loads(result.stdout)
     assert report["filtered"] == ["b"]

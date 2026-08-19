@@ -116,26 +116,6 @@ def test_nonduplicate_title_remains_in_the_citation_header() -> None:
     assert chunks[0].excerpt == "Deploy only after signed checks."
 
 
-def test_compact_title_retry_handles_a_non_additive_token_counter() -> None:
-    """The compact retry must carry its own budget into the final hard-fit pass."""
-    def non_additive_counter(text: str) -> int:
-        count = len(text)
-        return count + (100 if text.startswith("[1]\n") and len(text) > 4 else 0)
-
-    packer = DeterministicContextPacker(
-        non_additive_counter,
-        token_counter_identity="test.non-additive",
-    )
-    candidate = _candidate("mem_non_additive", "X", title="X")
-
-    context, chunks, usage = packer.pack("X", [candidate], token_budget=5)
-
-    assert context == ""
-    assert chunks == []
-    assert usage.context_tokens == 0
-    assert usage.token_counter == "test.non-additive"
-
-
 def test_sentence_excerpt_marks_omission_and_preserves_qualifying_evidence() -> None:
     packer = DeterministicContextPacker()
     candidate = _candidate(

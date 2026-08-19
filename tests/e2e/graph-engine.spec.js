@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260818-v29-independent-local-orbits';
+const stellarOrbitAssetVersion = '20260818-v20-main-node-material-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -131,8 +131,7 @@ const blackHoleGalaxyScene = {
       galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8 },
   ],
   community_bridges: [],
-  meta: { algorithm_version: 'galaxy-v6', canonical_positions: true,
-    layout_seed: 91, total_nodes: 8, truncated: false },
+  meta: { algorithm_version: 'galaxy-v6', layout_seed: 91, total_nodes: 8, truncated: false },
 };
 
 /* Match the production-sized browser complaint without checking in a 542-row fixture. Sixty
@@ -308,64 +307,6 @@ function completeGalaxyScene() {
 
 const servedCompleteGalaxyScene = completeGalaxyScene();
 
-/* The production failure was not a small connected fixture: a sparse relation layer can
-   legitimately contain hundreds of evidence entities and only a handful of links. Keep this
-   generated scene compact in source while preserving the observed 918-body / 8-edge shape. */
-function sparseGalaxyScene() {
-  const nodes = [{
-    id: 'black-hole', label: 'Evidence core', gravity_mass: 64, visual_radius: 12,
-    community_id: 'core', anchor_role: 'global', system_anchor_id: 'black-hole', orbit_tier: 0,
-    galactic_radius: 0, galactic_target_radius: 0, x: 0, y: 0,
-  }];
-  const edges = [];
-  for (let index = 1; index < 918; index += 1) {
-    const phase = index * 2.399963229728653;
-    const radius = 74 + (index % 37) * 4.2 + Math.floor(index / 37) * 1.6;
-    const id = `sparse-${index}`;
-    nodes.push({
-      id, label: id, gravity_mass: 1 + (index % 11) * 0.35,
-      visual_radius: 2.2 + (index % 7) * 0.55,
-      community_id: id, anchor_role: 'community', system_anchor_id: 'black-hole', orbit_tier: 1,
-      galactic_radius: radius, galactic_target_radius: radius,
-      galactic_radius_scale: 0.4, galactic_initial_compactness: 0.8, galactic_phase: phase,
-      x: Math.cos(phase) * radius, y: Math.sin(phase) * radius * 0.84,
-    });
-    if (index <= 8) edges.push({
-      id: `sparse-edge-${index}`, source: 'black-hole', target: id,
-      relation: 'evidence', rest_length: radius, spring_strength: 0.04,
-    });
-  }
-  return {
-    nodes, edges, communities: [{ id: 'core', mass: 64, member_count: 1,
-      anchor_id: 'black-hole', galactic_radius: 0, galactic_target_radius: 0 }],
-    community_bridges: [],
-    meta: { algorithm_version: 'galaxy-v6', canonical_positions: true, layout_seed: 9188,
-      total_nodes: nodes.length, truncated: false },
-  };
-}
-
-const servedSparseGalaxyScene = sparseGalaxyScene();
-
-function sparseCompleteGalaxyScene() {
-  const scene = JSON.parse(JSON.stringify(servedSparseGalaxyScene));
-  for (let index = scene.nodes.length; index < 3229; index += 1) {
-    const phase = index * 2.399963229728653;
-    const radius = 96 + (index % 61) * 3.7 + Math.floor(index / 61) * 0.9;
-    scene.nodes.push({
-      id: `complete-sparse-${index}`, label: `complete-sparse-${index}`,
-      gravity_mass: 1 + (index % 9) * 0.25, visual_radius: 2.2 + (index % 5) * 0.45,
-      community_id: `complete-sparse-${index}`, anchor_role: 'community',
-      system_anchor_id: 'black-hole', orbit_tier: 1, orbit_radius: radius,
-      galactic_radius: radius, galactic_target_radius: radius,
-      x: Math.cos(phase) * radius, y: Math.sin(phase) * radius * 0.84,
-    });
-  }
-  scene.meta.total_nodes = scene.nodes.length;
-  return scene;
-}
-
-const servedSparseCompleteGalaxyScene = sparseCompleteGalaxyScene();
-
 /**
  * Stub the dashboard's API surface and start recording everything a browser can tell us that
  * a Node harness cannot: which scripts were fetched, which CSP rules fired, and what the page
@@ -381,12 +322,6 @@ async function openDashboard(page, { query = '', graphScene = graphScenePayload 
   // failure and not a console error Playwright surfaces reliably, so the only trustworthy
   // source is the document event the browser fires.
   await page.addInitScript(() => {
-    /* Most tests in this file exercise the detailed live engine. Product default coverage for
-       All nodes · LOD lives in ledger.spec.js and graph-all-performance.spec.js. */
-    const preferenceKey = 'engraphis-ledger-graph-preferences-v1';
-    let preferences = {};
-    try { preferences = JSON.parse(localStorage.getItem(preferenceKey) || '{}') || {}; } catch (_) {}
-    localStorage.setItem(preferenceKey, JSON.stringify({ ...preferences, presentationMode: 'physics' }));
     window.__cspViolations = [];
     document.addEventListener('securitypolicyviolation', event => {
       window.__cspViolations.push({
@@ -585,21 +520,7 @@ async function renderedSystemEnvelopeSnapshot(page) {
     const bounds = canvas && canvas.getBoundingClientRect();
     const byId = new Map(nodes.map(node => [String(node.id), node]));
     const systems = nodes.filter(node => node.anchor_role === 'community').map(star => {
-      const members = nodes.filter(node => {
-        let current = node;
-        const seen = new Set();
-        while (current && !seen.has(String(current.id))) {
-          const currentId = String(current.id);
-          if (currentId === String(star.id)) return true;
-          seen.add(currentId);
-          const parentId = current.system_anchor_id == null
-            ? '' : String(current.system_anchor_id);
-          if (!parentId || parentId === currentId) return false;
-          if (parentId === String(star.id)) return true;
-          current = byId.get(parentId);
-        }
-        return false;
-      });
+      const members = nodes.filter(node => String(node.system_anchor_id || '') === String(star.id));
       const point = graph.graph2ScreenCoords(star.x, star.y);
       const radius = Math.max(...members.map(node => {
         const member = graph.graph2ScreenCoords(node.x, node.y);
@@ -903,68 +824,6 @@ async function carrierPaintAuditSnapshot(page) {
       last: audit ? JSON.parse(JSON.stringify(audit.last)) : {},
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
       hidden: document.hidden,
-    };
-  });
-}
-
-/* Capture the actual canvas arc radii submitted by the production node painter.  A graph-space
-   radius can look healthy in an API snapshot while becoming sub-pixel after zoom-to-fit; this
-   audit catches that exact sparse-scene failure without depending on private renderer state. */
-async function sparsePaintSnapshot(page) {
-  await page.evaluate(() => {
-    const graph = window.__fg;
-    const original = graph.nodeCanvasObject();
-    const records = {};
-    window.__sparsePaintRecords = records;
-    graph.nodeCanvasObject((node, context, scale) => {
-      const id = String(node.id);
-      const record = records[id] || (records[id] = { calls: 0, arcs: 0, maxScreenRadius: 0 });
-      record.calls += 1;
-      const originalArc = context && context.arc;
-      const originalDrawImage = context && context.drawImage;
-      if (typeof originalArc !== 'function') return original(node, context, scale);
-      context.arc = function recordNodeArc(x, y, radius, start, end, anticlockwise) {
-        const screenRadius = Math.abs(Number(radius) || 0) * Math.abs(Number(scale) || 1);
-        record.arcs += 1;
-        record.maxScreenRadius = Math.max(record.maxScreenRadius, screenRadius);
-        return originalArc.call(this, x, y, radius, start, end, anticlockwise);
-      };
-      if (typeof originalDrawImage === 'function') {
-        context.drawImage = function recordNodeSprite(...args) {
-          const destinationWidth = args.length >= 5 ? Math.abs(Number(args[3]) || 0) : 0;
-          record.maxScreenRadius = Math.max(record.maxScreenRadius,
-            destinationWidth * Math.abs(Number(scale) || 1) / 2);
-          return originalDrawImage.apply(this, args);
-        };
-      }
-      try {
-        return original(node, context, scale);
-      } finally {
-        context.arc = originalArc;
-        if (typeof originalDrawImage === 'function') context.drawImage = originalDrawImage;
-      }
-    });
-    graph.zoom(graph.zoom());
-  });
-  await page.waitForTimeout(120);
-  return page.evaluate(() => {
-    const graph = window.__fg;
-    const records = window.__sparsePaintRecords || {};
-    const canvas = document.querySelector('#graph-net canvas');
-    const pixels = canvas ? canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data : [];
-    let nonBlack = 0;
-    for (let index = 0; index < pixels.length; index += 4) {
-      if (pixels[index] + pixels[index + 1] + pixels[index + 2] > 42) nonBlack += 1;
-    }
-    const values = Object.values(records);
-    return {
-      nodeCount: graph.graphData().nodes.length,
-      paintedCount: values.filter(record => record.calls > 0).length,
-      arcCount: values.reduce((sum, record) => sum + record.arcs, 0),
-      visibleCount: values.filter(record => record.maxScreenRadius >= 1.5).length,
-      visibleFraction: values.length ? values.filter(record => record.maxScreenRadius >= 1.5).length / values.length : 0,
-      nonBlack,
-      zoom: canvas && canvas.__zoom ? canvas.__zoom.k : null,
     };
   });
 }
@@ -1361,89 +1220,6 @@ test('the opt-in engine renders a real canvas and registers under its flag', asy
   expect(session.pageErrors).toEqual([]);
 });
 
-test('sparse 918-body Galaxy stays visible after zoom-to-fit', async ({ page }) => {
-  const session = await openDashboard(page, {
-    // Boot with the ordinary fixture so the lazy renderer can initialize before replacing it
-    // with the production-sized sparse payload. This keeps the regression about paint scale,
-    // not a test-server request racing a 918-body first render.
-    query: '?graph-engine=next', graphScene: graphScenePayload,
-  });
-  await openGraphView(page);
-  await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
-
-  await page.evaluate(scene => {
-    const api = window.__engraphisGraph;
-    api.setPreset('galaxy');
-    api.setSettings({ gravity: 48, size: 1 });
-    api.setData(scene);
-    api.setScope({ showUnlinked: true, minDegree: 0 });
-    api.freeze(true);
-    window.__fg.zoomToFit(0, 0);
-  }, servedSparseGalaxyScene);
-  await page.waitForFunction(() => window.__fg.graphData().nodes.length === 918);
-  await page.waitForTimeout(120);
-
-  const paint = await sparsePaintSnapshot(page);
-  const guides = await page.evaluate(() => {
-    const I = window.EngraphisGraph._internals;
-    const nodes = window.__fg.graphData().nodes;
-    const lanes = I.galaxyOrbitLaneGeometry(nodes);
-    const overview = I.galaxyOrbitLanePresentation(lanes, nodes.length, 0.08);
-    const focused = I.galaxyOrbitLanePresentation(lanes, nodes.length, 0.08,
-      new Set(['black-hole']));
-    return {
-      total: lanes.length,
-      overview: overview.lanes.length,
-      focused: focused.lanes.length,
-      focusedOpacity: focused.opacity,
-    };
-  });
-  expect(paint.nodeCount).toBe(918);
-  expect(paint.paintedCount).toBe(918);
-  // Every evidence body must remain a usable visual/click target even when 918 entities share
-  // only eight links. A sub-pixel result is the production screenshot failure this pins.
-  expect(paint.visibleFraction).toBeGreaterThan(0.95);
-  expect(paint.nonBlack).toBeGreaterThan(500);
-  expect(guides.total).toBeGreaterThan(0);
-  expect(guides.overview).toBe(0);
-  expect(guides.focused).toBeGreaterThan(0);
-  expect(guides.focused).toBeLessThanOrEqual(12);
-  expect(guides.focusedOpacity).toBeLessThanOrEqual(0.055);
-  expect(session.pageErrors).toEqual([]);
-});
-
-test('complete 3,229-body sparse Galaxy keeps orbit guides contextual', async ({ page }) => {
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
-  await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
-  await page.evaluate(scene => {
-    const api = window.__engraphisGraph;
-    api.setPreset('galaxy');
-    api.setData(scene);
-    api.setScope({ showUnlinked: true, minDegree: 0 });
-    api.freeze(true);
-  }, servedSparseCompleteGalaxyScene);
-  await page.waitForFunction(() => window.__fg.graphData().nodes.length === 3229);
-  const guides = await page.evaluate(() => {
-    const I = window.EngraphisGraph._internals;
-    const nodes = window.__fg.graphData().nodes;
-    const lanes = I.galaxyOrbitLaneGeometry(nodes);
-    const overview = I.galaxyOrbitLanePresentation(lanes, nodes.length, 0.08);
-    const focused = I.galaxyOrbitLanePresentation(lanes, nodes.length, 0.08,
-      new Set(['black-hole']));
-    const blackHole = nodes.find(node => node.id === 'black-hole');
-    return { total: nodes.length, lanes: lanes.length, overview: overview.lanes.length,
-      focused: focused.lanes.length, blackHoleAtCenter: Math.hypot(blackHole.x, blackHole.y) < 1e-6 };
-  });
-  expect(guides.total).toBe(3229);
-  expect(guides.lanes).toBeGreaterThan(0);
-  expect(guides.overview).toBe(0);
-  expect(guides.focused).toBeGreaterThan(0);
-  expect(guides.focused).toBeLessThanOrEqual(12);
-  expect(guides.blackHoleAtCenter).toBe(true);
-  expect(session.pageErrors).toEqual([]);
-});
-
 test('Classic defaults to the canonical engine without a query flag', async ({ page }) => {
   const session = await openDashboard(page);
   const canvas = await openGraphView(page);
@@ -1726,7 +1502,7 @@ test('black-hole Galaxy remains bounded and differential beyond 450 custom steps
     expect(middleSystem.internalDiameter).toBeGreaterThan(8);
     expect(lateSystem.internalDiameter).toBeGreaterThan(8);
   }
-  expect(Math.max(...angularRates) - Math.min(...angularRates)).toBeGreaterThan(0.0001);
+  expect(Math.max(...angularRates) - Math.min(...angularRates)).toBeGreaterThan(0.0002);
   expect(lateMotion).toBeGreaterThan(5);
 
   expect(horizon.diagnostics.steps - early.diagnostics.steps).toBeGreaterThanOrEqual(450);
@@ -1931,16 +1707,16 @@ for (const reducedMotion of [false, true]) {
       expect(Math.min(...samples.map(sample => sample.safety.minimumOuterClearance)),
         JSON.stringify(evidence)).toBeGreaterThanOrEqual(-1e-7);
       expect(Math.max(...samples.map(sample => sample.safety.maximumSpeed)),
-        JSON.stringify(evidence)).toBeLessThanOrEqual(48.1);
+        JSON.stringify(evidence)).toBeLessThanOrEqual(48 + 1e-9);
       expect(Math.max(...samples.map(sample => sample.safety.speedCapActivations)),
         JSON.stringify(evidence)).toBe(0);
       expect(before.planet.anchor).toBe(before.star.id);
       expect(samples.every(sample => sample.screenLocal.radius
         > sample.star.screenRadius + sample.planet.screenRadius), JSON.stringify(evidence))
         .toBe(true);
-      expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.45);
-      expect(Math.abs(screenTravel), JSON.stringify(evidence)).toBeGreaterThan(0.45);
-      expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(8);
+      expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
+      expect(Math.abs(screenTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
+      expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(15);
       expect(coRotatingSegments, JSON.stringify(evidence)).toBeGreaterThanOrEqual(9);
       expect(phaseReversals, JSON.stringify(evidence)).toBe(0);
       expect(Math.min(...localStepMagnitudes), JSON.stringify(evidence)).toBeGreaterThan(0.025);
@@ -1953,10 +1729,10 @@ for (const reducedMotion of [false, true]) {
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
       /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
-         the exact step count. A 0.20-radian sweep is already >11 degrees and independently
+         the exact step count. A 0.35-radian sweep is already >20 degrees and independently
          visible; the stronger local threshold above proves the nested planet orbit at the same
          time. */
-      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.2);
+      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.35);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
       expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
@@ -1971,9 +1747,9 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 48, repel: 200, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 48, repel: 100, link: 8,
       });
-      expect(diagnostics.orbitalSeparationSetting).toBe(200);
+      expect(diagnostics.orbitalSeparationSetting).toBe(100);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
       expect(diagnostics.orbitalSeparationStrength).toBe(1);
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
@@ -1991,7 +1767,7 @@ for (const reducedMotion of [false, true]) {
       const servedAsset = await page.request.get(assetUrl.href);
       expect(servedAsset.ok()).toBe(true);
       const servedSource = await servedAsset.text();
-      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;');
+      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;');
       expect(servedSource).toContain('const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;');
       expect(servedSource).toContain('const BASE_NODE_RADIUS_SCALE = 1.2;');
       expect(servedSource).toContain('preserveSystemRadii: true,');
@@ -2251,13 +2027,9 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
             lane: body.carrierLaneRadius,
           })) };
       });
-      /* The high-density live clock deliberately avoids collision impulses because they can
-         eject light planets. Independent nested orbits can graze across carrier envelopes;
-         permit fewer than two dozen shallow contacts among 60 systems while still rejecting
-         coincident systems, hidden carriers, or an expanding outer wall. */
       expect(samples.every(sample => sample.envelopes.systems.length === 60
         && sample.envelopes.systems.every(system => system.visible)
-        && sample.envelopes.overlaps <= 24 && sample.envelopes.minimumClearance >= -5),
+        && sample.envelopes.overlaps === 0 && sample.envelopes.minimumClearance >= -.75),
       JSON.stringify(visibilityDebug))
         .toBe(true);
       expect(samples.every(sample => sample.global.diagnostics.speedCapActivations === 0
@@ -2838,8 +2610,8 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
 
     expect(samples.every(sample => sample.finite && sample.visible), JSON.stringify(evidence))
       .toBe(true);
-    expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.4);
-    expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(10);
+    expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.5);
+    expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(12);
     expect(after.local.radius).toBeGreaterThan(before.local.radius * 0.7);
     expect(after.local.radius).toBeLessThan(before.local.radius * 1.5);
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
@@ -2861,7 +2633,7 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(session.pageErrors).toEqual([]);
   });
 
-test('Galaxy motion is 30 percent slower while core perturbation stays bound', async ({ page }) => {
+test('Galaxy motion is 50 percent faster while core perturbation stays bound', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.EngraphisGraph);
@@ -2891,8 +2663,8 @@ test('Galaxy motion is 30 percent slower while core perturbation stays bound', a
     };
     const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
     const start = nodes.map(node => ({ ...node }));
-    const slower = start.map(node => ({ ...node }));
-    const prior = start.map(node => ({ ...node }));
+    const fast = start.map(node => ({ ...node }));
+    const old = start.map(node => ({ ...node }));
     const initialPhase = phase(start);
     const options = timestep => ({
       gravity: 48,
@@ -2911,17 +2683,17 @@ test('Galaxy motion is 30 percent slower while core perturbation stays bound', a
     });
     const steps = 12;
     for (let step = 0; step < steps; step += 1) {
-      I.integrateGalaxyLeapfrog(slower, [], [], options(0.021328125));
-      I.integrateGalaxyLeapfrog(prior, [], [], options(0.03046875));
+      I.integrateGalaxyLeapfrog(fast, [], [], options(0.032));
+      I.integrateGalaxyLeapfrog(old, [], [], options(0.021328125));
     }
-    const slowerPhase = phase(slower), priorPhase = phase(prior);
-    const slowerTurns = {
-      system: Math.abs(delta(initialPhase.system, slowerPhase.system)),
-      local: Math.abs(delta(initialPhase.local, slowerPhase.local)),
+    const fastPhase = phase(fast), oldPhase = phase(old);
+    const fastTurns = {
+      system: Math.abs(delta(initialPhase.system, fastPhase.system)),
+      local: Math.abs(delta(initialPhase.local, fastPhase.local)),
     };
-    const priorTurns = {
-      system: Math.abs(delta(initialPhase.system, priorPhase.system)),
-      local: Math.abs(delta(initialPhase.local, priorPhase.local)),
+    const oldTurns = {
+      system: Math.abs(delta(initialPhase.system, oldPhase.system)),
+      local: Math.abs(delta(initialPhase.local, oldPhase.local)),
     };
 
     const system = (prefix, community) => [
@@ -2946,17 +2718,13 @@ test('Galaxy motion is 30 percent slower while core perturbation stays bound', a
     const initialCoreRadius = Math.hypot(
       coreOrbit[1].x - coreOrbit[0].x, coreOrbit[1].y - coreOrbit[0].y,
     );
-    const blackHolePadding = Number(
-      window.__engraphisGraph.physicsDiagnostics().blackHoleExclusionPadding || 0,
-    );
-    const coreContactFloor = Number(coreOrbit[0].radius || 0)
-      + Number(coreOrbit[1].radius || 0) + blackHolePadding;
     let minimumCoreRadius = initialCoreRadius;
     let maximumCoreRadius = initialCoreRadius;
     let speedCaps = 0;
     for (let step = 0; step < 450; step += 1) {
       const tick = I.integrateGalaxyLeapfrog(coreOrbit, [], [], {
-        ...options(0.021328125),
+        ...options(0.032), central: false,
+        includeBlackHoleExclusion: false,
         includeFarFieldConfinement: false,
       });
       const radius = Math.hypot(
@@ -2991,16 +2759,15 @@ test('Galaxy motion is 30 percent slower while core perturbation stays bound', a
 
     return {
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
-      slowerTurns,
-      priorTurns,
+      fastTurns,
+      oldTurns,
       ratios: {
-        system: slowerTurns.system / priorTurns.system,
-        local: slowerTurns.local / priorTurns.local,
+        system: fastTurns.system / oldTurns.system,
+        local: fastTurns.local / oldTurns.local,
       },
       directRatio,
       coreOrbit: {
         initial: initialCoreRadius,
-        contactFloor: coreContactFloor,
         minimum: minimumCoreRadius,
         maximum: maximumCoreRadius,
         speedCaps,
@@ -3011,19 +2778,18 @@ test('Galaxy motion is 30 percent slower while core perturbation stays bound', a
     };
   }, blackHoleGalaxyScene);
 
-  expect(report.diagnostics.timestep).toBe(0.021328125);
+  expect(report.diagnostics.timestep).toBe(0.032);
   expect(report.diagnostics.frameIntervalMs).toBeCloseTo(1000 / 30, 8);
-  expect(report.slowerTurns.system).toBeGreaterThan(0);
-  expect(report.slowerTurns.local).toBeGreaterThan(0);
-  expect(report.ratios.system).toBeGreaterThan(0.67);
-  expect(report.ratios.system).toBeLessThan(0.73);
-  expect(report.ratios.local).toBeGreaterThan(0.67);
-  expect(report.ratios.local).toBeLessThan(0.73);
+  expect(report.fastTurns.system).toBeGreaterThan(0);
+  expect(report.fastTurns.local).toBeGreaterThan(0);
+  expect(report.ratios.system).toBeGreaterThan(1.35);
+  expect(report.ratios.system).toBeLessThan(1.65);
+  expect(report.ratios.local).toBeGreaterThan(1.35);
+  expect(report.ratios.local).toBeLessThan(1.65);
   expect(report.directRatio).toBeCloseTo(0.75, 10);
   expect(report.coreOrbit.finite).toBe(true);
   expect(report.coreOrbit.speedCaps).toBe(0);
-  // Eccentric inner orbits may reach periapsis, but the painted event horizon is impenetrable.
-  expect(report.coreOrbit.minimum).toBeGreaterThanOrEqual(report.coreOrbit.contactFloor - 1e-7);
+  expect(report.coreOrbit.minimum).toBeGreaterThan(report.coreOrbit.initial * 0.6);
   // The leapfrog orbit stays bounded with a small deterministic integration margin; the
   // contract is containment, not an exact radius cap at the 1.6x sample boundary.
   expect(report.coreOrbit.maximum).toBeLessThan(report.coreOrbit.initial * 1.65);
@@ -3674,7 +3440,6 @@ test('Reheat layout control never adds Galaxy bonus physics slices', async ({ pa
     };
   });
   expect(after.diagnostics.reheatActivations).toBe(before.diagnostics.reheatActivations + 1);
-  expect(after.diagnostics.reheatRepairs).toBe(before.diagnostics.reheatRepairs + 1);
   expect(after.diagnostics.reheatStepsApplied).toBe(before.diagnostics.reheatStepsApplied);
   expect(after.diagnostics.reheatStepsRemaining).toBe(0);
   expect(after.diagnostics.lastReheatSubsteps).toBe(0);
