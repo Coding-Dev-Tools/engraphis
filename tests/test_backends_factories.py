@@ -56,6 +56,35 @@ def test_embedder_factory_falls_back_offline(monkeypatch):
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
 
 
+def test_embedder_strict_failure_is_redacted_and_not_chained(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("token=super-secret path=C:/private/model")
+
+    monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", unavailable)
+    with pytest.raises(RuntimeError) as caught:
+        get_embedder("C:/private/model", 128, require_exact=True)
+
+    assert "super-secret" not in str(caught.value)
+    assert "C:/private/model" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_memory_engine_create_forwards_exact_backend_mode(monkeypatch):
+    import engraphis.core.engine as engine_module
+
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return "engine"
+
+    monkeypatch.setattr(engine_module, "_ENGINE_FACTORY", factory)
+    assert MemoryEngine.create(require_exact_backends=True) == "engine"
+    assert captured["require_exact_backends"] is True
+
+
 def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
     import engraphis.backends.embedder_st as embedder_st
 
