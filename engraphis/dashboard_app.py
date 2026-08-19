@@ -378,7 +378,6 @@ def create_app() -> FastAPI:
         settings.db_path, embed_model=settings.embed_model,
         embed_revision=getattr(settings, "embed_revision", "") or None,
         require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-        require_exact_backends=bool(getattr(settings, "require_exact_backends", False)),
         embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
         vector_backend=settings.vector_backend,
         rerank_model=getattr(settings, "rerank_model", "") or None,

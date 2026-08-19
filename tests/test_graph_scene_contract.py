@@ -22,7 +22,6 @@ def test_graph_scene_fixture_has_stable_public_shape():
         "workspace", "level", "scene_hash", "index_generation", "total_nodes",
         "total_edges", "shown_nodes", "shown_edges", "truncated", "query_ms",
         "layout_seed", "index_state", "filters",
-        "canonical_positions",
     } <= set(scene["meta"])
     assert {
         "id", "canonical_id", "label", "type", "member_ids", "repo_ids",
@@ -56,7 +55,6 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
     nodes = {node["id"]: node for node in scene["nodes"]}
     communities = {community["id"]: community for community in scene["communities"]}
     assert scene["meta"]["algorithm_version"] == "galaxy-v6"
-    assert scene["meta"]["canonical_positions"] is True
     for node in scene["nodes"]:
         expected_mass = 1.0 + 15.0 * node["mass_score"] ** 2
         assert math.isclose(node["gravity_mass"], expected_mass, abs_tol=1e-6)

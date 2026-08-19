@@ -712,7 +712,6 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_RERANK_MODEL` | Not set | Optional sentence-transformers cross-encoder reranker |
 | `ENGRAPHIS_RERANK_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the reranker |
 | `ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS` | `false` | When enabled, require a 40-hex commit before loading remote embedding models, rerankers, or chunk tokenizers; `local:` selectors and filesystem paths remain permitted |
-| `ENGRAPHIS_REQUIRE_EXACT_BACKENDS` | `false` | When enabled, dashboard and standalone MCP startup fails if a configured optional backend is unavailable instead of silently falling back |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
 | `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` | Not set | Optional Hugging Face tokenizer used to enforce chunk budgets with the downstream reader's real tokenization; requires the optional `transformers` package |
 | `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` | Not set | Optional immutable tokenizer/model revision recorded in the chunk-counter identity; pin this for reproducible benchmark artifacts |

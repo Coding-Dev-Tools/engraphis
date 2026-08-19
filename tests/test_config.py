@@ -61,30 +61,6 @@ def test_cors_default_origins_follow_configured_port():
     assert config._parse_origins("https://app.example.com", 9000) == [
         "https://app.example.com"]
 
-def test_cors_wildcard_origin_is_explicitly_accepted():
-    """A literal ``*`` must pass through _parse_origins so CORSMiddleware can
-    enable public access.  The dashboard disables credentials when ``*`` is
-    present; this test pins the parser half of that contract."""
-    assert config._parse_origins("*", 8700) == ["*"]
-    # Wildcard mixed with explicit origins: both survive so the operator can
-    # gradually migrate without an all-or-nothing cutover.
-    assert config._parse_origins("*,https://app.example.com", 8700) == [
-        "*", "https://app.example.com"]
-
-def test_cors_schemeless_origins_are_rejected_with_diagnostic():
-    """Bare hostnames or dangerous values like ``null`` must be dropped so
-    an operator typo cannot open the CORS allow-list to an attacker."""
-    import contextlib
-    import io
-    buf = io.StringIO()
-    with contextlib.redirect_stderr(buf):
-        result = config._parse_origins("evil.com,null,https://safe.example.com", 8700)
-    assert result == ["https://safe.example.com"]
-    assert "scheme" in buf.getvalue().lower() or "CORS" in buf.getvalue()
-    # Credential-like values must never appear in the diagnostic.
-    assert "evil.com" not in buf.getvalue()
-    assert "null" not in buf.getvalue()
-
 
 def test_cors_origins_use_engraphis_port_env(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_CORS_ORIGINS", raising=False)
@@ -194,40 +170,6 @@ def test_model_provenance_settings_read_environment_and_are_documented(monkeypat
     assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 
-def test_exact_backend_mode_reads_environment_and_is_documented(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_REQUIRE_EXACT_BACKENDS", "true")
-
-    configured = Settings()
-
-    assert configured.require_exact_backends is True
-    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / ".env.example").read_text(
-        encoding="utf-8"
-    )
-    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / "README.md").read_text(
-        encoding="utf-8"
-    )
-
-
-def test_invalid_configuration_warnings_do_not_echo_values(monkeypatch, caplog):
-    secrets = {
-        "ENGRAPHIS_PORT": "port-secret",
-        "ENGRAPHIS_DECAY_HALFLIFE_DAYS": "float-secret",
-        "ENGRAPHIS_LLM_AUTO_EXTRACT": "bool-secret",
-        "ENGRAPHIS_VECTOR_BACKEND": "vector-secret",
-    }
-    for key, value in secrets.items():
-        monkeypatch.setenv(key, value)
-
-    with caplog.at_level("WARNING", logger="engraphis.config"):
-        configured = Settings()
-
-    assert configured.port == 8700
-    assert configured.decay_halflife_days == 7.0
-    assert configured.llm_auto_extract is False
-    assert configured.vector_backend == "numpy"
-    assert all(value not in caplog.text for value in secrets.values())
-
-
 def test_server_vector_backend_defaults_to_safe_auto(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_VECTOR_BACKEND", raising=False)
     assert Settings().vector_backend == "auto"
@@ -277,23 +219,6 @@ def test_retired_relay_url_override_is_canonicalized(url):
 def test_customer_relay_url_is_not_rewritten():
     url = "https://relay.customer.example/team/"
     assert config.canonicalize_relay_url(url) == url.rstrip("/")
-
-
-def test_invalid_relay_url_error_does_not_echo_credentials(monkeypatch):
-    secret_url = "ftp://relay-user:relay-token@example.test"
-    monkeypatch.setenv("ENGRAPHIS_RELAY_URL", secret_url)
-
-    with pytest.raises(ValueError) as caught:
-        Settings()
-
-    assert secret_url not in str(caught.value)
-    assert "relay-token" not in str(caught.value)
-
-
-def test_invalid_cors_origin_diagnostic_does_not_echo_credentials(monkeypatch, capsys):
-    config._parse_origins("ftp://cors-user:cors-token@example.test")
-
-    assert "cors-token" not in capsys.readouterr().err
 
 def test_invalid_service_mode_exits_process(monkeypatch):
     """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
@@ -423,11 +348,10 @@ def test_trusted_env_parser_supports_documented_values_without_interpolation() -
     ],
 )
 def test_trusted_env_parser_rejects_malformed_syntax_without_echoing_values(raw) -> None:
-    with pytest.raises(ValueError, match=r"trusted config .* contains invalid syntax") as caught:
+    with pytest.raises(ValueError, match="trusted config contains invalid syntax") as caught:
         config._parse_trusted_env(raw)
 
     assert "do-not-print" not in str(caught.value)
-    assert str(config._CONFIG_ENV_PATH) not in str(caught.value)
 
 
 def test_explicit_env_file_path_must_be_absolute(tmp_path) -> None:

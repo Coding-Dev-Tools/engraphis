@@ -3536,13 +3536,6 @@ class Store:
             # Explicit shutdown retains the historical error contract. Detach only after
             # close succeeds so a failed close still gets one best-effort finalizer attempt.
             self.conn.close()
-            # An injected connector (``connect`` parameter) may be shared across
-            # multiple Store instances — closing it here would blank the key
-            # pragma and break the surviving stores' subsequent _open_connection()
-            # calls (verified backups, secure-erasure helpers). The injector
-            # owns the lifecycle, so we never close what we didn't create.
-            # When self._connect is None, Store opened its own stdlib sqlite3
-            # connection above; no connector object exists to clean up.
             finalizer.detach()
 
     def __enter__(self) -> "Store":
