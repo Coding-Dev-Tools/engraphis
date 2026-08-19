@@ -842,17 +842,15 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-retry"' in page.text
         assert 'id="graph-full"' not in page.text
         assert 'id="graph-show-all"' in page.text
-        assert "See all nodes · LOD" in page.text
         assert 'id="graph-show-unlinked"' in page.text
         assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
         assert 'id="graph-tune-unlinked"' not in page.text
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
-        assert "const GRAPH_INITIAL_NODE_LIMIT = 1500;" in script.text
-        assert "const GRAPH_INITIAL_EDGE_LIMIT = 3000;" in script.text
+        assert "const GRAPH_INITIAL_NODE_LIMIT = 1000;" in script.text
+        assert "const GRAPH_INITIAL_EDGE_LIMIT = 2000;" in script.text
         assert "const GRAPH_ALL_NODE_LIMIT = 20_000;" in script.text
-        assert "const GRAPH_ALL_EDGE_LIMIT = 200_000;" in script.text
-        assert "const GRAPH_LOAD_TIMEOUT_MS = 60_000;" in script.text
+        assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
         assert "graphLoadRepo: ''" in script.text
@@ -874,16 +872,16 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "&level=${level}" in script.text
         assert "&include_memory_nodes=false" in script.text
         assert "&presentation=all" in script.text
-        assert "renderMode: fullGraph ? 'all' : 'overview'" in script.text
+        assert "renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview'" in script.text
         assert "&include_history=true" in script.text
         assert "&connected_only=true" in script.text
         assert "const repo = (byId('graph-repo-filter').value || '').trim();" in script.text
         assert "repo ? `&repo=${encodeURIComponent(repo)}`" in script.text
         assert "item.degree != null ? item.degree : item.weighted_degree" in script.text
         assert "style: 'cyber'" in script.text
-        assert "renderMode: fullGraph ? 'all' : 'overview'" in script.text
+        assert "renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview'" in script.text
         assert "loadGraph({ force: true })" in script.text
-        assert "if (!fullGraph && window.EngraphisSpacetime" in script.text
+        assert "if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime" in script.text
         assert "setAttribute('aria-busy', 'true')" in script.text
         assert "setAttribute('aria-busy', 'false')" in script.text
 
@@ -931,9 +929,8 @@ def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkey
         assert "showUnlinked: state.graphShowUnlinked" in script.text
         assert "includeCode: state.graphIncludeCode" in script.text
         assert "minDegree: number(byId('graph-min-degree').value)" in script.text
-        assert "if (loadAll) return ensureGraphAllAsset();" in script.text
-        assert "const graphFactory = fullGraph ? window.EngraphisAllGraph" in script.text
-        assert "galaxyQuality" not in script.text
+        assert "if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();" in script.text
+        assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in script.text
         assert "scopeControl.disabled = full" not in script.text
         assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text
         assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in script.text
@@ -973,10 +970,7 @@ def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
         assert "function graphThemeColors()" in ledger.text
         assert "graph.setThemeColors(graphThemeColors());" in ledger.text
         assert "state.graphEngine.setThemeColors(graphThemeColors());" in ledger.text
-        assert (
-            "renderMode: opts.renderMode === 'full' || opts.renderMode === 'all' "
-            "? 'full' : 'overview'"
-        ) in engine.text
+        assert "renderMode: opts.renderMode === 'full' ? 'full' : 'overview'" in engine.text
         assert "function pinFullGraphLayout(data)" in engine.text
 
 
