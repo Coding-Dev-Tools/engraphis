@@ -959,9 +959,7 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return prefix + hashlib.sha256(payload).hexdigest()[:16]
 
 
-def _components(
-    node_ids: Sequence[str], edges: Sequence[Mapping[str, Any]],
-) -> dict[str, str]:
+def _components(node_ids: Sequence[str], edges: Sequence[dict]) -> dict[str, str]:
     adjacent: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     for edge in edges:
         adjacent.setdefault(edge["source"], set()).add(edge["target"])
@@ -2365,7 +2363,6 @@ def _build_complete_scene(
             "safety_state": "full",
             "query_ms": 0.0,
             "layout_seed": layout_seed,
-            "canonical_positions": True,
             "index_state": "ready",
             "filters": filters,
             "algorithm_version": ALGORITHM_VERSION,
@@ -2904,7 +2901,6 @@ def build_graph_scene(
             "truncated": len(scene_nodes) < len(nodes) or len(scene_edges) < total_scene_edges,
             "query_ms": 0.0,
             "layout_seed": layout_seed,
-            "canonical_positions": True,
             "index_state": "ready",
             "filters": filters or {},
             "connected_only": connected_only,

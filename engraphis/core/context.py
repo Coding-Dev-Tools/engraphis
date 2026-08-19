@@ -115,7 +115,6 @@ class DeterministicContextPacker:
             excerpt = ""
             truncated = False
             reason = ""
-            available = 0
             if self._count(base) < budget:
                 available = budget - self._count(base)
                 excerpt, truncated, reason = self._excerpt(
@@ -137,7 +136,6 @@ class DeterministicContextPacker:
                     compact = self._excerpt(query, candidate, compact_available)
                     if compact[0] and _starts_with_title(compact[0], record.title):
                         base = compact_base
-                        available = compact_available
                         excerpt, truncated, reason = compact
             if not excerpt:
                 continue

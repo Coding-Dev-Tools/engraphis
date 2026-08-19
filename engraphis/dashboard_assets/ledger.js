@@ -17,25 +17,23 @@
     refreshEpoch: 0,
     graphWorkspace: '',
     graphData: null,
-    graphDataMode: 'full',
+    graphDataMode: 'overview',
     graphDataIncludeCode: false,
-    graphDataShowUnlinked: true,
+    graphDataShowUnlinked: false,
     graphDataAsOf: null,
     graphDataRepo: '',
     graphMeta: null,
-    graphMode: 'full',
-    presentationMode: 'all',
+    graphMode: 'overview',
     graphShowUnlinked: true,
     graphEngine: null,
     graphLoadPromise: null,
     graphLoadWorkspace: '',
     graphLoadMode: '',
     graphLoadIncludeCode: false,
-    graphLoadShowUnlinked: true,
+    graphLoadShowUnlinked: false,
     graphLoadAsOf: null,
     graphLoadRepo: '',
     graphLoadKey: '',
-    graphCapacityFallbackKey: '',
     graphLoadRequest: 0,
     graphRetryPending: false,
     graphLoadController: null,
@@ -118,15 +116,15 @@
   const GRAPH_ALL_NODE_LIMIT = 20_000;
   const GRAPH_ALL_EDGE_LIMIT = 200_000;
   const GRAPH_LOAD_TIMEOUT_MS = 60_000;
-  const GRAPH_FULL_LOAD_TIMEOUT_MS = 90_000;
+  const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 5;
+  const GRAPH_PHYSICS_VERSION = 4;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
-    { id: 'graph-repel', key: 'repel', fallback: 200 },
+    { id: 'graph-repel', key: 'repel', fallback: 100 },
     { id: 'graph-link', key: 'link', fallback: 8 },
     { id: 'graph-gravity', key: 'gravity', fallback: 48 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
@@ -145,7 +143,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 200, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -424,7 +422,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260818-all-nodes-lod-5'),
+        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3'),
         'EngraphisAllGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -451,7 +449,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260818-v29-independent-local-orbits'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260818-v20-main-node-material-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2307,12 +2305,12 @@
     byId('graph-style-note').textContent = styleNotes[style] || styleNotes.classic;
     updateGraphGalaxyControls();
     const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Galaxy gravity';
-    byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'Live physics focus'} · ${preset}`;
+    byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'High quality'} · ${preset}`;
     const toggle = byId('graph-show-all');
     if (toggle) {
-      toggle.textContent = full ? 'Live physics focus' : 'All nodes · LOD';
+      toggle.textContent = full ? 'High quality' : 'See all nodes · LOD';
       toggle.setAttribute('aria-pressed', String(full));
-      toggle.title = full ? 'Switch to the Live physics focus graph' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entities and ${GRAPH_ALL_EDGE_LIMIT.toLocaleString()} relationships with progressive LOD rendering`;
+      toggle.title = full ? 'Return to the High quality graph' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entities and ${GRAPH_ALL_EDGE_LIMIT.toLocaleString()} relationships with progressive LOD rendering`;
     }
   }
 
@@ -2321,7 +2319,7 @@
   }
 
   function graphSizeBy() {
-    return graphIsGalaxy()
+    return graphIsGalaxy() && state.graphMode !== 'full'
       ? 'evidence_mass' : byId('graph-size').value;
   }
 
@@ -2329,7 +2327,7 @@
     const galaxy = graphIsGalaxy();
     const full = state.graphMode === 'full';
     const size = byId('graph-size');
-    if (galaxy) {
+    if (galaxy && !full) {
       if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
       size.value = 'evidence_mass';
       size.disabled = true;
@@ -2362,7 +2360,7 @@
       ? 'All-node force refinement'
       : 'Spacetime · black-hole orbit controls';
     byId('graph-spacetime-note').textContent = full
-      ? 'These values refine the settled worker layout. The Live physics focus orbit model stays unchanged.'
+      ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
       : 'Drag and release a node to slingshot it into a new orbit.';
     byId('graph-orbits-pause-label').textContent = full ? 'Pause relation motion' : 'Pause orbits';
     byId('graph-orbits-pause-detail').textContent = full ? 'LOD' : 'physics';
@@ -2592,7 +2590,6 @@
     const layers = graphLayerState();
     return {
       physicsVersion: GRAPH_PHYSICS_VERSION,
-      presentationMode: state.presentationMode === 'physics' ? 'physics' : 'all',
       preset: byId('graph-preset').value,
       style: byId('graph-style').value,
       color: byId('graph-color').value,
@@ -2638,10 +2635,6 @@
       ['community', 'connections', 'type']);
     const palette = graphPreference('palette', byId('graph-palette').value,
       ['theme', 'aurora', 'ocean', 'ember', 'contrast', 'custom']);
-    const presentationMode = graphPreference('presentationMode', 'all', ['all', 'physics']);
-    state.presentationMode = presentationMode;
-    state.graphMode = presentationMode === 'physics' ? 'overview' : 'full';
-    state.graphDataMode = state.graphMode;
     byId('graph-preset').value = preset;
     byId('graph-style').value = style;
     byId('graph-color').value = color;
@@ -2669,13 +2662,12 @@
       delete effectiveTuning.link;
       delete effectiveTuning.gravity;
     }
-    /* Physics v5 doubles Galaxy's shipped orbital-speed setting from 100 to 200. Preferences
-       already versioned at v4 migrate only that exact former default; older snapshots may also
-       contain the retired 48/60 defaults. Every other custom speed remains intact. */
-    const retiredGalaxySpeeds = savedPhysicsVersion >= 4 ? [100] : [48, 60, 100];
+    /* Older preferences persisted 48 and then 60 as Galaxy's default orbital speed. Physics v4
+       defines the control as a percentage with 100 as neutral, so migrate only those exact
+       retired defaults. Every other custom speed and every unrelated preference remains intact. */
     if (legacyPhysics && preset === 'galaxy'
-      && retiredGalaxySpeeds.includes(Number(effectiveTuning.repel))) {
-      effectiveTuning.repel = 200;
+      && [48, 60].includes(Number(effectiveTuning.repel))) {
+      effectiveTuning.repel = 100;
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),
@@ -2928,14 +2920,11 @@
     }, 'image/png');
   }
 
-  function graphCountText(nodes, links, drawnLinks = null, visibleNodes = null,
-    filteredNodes = null) {
+  function graphCountText(nodes, links, drawnLinks = null, visibleNodes = null) {
     const available = number(state.graphMeta && state.graphMeta.nodes_available) || nodes;
-    const prefix = state.graphMode === 'full' ? 'All nodes · LOD' : 'Live physics focus';
-    const visibleEntityCount = visibleNodes == null
-      ? number(nodes) : Math.min(number(nodes), Math.max(0, number(visibleNodes)));
-    const entityText = visibleEntityCount < number(nodes)
-      ? `${visibleEntityCount.toLocaleString()} visible of ${number(nodes).toLocaleString()} entities`
+    const prefix = state.graphMode === 'full' ? 'All nodes · LOD' : 'High quality';
+    const entityText = visibleNodes != null && number(visibleNodes) < number(nodes)
+      ? `${number(visibleNodes).toLocaleString()} visible of ${number(nodes).toLocaleString()} entities`
       : available > nodes
       ? `${number(nodes).toLocaleString()} of ${available.toLocaleString()} entities`
       : `${number(nodes).toLocaleString()} entities`;
@@ -2947,26 +2936,7 @@
     const hidden = state.graphMode === 'full' && hiddenRelations != null
       ? ` · ${hiddenRelations.toLocaleString()} hidden relationships`
       : '';
-    const workspaceTotal = number(state.graphMeta && (state.graphMeta.workspace_total
-      ?? state.graphMeta.total_nodes ?? state.graphMeta.nodes_available)) || nodes;
-    const filters = [];
-    const repo = (byId('graph-repo-filter') && byId('graph-repo-filter').value || '').trim();
-    if (repo) filters.push(`repo:${repo}`);
-    if (!state.graphShowUnlinked) filters.push('connected');
-    if (number(byId('graph-min-degree') && byId('graph-min-degree').value) > 0) {
-      filters.push(`degree≥${number(byId('graph-min-degree').value)}`);
-    }
-    const filterText = filters.length ? filters.join(', ') : 'none';
-    const filteredEntityCount = filteredNodes == null
-      ? visibleEntityCount : Math.min(number(nodes), Math.max(0, number(filteredNodes)));
-    const filterHidden = Math.max(0, number(nodes) - filteredEntityCount);
-    const visibleRelations = drawnLinks == null
-      ? number(links) : Math.min(number(links), Math.max(0, number(drawnLinks)));
-    return `${prefix} · ${entityText} · ${number(links).toLocaleString()} relations`
-      + ` · workspace ${workspaceTotal.toLocaleString()} entities`
-      + ` · loaded ${number(nodes).toLocaleString()} · visible ${visibleEntityCount.toLocaleString()}`
-      + ` · filter-hidden ${filterHidden.toLocaleString()}`
-      + ` · visible relations ${visibleRelations.toLocaleString()} · filters ${filterText}${hidden}`;
+    return `${prefix} · ${entityText} · ${number(links).toLocaleString()} relations${hidden}`;
   }
 
   function graphStatsChanged(stats) {
@@ -2974,7 +2944,7 @@
     const nodes = stats.nodes == null ? state.graphData.nodes.length : stats.nodes;
     const links = stats.links == null ? state.graphData.links.length : stats.links;
     byId('graph-count').textContent = graphCountText(
-      nodes, links, stats.drawnLinks, stats.visibleNodes, stats.filteredNodes,
+      nodes, links, stats.drawnLinks, stats.visibleNodes,
     );
     if (state.graphMode === 'full') {
       const note = byId('graph-lod-note');
@@ -3076,17 +3046,6 @@
     Promise.resolve(loadGraph({ force: true })).finally(() => {
       state.graphRetryPending = false;
     });
-  }
-
-  function fallbackToPhysicsOnce(loadKey) {
-    if (!loadKey || state.graphCapacityFallbackKey === loadKey) return false;
-    state.graphCapacityFallbackKey = loadKey;
-    state.presentationMode = 'physics';
-    state.graphMode = 'overview';
-    state.graphDataMode = 'overview';
-    updateGraphModeControls();
-    showNotice('All-node capacity was reached. Showing Live physics focus instead.');
-    return true;
   }
 
   async function loadGraph({ force = false } = {}) {
@@ -3250,11 +3209,6 @@
           onError: error => {
             if (!fullGraph || state.graphLoadRequest !== request.id
               || state.graphMode !== 'full') return;
-            if (error && (error.code === 'GRAPH_CAPACITY' || error.status === 413)
-              && fallbackToPhysicsOnce(request.key)) {
-              loadGraph({ force: true });
-              return;
-            }
             byId('graph-empty').hidden = false;
             byId('graph-empty').textContent = error && error.code === 'GRAPH_CAPACITY'
               ? `All nodes exceed renderer capacity. Narrow by repository or entity type. (${error.message})`
@@ -3308,11 +3262,7 @@
           state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
         }
         state.graphEngine.setData(data);
-        /* A new engine is already live. Calling freeze(false) here is an unfreeze transition,
-           not a no-op: it performs a second Galaxy render while the first frame is still being
-           admitted and can overwrite the stable seeded carrier phase. Only issue the transition
-           when this session explicitly requested a frozen graph. */
-        if (state.graphFrozen) state.graphEngine.freeze(true);
+        state.graphEngine.freeze(state.graphFrozen);
         byId('graph-empty').hidden = Boolean(data.nodes.length);
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
@@ -3320,14 +3270,9 @@
         updateGraphLayerCounts(data, scene.layers || payload.layers);
       } catch (error) {
         if (!isCurrentGraphLoad(request)) return;
-        if (fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
-          && fallbackToPhysicsOnce(request.key)) {
-          loadGraph({ force: true });
-          return;
-        }
         byId('graph-empty').hidden = false;
         byId('graph-empty').textContent = error && error.name === 'AbortError'
-          ? `${fullGraph ? 'All-node graph' : 'Live physics focus'} loading timed out. Choose Retry to try again.`
+          ? `${fullGraph ? 'All-node graph' : 'High-quality graph'} loading timed out. Choose Retry to try again.`
           : fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
             ? `All nodes exceed the 20,000-entity or 200,000-relationship capacity. Narrow by repository or entity type. (${error.message})`
           : `Graph unavailable: ${error.message}`;
@@ -4527,13 +4472,6 @@
   byId('graph-show-all').addEventListener('click', () => {
     cancelGraphRepositoryReload();
     state.graphMode = state.graphMode === 'full' ? 'overview' : 'full';
-    state.presentationMode = state.graphMode === 'full' ? 'all' : 'physics';
-    /* Entering “All nodes” must mean all nodes. Auto-collapse remains available as an explicit
-       follow-up choice, but a stale focus-mode preference cannot silently reduce thousands of
-       entities to a few representatives during this transition. */
-    if (state.graphMode === 'full') byId('graph-collapse').checked = false;
-    state.graphCapacityFallbackKey = '';
-    saveGraphPreferences();
     updateGraphModeControls();
     loadGraph({ force: true });
   });

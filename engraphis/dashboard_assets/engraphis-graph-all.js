@@ -3,7 +3,7 @@
    geometry, and a bounded overlay communicates relation direction without moving nodes. */
 (function () {
   'use strict';
-  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260818-all-nodes-lod-5';
+  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260817-all-nodes-lod-2';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const FLOW_EDGE_LIMIT = 900;
@@ -16,7 +16,7 @@
   };
   const TYPE_COLORS = { person_or_concept: '#8d82e3', mention: '#5ba1a6', hashtag: '#c9a15b', email: '#8eb3e6', organization: '#d48173', location: '#7ebf8e', memory: '#5ba1a6', repo: '#c9a15b', file: '#8eb3e6' };
   const PRESETS = {
-    galaxy: { repel: 200, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
@@ -38,7 +38,7 @@
     const labelContext = labels.getContext('2d');
     const worker = new Worker(WORKER_URL);
     const state = {
-      ids: [], labels: [], types: [], communities: [], anchorRoles: [], positions: new Float32Array(0), nodeVertexPositions: new Float32Array(0), nodeGhosts: new Uint8Array(0), nodeVisible: new Uint8Array(0), degrees: new Float32Array(0), betweenness: new Float32Array(0), evidenceMass: new Float32Array(0),
+      ids: [], labels: [], types: [], communities: [], positions: new Float32Array(0), nodeVertexPositions: new Float32Array(0), nodeGhosts: new Uint8Array(0), nodeVisible: new Uint8Array(0), degrees: new Float32Array(0), betweenness: new Float32Array(0), evidenceMass: new Float32Array(0),
       edgeSources: new Uint32Array(0), edgeTargets: new Uint32Array(0), edgeBridges: new Uint8Array(0), edgeLayers: [], topNodes: new Uint32Array(0),
       visibleNodes: new Uint32Array(0), visibleEdges: new Uint32Array(0), visibleLabels: new Uint32Array(0),
       edgeVertexPositions: new Float32Array(0), edgeColors: new Float32Array(0), edgeVertexCount: 0, nodeColors: new Float32Array(0), nodeSizes: new Float32Array(0), bounds: null,
@@ -46,9 +46,8 @@
       settings: { labels: true, flow: false, flowSpeed: 45, frozen: false, mode: 'communities', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
       palette: 'theme', themeColors: {}, layers: null, sizeBy: 'degree', bridges: true, ghosts: true,
       scope: { minDegree: 1, showUnlinked: true, depth: 2 }, collapse: false, collapsed: false,
-      focus: -1, hover: -1, ready: false, totalLinks: 0, drawnLinks: 0,
-      visibleNodeCount: 0, filteredNodeCount: 0,
-      frame: 0, flowPaintAt: 0, layoutPending: false, hitRequest: 0, drag: null, destroyed: false, error: null, canonicalPositions: false,
+      focus: -1, hover: -1, ready: false, totalLinks: 0, drawnLinks: 0, visibleNodeCount: 0,
+      frame: 0, flowPaintAt: 0, layoutPending: false, hitRequest: 0, drag: null, destroyed: false, error: null,
     };
     let nodeProgram = null, edgeProgram = null, nodeBuffers = {}, edgeBuffers = {};
     let hitFrame = 0, pendingHit = null, layoutFrame = 0, pendingLayoutFit = false;
@@ -106,21 +105,9 @@
       if (state.sizeBy === 'evidence_mass') return state.evidenceMass[index] || 0;
       return state.degrees[index] || 0;
     }
-    function basePointSize(index = 0) {
-      /* Galaxy evidence mass is the authority for all-node star scale. Degree remains a
-         fallback for old compatibility payloads where no mass was supplied. */
-      const metric = Math.log1p(Math.max(0, state.evidenceMass[index] || state.degrees[index] || 0));
-      const massRadius = 2.4 + Math.min(7, metric * 0.9);
-      const sizeScale = 0.74 + Number(state.settings.size || 3) * 0.22;
-      const anchorBoost = state.anchorRoles[index] === 'global' ? 2 : 1;
-      return clamp(massRadius * sizeScale * anchorBoost, 2.5, 24);
-    }
-    function screenPointSize(index = 0) {
-      return clamp(basePointSize(index) * Math.min(1, Math.max(0.05, state.camera.scale)),
-        state.anchorRoles[index] === 'global' ? 5 : 2.5, 16);
-    }
     function pointSize(index = 0) {
-      return basePointSize(index);
+      const metric = Math.log1p(Math.max(0, metricValue(index)));
+      return clamp(2.4 + Number(state.settings.size || 3) * 0.62 + Math.min(4.5, metric * 0.55), 2.5, 12);
     }
     function shader(type, source) { const value = gl.createShader(type); gl.shaderSource(value, source); gl.compileShader(value); if (!gl.getShaderParameter(value, gl.COMPILE_STATUS)) throw new Error('all-node shader compilation failed'); return value; }
     function program(vertex, fragment) {
@@ -176,7 +163,7 @@
         state.nodeVertexPositions[positionOffset + 1] = visible
           ? state.positions[positionOffset + 1] : Number.NaN;
         state.nodeColors[colorOffset] = nodeRgb[0]; state.nodeColors[colorOffset + 1] = nodeRgb[1]; state.nodeColors[colorOffset + 2] = nodeRgb[2];
-        state.nodeSizes[index] = screenPointSize(index) / Math.max(0.05, state.camera.scale * state.dpr);
+        state.nodeSizes[index] = pointSize(index);
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, nodeBuffers.position); gl.bufferData(gl.ARRAY_BUFFER, state.nodeVertexPositions, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, nodeBuffers.color); gl.bufferData(gl.ARRAY_BUFFER, state.nodeColors, gl.DYNAMIC_DRAW);
@@ -188,7 +175,7 @@
       labelContext.stroke();
       if (state.bridges) { labelContext.strokeStyle = 'rgba(244,211,127,0.62)'; labelContext.beginPath(); for (let index = 0; index < state.visibleEdges.length; index += 1) { const edge = state.visibleEdges[index]; if (!state.edgeBridges[edge]) continue; const source = state.edgeSources[edge], target = state.edgeTargets[edge], a = screen(state.positions[source * 2], state.positions[source * 2 + 1]), b = screen(state.positions[target * 2], state.positions[target * 2 + 1]); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); } labelContext.stroke(); }
       const visible = state.visibleNodes, compact = state.camera.scale < 0.55;
-      for (let cursor = 0; cursor < visible.length; cursor += 1) { const index = visible[cursor], point = screen(state.positions[index * 2], state.positions[index * 2 + 1]); if (point[0] < -16 || point[0] > state.width + 16 || point[1] < -16 || point[1] > state.height + 16) continue; const radius = screenPointSize(index) * 0.5; labelContext.fillStyle = nodeColor(index); labelContext.fillRect(point[0] - radius, point[1] - radius, radius * 2, radius * 2); }
+      for (let cursor = 0; cursor < visible.length; cursor += 1) { const index = visible[cursor], point = screen(state.positions[index * 2], state.positions[index * 2 + 1]); if (point[0] < -4 || point[0] > state.width + 4 || point[1] < -4 || point[1] > state.height + 4) continue; const radius = compact ? 1.3 : clamp(pointSize(index) * Math.min(1, state.camera.scale), 1, 7); labelContext.fillStyle = nodeColor(index); labelContext.fillRect(point[0] - radius, point[1] - radius, radius * 2, radius * 2); }
     }
     function updateEdges() {
       if (!gl || !edgeProgram) return;
@@ -272,7 +259,7 @@
       if (flowAnimating()) schedule();
     }
     function schedule() { if (!state.destroyed && !state.paused && !state.frame) state.frame = raf(draw); }
-    function camera() { if (!state.ready) return; updateNodes(); worker.postMessage({ type: 'camera', x: state.camera.x, y: state.camera.y, scale: state.camera.scale, width: state.width, height: state.height }); schedule(); }
+    function camera() { if (!state.ready) return; worker.postMessage({ type: 'camera', x: state.camera.x, y: state.camera.y, scale: state.camera.scale, width: state.width, height: state.height }); schedule(); }
     function postSettings(relayout, fitLayout = false) {
       if (!relayout) {
         worker.postMessage({ type: 'settings', settings: state.settings, relayout: false });
@@ -290,23 +277,8 @@
         worker.postMessage({ type: 'settings', settings: state.settings, relayout: true, fit });
       });
     }
-    function fit() {
-      if (!state.positions.length) return;
-      const bounds = state.bounds || { minX: state.positions[0], maxX: state.positions[0], minY: state.positions[1], maxY: state.positions[1] };
-      const globalIndex = state.anchorRoles.findIndex(role => role === 'global');
-      const centerX = globalIndex >= 0 ? state.positions[globalIndex * 2] : (bounds.minX + bounds.maxX) / 2;
-      const centerY = globalIndex >= 0 ? state.positions[globalIndex * 2 + 1] : (bounds.minY + bounds.maxY) / 2;
-      const spanX = globalIndex >= 0
-        ? Math.max(160, 2 * Math.max(Math.abs(bounds.minX - centerX), Math.abs(bounds.maxX - centerX)) + 48)
-        : Math.max(160, bounds.maxX - bounds.minX + 48);
-      const spanY = globalIndex >= 0
-        ? Math.max(160, 2 * Math.max(Math.abs(bounds.minY - centerY), Math.abs(bounds.maxY - centerY)) + 48)
-        : Math.max(160, bounds.maxY - bounds.minY + 48);
-      state.camera.x = centerX; state.camera.y = centerY;
-      state.camera.scale = clamp(Math.min(state.width / spanX, state.height / spanY), 0.05, 3);
-      camera();
-    }
-    function stats(extra) { if (typeof opts.onStats === 'function') opts.onStats({ nodes: state.ids.length, visibleNodes: state.visibleNodeCount || state.visibleNodes.length, filteredNodes: state.filteredNodeCount, filterHiddenNodes: Math.max(0, state.ids.length - state.filteredNodeCount), links: state.totalLinks, drawnLinks: state.drawnLinks, hiddenLinks: Math.max(0, state.totalLinks - state.drawnLinks), collapsed: state.collapsed, relationFlow: state.settings.flow === true, layoutPending: state.layoutPending, presentation: 'all', preset: 'All nodes · LOD', renderer: gl && nodeProgram ? 'webgl2' : 'canvas', ...extra }); }
+    function fit() { if (!state.positions.length) return; const bounds = state.bounds || { minX: state.positions[0], maxX: state.positions[0], minY: state.positions[1], maxY: state.positions[1] }; state.camera.x = (bounds.minX + bounds.maxX) / 2; state.camera.y = (bounds.minY + bounds.maxY) / 2; state.camera.scale = clamp(Math.min(state.width / Math.max(120, bounds.maxX - bounds.minX + 120), state.height / Math.max(120, bounds.maxY - bounds.minY + 120)), 0.03, 4); camera(); }
+    function stats(extra) { if (typeof opts.onStats === 'function') opts.onStats({ nodes: state.ids.length, visibleNodes: state.visibleNodeCount || state.visibleNodes.length, links: state.totalLinks, drawnLinks: state.drawnLinks, hiddenLinks: Math.max(0, state.totalLinks - state.drawnLinks), collapsed: state.collapsed, relationFlow: state.settings.flow === true, layoutPending: state.layoutPending, presentation: 'all', preset: 'All nodes · LOD', renderer: gl && nodeProgram ? 'webgl2' : 'canvas', ...extra }); }
     /* Coalesce pointer samples to the display cadence. Otherwise a high-polling mouse can queue
        hundreds of obsolete worker hit tests behind the latest camera request. */
     function requestHit(event) {
@@ -357,10 +329,7 @@
         state.nodeGhosts = message.nodeGhosts || state.nodeGhosts;
         state.bounds = message.bounds || null;
         state.communities = message.communities || [];
-        state.anchorRoles = message.anchorRoles || [];
-        state.canonicalPositions = message.canonicalPositions === true;
         state.degrees = new Float32Array(state.ids.length);
-        state.filteredNodeCount = state.ids.length;
         state.nodeVisible = new Uint8Array(state.ids.length); state.nodeVisible.fill(1);
         setVisibleNodes(drawableNodeIndices());
         state.ready = true;
@@ -377,8 +346,6 @@
         state.degrees = message.degrees || new Float32Array(0);
         state.betweenness = message.betweenness || new Float32Array(0);
         state.evidenceMass = message.evidenceMass || new Float32Array(0);
-        state.anchorRoles = message.anchorRoles || [];
-        state.canonicalPositions = message.canonicalPositions === true;
         state.communities = message.communities || [];
         state.edgeSources = message.edgeSources || new Uint32Array(0);
         state.edgeTargets = message.edgeTargets || new Uint32Array(0);
@@ -386,7 +353,6 @@
         state.edgeLayers = message.edgeLayers || [];
         state.topNodes = message.topNodes || new Uint32Array(0);
         state.totalLinks = Number(message.totalLinks || 0);
-        state.filteredNodeCount = state.ids.length;
         state.nodeVisible = new Uint8Array(state.ids.length); state.nodeVisible.fill(1);
         setVisibleNodes(drawableNodeIndices());
         state.ready = true;
@@ -396,8 +362,6 @@
         return;
       }
       if (message.type === 'visible') {
-        state.filteredNodeCount = Number.isFinite(Number(message.filteredNodeCount))
-          ? Number(message.filteredNodeCount) : state.filteredNodeCount;
         setVisibleNodes(message.nodes || state.visibleNodes);
         state.visibleEdges = message.edges || new Uint32Array(0);
         state.visibleLabels = message.labels || new Uint32Array(0);
@@ -503,7 +467,7 @@
     const api = {
       exportImageCanvas,
       apply(fn, shouldFit) { if (typeof fn === 'function') fn(api); if (shouldFit) fit(); return api; },
-      setData(data) { if (state.destroyed) return api; const nodes = Array.isArray(data && data.nodes) ? data.nodes : [], links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [], meta = data && data.meta && typeof data.meta === 'object' ? data.meta : {}; state.ready = false; state.error = null; worker.postMessage({ type: 'prepare', payload: { nodes, links, canonical_positions: meta.canonical_positions === true } }); return api; },
+      setData(data) { if (state.destroyed) return api; const nodes = Array.isArray(data && data.nodes) ? data.nodes : [], links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || []; state.ready = false; state.error = null; worker.postMessage({ type: 'prepare', payload: { nodes, links } }); return api; },
       setRenderMode(value) { state.renderMode = value === 'full' ? 'full' : 'all'; return api; },
       setPreset(value) { const preset = PRESETS[value] ? value : 'communities'; const next = { ...state.settings, ...PRESETS[preset], mode: preset }; state.settings = next; pendingLayoutFit = true; postSettings(true, true); updateNodes(); schedule(); return { ...next }; },
       setStyle(value) { state.styleName = value || state.styleName; element.setAttribute('data-graph-style', state.styleName); updateNodes(); schedule(); return api; },
@@ -519,7 +483,7 @@
       setBridges(value) { state.bridges = value !== false; updateEdges(); if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics()); schedule(); return api; },
       setCollapse(value) { state.collapse = value === true ? true : value === 'auto' ? 'auto' : false; worker.postMessage({ type: 'collapse', value: state.collapse }); camera(); return api; },
       setGhosts(value) { state.ghosts = value !== false; setVisibleNodes(drawableNodeIndices()); updateNodes(); worker.postMessage({ type: 'ghosts', value: state.ghosts }); camera(); schedule(); return api; },
-      setLayers(value) { state.layers = value || null; worker.postMessage({ type: 'layers', layers: state.layers }); camera(); return api; }, setHighlight(id) { focus(state.ids.indexOf(String(id))); return api; }, clearFocus() { focus(-1); return api; }, reveal(id) { const index = state.ids.indexOf(String(id)); if (index < 0) return false; state.camera.x = state.positions[index * 2]; state.camera.y = state.positions[index * 2 + 1]; state.camera.scale = Math.max(1.2, state.camera.scale); focus(index); return true; }, focus(id) { return api.reveal(id); }, zoomToNode(id) { return api.reveal(id); }, communityMap() { const result = {}; state.ids.forEach((id, index) => { result[id] = state.communities[index] || index; }); return result; }, resize, fit, reheat() { if (state.settings.frozen) return api; state.layoutPending = true; stats({ layoutPending: true }); worker.postMessage({ type: 'reheat' }); return api; }, freeze(value = true) { state.settings.frozen = value !== false; return api.setSettings({ frozen: state.settings.frozen }); }, pause() { state.paused = true; if (state.frame) { caf(state.frame); state.frame = 0; } return api; }, resume() { state.paused = false; schedule(); return api; }, state() { return { mode: 'all', presentation: 'all', nodeCount: state.ids.length, visibleNodeCount: state.visibleNodeCount, edgeCount: state.totalLinks, drawnEdgeCount: state.drawnLinks, renderer: gl && nodeProgram ? 'webgl2' : 'canvas', collapsed: state.collapsed, collapse: state.collapse, canonicalPositions: state.canonicalPositions === true, scope: { ...state.scope }, relationFlow: state.settings.flow === true, flowSpeed: Number(state.settings.flowSpeed || 0), layoutPending: state.layoutPending, frozen: state.settings.frozen === true, paused: state.paused === true }; }, metrics() { const bridges = state.edgeBridges.reduce((count, value) => count + (value ? 1 : 0), 0); return { ...api.state(), bridges, top: Array.from(state.topNodes.slice(0, 5), node => ({ id: state.ids[node], name: state.labels[node], score: state.degrees[node] || 0 })) }; }, physicsDiagnostics() { return { mode: 'all', simulation: false, layout: 'deterministic-worker', controls: 'bounded-layout-forces', relationFlow: state.settings.flow === true, frozen: state.settings.frozen === true, paused: state.paused === true }; }, graphToScreen(x, y) { return { x: (Number(x) - state.camera.x) * state.camera.scale + state.width / 2, y: (Number(y) - state.camera.y) * state.camera.scale + state.height / 2 }; }, getPhysicsSnapshot() { const nodes = []; const limit = Math.min(128, state.topNodes.length); for (let index = 0; index < limit; index += 1) { const node = state.topNodes[index]; nodes.push({ id: state.ids[node], x: state.positions[node * 2], y: state.positions[node * 2 + 1], vx: 0, vy: 0, radius: pointSize(node), communityId: state.communities[node] }); } return { center: null, nodes, systemAnchors: [], paused: state.settings.frozen === true || state.paused === true, diagnostics: api.physicsDiagnostics() }; }, destroy: destroyGraph,
+      setLayers(value) { state.layers = value || null; worker.postMessage({ type: 'layers', layers: state.layers }); camera(); return api; }, setHighlight(id) { focus(state.ids.indexOf(String(id))); return api; }, clearFocus() { focus(-1); return api; }, reveal(id) { const index = state.ids.indexOf(String(id)); if (index < 0) return false; state.camera.x = state.positions[index * 2]; state.camera.y = state.positions[index * 2 + 1]; state.camera.scale = Math.max(1.2, state.camera.scale); focus(index); return true; }, focus(id) { return api.reveal(id); }, zoomToNode(id) { return api.reveal(id); }, communityMap() { const result = {}; state.ids.forEach((id, index) => { result[id] = state.communities[index] || index; }); return result; }, resize, fit, reheat() { if (state.settings.frozen) return api; state.layoutPending = true; stats({ layoutPending: true }); worker.postMessage({ type: 'reheat' }); return api; }, freeze(value = true) { state.settings.frozen = value !== false; return api.setSettings({ frozen: state.settings.frozen }); }, pause() { state.paused = true; if (state.frame) { caf(state.frame); state.frame = 0; } return api; }, resume() { state.paused = false; schedule(); return api; }, state() { return { mode: 'all', presentation: 'all', nodeCount: state.ids.length, visibleNodeCount: state.visibleNodeCount, edgeCount: state.totalLinks, drawnEdgeCount: state.drawnLinks, renderer: gl && nodeProgram ? 'webgl2' : 'canvas', collapsed: state.collapsed, collapse: state.collapse, scope: { ...state.scope }, relationFlow: state.settings.flow === true, flowSpeed: Number(state.settings.flowSpeed || 0), layoutPending: state.layoutPending, frozen: state.settings.frozen === true, paused: state.paused === true }; }, metrics() { const bridges = state.edgeBridges.reduce((count, value) => count + (value ? 1 : 0), 0); return { ...api.state(), bridges, top: Array.from(state.topNodes.slice(0, 5), node => ({ id: state.ids[node], name: state.labels[node], score: state.degrees[node] || 0 })) }; }, physicsDiagnostics() { return { mode: 'all', simulation: false, layout: 'deterministic-worker', controls: 'bounded-layout-forces', relationFlow: state.settings.flow === true, frozen: state.settings.frozen === true, paused: state.paused === true }; }, graphToScreen(x, y) { return { x: (Number(x) - state.camera.x) * state.camera.scale + state.width / 2, y: (Number(y) - state.camera.y) * state.camera.scale + state.height / 2 }; }, getPhysicsSnapshot() { const nodes = []; const limit = Math.min(128, state.topNodes.length); for (let index = 0; index < limit; index += 1) { const node = state.topNodes[index]; nodes.push({ id: state.ids[node], x: state.positions[node * 2], y: state.positions[node * 2 + 1], vx: 0, vy: 0, radius: pointSize(node), communityId: state.communities[node] }); } return { center: null, nodes, systemAnchors: [], paused: state.settings.frozen === true || state.paused === true, diagnostics: api.physicsDiagnostics() }; }, destroy: destroyGraph,
     };
     return api;
   }

@@ -349,7 +349,7 @@
               <details class="graph-drawer-section graph-tuning" open>
                 <summary>Tune the simulation · forces, size, scope</summary>
                 <div class="graph-tuning-grid">
-                  <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="400" value="200" aria-labelledby="graph-repel-label"><output id="graph-repel-output">200</output></label>
+                  <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="400" value="100" aria-labelledby="graph-repel-label"><output id="graph-repel-output">100</output></label>
                   <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
                   <label for="graph-gravity"><span id="graph-gravity-label">Galactic gravity · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="48" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">48</output></label>
                   <label for="graph-node-size"><span id="graph-node-size-label">Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3" aria-labelledby="graph-node-size-label"><output id="graph-node-size-output">3</output></label>
@@ -388,7 +388,7 @@
                 <label for="graph-min-degree"><span id="graph-min-degree-label">Minimum links</span><input id="graph-min-degree" type="range" min="0" max="12" value="1" aria-labelledby="graph-min-degree-label"><output id="graph-min-degree-output">1</output></label>
                 <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option><option value="evidence_mass">Evidence mass</option></select></label>
                 <label class="check-row"><input id="graph-bridges" type="checkbox"> Highlight bridges</label>
-                <label class="check-row"><input id="graph-collapse" type="checkbox"> Auto-collapse clusters</label>
+                <label class="check-row"><input id="graph-collapse" type="checkbox" checked> Auto-collapse clusters</label>
               </section>
               <section class="control-group">
                 <div class="section-heading"><h2>Graph facts</h2><span id="graph-bridge-count"></span></div>
@@ -707,6 +707,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260818-entire-graph-default-2"></script>
+    <script src="/v2-assets/ledger.js?v=20260818-black-hole-mass-response-1"></script>
 </body>
 </html>
