@@ -273,7 +273,7 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load all entity nodes with progressive level-of-detail rendering">Show all nodes</button>
+                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load every graph entity with progressive level-of-detail rendering">See all nodes · LOD</button>
                 <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
@@ -284,7 +284,7 @@
                   </div>
                 </div>
               </div>
-              <p id="graph-lod-note" class="graph-lod-note" role="status" aria-live="polite" hidden><strong>All nodes · live controls</strong><span>Layout, forces, scope, colour and relation flow update without reloading the complete graph.</span></p>
+              <p id="graph-lod-note" class="graph-lod-note" role="status" aria-live="polite" hidden><strong>All nodes · LOD · live controls</strong><span>Layout, forces, scope, colour and relation flow update without reloading the graph.</span></p>
 
               <section class="graph-drawer-section" aria-labelledby="graph-rendering-title">
                 <h2 id="graph-rendering-title">Rendering</h2>
@@ -349,7 +349,7 @@
               <details class="graph-drawer-section graph-tuning" open>
                 <summary>Tune the simulation · forces, size, scope</summary>
                 <div class="graph-tuning-grid">
-                  <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="120" value="60" aria-labelledby="graph-repel-label"><output id="graph-repel-output">60</output></label>
+                  <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="400" value="100" aria-labelledby="graph-repel-label"><output id="graph-repel-output">100</output></label>
                   <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
                   <label for="graph-gravity"><span id="graph-gravity-label">Galactic gravity · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="48" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">48</output></label>
                   <label for="graph-node-size"><span id="graph-node-size-label">Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3" aria-labelledby="graph-node-size-label"><output id="graph-node-size-output">3</output></label>
@@ -707,6 +707,6 @@
     </form>
   </dialog>
 
-    <script src="/v2-assets/ledger.js?v=20260814-all-controls-2"></script>
+    <script src="/v2-assets/ledger.js?v=20260818-black-hole-mass-response-1"></script>
 </body>
 </html>

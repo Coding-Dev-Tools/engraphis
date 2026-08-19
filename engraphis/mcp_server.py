@@ -120,7 +120,14 @@ def service() -> MemoryService:
 
 
 def _ok(payload: dict) -> str:
-    return json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+    """Serialize MCP payloads without presentation whitespace.
+
+    MCP text results are normally placed directly into an agent's context.  Pretty
+    indentation carries no information once the client parses JSON, but is repeated
+    on every successful tool response.  Keep the historical JSON-string contract
+    and all fields intact while avoiding that transport-only overhead.
+    """
+    return json.dumps(payload, separators=(",", ":"), default=str, ensure_ascii=False)
 
 
 
@@ -2195,7 +2202,7 @@ def _smart_error(code: str, message: str, *, retryable: bool) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps({
             "error": {"code": code, "message": message, "retryable": retryable},
-        }, indent=2, default=str, ensure_ascii=False))],
+        }, separators=(",", ":"), default=str, ensure_ascii=False))],
         isError=True,
     )
 
