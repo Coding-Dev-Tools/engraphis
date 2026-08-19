@@ -198,17 +198,6 @@ class _EncryptedConnector:
         self._driver = driver
         self._pragma = pragma
 
-    def close(self) -> None:
-        """Clear key material from memory. Best-effort: Python strings are immutable,
-        but removing the reference allows GC to reclaim the buffer sooner."""
-        self._pragma = ""
-
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:  # noqa: BLE001
-            pass
-
     def __call__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)

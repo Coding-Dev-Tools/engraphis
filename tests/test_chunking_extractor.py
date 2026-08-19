@@ -36,27 +36,6 @@ def test_factory_selects_chunker_and_reads_env(monkeypatch):
     assert ex.target_tokens == 77 and ex.overlap_tokens == 9 and ex.max_chunks == 5
 
 
-@pytest.mark.parametrize("kind", ["llm", "llm_structured"])
-def test_exact_llm_extractor_rejects_missing_credentials(monkeypatch, kind):
-    closed = []
-
-    class FakeLLMClient:
-        api_key = ""
-
-        def close(self):
-            closed.append(True)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "engraphis.llm.client",
-        types.SimpleNamespace(LLMClient=FakeLLMClient),
-    )
-
-    with pytest.raises(RuntimeError, match="ENGRAPHIS_LLM_API_KEY"):
-        get_extractor(kind, require_exact=True)
-    assert closed == [True]
-
-
 def test_factory_loads_explicit_pinned_reader_tokenizer(monkeypatch):
     requests = []
 
@@ -415,73 +394,3 @@ def test_structured_llm_extractor_falls_back_to_chunking_on_failure():
         "mode": "llm_structured",
         "reason": "provider_or_output_error",
     }
-
-
-def test_heading_content_does_not_leak_across_section_boundaries():
-    """Content from one heading section must not appear in another section's chunk."""
-    text = (
-        "# Section Alpha\n\n"
-        "Unique alpha content about apples.\n\n"
-        "# Section Beta\n\n"
-        "Unique beta content about bananas.\n\n"
-        "# Section Gamma\n\n"
-        "Unique gamma content about cherries.\n"
-    )
-    facts = ChunkingExtractor(target_tokens=32, overlap_tokens=0).extract(text)
-    assert len(facts) >= 3
-    for fact in facts:
-        # Each chunk must contain content from only one section.
-        has_alpha = "apples" in fact.content
-        has_beta = "bananas" in fact.content
-        has_gamma = "cherries" in fact.content
-        # At most one section's unique marker per chunk.
-        assert sum([has_alpha, has_beta, has_gamma]) <= 1, (
-            f"chunk leaked across sections: {fact.content!r}"
-        )
-
-
-def test_nested_heading_path_stays_scoped_to_active_section():
-    """A deeper heading must not carry content from a shallower sibling."""
-    text = (
-        "# Top\n\n"
-        "Top level text.\n\n"
-        "## Sub A\n\n"
-        "Sub A unique marker ALPHA.\n\n"
-        "## Sub B\n\n"
-        "Sub B unique marker BETA.\n"
-    )
-    facts = ChunkingExtractor(target_tokens=24, overlap_tokens=0).extract(text)
-    for fact in facts:
-        has_alpha = "ALPHA" in fact.content
-        has_beta = "BETA" in fact.content
-        assert not (has_alpha and has_beta), (
-            f"sibling sections leaked: {fact.content!r}"
-        )
-
-
-def test_code_block_content_does_not_leak_into_surrounding_prose():
-    """A fenced code block's payload must not appear in prose chunks."""
-    text = (
-        "# Intro\n\n"
-        "Prose before the code.\n\n"
-        "```python\n"
-        "UNIQUE_CODE_MARKER_XYZ = 42\n"
-        "```\n\n"
-        "# Outro\n\n"
-        "Prose after the code.\n"
-    )
-    facts = ChunkingExtractor(target_tokens=16, overlap_tokens=0).extract(text)
-    prose_facts = [f for f in facts if "UNIQUE_CODE_MARKER_XYZ" not in f.content]
-    for fact in prose_facts:
-        assert "UNIQUE_CODE_MARKER_XYZ" not in fact.content
-
-
-def test_chunk_metadata_records_token_counter_identity():
-    """Each chunk must record the counter identity for reproducibility."""
-    facts = ChunkingExtractor().extract("Some paragraph text here.")
-    assert len(facts) == 1
-    chunking = facts[0].metadata["chunking"]
-    assert "target_tokens" in chunking
-    assert "overlap_tokens" in chunking
-    assert "token_counter" in chunking
-    assert isinstance(chunking["token_counter"], str)

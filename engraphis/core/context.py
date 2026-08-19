@@ -109,36 +109,15 @@ class DeterministicContextPacker:
                 continue
 
             prefix = "\n\n" if context else ""
-            ordinal = len(packed) + 1
-            header = self._header(candidate, ordinal)
+            header = self._header(candidate, len(packed) + 1)
             base = f"{context}{prefix}{header}\n"
-            excerpt = ""
-            truncated = False
-            reason = ""
-            available = 0
-            if self._count(base) < budget:
-                available = budget - self._count(base)
-                excerpt, truncated, reason = self._excerpt(
-                    query, candidate, available
-                )
+            if self._count(base) >= budget:
+                continue
 
-            # Keep the established single-pass behavior for ordinary sources.
-            # Only retry against the cheaper ordinal-only header when the selected
-            # excerpt already starts with the exact displayed title (or the titled
-            # header left no room). This removes prompt duplication without deleting
-            # evidence or weakening the stable ``[n]`` citation bridge.
-            if not excerpt or _starts_with_title(excerpt, record.title):
-                compact_base = (
-                    f"{context}{prefix}"
-                    f"{self._header(candidate, ordinal, include_title=False)}\n"
-                )
-                if self._count(compact_base) < budget:
-                    compact_available = budget - self._count(compact_base)
-                    compact = self._excerpt(query, candidate, compact_available)
-                    if compact[0] and _starts_with_title(compact[0], record.title):
-                        base = compact_base
-                        available = compact_available
-                        excerpt, truncated, reason = compact
+            available = budget - self._count(base)
+            excerpt, truncated, reason = self._excerpt(
+                query, candidate, available
+            )
             if not excerpt:
                 continue
             proposed = f"{base}{excerpt}"
@@ -391,13 +370,7 @@ class DeterministicContextPacker:
                 high = middle - 1
         return best
 
-    def _header(
-        self,
-        candidate: Candidate,
-        ordinal: int,
-        *,
-        include_title: bool = True,
-    ) -> str:
+    def _header(self, candidate: Candidate, ordinal: int) -> str:
         record = candidate.record
         if record is None:
             return f"[{ordinal}]"
@@ -405,7 +378,7 @@ class DeterministicContextPacker:
         # scope labels inside the context spends reader tokens without adding
         # evidence; the ordinal is the citation bridge.
         header = f"[{ordinal}]"
-        if include_title and record.title:
+        if record.title:
             title = " ".join(record.title.split())[:120]
             header += f" {title}"
         return header
@@ -440,18 +413,6 @@ class DeterministicContextPacker:
 
 def _terms(text: str) -> set[str]:
     return {match.group(0).casefold() for match in _WORD_RE.finditer(text or "")}
-
-
-def _starts_with_title(excerpt: str, title: str) -> bool:
-    """Whether an excerpt already opens with the exact displayed title text."""
-    displayed_title = " ".join((title or "").split())[:120].casefold()
-    normalized_excerpt = " ".join((excerpt or "").split()).casefold()
-    if not displayed_title or not normalized_excerpt.startswith(displayed_title):
-        return False
-    return (
-        len(normalized_excerpt) == len(displayed_title)
-        or not normalized_excerpt[len(displayed_title)].isalnum()
-    )
 
 
 def _family_representatives(

@@ -8,7 +8,6 @@ why/timeline/proactive tools.
 import sqlite3
 import threading
 import time
-from types import SimpleNamespace
 import numpy as np
 import pytest
 
@@ -62,23 +61,6 @@ class _ReviewedLocalService:
 
 def _svc() -> _ReviewedLocalService:
     return _ReviewedLocalService(MemoryService.create(":memory:"))
-
-
-def test_service_create_forwards_exact_backend_mode(monkeypatch):
-    captured = {}
-    store = SimpleNamespace(allowed_workspaces=None)
-
-    def fake_create(cls, db_path, **kwargs):
-        captured.update(db_path=db_path, **kwargs)
-        return SimpleNamespace(store=store)
-
-    monkeypatch.setattr(service_module.MemoryEngine, "create", classmethod(fake_create))
-    MemoryService.create(
-        ":memory:", extractor="none", graph_extractor="none",
-        retention_supervisor="none", require_exact_backends=True,
-    )
-
-    assert captured["require_exact_backends"] is True
 
 
 def test_empty_configured_db_warns_about_populated_owner_db(tmp_path, monkeypatch, capsys):

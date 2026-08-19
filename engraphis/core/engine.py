@@ -576,7 +576,6 @@ class MemoryEngine:
         graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
         query_planner: Optional[QueryPlanner] = None,
         read_only: bool = False,
-        require_exact_backends: bool = False,
     ) -> "MemoryEngine":
         """Compose the default engine through the package-level backend provider."""
         if _ENGINE_FACTORY is None:
@@ -603,7 +602,6 @@ class MemoryEngine:
             graph_traversal_policy=graph_traversal_policy,
             query_planner=query_planner,
             read_only=read_only,
-            require_exact_backends=require_exact_backends,
         )
 
     def _rebuild_versioned_embeddings(self) -> None:

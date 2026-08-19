@@ -109,7 +109,6 @@ def service() -> MemoryService:
             embed_model=settings.embed_model or None,
             embed_revision=getattr(settings, "embed_revision", "") or None,
             require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-            require_exact_backends=bool(getattr(settings, "require_exact_backends", False)),
             embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
             vector_backend=settings.vector_backend,
             rerank_model=getattr(settings, "rerank_model", "") or None,
@@ -120,14 +119,7 @@ def service() -> MemoryService:
 
 
 def _ok(payload: dict) -> str:
-    """Serialize MCP payloads without presentation whitespace.
-
-    MCP text results are normally placed directly into an agent's context.  Pretty
-    indentation carries no information once the client parses JSON, but is repeated
-    on every successful tool response.  Keep the historical JSON-string contract
-    and all fields intact while avoiding that transport-only overhead.
-    """
-    return json.dumps(payload, separators=(",", ":"), default=str, ensure_ascii=False)
+    return json.dumps(payload, indent=2, default=str, ensure_ascii=False)
 
 
 
@@ -2202,7 +2194,7 @@ def _smart_error(code: str, message: str, *, retryable: bool) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps({
             "error": {"code": code, "message": message, "retryable": retryable},
-        }, separators=(",", ":"), default=str, ensure_ascii=False))],
+        }, indent=2, default=str, ensure_ascii=False))],
         isError=True,
     )
 
@@ -2817,22 +2809,9 @@ def engraphis_conflict_review(
 # The standard module export and dashboard mount are the zero-configuration Smart surface.
 mcp = smart_mcp
 
-def _eager_exact_backend_check() -> None:
-    """Construct the service eagerly when exact mode is enabled.
-
-    Every MCP launcher (stdio, HTTP, classic) calls this before accepting
-    traffic so a missing model, credential, or retention supervisor fails
-    the process immediately — matching the documented startup-failure
-    contract. Without this, the lazy ``service()`` factory surfaces the
-    same failure only on the first tool invocation.
-    """
-    if bool(getattr(settings, "require_exact_backends", False)):
-        service()
-
 
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
-    _eager_exact_backend_check()
     mcp.run()
 
 

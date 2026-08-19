@@ -41,30 +41,6 @@ export class EngraphisCompatibilityError extends Error {
 // The default MCP timeout is one minute. A local model's cold start or an intentional
 // repository index can reasonably take longer, while Pi can still cancel through its signal.
 const TOOL_REQUEST_TIMEOUT_MS = 5 * 60 * 1_000;
-const READ_ONLY_TOOLS = new Set([
-	"engraphis_recall_context",
-	"engraphis_get_memory",
-	"engraphis_conflict_review",
-	"engraphis_discover_actions",
-]);
-
-function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
-	const abortReason = () => signal?.reason instanceof Error
-		? signal.reason
-		: new DOMException("Engraphis request was cancelled.", "AbortError");
-	if (signal?.aborted) return Promise.reject(abortReason());
-	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, delayMs);
-		const onAbort = () => {
-			clearTimeout(timer);
-			reject(abortReason());
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
 
 /** A session-owned connection to the local Engraphis MCP process. */
 export class EngraphisMcpClient {
@@ -123,14 +99,12 @@ export class EngraphisMcpClient {
 	}
 
 	async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpResult> {
-		return this.withClient(
-			async (client) =>
-				(await client.callTool(
-					{ name, arguments: args },
-					undefined,
-					{ signal, timeout: TOOL_REQUEST_TIMEOUT_MS },
-				)) as McpResult,
-			{ retry: READ_ONLY_TOOLS.has(name), signal },
+		return this.withClient(async (client) =>
+			(await client.callTool(
+				{ name, arguments: args },
+				undefined,
+				{ signal, timeout: TOOL_REQUEST_TIMEOUT_MS },
+			)) as McpResult,
 		);
 	}
 
@@ -213,23 +187,13 @@ export class EngraphisMcpClient {
 	}
 
 	/** Reset an unhealthy stdio connection so the next Pi tool call can start a fresh server. */
-	private async withClient<T>(
-		operation: (client: Client) => Promise<T>,
-		options?: { retry?: boolean; signal?: AbortSignal },
-	): Promise<T> {
-		const maxRetries = options?.retry ? 2 : 0;
-		let lastError: unknown;
-		for (let attempt = 0; attempt <= maxRetries; attempt++) {
-			try {
-				return await operation(await this.connect());
-			} catch (error) {
-				lastError = error;
-				await this.close().catch(() => undefined);
-				if (attempt >= maxRetries || options?.signal?.aborted) break;
-				await waitForRetry((attempt + 1) * 1000 + attempt * 2000, options?.signal);
-			}
+	private async withClient<T>(operation: (client: Client) => Promise<T>): Promise<T> {
+		try {
+			return await operation(await this.connect());
+		} catch (error) {
+			await this.close().catch(() => undefined);
+			throw error;
 		}
-		throw lastError;
 	}
 
 	private async listTools(client: Client, signal?: AbortSignal): Promise<McpTool[]> {

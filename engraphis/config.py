@@ -4,7 +4,6 @@ from __future__ import annotations
 import errno
 import json
 import hashlib
-import logging
 import math
 import os
 import re
@@ -26,8 +25,6 @@ from engraphis.private_state import (
     private_file_stat,
     read_private_text,
 )
-
-_logger = logging.getLogger("engraphis.config")
 
 _MAX_CONFIG_ENV_BYTES = 1024 * 1024
 _CONFIG_ENV_ASSIGNMENT = re.compile(
@@ -62,9 +59,7 @@ def trusted_env_path() -> Path:
 
 def _trusted_env_syntax_error(line_number: int) -> ValueError:
     """Return a value-free parse error so configuration secrets are never echoed."""
-    return ValueError(
-        f"trusted config file contains invalid syntax on line {line_number}"
-    )
+    return ValueError(f"trusted config contains invalid syntax on line {line_number}")
 
 
 def _parse_trusted_env_value(value: str, line_number: int) -> str:
@@ -698,13 +693,7 @@ def _env(key: str, default: str = "") -> str:
 def _parse_vector_backend(value: str) -> str:
     """Return a supported vector backend, failing closed to the portable default."""
     normalized = (value or "").strip().lower()
-    if normalized in {"numpy", "sqlite-vec", "auto"}:
-        return normalized
-    _logger.warning(
-        "ENGRAPHIS_VECTOR_BACKEND contains an unsupported value; "
-        "using default 'numpy' (supported: numpy, sqlite-vec, auto)"
-    )
-    return "numpy"
+    return normalized if normalized in {"numpy", "sqlite-vec", "auto"} else "numpy"
 
 
 def _parse_llm_provider(value: str) -> str:
@@ -727,38 +716,18 @@ def _validate_service_mode(value: str) -> str:
 
 
 def _env_int(key: str, default: int) -> int:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
     try:
-        return int(raw.strip())
-    except (TypeError, ValueError):
-        _logger.warning(
-            "Environment variable %s contains an invalid integer; using the default %d",
-            key, default
-        )
+        return int(_env(key, str(default)))
+    except ValueError:
         return default
 
 
 def _env_float(key: str, default: float) -> float:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
     try:
-        value = float(raw.strip())
+        value = float(_env(key, str(default)))
     except (TypeError, ValueError):
-        _logger.warning(
-            "Environment variable %s contains an invalid float; using the default %f",
-            key, default
-        )
         return default
-    if not math.isfinite(value):
-        _logger.warning(
-            "Environment variable %s contains a non-finite value; using the default %f",
-            key, default
-        )
-        return default
-    return value
+    return value if math.isfinite(value) else default
 
 
 _FALSY_ENV = {"0", "false", "no", "off", "disable", "disabled"}
@@ -774,10 +743,6 @@ def _env_bool(key: str, default: bool) -> bool:
         return True
     if normalized in _FALSY_ENV:
         return False
-    _logger.warning(
-        "Environment variable %s contains an unrecognized boolean; using the default %s",
-        key, default
-    )
     return default
 
 
@@ -900,11 +865,6 @@ class Settings:
     require_immutable_models: bool = field(
         default_factory=lambda: _env_bool("ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS", False)
     )
-    # When enabled, configured optional backends fail startup instead of silently
-    # falling back to the deterministic local implementation.
-    require_exact_backends: bool = field(
-        default_factory=lambda: _env_bool("ENGRAPHIS_REQUIRE_EXACT_BACKENDS", False)
-    )
     embed_dim: Optional[int] = field(
         default_factory=lambda: (
             None if _env("ENGRAPHIS_EMBED_DIM", "") == "0" else _env_int("ENGRAPHIS_EMBED_DIM", 384)
@@ -1012,37 +972,6 @@ class Settings:
     def customer_service(self) -> bool:
         return self.service_mode == "customer"
 
-    def __post_init__(self) -> None:
-        """Validate critical settings and fail fast on configuration errors."""
-        if not self.host or not self.host.strip():
-            raise ValueError("ENGRAPHIS_HOST must be a non-empty hostname or IP address")
-        if not (1 <= self.port <= 65535):
-            raise ValueError(
-                "ENGRAPHIS_PORT must be between 1 and 65535"
-            )
-        if self.embed_dim is not None and self.embed_dim <= 0:
-            raise ValueError(
-                "ENGRAPHIS_EMBED_DIM must be positive or 0 (for None)"
-            )
-        if self.relay_url and not self.relay_url.lower().startswith(("http://", "https://")):
-            raise ValueError(
-                "ENGRAPHIS_RELAY_URL must start with http:// or https://"
-            )
-        if self.require_exact_backends:
-            # _parse_vector_backend silently replaces typos (and blank values)
-            # with 'numpy' so the default path keeps working. In exact mode
-            # that hides a configuration error; re-check the raw env value
-            # against the known set and refuse — including blank/whitespace,
-            # which would otherwise pass the truthiness guard below.
-            raw_vector = _env("ENGRAPHIS_VECTOR_BACKEND", "auto")
-            normalized_vector = (raw_vector or "").strip().lower()
-            if normalized_vector not in {"numpy", "sqlite-vec", "auto"}:
-                raise ValueError(
-                    "Configured vector backend selector is not recognized and "
-                    "require_exact_backends=True prevents silent fallback to numpy "
-                    "(valid: numpy, sqlite-vec, auto)"
-                )
-
 
 def _parse_headers(raw: str) -> dict:
     if not raw:
@@ -1073,22 +1002,7 @@ def _parse_origins(raw: str, port: int = 8700) -> list:
     ENGRAPHIS_PORT doesn't lock its own origin out of the CORS allow-list."""
     if not raw.strip():
         return ["http://127.0.0.1:%d" % port, "http://localhost:%d" % port]
-    validated = []
-    for token in raw.split(","):
-        origin = token.strip().rstrip("/")
-        if not origin:
-            continue
-        if origin == "*":
-            validated.append(origin)
-            continue
-        if not (origin.startswith("http://") or origin.startswith("https://")):
-            print(
-                "[engraphis] CORS origin rejected (must use http:// or https://)",
-                file=sys.stderr,
-            )
-            continue
-        validated.append(origin)
-    return validated
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 def _parse_csv(raw: str) -> list:

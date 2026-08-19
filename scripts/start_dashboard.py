@@ -191,19 +191,6 @@ def _reuse_or_report_occupied_port(
 
 
 def _startup_error(exc: BaseException, db: str) -> str:
-    if isinstance(exc, ValueError):
-        # Any ValueError from dashboard construction can embed configured paths,
-        # model names, or endpoint URLs (e.g. AutoTokenizer.from_pretrained,
-        # embed-model probes, third-party config loaders). Substring heuristics
-        # like "trusted config" are themselves a leak vector: a third-party
-        # library raising ValueError("environment variable failure loading
-        # C:/tenant/private/...") would pass the check. Emit a value-free
-        # diagnostic unconditionally; the operator can run engraphis-init
-        # --check for the full detail.
-        return (
-            f"Configuration error ({type(exc).__name__}). "
-            "Run engraphis-init --check for diagnostics."
-        )
     if isinstance(exc, (ImportError, ModuleNotFoundError)):
         return ("The server extra is required: pip install \"engraphis[server]\""
                 " (needs Python 3.10+)")
@@ -222,21 +209,7 @@ def _startup_error(exc: BaseException, db: str) -> str:
             "writable SQLite file, then run engraphis-init --check." % db
         )
     if isinstance(exc, RuntimeError):
-        # RuntimeErrors from factory include backend availability issues
-        error_msg = str(exc)
-        if "require_exact_backends" in error_msg or "unavailable" in error_msg:
-            return (
-                f"Backend initialization failed: {error_msg}. "
-                f"Either install the required dependencies or remove "
-                f"require_exact_backends=True from your configuration."
-            )
-        # Unknown RuntimeError from a backend or provider can embed proxy
-        # credentials, certificate paths, or endpoint URLs. Redact to the
-        # exception type so operator logs stay value-free.
-        return (
-            f"Backend initialization failed ({type(exc).__name__}). "
-            "Run engraphis-init --check for diagnostics."
-        )
+        return str(exc)
     return "Dashboard initialization failed. Run engraphis-init --check for diagnostics."
 
 
@@ -245,20 +218,7 @@ def main(argv=None) -> None:
     # a desktop/CLI launch can overwrite trusted embed-model, host, and port
     # values with built-in defaults before dashboard_app is imported, which can turn an
     # offline install or an existing workspace into an apparent startup failure.
-    try:
-        from engraphis import config as _config  # noqa: F401  # loads trusted config once
-        # Validate config eagerly so errors surface before we attempt to bind ports
-        _ = _config.settings
-    except ValueError as exc:
-        sys.exit(f"Error: Configuration validation failed: {exc}\n")
-    except Exception as exc:  # noqa: BLE001 - never echo config paths or values
-        # UnsafeStateFile and other OSError subclasses can embed the configured
-        # ENGRAPHIS_ENV_FILE path; emit a value-free diagnostic so tenant-identifying
-        # or secret-bearing paths never reach service logs.
-        sys.exit(
-            f"Error: Failed to load configuration ({type(exc).__name__}). "
-            "Run engraphis-init --check for diagnostics.\n"
-        )
+    from engraphis import config as _config  # noqa: F401  # loads trusted config once
 
     ap = argparse.ArgumentParser(description="Start the Engraphis WebUI.")
     ap.add_argument("--host", default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"),

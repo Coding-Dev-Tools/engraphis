@@ -335,25 +335,11 @@ class StructuredMetadataGraphExtractor:
         return []
 
 
-def get_graph_extractor(kind: str = "none", *, require_exact: bool = False):
+def get_graph_extractor(kind: str = "none"):
     """Factory mirroring ``get_extractor``: config in, backend out. ``kind='regex'``
-    -> heuristic NER; ``kind='none'`` or empty -> the no-op passthrough.
-
-    Args:
-        require_exact: When True, raise on unknown kinds instead of silently
-            returning NullGraphExtractor.
-    """
-    name = (kind or "none").lower().strip()
-    if name == "regex":
+    -> heuristic NER; anything else (incl. ``'none'``) -> the no-op passthrough."""
+    if (kind or "none").lower() == "regex":
         return RegexGraphExtractor()
-    if name == "none":
-        return NullGraphExtractor()
-    if require_exact:
-        raise RuntimeError(
-            "Configured graph extractor selector is not recognized and "
-            "require_exact_backends=True prevents silent fallback to NullGraphExtractor "
-            "(valid kinds: none, regex)"
-        )
     return NullGraphExtractor()
 
 

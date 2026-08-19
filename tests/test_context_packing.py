@@ -75,67 +75,6 @@ def test_unfit_header_does_not_block_a_later_compact_source() -> None:
     assert usage.context_tokens <= 6
 
 
-def test_title_repeated_at_excerpt_start_is_emitted_once() -> None:
-    packer = DeterministicContextPacker()
-    title = "Release policy"
-    content = "Release policy\nDeploy only after signed checks."
-    candidate = _candidate(
-        "mem_repeated_title",
-        content,
-        title=title,
-    )
-
-    context, chunks, usage = packer.pack(
-        "release policy",
-        [candidate],
-        token_budget=100,
-    )
-
-    counter = RegexTokenCounter()
-    previous_format = f"[1] {title}\n{content}"
-    assert context == f"[1]\n{content}"
-    assert chunks[0].excerpt == content
-    assert usage.context_tokens == counter(previous_format) - counter(title)
-
-
-def test_nonduplicate_title_remains_in_the_citation_header() -> None:
-    packer = DeterministicContextPacker()
-    candidate = _candidate(
-        "mem_distinct_title",
-        "Deploy only after signed checks.",
-        title="Release policy",
-    )
-
-    context, chunks, _ = packer.pack(
-        "release policy",
-        [candidate],
-        token_budget=100,
-    )
-
-    assert context == "[1] Release policy\nDeploy only after signed checks."
-    assert chunks[0].excerpt == "Deploy only after signed checks."
-
-
-def test_compact_title_retry_handles_a_non_additive_token_counter() -> None:
-    """The compact retry must carry its own budget into the final hard-fit pass."""
-    def non_additive_counter(text: str) -> int:
-        count = len(text)
-        return count + (100 if text.startswith("[1]\n") and len(text) > 4 else 0)
-
-    packer = DeterministicContextPacker(
-        non_additive_counter,
-        token_counter_identity="test.non-additive",
-    )
-    candidate = _candidate("mem_non_additive", "X", title="X")
-
-    context, chunks, usage = packer.pack("X", [candidate], token_budget=5)
-
-    assert context == ""
-    assert chunks == []
-    assert usage.context_tokens == 0
-    assert usage.token_counter == "test.non-additive"
-
-
 def test_sentence_excerpt_marks_omission_and_preserves_qualifying_evidence() -> None:
     packer = DeterministicContextPacker()
     candidate = _candidate(
