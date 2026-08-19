@@ -3,7 +3,7 @@
    geometry, and a bounded overlay communicates relation direction without moving nodes. */
 (function () {
   'use strict';
-  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260814-all-controls-2';
+  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260817-all-nodes-lod-2';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const FLOW_EDGE_LIMIT = 900;
@@ -16,7 +16,7 @@
   };
   const TYPE_COLORS = { person_or_concept: '#8d82e3', mention: '#5ba1a6', hashtag: '#c9a15b', email: '#8eb3e6', organization: '#d48173', location: '#7ebf8e', memory: '#5ba1a6', repo: '#c9a15b', file: '#8eb3e6' };
   const PRESETS = {
-    galaxy: { repel: 60, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
