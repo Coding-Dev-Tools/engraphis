@@ -7582,10 +7582,6 @@
        recomputes GPERF — filters and focus can take a huge store down to a small view. */
     let large = false, dense = false, materialLow = false;
     let staticFullLayout = false, fullLayoutDirty = true;
-    /* Canonical v5 scenes carry server-computed stable orbits. The integrator must not
-       apply spacetime collapse forces (inward acceleration, event horizon decay, tidal)
-       that override those authored positions. Set on every render() admission. */
-    let galaxySceneIsCanonical = false;
     /* The node/link arrays last handed to force-graph. Seeding is not free: the vendor copies
        the data in and d3 resets the simulation alpha to 1, so a paint-only change would restart
        the whole layout. See `sameData`/`render`. */
@@ -8830,7 +8826,7 @@
         wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
         velocityDecay: GALAXY_VELOCITY_DECAY
           * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
-        includeSpacetime: !galaxySceneIsCanonical,
+        includeSpacetime: true,
         frameDraggingFraction: GALAXY_FRAME_DRAGGING_FRACTION,
         frameDraggingMaxAcceleration: GALAXY_FRAME_DRAGGING_MAX_ACCELERATION,
         eventHorizonInfluenceScale: GALAXY_EVENT_HORIZON_INFLUENCE_SCALE,
@@ -9345,18 +9341,6 @@
          before handing it restored Galaxy coordinates, or Compact's old link/charge field gets
          one last chance to corrupt the physical phase before the custom clock even starts. */
       if (galaxyMode) disableD3GalaxyIntegration();
-      if (galaxyMode) {
-        const authoredScene = data.nodes.some(node => node.anchor_role === 'global')
-          && data.nodes.filter(node => node.anchor_role === 'community').length > 1;
-        galaxySceneIsCanonical = authoredScene
-          && raw.meta && raw.meta.canonical_positions === true
-          && data.nodes.every(node =>
-            Number.isFinite(Number(node.galactic_target_radius))
-            && node.system_anchor_id !== undefined && node.system_anchor_id !== null
-          );
-      } else {
-        galaxySceneIsCanonical = false;
-      }
       if (!reused) {
         if (staticFullLayout) {
           if (galaxyMode) {
@@ -9391,7 +9375,12 @@
              envelope is cached; the later field is then sized from the already-clear scene. */
           const authoredGalaxy = data.nodes.some(node => node.anchor_role === 'global')
             && data.nodes.filter(node => node.anchor_role === 'community').length > 1;
-          const canonicalGalaxy = galaxySceneIsCanonical;
+          const canonicalGalaxy = authoredGalaxy
+            && raw.meta && raw.meta.canonical_positions === true
+            && data.nodes.every(node =>
+            Number.isFinite(Number(node.galactic_target_radius))
+            && node.system_anchor_id !== undefined && node.system_anchor_id !== null
+          );
           if (authoredGalaxy && !canonicalGalaxy) {
             /* Compatibility payloads need admission packing. Canonical scene coordinates have
                already passed the server's deterministic hierarchy/overlap policy; packing them
