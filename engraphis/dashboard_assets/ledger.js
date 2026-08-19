@@ -126,7 +126,7 @@
   const GRAPH_TUNING = [
     { id: 'graph-repel', key: 'repel', fallback: 100 },
     { id: 'graph-link', key: 'link', fallback: 8 },
-    { id: 'graph-gravity', key: 'gravity', fallback: 48 },
+    { id: 'graph-gravity', key: 'gravity', fallback: 80 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
     { id: 'graph-text-size', key: 'font', fallback: 12 },
     { id: 'graph-line-width', key: 'linkw', fallback: 0.72, precision: 2 },
@@ -143,7 +143,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 80, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };

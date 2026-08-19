@@ -9,7 +9,7 @@
    with both the dashboard adapter and standalone scene payloads. */
 (function () {
   const PRESETS = {
-    galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
+    galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 80, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
     original: { label: 'Original force', repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40, curve: 0, particles: 0 },
     compact: { label: 'Compact clusters', repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30, curve: 0.08, particles: 0 },
     communities: { label: 'Community islands', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
@@ -436,6 +436,18 @@
     const raw = Number(value);
     return Number.isFinite(raw)
       ? Math.max(0, Math.min(maximum, raw)) : fallback;
+  }
+  /* Normalized multiplier for the advanced spacetime panel sliders. The HTML sliders expose
+     human-friendly numbers (0-200 for G, 20-500 for black hole mass) but the physics expects
+     a multiplier around 1.0. This maps slider-value/100 to a multiplier so that the default
+     slider position (100) produces a 1.0x multiplier, and moving the slider produces a
+     proportional change. A small floor (0.05) keeps the simulation alive even at 0. */
+  function galaxyNormalizedMultiplier(value, fallback, maximum) {
+    const raw = Number(value);
+    if (!Number.isFinite(raw)) return fallback;
+    const normalized = raw / 100;
+    const capped = Math.max(0.05, Math.min(maximum, normalized));
+    return capped;
   }
   function galaxyLocalGravityMultiplier(anchor, options) {
     const opts = options || {};
@@ -1927,11 +1939,11 @@
       gravitySetting: galaxyAccelerationCapReference(opts.gravity),
       stellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       stellarGravity: galaxyStellarGravityConstant(localGravitySetting)
-        * galaxyPhysicsMultiplier(opts.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-      localGravitationalConstant: galaxyPhysicsMultiplier(
+        * galaxyNormalizedMultiplier(opts.localGravitationalConstant,
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+      localGravitationalConstant: galaxyNormalizedMultiplier(
         opts.localGravitationalConstant,
-        GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+        GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
       eligibleStellarAnchors: 0, fallbackAnchors: 0, globalAnchors: 0,
       stellarFloorActive: false,
     };
@@ -2314,8 +2326,8 @@
     const strengthFraction = Math.max(0, Math.min(1,
       Number.isFinite(Number(opts.strengthFraction))
         ? Number(opts.strengthFraction) : GALAXY_MUTUAL_SYSTEM_GRAVITY_FRACTION));
-    const gravityMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
-      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+    const gravityMultiplier = galaxyNormalizedMultiplier(opts.gravitationalConstant,
+      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4);
     const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity) * strengthFraction
       * gravityMultiplier;
     const softening = Math.max(0.1, Number(opts.softening)
@@ -2514,8 +2526,8 @@
     /* The singular center term is sourced by the actual dominant evidence node. Other stars
        in its community remain part of the smooth bulge/halo instead of inflating black-hole
        mass merely because they share a community label. */
-    const blackHoleMassMultiplier = galaxyPhysicsMultiplier(opts.blackHoleMass,
-      GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16);
+    const blackHoleMassMultiplier = galaxyNormalizedMultiplier(opts.blackHoleMass,
+      GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 10);
     const baseCoreMass = finitePositive(anchor.gravity_mass, 1, 1000);
     const coreMass = baseCoreMass * blackHoleMassMultiplier;
     /* Black-hole mass tuning changes only the compact central source. It must not create or
@@ -2546,10 +2558,10 @@
       });
     }
     const explicitGlobal = anchor.anchor_role === 'global';
-    const gravitationalConstantMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
-      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
+    const gravitationalConstantMultiplier = galaxyNormalizedMultiplier(opts.gravitationalConstant,
+      GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4);
     const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal)
-      * gravitationalConstantMultiplier;
+      * gravitationalConstantMultiplier * Math.sqrt(Math.max(0.25, blackHoleMassMultiplier));
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
@@ -8555,13 +8567,13 @@
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
         localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
-        gravitationalConstant: galaxyPhysicsMultiplier(
-          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        localGravitationalConstant: galaxyPhysicsMultiplier(
+        gravitationalConstant: galaxyNormalizedMultiplier(
+          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+        localGravitationalConstant: galaxyNormalizedMultiplier(
           state.settings.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        blackHoleMass: galaxyPhysicsMultiplier(
-          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+        blackHoleMass: galaxyNormalizedMultiplier(
+          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 10),
         softening: galaxyLiveSoftening(),
         centralSoftening: Math.max(36, galaxySoftening() * 5),
         bridgeSoftening: Math.max(24, galaxySoftening() * 4),
@@ -8732,31 +8744,31 @@
         gravityResponseRateMultiplier: GALAXY_GRAVITY_RESPONSE_RATE_MULTIPLIER,
         /* The two normalized controls are independent: G_center owns black-hole and
            inter-system motion, while G_star scales the calibrated dominant-star wells. */
-        gravitationalConstant: galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
-          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        G_center: galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
-          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        localGravitationalConstant: galaxyPhysicsMultiplier(
+        gravitationalConstant: galaxyNormalizedMultiplier(state.settings.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+        G_center: galaxyNormalizedMultiplier(state.settings.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+        localGravitationalConstant: galaxyNormalizedMultiplier(
           state.settings.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        G_star: galaxyPhysicsMultiplier(state.settings.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
+        G_star: galaxyNormalizedMultiplier(state.settings.localGravitationalConstant,
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
         globalAnchorId: diagnosticAnchor ? diagnosticAnchor.id : null,
         globalAnchorLabel: diagnosticAnchor ? nodeName(diagnosticAnchor) : null,
         blackHoleSpinAngle: diagnosticAnchor ? galaxyBlackHoleSpinAngle(diagnosticAnchor) : 0,
-        blackHoleMass: galaxyPhysicsMultiplier(state.settings.blackHoleMass,
-          GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
+        blackHoleMass: galaxyNormalizedMultiplier(state.settings.blackHoleMass,
+          GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 10),
         damping: galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
         springStiffness: galaxyPhysicsMultiplier(state.settings.springStiffness,
           GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
         effectiveGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true)
-          * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
-            GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+          * galaxyNormalizedMultiplier(state.settings.gravitationalConstant,
+            GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
         blackHoleGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true),
         localGravity: galaxyLocalGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING),
         effectiveLocalGravity: galaxyStellarGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING)
-          * galaxyPhysicsMultiplier(state.settings.localGravitationalConstant,
-            GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+          * galaxyNormalizedMultiplier(state.settings.localGravitationalConstant,
+            GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 4),
         immediateGravityResponse: { ...galaxyLastGravityResponse },
         systemGravity: { ...galaxyLastSystemGravity },
         mutualSystemGravity: { ...galaxyLastMutualGravity },
@@ -9955,17 +9967,17 @@
       }
       delete next.G_center;
       if (next.gravitationalConstant !== undefined) next.gravitationalConstant =
-        galaxyPhysicsMultiplier(next.gravitationalConstant,
-          state.settings.gravitationalConstant, 8);
+        galaxyNormalizedMultiplier(next.gravitationalConstant,
+          state.settings.gravitationalConstant, 4);
       if (next.localGravitationalConstant === undefined && next.G_star !== undefined) {
         next.localGravitationalConstant = next.G_star;
       }
       delete next.G_star;
       if (next.localGravitationalConstant !== undefined) next.localGravitationalConstant =
-        galaxyPhysicsMultiplier(next.localGravitationalConstant,
-          state.settings.localGravitationalConstant, 8);
-      if (next.blackHoleMass !== undefined) next.blackHoleMass = galaxyPhysicsMultiplier(
-        next.blackHoleMass, state.settings.blackHoleMass, 16);
+        galaxyNormalizedMultiplier(next.localGravitationalConstant,
+          state.settings.localGravitationalConstant, 4);
+      if (next.blackHoleMass !== undefined) next.blackHoleMass = galaxyNormalizedMultiplier(
+        next.blackHoleMass, state.settings.blackHoleMass, 10);
       if (next.damping !== undefined) next.damping = galaxyPhysicsMultiplier(
         next.damping, state.settings.damping, 100);
       if (next.springStiffness !== undefined) next.springStiffness = galaxyPhysicsMultiplier(
