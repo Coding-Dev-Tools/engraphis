@@ -443,12 +443,8 @@ def test_scene_is_canonical_deterministic_and_strength_shortens_links():
          "confidence": 0.25, "provenance": "{}"},
     ]
 
-    first = build_graph_scene(
-        "w", entities, edges, supports, level="complete", include_memory_nodes=False
-    )
-    second = build_graph_scene(
-        "w", entities, edges, supports, level="complete", include_memory_nodes=False
-    )
+    first = build_graph_scene("w", entities, edges, supports)
+    second = build_graph_scene("w", entities, edges, supports)
 
     assert first == second
     assert first["meta"]["total_nodes"] == 3  # a1/a2 collapse to one canonical entity
@@ -652,7 +648,7 @@ def test_community_bridges_keep_aggregate_evidence_for_physics():
     assert stronger["edge_count"] == 8
 
 
-def test_overview_keeps_systems_separate_while_preserving_internal_edges():
+def test_overview_retains_real_cross_system_connectors_for_galaxy_painting():
     nodes = {
         "black-hole": {"community_id": "core", "anchor_role": "global"},
         "solar-star": {"community_id": "solar", "anchor_role": "community"},
@@ -683,7 +679,9 @@ def test_overview_keeps_systems_separate_while_preserving_internal_edges():
     selected = set(nodes)
     chosen = graph_scene_module._selected_edges(graph, selected, "overview", 20)
 
-    assert {edge["id"] for edge in chosen} == {"solar-internal"}
+    assert {edge["id"] for edge in chosen} == {
+        "black-hole-solar", "black-hole-outer", "solar-outer", "solar-internal",
+    }
 
 
 def test_canonical_bundle_filters_use_aggregate_support_and_confidence():
@@ -996,7 +994,7 @@ def test_skewed_evidence_keeps_mass_and_radius_contrast_after_top_n_cap():
             1.0 + 15.0 * node["mass_score"] ** 2, abs=1e-6
         )
         assert node["visual_radius"] == pytest.approx(
-            1.2 * (1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0)), abs=2e-6
+            1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0), abs=2e-6
         )
 
 
@@ -1011,16 +1009,10 @@ def test_visual_mass_mapping_preserves_live_fit_to_view_contrast():
     heavy_radius = graph_scene_module._visual_radius(heavy_mass)
 
     assert heavy_radius / light_radius >= 2.7
-    assert heavy_radius < 15.6
+    assert heavy_radius < 13.0
 
 
 def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
-    assert graph_scene_module.BASE_NODE_RADIUS_SCALE == 1.2
-    assert graph_scene_module.LOCAL_ORBIT_INITIAL_COMPACTNESS == 0.48
-    assert graph_scene_module.GALACTIC_INITIAL_COMPACTNESS == 0.384
-    assert graph_scene_module.GALACTIC_RADIUS_SCALE == 0.192
-    assert graph_scene_module.GALAXY_LOCAL_GAP_SCALE == 0.6
-    assert graph_scene_module.GALAXY_SYSTEM_MIN_GAP == 23.04
     nodes = {}
     member_ids = []
     for index in range(21):
@@ -1077,8 +1069,8 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
     assert (core["x"], core["y"]) == (0.0, 0.0)
     assert core["galactic_radius"] == 0.0
     assert core["galactic_target_radius"] == 0.0
-    assert core["galactic_radius_scale"] == 0.192
-    assert core["galactic_initial_compactness"] == 0.384
+    assert core["galactic_radius_scale"] == 0.4
+    assert core["galactic_initial_compactness"] == 0.8
     assert core["galactic_clearance_adjusted"] is False
     assert core["galactic_overlap"] is False
     assert core["galactic_arm"] == -1
@@ -1108,23 +1100,19 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
         distance = math.hypot(node["x"] - core["x"], node["y"] - core["y"])
         assert 0.87 * node["orbit_radius"] <= distance <= node["orbit_radius"] + 1e-5
     assert len({(node["x"], node["y"]) for node in by_id.values()}) == len(by_id)
-    node_list = list(by_id.values())
-    for left_index, left in enumerate(node_list):
-        for right in node_list[left_index + 1:]:
-            assert math.dist((left["x"], left["y"]), (right["x"], right["y"])) >= (
-                left["visual_radius"] + right["visual_radius"] + 4.7
-            )
     assert scene["communities"][0]["radius"] >= max(
         node["orbit_radius"] + node["visual_radius"] for node in by_id.values()
-    ) + 3.5
+    ) + 5.9
 
-    # Recreate the clearance-aware hierarchy using the emitted scene seed. Compactness
-    # remains preferred, but dense rings may expand to preserve painted-disk clearance.
+    # Recreate the otherwise-identical pre-contraction orbital positions using
+    # the emitted scene seed.  Both local offsets and public orbit metadata are
+    # exactly 80% of this reference, including every live satellite.
     reference_nodes = copy.deepcopy(fake_graph["nodes"])
     reference_slots, _reference_radii = graph_scene_module._assign_orbit_hierarchy(
         reference_nodes,
         fake_graph["community_members"],
         {"community-stars": core["id"]},
+        radius_scale=1.0,
     )
     for node_id, node in by_id.items():
         if node_id == core["id"]:
@@ -1134,76 +1122,14 @@ def test_scene_seeds_mass_dominant_core_and_expanding_orbit_tiers(monkeypatch):
                 0.0, 0.0, "community-stars", reference_slots[node_id],
                 scene["meta"]["layout_seed"],
             )
-        assert node["x"] == pytest.approx(reference_x, abs=2e-6)
-        assert node["y"] == pytest.approx(reference_y, abs=2e-6)
+        assert node["x"] == pytest.approx(0.8 * reference_x, abs=2e-6)
+        assert node["y"] == pytest.approx(0.8 * reference_y, abs=2e-6)
         assert math.hypot(node["x"], node["y"]) == pytest.approx(
-            math.hypot(reference_x, reference_y), abs=2e-6
+            0.8 * math.hypot(reference_x, reference_y), abs=2e-6
         )
         assert node["orbit_radius"] == pytest.approx(
-            reference_nodes[node_id]["orbit_radius"], abs=2e-6
+            0.8 * reference_nodes[node_id]["orbit_radius"], abs=2e-6
         )
-
-
-def test_orbit_hierarchy_uses_nearest_larger_connected_parent_for_moons():
-    specs = {
-        "star": (16.0, 12.0),
-        "planet-a": (10.0, 7.0),
-        "planet-b": (8.0, 5.0),
-        "moon-a": (3.0, 2.0),
-        "moon-b": (2.0, 1.0),
-    }
-    nodes = {
-        node_id: {
-            "id": node_id,
-            "gravity_mass": mass,
-            "scene_rank": mass / 16.0,
-            "weighted_degree": degree,
-            "visual_radius": graph_scene_module._visual_radius(mass),
-            "community_id": "solar",
-            "anchor_role": "community" if node_id == "star" else "none",
-            "ghost": False,
-        }
-        for node_id, (mass, degree) in specs.items()
-    }
-    edges = [
-        {"source": "star", "target": "planet-a", "strength": 1.0},
-        {"source": "star", "target": "planet-b", "strength": 0.9},
-        # moon-a can see both bodies; the nearest larger connected body is its planet.
-        {"source": "star", "target": "moon-a", "strength": 0.2},
-        {"source": "planet-a", "target": "moon-a", "strength": 0.8},
-        {"source": "planet-a", "target": "moon-b", "strength": 0.7},
-    ]
-
-    slots, system_radii = graph_scene_module._assign_orbit_hierarchy(
-        nodes, {"solar": list(nodes)}, {"solar": "star"}, edges=edges
-    )
-
-    assert nodes["star"]["system_anchor_id"] == "star"
-    assert nodes["star"]["orbit_tier"] == 0
-    assert nodes["planet-a"]["system_anchor_id"] == "star"
-    assert nodes["planet-b"]["system_anchor_id"] == "star"
-    assert nodes["planet-a"]["orbit_tier"] == 1
-    assert nodes["moon-a"]["system_anchor_id"] == "planet-a"
-    assert nodes["moon-b"]["system_anchor_id"] == "planet-a"
-    assert nodes["moon-a"]["orbit_tier"] == 2
-    assert nodes["moon-b"]["orbit_tier"] == 2
-
-    positions = graph_scene_module._orbital_layout_positions(
-        nodes, {"solar": list(nodes)}, {"solar": "star"},
-        {"solar": (0.0, 0.0)}, slots, 4107,
-    )
-    for child_id, parent_id in {
-        "planet-a": "star", "planet-b": "star",
-        "moon-a": "planet-a", "moon-b": "planet-a",
-    }.items():
-        distance = math.dist(positions[child_id], positions[parent_id])
-        assert 0.87 * nodes[child_id]["orbit_radius"] <= distance
-        assert distance <= nodes[child_id]["orbit_radius"] + 1e-5
-    assert system_radii["solar"] >= (
-        nodes["planet-a"]["orbit_radius"]
-        + nodes["moon-a"]["orbit_radius"]
-        + nodes["moon-a"]["visual_radius"]
-    )
 
 
 def test_community_spiral_packs_compact_preferred_targets_without_envelope_overlap():
@@ -1222,8 +1148,8 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     assert positions["system-00"] == (0.0, 0.0)
     assert hints["system-00"]["galactic_radius"] == 0.0
     assert hints["system-00"]["galactic_target_radius"] == 0.0
-    assert hints["system-00"]["galactic_radius_scale"] == 0.192
-    assert hints["system-00"]["galactic_initial_compactness"] == 0.384
+    assert hints["system-00"]["galactic_radius_scale"] == 0.4
+    assert hints["system-00"]["galactic_initial_compactness"] == 0.8
     assert hints["system-00"]["galactic_overlap"] is False
     assert hints["system-00"]["galactic_arm"] == -1
     outer_hints = [hint for community_id, hint in hints.items() if community_id != "system-00"]
@@ -1258,10 +1184,10 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     y_span = max(y for _x, y in positions.values()) - min(
         y for _x, y in positions.values()
     )
-    _outer_radii = sorted(
+    outer_radii = sorted(
         math.hypot(x, y) for community_id, (x, y) in positions.items()
         if community_id != "system-00"
-    )  # noqa: F841 - retained for future radial-distribution assertions
+    )
     angles = sorted(
         math.atan2(y, x) % math.tau
         for community_id, (x, y) in positions.items()
@@ -1275,10 +1201,12 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     gap_deviation = math.sqrt(sum(
         (gap - mean_gap) ** 2 for gap in angular_gaps
     ) / len(angular_gaps))
-    # Golden-angle carriers stay evenly distributed while preserving envelope clearance.
-    assert gap_deviation / mean_gap < 0.40
-    assert radial_span < 2400.0
-    assert max(x_span, y_span) < 4800.0
+    assert outer_radii[-1] / outer_radii[0] >= 2.0
+    assert gap_deviation / mean_gap >= 0.25
+    assert len({round(gap, 3) for gap in angular_gaps}) >= len(angular_gaps) // 2
+    # Envelope clearance grows a dense galaxy only as much as is geometrically necessary.
+    assert radial_span < 1200.0
+    assert max(x_span, y_span) < 2400.0
 
 
 def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
@@ -1304,8 +1232,7 @@ def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
         assert len(positions) == count
         traversal_counts.append(calls - before)
 
-    # Doubling the systems stays comfortably below quadratic growth (4x).
-    assert traversal_counts[1] < 2.6 * traversal_counts[0]
+    assert traversal_counts[1] < 2.5 * traversal_counts[0]
 
 
 def test_scene_bounds_public_support_ids_and_deduplicates_confidence():
@@ -1583,7 +1510,6 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
         "entity_rows": 40_000,
         "all_mode_nodes": 20_000,
         "all_mode_entity_nodes": 20_000,
-        "all_mode_relations": 200_000,
         "raw_relations": 200_000,
         "evidence_rows": 500_000,
         "memory_nodes": 100_000,
@@ -1831,7 +1757,7 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
 
 
 def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
@@ -1854,7 +1780,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v8-cross-system-links"
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True
@@ -3049,8 +2975,8 @@ def test_history_cache_expires_when_known_time_is_unanchored(monkeypatch):
     ({"level": "unknown"}, "level must be one of"),
     ({"seeds": ["seed"] * 65}, "too many seeds"),
     ({"min_confidence": float("nan")}, "min_confidence"),
-    ({"node_limit": 1501}, "node_limit"),
-    ({"edge_limit": 3001}, "edge_limit"),
+    ({"node_limit": 1001}, "node_limit"),
+    ({"edge_limit": 2001}, "edge_limit"),
     ({"edge_limit": -1}, "edge_limit"),
 ])
 def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
@@ -3061,15 +2987,15 @@ def test_graph_scene_direct_service_inputs_are_bounded(kwargs, message):
 
 
 
-def test_graph_scene_accepts_the_1500_node_3000_relation_overview_limit():
+def test_graph_scene_accepts_the_1000_node_2000_relation_overview_limit():
     service, _alpha, _beta, _gamma = _seed_service()
 
     scene = service.graph_scene(
-        workspace="acme", node_limit=1500, edge_limit=3000,
+        workspace="acme", node_limit=1000, edge_limit=2000,
     )
 
-    assert scene["meta"]["shown_nodes"] <= 1500
-    assert scene["meta"]["shown_edges"] <= 3000
+    assert scene["meta"]["shown_nodes"] <= 1000
+    assert scene["meta"]["shown_edges"] <= 2000
 
 
 def test_graph_scene_all_profile_keeps_exact_20k_entity_and_200k_relation_contract(monkeypatch):
@@ -3091,7 +3017,6 @@ def test_graph_scene_all_profile_keeps_exact_20k_entity_and_200k_relation_contra
     assert scene["meta"]["total_edges"] == 200_000
     assert scene["meta"]["safety_limits"]["all_mode_entity_nodes"] == 20_000
     assert scene["meta"]["safety_limits"]["all_mode_nodes"] == 20_000
-    assert scene["meta"]["safety_limits"]["all_mode_relations"] == 200_000
 
 
 def test_graph_scene_all_profile_rejects_entity_over_capacity_without_sampling(monkeypatch):
@@ -3102,21 +3027,6 @@ def test_graph_scene_all_profile_rejects_entity_over_capacity_without_sampling(m
     ))
     with pytest.raises(GraphSceneCapacityExceeded, match="all-mode entity nodes"):
         service.graph_scene(workspace="acme", level="complete", presentation="all", include_memory_nodes=False)
-
-
-def test_graph_scene_all_profile_rejects_relations_over_capacity_without_sampling(monkeypatch):
-    service, _alpha, _beta, _gamma = _seed_service()
-    edges = [object() for _index in range(200_001)]
-    monkeypatch.setattr(service, "_graph_scene_rows", lambda **_kwargs: (
-        "acme", "workspace-id", [{"id": "entity"}], edges, [], [], [], [],
-        {"generation": 1, "state": "ready"},
-    ))
-
-    with pytest.raises(GraphSceneCapacityExceeded, match="all-mode relations"):
-        service.graph_scene(
-            workspace="acme", level="complete", presentation="all",
-            include_memory_nodes=False,
-        )
 
 
 def test_graph_scene_all_profile_caps_final_nodes_after_a_code_overlay(monkeypatch):

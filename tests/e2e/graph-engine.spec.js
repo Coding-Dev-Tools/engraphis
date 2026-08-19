@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260818-v20-main-node-material-1';
+const stellarOrbitAssetVersion = '20260814-galaxy-gravity-3';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -135,8 +135,8 @@ const blackHoleGalaxyScene = {
 };
 
 /* Match the production-sized browser complaint without checking in a 542-row fixture. Sixty
-   explicit star systems with seven planets and one nested moon each, plus the black hole and
-   one core satellite, exercise both local hierarchy levels at the live/material boundary. */
+   explicit star systems with eight planets each, plus the black hole and one core satellite,
+   exercise the same live/material eligibility boundary while keeping phases deterministic. */
 function largeServedGalaxyScene() {
   const nodes = [{
     id: 'black-hole', label: 'Evidence core', gravity_mass: 64, visual_radius: 8,
@@ -163,34 +163,26 @@ function largeServedGalaxyScene() {
     const centerX = Math.cos(phase) * galacticRadius;
     const centerY = Math.sin(phase) * galacticRadius * 0.84;
     let mass = 0;
-    let moonParent = null;
     for (let member = 0; member < 9; member += 1) {
-      const localRadius = member === 0 ? 0
-        : (member === 8 ? 16 : (member === 1 ? 40 : 18 + member * 5));
+      const localRadius = member === 0 ? 0 : (member === 1 ? 40 : 18 + member * 5);
       const localPhase = phase + member * 2.399963229728653;
       const nodeId = member === 0 ? starId
-        : (member === 1 ? `${id}-planet`
-          : (member === 8 ? `${id}-moon` : `${id}-planet-${member}`));
-      const parentId = member === 8 ? moonParent.id : starId;
-      const parentX = member === 8 ? moonParent.x : centerX;
-      const parentY = member === 8 ? moonParent.y : centerY;
+        : (member === 1 ? `${id}-planet` : `${id}-planet-${member}`);
       const gravityMass = member === 0 ? 8 + system % 5 : 1 + (member % 3) * 0.25;
       mass += gravityMass;
-      const node = {
+      nodes.push({
         id: nodeId, label: nodeId, gravity_mass: gravityMass,
         visual_radius: member === 0 ? 5.5 : 2.5,
         community_id: id, anchor_role: member === 0 ? 'community' : 'none',
-        system_anchor_id: parentId, orbit_tier: member === 8 ? 2 : member,
+        system_anchor_id: starId, orbit_tier: member,
         orbit_radius: localRadius, galactic_radius: galacticRadius,
         galactic_target_radius: galacticRadius, galactic_radius_scale: 0.4,
         galactic_initial_compactness: 0.8, galactic_phase: phase,
-        x: parentX + Math.cos(localPhase) * localRadius,
-        y: parentY + Math.sin(localPhase) * localRadius,
-      };
-      nodes.push(node);
-      if (member === 7) moonParent = node;
+        x: centerX + Math.cos(localPhase) * localRadius,
+        y: centerY + Math.sin(localPhase) * localRadius,
+      });
       if (member > 0) edges.push({
-        id: `${starId}-orbit-${member}`, source: parentId, target: nodeId,
+        id: `${starId}-orbit-${member}`, source: starId, target: nodeId,
         relation: 'orbits', rest_length: localRadius, spring_strength: 0.08,
       });
     }
@@ -534,22 +526,17 @@ async function renderedSystemEnvelopeSnapshot(page) {
       return { id: String(star.id), x: point.x, y: point.y, radius, visible,
         pixelsPerGraphUnit: Math.hypot(unit.x - point.x, unit.y - point.y), members: members.length };
     });
-    let minimumClearance = Infinity, overlaps = 0, worstPair = null;
+    let minimumClearance = Infinity, overlaps = 0;
     for (let left = 0; left < systems.length; left += 1) for (let right = left + 1;
       right < systems.length; right += 1) {
       const a = systems[left], b = systems[right];
       // The runtime gap is eight graph units, converted using the smaller local screen scale.
       const clearance = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
       const required = 8 * Math.min(a.pixelsPerGraphUnit, b.pixelsPerGraphUnit);
-      const margin = clearance - required;
-      if (margin < minimumClearance) {
-        minimumClearance = margin;
-        worstPair = { ids: [a.id, b.id], clearance, required, margin,
-          radii: [a.radius, b.radius] };
-      }
+      minimumClearance = Math.min(minimumClearance, clearance - required);
       if (clearance < required - .75) overlaps += 1;
     }
-    return { systems, minimumClearance, overlaps, worstPair,
+    return { systems, minimumClearance, overlaps,
       finite: systems.every(system => [system.x, system.y, system.radius,
         system.pixelsPerGraphUnit].every(Number.isFinite)) };
   });
@@ -887,7 +874,7 @@ async function orbitalSeparationTrial(page, separation, stepCount = 8) {
     const auroraPlanet = trialScene.nodes.find(node => node.id === 'aurora-planet');
     trialScene.nodes.push({
       id: 'aurora-moon', label: 'Aurora moon', gravity_mass: 1, visual_radius: 8,
-      community_id: 'aurora', anchor_role: 'none', system_anchor_id: 'aurora-planet',
+      community_id: 'aurora', anchor_role: 'none', system_anchor_id: 'aurora-star',
       orbit_tier: 2, orbit_radius: 19.2, galactic_radius: auroraPlanet.galactic_radius,
       galactic_target_radius: auroraPlanet.galactic_target_radius,
       galactic_radius_scale: auroraPlanet.galactic_radius_scale,
@@ -1747,9 +1734,9 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 48, repel: 100, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 48, repel: 60, link: 8,
       });
-      expect(diagnostics.orbitalSeparationSetting).toBe(100);
+      expect(diagnostics.orbitalSeparationSetting).toBe(60);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
       expect(diagnostics.orbitalSeparationStrength).toBe(1);
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
@@ -1758,7 +1745,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.gravitySetting).toBe(48);
       expect(diagnostics.blackHoleGravity).toBeCloseTo(240, 12);
       expect(diagnostics.localGravity).toBeCloseTo(120, 12);
-      expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
+      expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(18, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
       expect(assetRequests).toHaveLength(1);
@@ -1767,9 +1754,7 @@ for (const reducedMotion of [false, true]) {
       const servedAsset = await page.request.get(assetUrl.href);
       expect(servedAsset.ok()).toBe(true);
       const servedSource = await servedAsset.text();
-      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;');
-      expect(servedSource).toContain('const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;');
-      expect(servedSource).toContain('const BASE_NODE_RADIUS_SCALE = 1.2;');
+      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;');
       expect(servedSource).toContain('preserveSystemRadii: true,');
       expect(session.pageErrors).toEqual([]);
     });
@@ -1788,16 +1773,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       && window.__engraphisGraph.physicsDiagnostics().active
       && window.__engraphisGraph.physicsDiagnostics().steps >= 5);
 
-    const massSteps = await page.evaluate(() => {
-      const massControl = document.getElementById('graph-black-hole-mass');
-      const samples = [160, 170, 180].map(value => {
-        massControl.value = String(value);
-        massControl.dispatchEvent(new Event('input', { bubbles: true }));
-        return {
-          control: value,
-          multiplier: window.__engraphisGraph.state().settings.blackHoleMass,
-        };
-      });
+    await page.evaluate(() => {
       const values = {
         'graph-gravitational-constant': '150',
         'graph-local-gravitational-constant': '125',
@@ -1810,15 +1786,9 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
         control.value = value;
         control.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      return samples;
     });
-    expect(massSteps).toEqual([
-      { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.1 },
-      { control: 180, multiplier: 1.2 },
-    ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 1.5, blackHoleMass: 1.8,
+      .toMatchObject({ gravitationalConstant: 1.5, blackHoleMass: 1.5,
         localGravitationalConstant: 1.25, damping: 2, springStiffness: 2, orbitPaused: false });
 
     await page.locator('#graph-orbits-pause').click();
@@ -2013,14 +1983,9 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
       const visibilityDebug = samples.map(sample => {
         const invisible = new Set(sample.envelopes.systems.filter(system => !system.visible)
           .map(system => system.id));
-        const worstIds = new Set(sample.envelopes.worstPair?.ids || []);
         return { steps: sample.global.diagnostics.steps,
           packing: sample.global.diagnostics.systemPacking,
           support: sample.global.diagnostics.carrierOrbitSupport,
-          overlaps: sample.envelopes.overlaps,
-          minimumClearance: sample.envelopes.minimumClearance,
-          worstPair: sample.envelopes.worstPair,
-          worstBodies: sample.global.members.filter(body => worstIds.has(body.id)),
           invisible: [...invisible], carriers: sample.global.members.filter(body =>
             invisible.has(String(body.id))).map(body => ({
             id: body.id, radius: body.radius, angle: body.angle, tangent: body.tangent,
@@ -2301,9 +2266,9 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
 
 for (const reducedMotion of [false, true]) {
   const preference = reducedMotion ? 'reduced motion' : 'normal motion';
-  test(`served Galaxy keeps every local member orbiting its authored parent in ${preference}`,
+  test(`served Galaxy keeps every local member orbiting its star in ${preference}`,
     async ({ page }, testInfo) => {
-      test.setTimeout(90_000);
+      test.setTimeout(50_000);
       await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
       await openDashboard(page, { graphScene: servedLargeGalaxyScene });
       await page.goto('/');
@@ -2351,9 +2316,9 @@ for (const reducedMotion of [false, true]) {
         contentType: 'application/json',
       });
 
-      // 60 systems × (7 planets + 1 nested moon) + the core black-hole satellite: neither
-      // hierarchy level may be omitted. Keep this exact count so filtering cannot make the
-      // assertion vacuous.
+      // 60 systems × 8 planets + the core black-hole satellite: no member is allowed to be
+      // omitted from the local orbit pass. Keep this exact fixture count so a filter change
+      // cannot make the assertion vacuous.
       expect(before.members).toHaveLength(481);
       expect(after.members).toHaveLength(481);
       expect(before.finite && after.finite).toBe(true);
@@ -3123,10 +3088,10 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   const baseline = await gravityTrial(page, 48);
   const strong = await gravityTrial(page, 200);
-  const naturalOrbits = await orbitalSeparationTrial(page, 100);
-  const fastOrbits = await orbitalSeparationTrial(page, 400, 16);
+  const compactOrbits = await orbitalSeparationTrial(page, 0);
+  const separatedOrbits = await orbitalSeparationTrial(page, 120, 16);
   await testInfo.attach('orbital-speed-convergence.json', {
-    body: Buffer.from(JSON.stringify({ naturalOrbits, fastOrbits }, null, 2)),
+    body: Buffer.from(JSON.stringify({ compactOrbits, separatedOrbits }, null, 2)),
     contentType: 'application/json',
   });
   const immediate = await page.evaluate(scene => {
@@ -3200,34 +3165,39 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
   expect(strong.before.diagnostics.localGravity).toBe(120);
-  expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
-  expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
-  expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);
-  expect(naturalOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
-  expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
-  expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
-  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(4.6, 12);
-  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.24, 12);
-  expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
-  expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
-  expect(fastOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
-  expect(fastOrbits.maximumSeparations).toBeGreaterThan(0);
-  expect(fastOrbits.starPlanetBefore).toBeGreaterThan(naturalOrbits.starPlanetBefore);
-  expect(fastOrbits.starPlanetBefore).toBeCloseTo(
-    naturalOrbits.starPlanetBefore * 1.24, 6,
+  expect(compactOrbits.before.diagnostics.orbitalSeparationSetting).toBe(0);
+  expect(compactOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(0.5);
+  expect(compactOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(0.94, 12);
+  expect(compactOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
+  expect(compactOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
+  expect(separatedOrbits.before.diagnostics.orbitalSeparationSetting).toBe(120);
+  expect(separatedOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1.5);
+  expect(separatedOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.06, 12);
+  expect(separatedOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
+  expect(separatedOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
+  expect(separatedOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
+  expect(separatedOrbits.maximumSeparations).toBeGreaterThan(0);
+  expect(separatedOrbits.starPlanetBefore).toBeGreaterThan(compactOrbits.starPlanetBefore);
+  expect(separatedOrbits.starPlanetBefore).toBeCloseTo(
+    compactOrbits.starPlanetBefore * (1.06 / 0.94), 6,
   );
   // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
   // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
-  expect(fastOrbits.starPlanetAfter).toBeGreaterThan(naturalOrbits.starPlanetAfter);
-  expect(fastOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
-  expect(Math.max(...fastOrbits.corrections.slice(-4))).toBeLessThan(
-    Math.max(...fastOrbits.corrections.slice(0, 4)) * 0.05,
+  expect(separatedOrbits.starPlanetAfter).toBeGreaterThan(compactOrbits.starPlanetAfter);
+  expect(separatedOrbits.minimumSystemAnchorClearance).toBeGreaterThanOrEqual(0);
+  expect(Math.max(...separatedOrbits.corrections.slice(-4))).toBeLessThan(
+    Math.max(...separatedOrbits.corrections.slice(0, 4)) * 0.05,
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-  // Forced inward convergence is disabled at every gravity setting; the circular carrier field
-  // and permanent lanes own density without collapsing the disk toward the black hole.
-  expect(physicalField.densityFactors).toEqual([1, 1, 1, 1]);
+  // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
+  // the central field and inward convergence grow with the Galaxy setting.
+  expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[1]).toBeLessThan(physicalField.densityFactors[0]);
+  expect(physicalField.densityFactors[2]).toBeCloseTo(0.75 ** 0.68, 12);
+  expect(physicalField.densityFactors[3]).toBeCloseTo(
+    0.75 ** (11.430769230769231 * 0.68), 12,
+  );
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
     // Updating gravity alters carrier support, never teleports a solar system inward.
