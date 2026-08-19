@@ -111,20 +111,19 @@
       state.scopedRequests[kind] = number(state.scopedRequests[kind]) + 1;
     });
   };
-  const GRAPH_INITIAL_NODE_LIMIT = 1500;
-  const GRAPH_INITIAL_EDGE_LIMIT = 3000;
+  const GRAPH_INITIAL_NODE_LIMIT = 1000;
+  const GRAPH_INITIAL_EDGE_LIMIT = 2000;
   const GRAPH_ALL_NODE_LIMIT = 20_000;
-  const GRAPH_ALL_EDGE_LIMIT = 200_000;
-  const GRAPH_LOAD_TIMEOUT_MS = 60_000;
+  const GRAPH_LOAD_TIMEOUT_MS = 12_000;
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 4;
+  const GRAPH_PHYSICS_VERSION = 2;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
-    { id: 'graph-repel', key: 'repel', fallback: 100 },
+    { id: 'graph-repel', key: 'repel', fallback: 60 },
     { id: 'graph-link', key: 'link', fallback: 8 },
     { id: 'graph-gravity', key: 'gravity', fallback: 48 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
@@ -143,7 +142,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 100, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 60, link: 8, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -422,7 +421,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3'),
+        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2'),
         'EngraphisAllGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -435,10 +434,17 @@
   }
 
   function ensureGraphAssets(loadAll = false) {
-    /* The complete All Nodes profile is an independent worker/WebGL renderer in every visual
-       preset, including Galaxy. Keeping this boundary strict prevents a complete 20k/200k
-       payload from entering the live High quality physics engine. */
-    if (loadAll) return ensureGraphAllAsset();
+    /* The complete profile is an independent worker/WebGL renderer. Galaxy is the exception:
+       its solar-system view needs the authoritative hierarchical orbit integrator, so a full
+       Galaxy request uses the quality engine with the complete payload instead of the static
+       all-node worker. Other full presets retain the worker/WebGL path and its 20k-node cap. */
+    if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();
+    if (loadAll && graphIsGalaxy()) {
+      /* Load both candidates before the complete scene arrives. The factory decision below is
+         data-sensitive: an ordinary graph that merely uses the Galaxy preset keeps the worker,
+         while an authored star/planet scene gets the live hierarchical engine. */
+      return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
+    }
     const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
     if (!coreReady && !graphAssetsPromise) {
       const controller = new AbortController();
@@ -449,7 +455,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260818-v20-main-node-material-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2277,7 +2283,7 @@
         ? 'Filter by exact repository name…'
         : 'Filter to a repository or topic…';
       repoFilter.title = full
-        ? 'All Nodes accepts an exact repository name from this workspace.'
+        ? 'All nodes accepts an exact repository name from this workspace.'
         : '';
     }
     if (repoLabel) repoLabel.textContent = full
@@ -2291,7 +2297,7 @@
     all('[data-graph-layer="code"]').forEach(control => {
       control.disabled = false;
       control.title = full
-        ? 'Choose an exact repository first, then add its code overlay within the All Nodes capacity.'
+        ? 'Choose an exact repository first, then add its code overlay within the All-node capacity.'
         : '';
     });
     const lodNote = byId('graph-lod-note');
@@ -2308,9 +2314,9 @@
     byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'High quality'} · ${preset}`;
     const toggle = byId('graph-show-all');
     if (toggle) {
-      toggle.textContent = full ? 'High quality' : 'See all nodes · LOD';
+      toggle.textContent = full ? 'High quality' : 'Show all nodes';
       toggle.setAttribute('aria-pressed', String(full));
-      toggle.title = full ? 'Return to the High quality graph' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entities and ${GRAPH_ALL_EDGE_LIMIT.toLocaleString()} relationships with progressive LOD rendering`;
+      toggle.title = full ? 'Return to the high-quality graph view' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entity nodes with progressive level-of-detail rendering`;
     }
   }
 
@@ -2452,17 +2458,6 @@
     }, { orbitPaused: state.graphOrbitPaused });
   }
 
-  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
-  function graphBlackHoleMassMultiplier(controlValue) {
-    const value = number(controlValue);
-    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
-       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
-       Local stellar wells remain owned exclusively by Local solar gravity. */
-    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
-      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
-      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
-  }
-
   function graphSpacetimeSettings() {
     /* The control surface is expressed in intelligible 0–200 / 20–500 ranges while the
        integrator uses dimensionless multipliers. These baseline divisors are deliberate:
@@ -2470,7 +2465,7 @@
     const controls = graphSpacetimeControlSettings();
     return {
       gravitationalConstant: controls.gravitationalConstant / 100,
-      blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
+      blackHoleMass: controls.blackHoleMass / 160,
       localGravitationalConstant: controls.localGravitationalConstant / 100,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
@@ -2646,39 +2641,22 @@
       && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < GRAPH_PHYSICS_VERSION);
     const effectiveTuning = savedTuning && typeof savedTuning === 'object'
       ? { ...savedTuning } : {};
-    const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
-    /* A failed physics-control experiment could persist every attractive force at its maximum,
-       friction at zero, and the Galaxy spacing control at 400. That exact vector is not a
-       useful custom preset: it collapses the visible graph and can reduce hundreds of loaded
-       entities to a small central knot. Physics v3 resets only this known-bad snapshot. */
-    const staleMaxedPhysics = legacyPhysics && Number(effectiveTuning.gravity) === 400
-      && Number(savedSpacetimeTuning && savedSpacetimeTuning.gravitationalConstant) === 200
-      && Number(savedSpacetimeTuning && savedSpacetimeTuning.blackHoleMass) === 500
-      && Number(savedSpacetimeTuning && savedSpacetimeTuning.localGravitationalConstant) === 200
-      && Number(savedSpacetimeTuning && savedSpacetimeTuning.damping) === 0
-      && Number(savedSpacetimeTuning && savedSpacetimeTuning.springStiffness) === 100;
-    if (staleMaxedPhysics) {
-      delete effectiveTuning.repel;
-      delete effectiveTuning.link;
-      delete effectiveTuning.gravity;
-    }
-    /* Older preferences persisted 48 and then 60 as Galaxy's default orbital speed. Physics v4
-       defines the control as a percentage with 100 as neutral, so migrate only those exact
-       retired defaults. Every other custom speed and every unrelated preference remains intact. */
-    if (legacyPhysics && preset === 'galaxy'
-      && [48, 60].includes(Number(effectiveTuning.repel))) {
-      effectiveTuning.repel = 100;
+    /* Version-one preferences persisted the retired Galaxy default as if it were a custom
+       choice. Migrate only that exact old default; a deliberate Gravity 0 or any custom
+       spacing/style/layer remains untouched. Once versioned, a later user-selected 48 stays 48. */
+    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.repel) === 48) {
+      effectiveTuning.repel = 60;
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),
       ...effectiveTuning,
     });
+    const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
     /* Pause orbits is deliberately session-only. Old snapshots may contain orbitPaused=true;
        ignore it so a fresh dashboard always starts with live galactic motion. */
     state.graphOrbitPaused = false;
     syncGraphSpacetimeTuning({
-      ...(!staleMaxedPhysics && savedSpacetimeTuning
-        && typeof savedSpacetimeTuning === 'object'
+      ...(savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
         ? savedSpacetimeTuning : {}),
       orbitPaused: false,
     });
@@ -2692,8 +2670,7 @@
     const savedAsOf = graphPreference('asOf', '');
     byId('graph-as-of').value = typeof savedAsOf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(savedAsOf)
       ? savedAsOf : '';
-    setGraphShowUnlinked(staleMaxedPhysics
-      || graphPreference('showUnlinked', state.graphShowUnlinked) === true);
+    setGraphShowUnlinked(graphPreference('showUnlinked', state.graphShowUnlinked) === true);
     byId('graph-bridges').checked = graphPreference('bridges', byId('graph-bridges').checked) === true;
     byId('graph-collapse').checked = graphPreference('collapse', byId('graph-collapse').checked) === true;
     byId('graph-ghosts').checked = graphPreference('ghosts', byId('graph-ghosts').checked) !== false;
@@ -2895,7 +2872,7 @@
       nodes: graph.nodes,
       links: graph.links,
     };
-    // Pretty-print normal exports for readability. An All Nodes payload stays compact
+    // Pretty-print normal exports for readability. A 20k/200k all-node payload stays compact
     // to avoid the indentation expansion and extra main-thread work at the release limit.
     const indentation = state.graphMode === 'full' ? undefined : 2;
     downloadGraphFile(new Blob([JSON.stringify(payload, null, indentation)], { type: 'application/json' }), 'engraphis-graph.json');
@@ -3100,7 +3077,7 @@
     byId('graph-canvas').setAttribute('aria-busy', 'true');
     byId('graph-empty').hidden = false;
     byId('graph-empty').textContent = fullGraph
-      ? 'Loading all nodes with progressive level of detail…'
+      ? 'Loading every available graph node…'
       : 'Loading the responsive evidence graph…';
     const task = (async () => {
       const assets = ensureGraphAssets(fullGraph);
@@ -3190,14 +3167,20 @@
           state.graphSpacetimeOverlay = null;
         }
         if (state.graphEngine) state.graphEngine.destroy();
-        const graphFactory = fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
+        const galaxyQuality = fullGraph && graphIsGalaxy()
+          && data.nodes.some(node => node.anchor_role === 'community'
+            && (node.system_anchor_id !== undefined
+              || Number.isFinite(Number(node.galactic_radius))));
+        const graphFactory = galaxyQuality ? window.EngraphisGraph
+          : fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
         if (!graphFactory || typeof graphFactory.create !== 'function') {
           throw new Error(fullGraph
-            ? 'All Nodes LOD graph engine asset is unavailable'
+            ? galaxyQuality ? 'Galaxy graph engine is unavailable'
+              : 'all-node graph engine asset is unavailable'
             : 'graph engine asset is unavailable');
         }
         state.graphEngine = graphFactory.create(byId('graph-canvas'), {
-          renderMode: fullGraph ? 'all' : 'overview',
+          renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview',
           onNodeClick: item => openGraphConnections(item),
           onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
           onStats: stats => {
@@ -3211,8 +3194,8 @@
               || state.graphMode !== 'full') return;
             byId('graph-empty').hidden = false;
             byId('graph-empty').textContent = error && error.code === 'GRAPH_CAPACITY'
-              ? `All nodes exceed renderer capacity. Narrow by repository or entity type. (${error.message})`
-              : 'The All Nodes renderer stopped. Choose Reload data to start a fresh worker.';
+              ? `All nodes exceed renderer capacity. Narrow by repository or entity type, or reduce the workspace graph. (${error.message})`
+              : 'The all-node renderer stopped. Choose Reload data to start a fresh worker.';
             byId('graph-canvas').setAttribute('aria-busy', 'false');
           },
           onCollapseChange: collapsed => {
@@ -3254,7 +3237,7 @@
           graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
-        if (!fullGraph && window.EngraphisSpacetime
+        if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime
           && window.EngraphisSpacetime.create) {
           state.graphSpacetimeOverlay = window.EngraphisSpacetime.create(
             byId('graph-canvas'), state.graphEngine
@@ -3274,7 +3257,7 @@
         byId('graph-empty').textContent = error && error.name === 'AbortError'
           ? `${fullGraph ? 'All-node graph' : 'High-quality graph'} loading timed out. Choose Retry to try again.`
           : fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
-            ? `All nodes exceed the 20,000-entity or 200,000-relationship capacity. Narrow by repository or entity type. (${error.message})`
+            ? `All nodes exceed the server capacity. Narrow by repository or entity type, or reduce the workspace graph. (${error.message})`
           : `Graph unavailable: ${error.message}`;
       } finally {
         window.clearTimeout(timeout);

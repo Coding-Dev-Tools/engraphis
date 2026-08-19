@@ -246,11 +246,8 @@ MAX_IMPORT_TOTAL_BYTES = 250_000_000
 MAX_GRAPH_ANALYSIS_ENTITIES = 40_000
 MAX_GRAPH_ANALYSIS_EDGES = 200_000
 MAX_GRAPH_ANALYSIS_SUPPORTS = 500_000
-# The independent progressive LOD renderer is intentionally much larger than the responsive
-# High quality renderer. These are refusal ceilings for the complete All Nodes projection,
-# not the 1,500/3,000 High quality request limits.
+# Explicit all-node rendering refuses to sample beyond this final node capacity.
 MAX_GRAPH_ALL_NODES = 20_000
-MAX_GRAPH_ALL_EDGES = 200_000
 # Complete scenes are intentionally not representative samples.  These are hard
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
@@ -9097,11 +9094,11 @@ class MemoryService:
         clean_depth = bounded_int(depth, "depth", 0, 2)
         clean_min_support = bounded_int(min_support, "min_support", 0, 1_000_000)
         clean_node_limit = (
-            bounded_int(node_limit, "node_limit", 1, 1500)
+            bounded_int(node_limit, "node_limit", 1, 1000)
             if node_limit is not None else None
         )
         clean_edge_limit = (
-            bounded_int(edge_limit, "edge_limit", 0, 3000)
+            bounded_int(edge_limit, "edge_limit", 0, 2000)
             if edge_limit is not None else None
         )
         if clean_level == "complete" and (
@@ -9191,11 +9188,6 @@ class MemoryService:
                 resource="all-mode entity nodes", count=len(entities),
                 limit=MAX_GRAPH_ALL_NODES,
             )
-        if clean_presentation == "all" and len(edges) > MAX_GRAPH_ALL_EDGES:
-            raise GraphSceneCapacityExceeded(
-                resource="all-mode relations", count=len(edges),
-                limit=MAX_GRAPH_ALL_EDGES,
-            )
         selected_layers = set(clean_layers) if clean_layers is not None else None
         selected_relations = set(clean_relations) or None
         filters = {
@@ -9241,11 +9233,6 @@ class MemoryService:
                 resource="all-mode nodes", count=len(scene.get("nodes", [])),
                 limit=MAX_GRAPH_ALL_NODES,
             )
-        if clean_presentation == "all" and len(scene.get("edges", [])) > MAX_GRAPH_ALL_EDGES:
-            raise GraphSceneCapacityExceeded(
-                resource="all-mode relations", count=len(scene.get("edges", [])),
-                limit=MAX_GRAPH_ALL_EDGES,
-            )
         scene["meta"]["query_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         scene["meta"]["cache_hit"] = False
         if clean_level == "complete":
@@ -9253,7 +9240,6 @@ class MemoryService:
                 "entity_rows": MAX_GRAPH_ANALYSIS_ENTITIES,
                 "all_mode_entity_nodes": MAX_GRAPH_ALL_NODES,
                 "all_mode_nodes": MAX_GRAPH_ALL_NODES,
-                "all_mode_relations": MAX_GRAPH_ALL_EDGES,
                 "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
                 "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
                 "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,
