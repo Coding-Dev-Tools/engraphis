@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any, Optional
 
 from engraphis.backends.model_source import validate_model_source
@@ -29,7 +30,8 @@ class CrossEncoderReranker:
 
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", *,
                  revision: Optional[str] = None,
-                 require_immutable_models: Optional[bool] = None) -> None:
+                 require_immutable_models: Optional[bool] = None,
+                 batch_size: int = 32) -> None:
         validate_model_source(
             model_name,
             revision,
@@ -49,6 +51,8 @@ class CrossEncoderReranker:
         if local_files_only:
             kwargs["local_files_only"] = True
         self.model = CrossEncoder(resolved_model_name, **kwargs)
+        self._batch_size = batch_size
+        self._predict_lock = threading.Lock()
 
     def rerank(self, query: str, candidates: list[Candidate], k: int) -> list[Candidate]:
         if not candidates:
@@ -58,7 +62,8 @@ class CrossEncoderReranker:
             for c in candidates
         ]
         try:
-            scores = list(self.model.predict(pairs))
+            with self._predict_lock:
+                scores = list(self.model.predict(pairs, batch_size=self._batch_size))
         except (TypeError, ValueError) as exc:
             raise RuntimeError("cross-encoder returned malformed scores") from exc
         if len(scores) != len(candidates):
@@ -79,8 +84,15 @@ def get_reranker(
     *,
     revision: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
+    require_exact: bool = False,
+    batch_size: int = 32,
 ) -> Reranker:
-    """Return a cross-encoder reranker if a model is given and loads, else identity."""
+    """Return a cross-encoder reranker if a model is given and loads, else identity.
+
+    Args:
+        require_exact: When True, raise an error if the configured model is unavailable
+            instead of falling back to the identity reranker.
+    """
     if model_name:
         # Policy errors stay outside the optional-loader fallback: strict mode must
         # reject a mutable remote source rather than quietly disabling reranking.
@@ -95,10 +107,17 @@ def get_reranker(
                 model_name,
                 revision=revision,
                 require_immutable_models=require_immutable_models,
+                batch_size=batch_size,
             )
         except Exception as exc:  # noqa: BLE001 - optional dependency fallback
             # Third-party loader errors can include credentials, signed URLs, local
             # paths, and model identifiers. Keep diagnostics actionable but redacted.
+            if require_exact:
+                raise RuntimeError(
+                    f"Configured cross-encoder reranker is unavailable "
+                    f"({type(exc).__name__}) and require_exact_backends=True prevents "
+                    f"fallback to identity reranker"
+                ) from None
             logger.warning(
                 "Configured cross-encoder reranker unavailable (%s); using identity reranker",
                 type(exc).__name__,

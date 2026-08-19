@@ -246,8 +246,11 @@ MAX_IMPORT_TOTAL_BYTES = 250_000_000
 MAX_GRAPH_ANALYSIS_ENTITIES = 40_000
 MAX_GRAPH_ANALYSIS_EDGES = 200_000
 MAX_GRAPH_ANALYSIS_SUPPORTS = 500_000
-# Explicit all-node rendering refuses to sample beyond this final node capacity.
+# The independent progressive LOD renderer is intentionally much larger than the responsive
+# High quality renderer. These are refusal ceilings for the complete All Nodes projection,
+# not the 1,500/3,000 High quality request limits.
 MAX_GRAPH_ALL_NODES = 20_000
+MAX_GRAPH_ALL_EDGES = 200_000
 # Complete scenes are intentionally not representative samples.  These are hard
 # refusal ceilings, not render caps: callers receive an explicit capacity error rather
 # than a silently incomplete chart.
@@ -1140,9 +1143,14 @@ class MemoryService:
     """High-level, validated operations over a single Engraphis database."""
 
     def __init__(self, engine: MemoryEngine, *,
-                 allowed_workspaces: Optional[list] = None) -> None:
+                 allowed_workspaces: Optional[list] = None,
+                 owned_connector: Optional[Any] = None) -> None:
         self.engine = engine
         self.store = engine.store
+        # Connector created by MemoryService.create() — closed in close() so the
+        # SQLCipher key pragma doesn't outlive the service. None means the caller
+        # injected a connector and owns its lifecycle.
+        self._owned_connector = owned_connector
         # Server-side workspace binding (the hard isolation boundary). None means
         # unrestricted (single-tenant local default); a non-empty set means every scoped
         # read/write must target one of these workspaces — see ``_authorize_workspace``.
@@ -1220,12 +1228,28 @@ class MemoryService:
                     f"{len(alive)} graph index worker(s) did not stop before shutdown"
                 )
 
-            close_engine = getattr(self.engine, "close", None)
-            if callable(close_engine):
-                close_engine()
-            else:
-                self.store.close()
-            self._closed = True
+            # The owned connector must be closed even when engine shutdown raises
+            # (e.g. a backend cleanup failure). try/finally guarantees the key
+            # pragma is cleared regardless of the engine close path.
+            try:
+                close_engine = getattr(self.engine, "close", None)
+                if callable(close_engine):
+                    close_engine()
+                else:
+                    self.store.close()
+            finally:
+                # Close the encrypted connector we created (if any) so the SQLCipher
+                # key pragma is cleared from memory. Injected connectors are owned
+                # by the caller and must not be closed here.
+                connector = self._owned_connector
+                if connector is not None:
+                    close_conn = getattr(connector, "close", None)
+                    if callable(close_conn):
+                        try:
+                            close_conn()
+                        except Exception:  # noqa: BLE001
+                            pass
+                self._closed = True
 
     def _graph_scene_revision(self) -> tuple[int, int, int]:
         row = self.store.conn.execute("PRAGMA data_version").fetchone()
@@ -1335,7 +1359,8 @@ class MemoryService:
                graph_extractor: Optional[str] = None,
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
-               query_planner=None, read_only: bool = False) -> "MemoryService":
+               query_planner=None, read_only: bool = False,
+               require_exact_backends: bool = False) -> "MemoryService":
         database_path = str(db_path)
         physical_db_path = _physical_database_path(database_path)
         migration_allowed = (
@@ -1378,13 +1403,15 @@ class MemoryService:
             retention_supervisor=retention_supervisor, connect=connect,
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
+            require_exact_backends=require_exact_backends,
         )
         if migration_allowed:
             try:
                 _warn_if_db_empty_with_populated_sibling(physical_db_path)
             except Exception:  # noqa: BLE001 — diagnostics never block startup
                 pass
-        return cls(engine, allowed_workspaces=allowed_workspaces)
+        return cls(engine, allowed_workspaces=allowed_workspaces,
+                   owned_connector=connect)
 
     # ── name → id resolution ───────────────────────────────────────────────────
     def _lookup_workspace(self, name: str) -> Optional[str]:
@@ -9070,11 +9097,11 @@ class MemoryService:
         clean_depth = bounded_int(depth, "depth", 0, 2)
         clean_min_support = bounded_int(min_support, "min_support", 0, 1_000_000)
         clean_node_limit = (
-            bounded_int(node_limit, "node_limit", 1, 1000)
+            bounded_int(node_limit, "node_limit", 1, 1500)
             if node_limit is not None else None
         )
         clean_edge_limit = (
-            bounded_int(edge_limit, "edge_limit", 0, 2000)
+            bounded_int(edge_limit, "edge_limit", 0, 3000)
             if edge_limit is not None else None
         )
         if clean_level == "complete" and (
@@ -9164,6 +9191,11 @@ class MemoryService:
                 resource="all-mode entity nodes", count=len(entities),
                 limit=MAX_GRAPH_ALL_NODES,
             )
+        if clean_presentation == "all" and len(edges) > MAX_GRAPH_ALL_EDGES:
+            raise GraphSceneCapacityExceeded(
+                resource="all-mode relations", count=len(edges),
+                limit=MAX_GRAPH_ALL_EDGES,
+            )
         selected_layers = set(clean_layers) if clean_layers is not None else None
         selected_relations = set(clean_relations) or None
         filters = {
@@ -9209,6 +9241,11 @@ class MemoryService:
                 resource="all-mode nodes", count=len(scene.get("nodes", [])),
                 limit=MAX_GRAPH_ALL_NODES,
             )
+        if clean_presentation == "all" and len(scene.get("edges", [])) > MAX_GRAPH_ALL_EDGES:
+            raise GraphSceneCapacityExceeded(
+                resource="all-mode relations", count=len(scene.get("edges", [])),
+                limit=MAX_GRAPH_ALL_EDGES,
+            )
         scene["meta"]["query_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         scene["meta"]["cache_hit"] = False
         if clean_level == "complete":
@@ -9216,6 +9253,7 @@ class MemoryService:
                 "entity_rows": MAX_GRAPH_ANALYSIS_ENTITIES,
                 "all_mode_entity_nodes": MAX_GRAPH_ALL_NODES,
                 "all_mode_nodes": MAX_GRAPH_ALL_NODES,
+                "all_mode_relations": MAX_GRAPH_ALL_EDGES,
                 "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
                 "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
                 "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,

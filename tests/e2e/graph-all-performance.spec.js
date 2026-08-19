@@ -2,7 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 test('All-node controls filter, collapse, reflow, freeze, and expose directional flow', async ({ page }) => {
   await page.goto('/');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260818-all-nodes-lod-5' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.style.cssText = 'position:fixed;inset:20px;width:900px;height:600px';
@@ -78,7 +78,7 @@ test('20k-node all profile paints progressively and stays responsive after hando
     return { supported: true, renderer: debug ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) || '') : '' };
   });
   test.skip(!gpu.supported || /swiftshader|llvmpipe|software renderer/i.test(gpu.renderer), 'All-node performance target requires hardware-accelerated WebGL2');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260818-all-nodes-lod-5' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.className = 'graph-network';
@@ -121,4 +121,87 @@ test('20k-node all profile paints progressively and stays responsive after hando
   expect(result.settled.links).toBe(200000);
   expect(result.settled.drawn).toBeLessThanOrEqual(75000);
   expect(result.longTasks.filter(duration => duration > 50)).toEqual([]);
+});
+
+test('canonical 3229-node Galaxy projection keeps the global anchor and stays drawable', async ({ page }) => {
+  await page.goto('/');
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260818-all-nodes-lod-5' });
+  const result = await page.evaluate(async () => {
+    const host = document.createElement('div'); host.style.cssText = 'position:fixed;inset:0;width:900px;height:600px'; document.body.append(host);
+    const nodes = Array.from({ length: 3229 }, (_value, index) => index === 0
+      ? { id: 'black-hole', anchor_role: 'global', gravity_mass: 1000, x: 0, y: 0 }
+      : { id: `n-${index}`, anchor_role: 'none', gravity_mass: index % 17 + 1, x: 1200 + index * 0.4, y: (index % 31) * 7 - 100 });
+    window.__allClicked = null; window.__allHovered = null;
+    const engine = window.EngraphisAllGraph.create(host, {
+      reducedMotion: () => true,
+      onHover: node => { window.__allHovered = node && node.id; },
+      onNodeClick: node => { window.__allClicked = node && node.id; },
+    });
+    window.__allEngine = engine; window.__allHost = host;
+    engine.setData({ nodes, links: [], meta: { canonical_positions: true } });
+    const deadline = Date.now() + 10000;
+    while (engine.state().nodeCount !== 3229 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    engine.fit();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const state = engine.state(), center = engine.graphToScreen(0, 0);
+    const box = host.getBoundingClientRect();
+    const snapshot = engine.getPhysicsSnapshot().nodes;
+    const blackHole = snapshot.find(node => node.id === 'black-hole');
+    const ordinary = snapshot.find(node => node.id !== 'black-hole');
+    return { state, center: { x: box.left + center.x, y: box.top + center.y },
+      blackHoleRadius: blackHole && blackHole.radius,
+      ordinaryRadius: ordinary && ordinary.radius,
+      canvases: host.querySelectorAll('canvas').length };
+  });
+  expect(result.state.nodeCount).toBe(3229);
+  expect(result.state.canonicalPositions).toBe(true);
+  expect(result.state.visibleNodeCount).toBeGreaterThanOrEqual(3077);
+  expect(result.center.x).toBeGreaterThan(300);
+  expect(result.center.x).toBeLessThan(600);
+  expect(result.canvases).toBe(2);
+  expect(result.blackHoleRadius).toBeGreaterThanOrEqual(result.ordinaryRadius * 2);
+  await page.mouse.move(result.center.x, result.center.y);
+  await expect.poll(() => page.evaluate(() => window.__allHovered)).toBe('black-hole');
+  await page.mouse.click(result.center.x, result.center.y);
+  await expect.poll(() => page.evaluate(() => window.__allClicked)).toBe('black-hole');
+  await page.evaluate(() => { window.__allEngine.destroy(); window.__allHost.remove(); });
+});
+
+test('Canvas fallback keeps the complete canonical projection readable and centered', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function getContext(kind, ...args) {
+      if (kind === 'webgl2') return null;
+      return original.call(this, kind, ...args);
+    };
+  });
+  await page.goto('/');
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260818-all-nodes-lod-5' });
+  const report = await page.evaluate(async () => {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;inset:0;width:900px;height:600px';
+    document.body.append(host);
+    const nodes = Array.from({ length: 918 }, (_value, index) => index === 0
+      ? { id: 'black-hole', anchor_role: 'global', gravity_mass: 1000, x: 0, y: 0 }
+      : { id: `n-${index}`, gravity_mass: index % 11 + 1,
+        x: Math.cos(index * 2.399963) * (80 + index * 0.28),
+        y: Math.sin(index * 2.399963) * (80 + index * 0.28) });
+    const engine = window.EngraphisAllGraph.create(host, { reducedMotion: () => true });
+    engine.setData({ nodes, links: [], meta: { canonical_positions: true } });
+    const deadline = Date.now() + 10000;
+    while (engine.state().nodeCount !== nodes.length && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    engine.fit(); await new Promise(resolve => setTimeout(resolve, 80));
+    const state = engine.state(), center = engine.graphToScreen(0, 0);
+    const exportCanvas = engine.exportImageCanvas();
+    engine.destroy(); host.remove();
+    return { state, center, exported: Boolean(exportCanvas && exportCanvas.width > 0) };
+  });
+  expect(report.state.renderer).toBe('canvas');
+  expect(report.state.nodeCount).toBe(918);
+  expect(report.state.visibleNodeCount).toBeGreaterThanOrEqual(872);
+  expect(report.center.x).toBeGreaterThan(300);
+  expect(report.center.x).toBeLessThan(600);
+  expect(report.exported).toBe(true);
 });

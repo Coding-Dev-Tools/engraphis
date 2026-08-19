@@ -81,3 +81,12 @@ Run `python -m eval.adversarial_memory_security` for the deterministic v2 prompt
 gate. It checks write-time quarantine, review-pending content exclusion, direct and
 support-derived graph-edge exclusion, and availability of trusted control evidence. This is a
 fixed regression fixture, not a claim about real-world poisoning prevalence or detector recall.
+
+## Context-efficiency guardrail
+
+Run `python -m eval.context_efficiency_guardrails` after changes to context packing, recall, or
+grounded-answer construction. Its compact offline fixture only passes when a hard token budget
+reduces reader context versus replaying every source **and** the supported operational answer stays
+grounded and cited, an off-topic request abstains, and an explicitly untrusted instruction-shaped
+source is neither cited nor echoed. The JSON reports deterministic reader-context accounting with
+the named regex counter; it is not a provider-billing or LLM-output-quality claim.
