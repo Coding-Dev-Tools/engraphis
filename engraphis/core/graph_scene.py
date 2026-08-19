@@ -422,8 +422,8 @@ def _assign_orbit_hierarchy(
         node["orbit_tier"] = -1 if node.get("ghost") else 0
         node["orbit_radius"] = 0.0
 
-    # Pre-compute per-node adjacency from all edges once, instead of scanning
-    # all edges inside each community loop (O(edges) vs O(edges × communities)).
+    # Pre-compute per-node adjacency from all edges once, instead of
+    # scanning all edges inside each community loop (O(edges) vs O(edges * communities)).
     global_adjacency: dict[str, dict[str, float]] = defaultdict(dict)
     for edge in edges or ():
         if edge.get("ghost") or str(edge.get("relation") or "") == "co_occurs":
@@ -809,34 +809,33 @@ def _community_positions(
                 # the system centre outward (not angularly) keeps every local star/planet
                 # offset intact and maintains the computed even spacing.
                 found = False
-                # Small communities use their nominal position directly —
-                # the golden-angle distribution already spaces them evenly.
-                if system_radius <= 40.0:
-                    x, y = target_x, target_y
-                else:
-                    max_attempts = min(256, max(16, int(64 * math.sqrt(system_radius / 36.0))))
-                    for attempt in range(max_attempts):
-                        trial_radius = max(
-                            axis_radius * math.exp(0.018 * attempt),
-                            minimum_orbital_radius,
-                        )
-                        x = trial_radius * math.cos(angle)
-                        y = trial_radius * math.sin(angle)
-                        if not collides(x, y, system_radius):
-                            found = True
-                            break
-                    if not found:
-                        fallback_radius = max(
-                            axis_radius,
-                            (
-                                maximum_placed_distance
-                                + GALAXY_ENVELOPE_CLEARANCE_FACTOR
-                                * (system_radius + maximum_placed_radius)
-                                + spacing
-                            ),
-                        )
-                        x = fallback_radius * math.cos(angle)
-                        y = fallback_radius * math.sin(angle)
+                for attempt in range(256):
+                    trial_radius = max(
+                        axis_radius * math.exp(0.018 * attempt),
+                        minimum_orbital_radius,
+                    )
+                    x = trial_radius * math.cos(angle)
+                    y = trial_radius * math.sin(angle)
+                    if not collides(x, y, system_radius):
+                        found = True
+                        break
+                if not found:
+                    # A pathological target can still exhaust the bounded spiral walk
+                    # (especially when a very large system is already at the origin).
+                    # Place the entire system beyond every existing envelope using the
+                    # ellipse's enclosing-circle bound. This removes the old unresolved
+                    # overlap state instead of returning the last colliding trial.
+                    fallback_radius = max(
+                        axis_radius,
+                        (
+                            maximum_placed_distance
+                            + GALAXY_ENVELOPE_CLEARANCE_FACTOR
+                            * (system_radius + maximum_placed_radius)
+                            + spacing
+                        ),
+                    )
+                    x = fallback_radius * math.cos(angle)
+                    y = fallback_radius * math.sin(angle)
             positions[community_id] = (x, y)
             place(x, y, system_radius)
         return positions, unresolved
@@ -1463,6 +1462,8 @@ def _selected_edges(graph: dict, selected: set[str], level: str, cap: int) -> li
 def _community_summaries(graph: dict, community_ids: set[str],
                          selected: set[str]) -> list[dict]:
     edges = graph["edges"]
+    # Pre-compute per-node community and per-community edge lists in one pass.
+    # Original code scanned ALL edges for EACH community (O(edges * communities)).
     node_community: dict[str, str] = {}
     for cid in community_ids:
         for nid in graph["community_members"][cid]:
