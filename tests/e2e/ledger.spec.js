@@ -535,14 +535,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260818-v20-main-node-material-1');
+  expect(first.searchParams.get('v')).toBe('20260819-v24-physics-final');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260818-v20-main-node-material-1');
+  expect(second.searchParams.get('v')).toBe('20260819-v24-physics-final');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -560,7 +560,7 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   await page.goto('/');
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -575,7 +575,7 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   });
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
@@ -639,7 +639,7 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
   await expect(page.locator('#graph-black-hole-mass')).toHaveValue('160');
   await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
@@ -1284,7 +1284,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
