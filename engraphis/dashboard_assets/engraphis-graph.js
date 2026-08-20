@@ -129,7 +129,7 @@
        comfortable orbital spacing. The galaxy-v12 compact-orbits algorithm places systems
        tighter, so the same setting now reads as too loose. Scale the final constant 20%
        upward so the default (and every other position) feels like the reference layout. */
-    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 1.5;
+    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0;
   }
   /* Gravity strength is the galaxy-wide black-hole control. Its explicit zero endpoint selects
      the shallow carrier floor; local stellar wells are supplied independently by the calibrated
@@ -284,7 +284,7 @@
   const GALAXY_ORBITAL_SPEED_DEFAULT = 100;
   const GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING = 400;
   const GALAXY_ORBITAL_SPEED_MINIMUM = 0.25;
-  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 1.2;
+  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 0.8;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
   const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.24;
   function galaxyOrbitalSpeedMultiplier(setting) {
@@ -2553,7 +2553,7 @@
     const gravitationalConstantMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
       GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
     const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal)
-      * gravitationalConstantMultiplier;
+      * gravitationalConstantMultiplier * Math.sqrt(Math.max(0.25, blackHoleMassMultiplier));
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
