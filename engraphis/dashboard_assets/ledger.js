@@ -449,7 +449,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260819-v22-physics-fix'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260819-v24-physics-final'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2469,9 +2469,9 @@
        opening the new panel must reproduce the established Galaxy orbit exactly. */
     const controls = graphSpacetimeControlSettings();
     return {
-      gravitationalConstant: controls.gravitationalConstant / 100,
+      gravitationalConstant: controls.gravitationalConstant / 50,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 100,
+      localGravitationalConstant: controls.localGravitationalConstant / 50,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: controls.orbitPaused,
