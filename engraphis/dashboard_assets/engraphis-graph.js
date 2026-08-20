@@ -356,10 +356,9 @@
   /* Solar systems are packed by their complete painted envelopes, never by pushing arbitrary
      cross-community node pairs.  Eight world units stays visible between two outer planets;
      the bounded response lets live systems keep orbiting while their carrier frames separate. */
-  /* Default Galaxy admission should keep complete solar systems visually near the black-hole
-     interior. The v18 clearance band is another 20% tighter while remaining positive;
-     explicit higher gaps remain available through `systemPackingGap`. */
-  const GALAXY_SYSTEM_PACKING_GAP = 1.92;
+  /* Keep the default admission gap equal to the visible envelope contract. Complete solar
+     systems must retain eight graph units of screen-space clearance after fit-to-view. */
+  const GALAXY_SYSTEM_PACKING_GAP = 8;
   const GALAXY_SYSTEM_PACKING_STRENGTH = 0.45;
   const GALAXY_SYSTEM_PACKING_MAX_CORRECTION = 6;
   /* The orbital-speed control can expand local radii by at most 6%. Keep a small additional
@@ -4143,6 +4142,61 @@
     );
   }
 
+  /* Reserve the maximum painted envelope a live local hierarchy can reach before admitting its
+     carrier lane.  A flat `system.radius` is only the current snapshot: a nested moon can be
+     temporarily inside its planet while its authored orbit still expands at the top slider
+     setting.  The live boundary applies the same radius multiplier and slack to each edge, so
+     lane admission must sum those edge bounds rather than multiply one current snapshot. */
+  function galaxySystemMaximumEnvelopeRadius(system, options) {
+    const opts = options || {};
+    const members = system && Array.isArray(system.nodes) ? system.nodes : [];
+    const anchor = system && system.anchor ? system.anchor : galaxySystemAnchor(members);
+    if (!anchor) return 0;
+    const byId = new Map(members.filter(node => node && node.id !== undefined)
+      .map(node => [String(node.id), node]));
+    const bodyRadius = node => finitePositive(
+      node && node.radius, finitePositive(node && node.visual_radius,
+        radiusFromGravityMass(node && node.gravity_mass), 80), 160
+    );
+    const maximumRadiusMultiplier = galaxyOrbitalRadiusMultiplier(
+      GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING
+    );
+    const boundarySlack = Math.max(1, Number.isFinite(Number(opts.localOrbitBoundarySlack))
+      ? Number(opts.localOrbitBoundarySlack) : GALAXY_LOCAL_ORBIT_BOUNDARY_SLACK);
+    const memo = new Map(), visiting = new Set();
+    const edgeRadius = (node, parent) => {
+      const authored = Number(node && node.orbit_radius);
+      const seeded = Number(node && node.__galaxyOrbitBaseRadius);
+      const current = parent && Number.isFinite(node && node.x) && Number.isFinite(node && node.y)
+        && Number.isFinite(parent.x) && Number.isFinite(parent.y)
+        ? Math.hypot(node.x - parent.x, node.y - parent.y) : 0;
+      const base = Math.max(
+        Number.isFinite(authored) && authored > 0 ? authored : 0,
+        Number.isFinite(seeded) && seeded > 0 ? seeded : 0,
+        current
+      );
+      return base * maximumRadiusMultiplier * boundarySlack;
+    };
+    const distanceFromAnchor = node => {
+      if (!node || node === anchor) return 0;
+      if (memo.has(node)) return memo.get(node);
+      if (visiting.has(node)) return 0;
+      visiting.add(node);
+      const parent = galaxyLocalOrbitParent(node, members, anchor, byId);
+      const distance = parent && parent !== node
+        ? distanceFromAnchor(parent) + edgeRadius(node, parent) : edgeRadius(node, anchor);
+      visiting.delete(node);
+      memo.set(node, distance);
+      return distance;
+    };
+    let maximum = bodyRadius(anchor);
+    members.forEach(node => {
+      if (!node || node === anchor) return;
+      maximum = Math.max(maximum, distanceFromAnchor(node) + bodyRadius(node));
+    });
+    return Math.max(Number(system.radius) || 0, maximum);
+  }
+
   /* Assign permanent non-intersecting radial lanes to external solar-system envelopes. Two
      circles whose carrier radii differ by at least the sum of their painted extents can never
      collide at any orbital phase, so this admission solve removes the need to teleport systems
@@ -4161,17 +4215,19 @@
     const coreEnvelope = galaxySystemEnvelopes(nodes, Object.assign({}, opts, {
       respectFixedCoordinates: false,
     })).find(system => system.nodes.includes(anchor));
-    systems.sort((left, right) => right.radius - left.radius
+    const maximumExtents = new Map(systems.map(system => [
+      system, galaxySystemMaximumEnvelopeRadius(system, opts),
+    ]));
+    systems.sort((left, right) => maximumExtents.get(right) - maximumExtents.get(left)
       || String(left.id).localeCompare(String(right.id)));
     const coreRadius = Math.max(finitePositive(anchor.radius,
       evidenceNodeRadius(anchor, 3), 160), coreEnvelope ? coreEnvelope.radius : 0);
     let cursor = 0, previousLaneRadius = coreRadius, previousLaneExtent = 0, laneIndex = 0;
     while (cursor < systems.length) {
-      /* Reserve only the compact default clearance. When the speed slider expands local
-         radii, managed carrier lanes expand by the same multiplier, so reserving the maximum
-         here as well double-counted that growth and made the default galaxy unnecessarily wide. */
+      /* Reserve the maximum nested local envelope, then keep a small independent lane margin.
+         This remains collision-free when the orbital-speed control reaches its maximum. */
       const laneSlack = GALAXY_CARRIER_LANE_SLACK;
-      const laneExtent = systems[cursor].radius * laneSlack;
+      const laneExtent = maximumExtents.get(systems[cursor]) * laneSlack;
       let laneRadius = Math.max(coreRadius + laneExtent + gap
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
       previousLaneRadius + previousLaneExtent + laneExtent + gap);
