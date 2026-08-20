@@ -1828,12 +1828,57 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     });
     expect(massSteps).toEqual([
       { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.1 },
-      { control: 180, multiplier: 1.2 },
+      { control: 170, multiplier: 1.2 },
+      { control: 180, multiplier: 1.4 },
     ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 3, blackHoleMass: 1.8,
-        localGravitationalConstant: 2.5, damping: 2, springStiffness: 2, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 4, blackHoleMass: 2.6,
+        localGravitationalConstant: 3, damping: 3, springStiffness: 3, orbitPaused: false });
+    const rangeResponse = await page.evaluate(() => {
+      const set = (id, value) => {
+        const control = document.getElementById(id);
+        control.value = String(value);
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      [
+        ['graph-flow-speed', 65],
+        ['graph-repel', 150],
+        ['graph-link', 20],
+        ['graph-gravity', 120],
+        ['graph-node-size', 4],
+        ['graph-text-size', 16],
+        ['graph-line-width', 1],
+        ['graph-label-density', 40],
+        ['graph-tune-min-degree', 2],
+        ['graph-depth', 3],
+        ['graph-min-degree', 2],
+      ].forEach(([id, value]) => set(id, value));
+      const importance = document.getElementById('editor-memory-importance');
+      importance.value = '0.75';
+      importance.dispatchEvent(new Event('input', { bubbles: true }));
+      const state = window.__engraphisGraph.state();
+      return {
+        settings: state.settings,
+        scope: { minDegree: state.minDegree, depth: state.depth },
+        importanceAria: importance.getAttribute('aria-valuetext'),
+      };
+    });
+    expect(rangeResponse.settings).toMatchObject({
+      flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
+      linkw: 1.28, labelDensity: 56,
+    });
+    expect(rangeResponse.scope).toEqual({ minDegree: 3, depth: 4 });
+    expect(rangeResponse.importanceAria).toBe('1.00 importance');
+    /* The fixture has no high-degree metadata; restore a visible scope before exercising
+       pause/resume so the physics clock is tested with live bodies rather than an empty filter. */
+    await page.evaluate(() => {
+      ['graph-tune-min-degree', 'graph-min-degree'].forEach(id => {
+        const control = document.getElementById(id);
+        control.value = '0';
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+    await page.waitForFunction(() => window.__fg.graphData().nodes.length > 0);
 
     await page.locator('#graph-orbits-pause').click();
     await page.waitForFunction(() => window.__engraphisGraph.state().settings.orbitPaused === true

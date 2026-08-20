@@ -1345,7 +1345,14 @@
     byId('editor-memory-content').removeAttribute('aria-invalid');
     byId('editor-error').hidden = true;
     byId('editor-error').textContent = '';
-    byId('editor-memory-importance').value = memory && memory.importance != null ? memory.importance : 0.5;
+    const importanceControl = byId('editor-memory-importance');
+    const storedImportance = memory && memory.importance != null ? memory.importance : 0.5;
+    importanceControl.value = String(graphSliderInputValue(
+      'editor-memory-importance', storedImportance, 0.5,
+    ));
+    importanceControl.setAttribute('aria-valuetext', `${graphSliderResponseValue(
+      'editor-memory-importance', importanceControl.value, 0.5,
+    ).toFixed(2)} importance`);
     byId('editor-memory-title').focus();
   }
 
@@ -1366,7 +1373,9 @@
     const title = byId('editor-memory-title').value.trim();
     const memoryTypeValue = byId('editor-memory-type').value;
     const content = byId('editor-memory-content').value.trim();
-    const importance = number(byId('editor-memory-importance').value);
+    const importance = graphSliderResponseValue(
+      'editor-memory-importance', number(byId('editor-memory-importance').value), 0.5,
+    );
     const currentImportance = current && current.importance != null
       ? number(current.importance) : 0.5;
     const contentField = byId('editor-memory-content');
@@ -2405,6 +2414,103 @@
     const max = Number(control.max);
     return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
   }
+  /* Controls keep their human-readable ranges and defaults, while the engine receives a
+     bounded 2x response away from the selected preset baseline. This makes a drag feel
+     immediate and substantial without changing a saved view's neutral calibration or allowing
+     a slider to bypass its HTML safety bounds. */
+  const GRAPH_SLIDER_RESPONSE_GAIN = 2;
+  function graphSliderResponseBaseline(item) {
+    if (!item) return 0;
+    if (item.id === 'graph-flow-speed') return 45;
+    const preset = byId('graph-preset');
+    const tuning = preset ? graphPresetTuning(preset.value) : null;
+    const candidate = tuning && tuning[item.key];
+    return Number.isFinite(Number(candidate)) ? Number(candidate) : item.fallback;
+  }
+  function graphSliderResponseValue(id, value, baseline) {
+    const control = byId(id);
+    if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
+    const raw = graphValueInRange(id, value, baseline);
+    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
+    const min = Number(control.min);
+    const max = Number(control.max);
+    const expanded = center + (raw - center) * GRAPH_SLIDER_RESPONSE_GAIN;
+    return Math.min(Number.isFinite(max) ? max : expanded,
+      Math.max(Number.isFinite(min) ? min : expanded, expanded));
+  }
+  function graphSliderInputValue(id, value, baseline) {
+    const control = byId(id);
+    if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
+    const min = Number(control.min);
+    const max = Number(control.max);
+    const safe = graphValueInRange(id, value, baseline);
+    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : safe;
+    const compressed = center + (safe - center) / GRAPH_SLIDER_RESPONSE_GAIN;
+    return Math.min(Number.isFinite(max) ? max : compressed,
+      Math.max(Number.isFinite(min) ? min : compressed, compressed));
+  }
+
+
+  function graphTuningEngineSettings() {
+    return GRAPH_TUNING.reduce((settings, item) => {
+      const raw = number(byId(item.id).value);
+      settings[item.key] = graphSliderResponseValue(
+        item.id, raw, graphSliderResponseBaseline(item),
+      );
+      return settings;
+    }, {
+      flowSpeed: graphSliderResponseValue(
+        'graph-flow-speed', number(byId('graph-flow-speed').value), 45,
+      ),
+    });
+  }
+
+  function graphSpacetimeEngineSettings() {
+    const controls = GRAPH_SPACETIME_TUNING.reduce((settings, item) => {
+      const raw = number(byId(item.id).value);
+      settings[item.key] = graphSliderResponseValue(item.id, raw, item.fallback);
+      return settings;
+    }, {});
+    return {
+      gravitationalConstant: controls.gravitationalConstant / 50,
+      blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
+      localGravitationalConstant: controls.localGravitationalConstant / 50,
+      damping: controls.damping,
+      springStiffness: controls.springStiffness / 32,
+      orbitPaused: state.graphOrbitPaused,
+    };
+  }
+
+  function graphScopeEngine() {
+    return {
+      minDegree: graphSliderResponseValue(
+        'graph-min-degree', number(byId('graph-min-degree').value), 1,
+      ),
+      showUnlinked: state.graphShowUnlinked,
+      depth: graphSliderResponseValue(
+        'graph-depth', number(byId('graph-depth').value), 2,
+      ),
+    };
+  }
+
+
+  let graphPreferencesSaveScheduled = false;
+  function scheduleGraphPreferencesSave() {
+    if (graphPreferencesSaveScheduled) return;
+    graphPreferencesSaveScheduled = true;
+    const flush = () => {
+      graphPreferencesSaveScheduled = false;
+      saveGraphPreferences();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
+    else setTimeout(flush, 0);
+  }
+
+  function flushGraphPreferencesSave() {
+    if (!graphPreferencesSaveScheduled) return;
+    graphPreferencesSaveScheduled = false;
+    saveGraphPreferences();
+  }
 
   function graphPresetTuning(preset) {
     const available = window.EngraphisGraph && window.EngraphisGraph.PRESETS;
@@ -2445,12 +2551,6 @@
     return next;
   }
 
-  function graphSpacetimeControlSettings() {
-    return GRAPH_SPACETIME_TUNING.reduce((settings, item) => {
-      settings[item.key] = number(byId(item.id).value);
-      return settings;
-    }, { orbitPaused: state.graphOrbitPaused });
-  }
 
   const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
   function graphBlackHoleMassMultiplier(controlValue) {
@@ -2463,20 +2563,7 @@
       : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
   }
 
-  function graphSpacetimeSettings() {
-    /* The control surface is expressed in intelligible 0–200 / 20–500 ranges while the
-       integrator uses dimensionless multipliers. These baseline divisors are deliberate:
-       opening the new panel must reproduce the established Galaxy orbit exactly. */
-    const controls = graphSpacetimeControlSettings();
-    return {
-      gravitationalConstant: controls.gravitationalConstant / 50,
-      blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 50,
-      damping: controls.damping,
-      springStiffness: controls.springStiffness / 32,
-      orbitPaused: controls.orbitPaused,
-    };
-  }
+
 
   function syncGraphSpacetimeTuning(settings) {
     GRAPH_SPACETIME_TUNING.forEach(item => setGraphSpacetimeControl(item,
@@ -2493,11 +2580,7 @@
   }
 
   function graphScope() {
-    return {
-      minDegree: number(byId('graph-min-degree').value),
-      showUnlinked: state.graphShowUnlinked,
-      depth: number(byId('graph-depth').value),
-    };
+    return graphScopeEngine();
   }
 
   function applyGraphScope() {
@@ -2780,8 +2863,8 @@
         graph.setColorBy(color);
         applyGraphPalette(palette);
         graph.setSettings({
-          ...graphTuningSettings(),
-          ...graphSpacetimeSettings(),
+          ...graphTuningEngineSettings(),
+          ...graphSpacetimeEngineSettings(),
           flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
           labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
           frozen: state.graphFrozen,
@@ -2833,7 +2916,11 @@
     if (state.graphEngine) {
       state.graphEngine.apply(graph => {
         graph.setPreset(preset);
-        graph.setSettings({ ...graphTuningSettings(), ...graphSpacetimeSettings(), frozen: state.graphFrozen });
+        graph.setSettings({
+          ...graphTuningEngineSettings(),
+          ...graphSpacetimeEngineSettings(),
+          frozen: state.graphFrozen,
+        });
         graph.setScope(graphScope());
         graph.setLayers(graphLayerState());
       }, false, !state.graphFrozen);
@@ -3239,8 +3326,8 @@
           graph.setThemeColors(graphThemeColors());
           applyGraphPalette(byId('graph-palette').value);
           graph.setSettings({
-            ...graphTuningSettings(),
-            ...graphSpacetimeSettings(),
+            ...graphTuningEngineSettings(),
+            ...graphSpacetimeEngineSettings(),
             flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
             labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
             frozen: state.graphFrozen,
@@ -4334,6 +4421,12 @@
   byId('editor-close').addEventListener('click', closeEditor);
   byId('editor-cancel').addEventListener('click', closeEditor);
   byId('memory-editor').addEventListener('submit', saveMemory);
+  byId('editor-memory-importance').addEventListener('input', event => {
+    const effective = graphSliderResponseValue(
+      'editor-memory-importance', event.target.value, 0.5,
+    );
+    event.target.setAttribute('aria-valuetext', `${effective.toFixed(2)} importance`);
+  });
   byId('import-button').addEventListener('click', () => byId('import-files').click());
   byId('import-files').addEventListener('change', event => importFiles(event.target.files));
   byId('obsidian-import-button').addEventListener('click', openObsidianImport);
@@ -4389,12 +4482,13 @@
   });
   byId('graph-flow-speed').addEventListener('input', event => {
     const speed = graphValueInRange('graph-flow-speed', event.target.value, 45);
+    const effectiveSpeed = graphSliderResponseValue('graph-flow-speed', speed, 45);
     byId('graph-flow-speed').value = String(speed);
     byId('graph-flow-speed-output').value = String(Math.round(speed));
     byId('graph-flow-speed-output').textContent = String(Math.round(speed));
-    if (state.graphEngine) state.graphEngine.setSettings({ flowSpeed: speed });
+    if (state.graphEngine) state.graphEngine.setSettings({ flowSpeed: effectiveSpeed });
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   });
   byId('graph-search').addEventListener('input', event => searchGraph(event.target.value));
   byId('graph-repo-filter').addEventListener('input', event => {
@@ -4461,7 +4555,7 @@
   byId('graph-min-degree').addEventListener('input', event => {
     setGraphMinDegree(event.target.value);
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   });
   byId('graph-show-unlinked').addEventListener('click', event => {
     setGraphShowUnlinked(event.currentTarget.getAttribute('aria-pressed') !== 'true');
@@ -4478,18 +4572,21 @@
   byId('graph-tune-min-degree').addEventListener('input', event => {
     setGraphMinDegree(event.target.value);
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   });
   byId('graph-depth').addEventListener('input', event => {
     setGraphDepth(event.target.value);
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   });
   GRAPH_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
     const value = setGraphTuningControl(item, event.target.value);
-    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: value });
+    const effectiveValue = graphSliderResponseValue(
+      item.id, value, graphSliderResponseBaseline(item),
+    );
+    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: effectiveValue });
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   }));
   GRAPH_SPACETIME_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
     setGraphSpacetimeControl(item, event.target.value);
@@ -4497,11 +4594,11 @@
        normalized around 1. Apply the same conversion used during graph creation on every live
        input event; passing the raw slider value would immediately clamp G to 8 and mass to 16. */
     if (state.graphEngine) {
-      const settings = graphSpacetimeSettings();
+      const settings = graphSpacetimeEngineSettings();
       state.graphEngine.setSettings({ [item.key]: settings[item.key] });
     }
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
   }));
   byId('graph-orbits-pause').addEventListener('click', event => {
     state.graphOrbitPaused = event.currentTarget.getAttribute('aria-checked') !== 'true';
@@ -4587,6 +4684,7 @@
     byId('create-workspace-form').hidden = !byId('create-workspace-form').hidden;
     if (!byId('create-workspace-form').hidden) byId('new-workspace-name').focus();
   });
+  window.addEventListener('pagehide', flushGraphPreferencesSave);
   byId('create-workspace-form').addEventListener('submit', createWorkspace);
   byId('consolidate-form').addEventListener('submit', previewConsolidation);
   byId('consolidate-commit').addEventListener('click', commitConsolidation);
