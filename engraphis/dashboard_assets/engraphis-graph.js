@@ -2553,7 +2553,7 @@
     const gravitationalConstantMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
       GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
     const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal)
-      * gravitationalConstantMultiplier * Math.max(0.25, Math.pow(blackHoleMassMultiplier, 1.3));
+      * gravitationalConstantMultiplier;
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
