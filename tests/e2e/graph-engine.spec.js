@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260818-v20-main-node-material-1';
+const stellarOrbitAssetVersion = '20260819-v24-physics-final';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1756,8 +1756,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(48);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(240, 12);
-      expect(diagnostics.localGravity).toBeCloseTo(120, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(480, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
@@ -1818,8 +1818,8 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       { control: 180, multiplier: 1.2 },
     ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 1.5, blackHoleMass: 1.8,
-        localGravitationalConstant: 1.25, damping: 2, springStiffness: 2, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 3, blackHoleMass: 1.8,
+        localGravitationalConstant: 2.5, damping: 2, springStiffness: 2, orbitPaused: false });
 
     await page.locator('#graph-orbits-pause').click();
     await page.waitForFunction(() => window.__engraphisGraph.state().settings.orbitPaused === true
@@ -3181,25 +3181,25 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
 
   expect(baseline.curve.setting).toBe(48);
   expect(strong.curve.setting).toBe(200);
-  expect(baseline.curve.baseline).toBe(240);
-  expect(baseline.curve.maximum).toBeCloseTo(2743.3846153846152, 12);
-  expect(baseline.curve.localBaseline).toBe(120);
-  expect(baseline.curve.localMaximum).toBeCloseTo(1371.6923076923076, 12);
+  expect(baseline.curve.baseline).toBe(480);
+  expect(baseline.curve.maximum).toBeCloseTo(5486.7692307692305, 12);
+  expect(baseline.curve.localBaseline).toBe(240);
+  expect(baseline.curve.localMaximum).toBeCloseTo(2743.3846153846152, 12);
   expect(baseline.curve.localBaseline).toBe(baseline.curve.baseline * 0.5);
   expect(baseline.curve.localMaximum).toBe(baseline.curve.maximum * 0.5);
   expect(baseline.curve.maximum / baseline.curve.baseline).toBeCloseTo(
     11.430769230769231, 12,
   );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
-  expect(baseline.before.diagnostics.effectiveGravity).toBe(240);
-  expect(baseline.before.diagnostics.blackHoleGravity).toBe(240);
-  expect(baseline.before.diagnostics.localGravity).toBe(120);
+  expect(baseline.before.diagnostics.effectiveGravity).toBe(480);
+  expect(baseline.before.diagnostics.blackHoleGravity).toBe(480);
+  expect(baseline.before.diagnostics.localGravity).toBe(240);
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
-  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(2743.3846153846152, 12);
-  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(2743.3846153846152, 12);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(5486.7692307692305, 12);
+  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(5486.7692307692305, 12);
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
-  expect(strong.before.diagnostics.localGravity).toBe(120);
+  expect(strong.before.diagnostics.localGravity).toBe(240);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
   expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
   expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);
