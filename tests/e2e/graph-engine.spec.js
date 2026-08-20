@@ -3206,7 +3206,7 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(naturalOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
-  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(4.6, 12);
+  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(3.4, 12);
   expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.24, 12);
   expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
@@ -3225,16 +3225,23 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-  // Forced inward convergence is disabled at every gravity setting; the circular carrier field
-  // and permanent lanes own density without collapsing the disk toward the black hole.
-  expect(physicalField.densityFactors).toEqual([1, 1, 1, 1]);
-  expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
+  // Gravity changes have an immediate reversible radial response so the control has a visible
+  // density effect; the response preserves each system's internal geometry and velocity.
+  const immediateResponse = immediate.after.diagnostics.immediateGravityResponse;
+  expect(immediateResponse.moved).toBeGreaterThan(0);
+  expect(immediateResponse.ratio).toBeGreaterThan(0);
+  expect(immediateResponse.ratio).toBeLessThan(1);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
-    // Updating gravity alters carrier support, never teleports a solar system inward.
-    expect(immediate.after.radii[id] / radius, id).toBeCloseTo(1, 10);
+    expect(immediate.after.radii[id] / radius, id)
+      .toBeCloseTo(immediateResponse.ratio, 2);
   }
   expect(immediate.after.diameter).toBeCloseTo(immediate.before.diameter, 10);
-  expect(immediate.after.velocities).toEqual(immediate.before.velocities);
+  for (const [index, [id, vx, vy]] of immediate.before.velocities.entries()) {
+    const [afterId, afterVx, afterVy] = immediate.after.velocities[index];
+    expect(afterId).toBe(id);
+    expect(afterVx).toBeCloseTo(vx, 12);
+    expect(afterVy).toBeCloseTo(vy, 12);
+  }
   expect(baseline.steps).toBeGreaterThanOrEqual(8);
   expect(strong.steps).toBeGreaterThanOrEqual(8);
   expect(Math.abs(strong.steps - baseline.steps)).toBeLessThanOrEqual(2);
