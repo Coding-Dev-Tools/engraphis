@@ -278,13 +278,13 @@
   const GALAXY_DRAG_POSITION_MAX_PULL = 2;
   const GALAXY_ORBITAL_SEPARATION_MULTIPLIER = 2;
   /* `graph-repel` remains the persisted key for saved-view compatibility. In Galaxy, 100 is
-     the natural orbital rate; increases above it receive 20% more angular response than the
-     former linear clock. Radius growth is independently gentler, so faster rotation does not
-     turn a solar system into an ever-widening Newtonian launch. */
+     the natural orbital rate; the high end is deliberately gentler than the old 3.4x response
+     so the control separates systems without injecting escape energy. Radius growth remains
+     independently bounded. */
   const GALAXY_ORBITAL_SPEED_DEFAULT = 100;
   const GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING = 400;
   const GALAXY_ORBITAL_SPEED_MINIMUM = 0.25;
-  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 0.8;
+  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 0.5;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
   const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.24;
   function galaxyOrbitalSpeedMultiplier(setting) {
@@ -2497,6 +2497,9 @@
       galaxyCarrierOrbitCurve(field, radius).circularSpeed
         * multiplier);
   }
+  /* Authored external systems retain their established lane clock while the physical target
+     remains mass- and gravity-aware. The explicit Orbital speed control is calibrated separately
+     by galaxyOrbitalSpeedMultiplier. */
   const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;
   function galaxyAuthoredCarrierTargetSpeed(field, radius, orbitalSpeed) {
     return galaxyCarrierTargetSpeed(field, radius, orbitalSpeed)
@@ -8761,6 +8764,16 @@
       const data = fg.graphData() || {};
       const orbitalSpeed = galaxyOrbitalSpeedMultiplier(state.settings.repel);
       const diagnosticAnchor = galaxyGlobalAnchor(data.nodes || []);
+      /* Keep diagnostics on the same calibrated scalar as galaxyBlackHoleField without
+         rebuilding the full O(n) field on every physics callback. Previously these values
+         bypassed blackHoleMass, so the control could change force while diagnostics reported
+         a constant gravity amount. */
+      const diagnosticMass = galaxyPhysicsMultiplier(state.settings.blackHoleMass,
+        GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16);
+      const effectiveGravity = galaxyBlackHoleGravityConstant(state.settings.gravity, true)
+        * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
+          GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8)
+        * Math.sqrt(Math.max(0.25, diagnosticMass));
       return Object.assign(galaxyMotionDiagnostics(data.nodes || []), {
         mode: state.settings.mode,
         running,
@@ -8804,15 +8817,12 @@
         globalAnchorId: diagnosticAnchor ? diagnosticAnchor.id : null,
         globalAnchorLabel: diagnosticAnchor ? nodeName(diagnosticAnchor) : null,
         blackHoleSpinAngle: diagnosticAnchor ? galaxyBlackHoleSpinAngle(diagnosticAnchor) : 0,
-        blackHoleMass: galaxyPhysicsMultiplier(state.settings.blackHoleMass,
-          GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
+        blackHoleMass: diagnosticMass,
         damping: galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
         springStiffness: galaxyPhysicsMultiplier(state.settings.springStiffness,
           GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
-        effectiveGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true)
-          * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
-            GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
-        blackHoleGravity: galaxyBlackHoleGravityConstant(state.settings.gravity, true),
+        effectiveGravity,
+        blackHoleGravity: effectiveGravity,
         localGravity: galaxyLocalGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING),
         effectiveLocalGravity: galaxyStellarGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING)
           * galaxyPhysicsMultiplier(state.settings.localGravitationalConstant,

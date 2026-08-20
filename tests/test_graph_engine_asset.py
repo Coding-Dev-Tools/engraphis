@@ -978,7 +978,7 @@ def test_galaxy_gravity_slider_controls_galactic_field_not_local_orbits() -> Non
 
 
 @requires_node
-def test_orbital_speed_increases_are_twenty_percent_faster_with_less_expansion() -> None:
+def test_orbital_speed_increases_use_a_bounded_response_with_less_expansion() -> None:
     report = _run_node(
         """
         const settings = [0, 100, 200, 400];
@@ -1040,14 +1040,14 @@ def test_orbital_speed_increases_are_twenty_percent_faster_with_less_expansion()
         });
         """
     )
-    assert report["multipliers"] == pytest.approx([0.25, 1, 1.8, 3.4])
+    assert report["multipliers"] == pytest.approx([0.25, 1, 1.5, 2.5])
     assert report["radii"][0] == pytest.approx(report["radii"][1])
     assert report["radii"][1] < report["radii"][2] < report["radii"][3]
     assert report["radii"][1] == pytest.approx(30)
     assert report["radii"][2] == pytest.approx(32.4)
     assert report["radii"][3] == pytest.approx(37.2)
-    assert report["multipliers"][2] - 1 == pytest.approx(0.8 * (2 - 1))
-    assert report["multipliers"][3] - 1 == pytest.approx(0.8 * (4 - 1))
+    assert report["multipliers"][2] - 1 == pytest.approx(0.5 * (2 - 1))
+    assert report["multipliers"][3] - 1 == pytest.approx(0.5 * (4 - 1))
     assert report["radii"][3] - report["radii"][1] == pytest.approx(
         0.8 * (39 - 30)
     )
@@ -1401,10 +1401,10 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
     )
     assert report["naturalKinematic"]["systemTravel"] > 0
     assert report["naturalKinematic"]["localTravel"] > 0
-    assert report["kinematicSystemRatio"] > 2.5
+    assert report["kinematicSystemRatio"] > 1.8
     assert report["kinematicLocalRatio"] > 2.5
     assert report["naturalCarrier"] > 0
-    assert report["carrierRatio"] == pytest.approx(3.4, rel=0.02)
+    assert report["carrierRatio"] == pytest.approx(2.5, rel=0.02)
 
 
 @requires_node
@@ -1521,7 +1521,7 @@ def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_res
     assert report["nodeCount"] == 541
     assert report["memberCount"] == 480
     assert report["finite"] is True
-    assert report["multiplier"] == pytest.approx(3.4)
+    assert report["multiplier"] == pytest.approx(2.5)
     assert report["radiusMultiplier"] == pytest.approx(1.24)
     assert report["maximumBoundaryRatio"] <= 1 + 1e-9
     assert report["minimumSystemClearance"] >= -1e-8
@@ -1572,7 +1572,7 @@ def test_black_hole_connected_nodes_get_slider_controlled_orbital_lanes() -> Non
     )
     assert report["slow"]["travel"] > 0
     assert report["fast"]["travel"] > report["slow"]["travel"]
-    assert report["ratio"] == pytest.approx(3.4, rel=0.03)
+    assert report["ratio"] == pytest.approx(2.5, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "connected"]
     assert report["fast"]["grouped"] == ["black-hole", "connected"]
 
@@ -1727,7 +1727,7 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
     )
     assert report["slow"]["travel"] > 0
     assert report["fast"]["travel"] > report["slow"]["travel"]
-    assert report["ratio"] == pytest.approx(3.4, rel=0.03)
+    assert report["ratio"] == pytest.approx(2.5, rel=0.03)
     assert report["slow"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fast"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["slow"]["localDistance"] > 14
@@ -1737,7 +1737,7 @@ def test_explicit_black_hole_orbit_links_move_community_anchors_and_their_planet
     assert report["fast"]["localDistance"] < 22
     assert report["slowKinematic"]["travel"] > 0
     assert report["fastKinematic"]["travel"] > report["slowKinematic"]["travel"]
-    assert report["kinematicRatio"] > 2.8
+    assert report["kinematicRatio"] > 1.8
     assert report["slowKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fastKinematic"]["grouped"] == ["black-hole", "community-child", "planet"]
     assert report["fastKinematic"]["localDistance"] > report["slowKinematic"]["localDistance"]
@@ -3570,7 +3570,7 @@ def test_black_hole_adornment_keeps_a_live_orbital_spin_phase() -> None:
     )
     assert abs(report["slow"]) > 0.1
     assert abs(report["fast"]) > abs(report["slow"])
-    assert report["ratio"] == pytest.approx(3.4, rel=1e-9)
+    assert report["ratio"] == pytest.approx(2.5, rel=1e-9)
 
 
 @requires_node

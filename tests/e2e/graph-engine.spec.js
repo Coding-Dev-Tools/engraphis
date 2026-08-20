@@ -1770,7 +1770,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(1615.3424319876754, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
       expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -2631,7 +2631,7 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(172.13538461538462, 8);
+    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(344.27076923076925, 8);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
     expect(after.diagnostics.globalGravityFloorActive).toBe(true);
     expect(after.diagnostics.systemGravity).toMatchObject({
@@ -3228,7 +3228,7 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(naturalOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
-  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(3.4, 12);
+  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(2.5, 12);
   expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.24, 12);
   expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
