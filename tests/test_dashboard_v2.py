@@ -904,8 +904,10 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
         for behavior in (
             "function applyGraphView(id)", "function resetGraphTuning()",
             "function saveCurrentGraphView()", "function graphTuningSettings()",
+            "function graphSliderResponseValue", "function graphTuningEngineSettings()",
+            "function graphSpacetimeEngineSettings()", "function graphScopeEngine()",
             "&include_code=true", "graph.setLayers(graphLayerState())",
-            "setSettings({ flowSpeed: speed })",
+            "setSettings({ flowSpeed: effectiveSpeed })",
         ):
             assert behavior in script.text
 
