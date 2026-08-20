@@ -966,7 +966,7 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return prefix + hashlib.sha256(payload).hexdigest()[:16]
 
 
-def _components(node_ids: Sequence[str], edges: Sequence[dict]) -> dict[str, str]:
+def _components(node_ids: Sequence[str], edges: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     adjacent: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     for edge in edges:
         adjacent.setdefault(edge["source"], set()).add(edge["target"])
