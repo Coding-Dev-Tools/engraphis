@@ -3101,16 +3101,22 @@ def _clear_superseded_denial(known_source: str) -> bool:
     credential) or the entitlement cache with a fresh answer. If the bytes backing
     ``known_source`` are exactly the ones the denial observed, the active-looking record
     predates the denial — however equal their wall-clock stamps are — and must not
-    resurrect grants the control plane just refused.
+    resurrect grants the control plane just refused. Both digests must be known: an
+    unreadable state file at denial time leaves ``None`` as the baseline, and a later
+    recovered read must never look like the superseding rewrite it cannot prove — the
+    guard then stays set until the next denial cycle or process restart, which fails
+    closed.
     """
 
     global _authoritative_denial_at
     with _ENTITLEMENT_REFRESH_LOCK:
         current = _persisted_state_digest(known_source)
+        baseline = _denied_state_digests.get(known_source)
         if (
             _AUTHORITATIVE_DENIAL_PENDING.is_set()
+            and baseline is not None
             and current is not None
-            and current != _denied_state_digests.get(known_source)
+            and current != baseline
         ):
             _AUTHORITATIVE_DENIAL_PENDING.clear()
             _authoritative_denial_at = 0.0

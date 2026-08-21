@@ -317,7 +317,7 @@ class ObsidianImporter:
         run_started = time.time()
         job_id = str(prepared["job_id"])
         import_id = str(prepared["import_id"])
-        items = self.store.list_source_import_items(vault_id=vault_id)
+        items = self._all_source_items(vault_id=vault_id)
         plans, missing = self._plan(scan, vault_id, items, inspect_memories=True)
         for plan in plans:
             self.store.record_source_import_job_item(
@@ -948,12 +948,31 @@ class ObsidianImporter:
             },
         }
 
+    def _all_source_items(self, *, vault_id: str,
+                          states: Optional[list[str]] = None) -> list[dict]:
+        """Page through the full manifest so truncation cannot hide historical rows.
+
+        ``list_source_import_items`` caps each page (default 10k rows); a manifest that
+        outgrew one page through repeated deletions and additions must still be planned
+        and reconciled in full, or rows beyond the first page silently stay live while
+        the run reports itself complete.
+        """
+        items: list[dict] = []
+        page_size = 10_000
+        for _ in range(20):  # bounded: at most 200k manifest rows per import run
+            page = self.store.list_source_import_items(
+                vault_id=vault_id, states=states, limit=page_size, offset=len(items),
+            )
+            items.extend(page)
+            if len(page) < page_size:
+                break
+        return items
+
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> list[dict]:
-        """Resolve derived links in bounded, cancellable, replay-safe batches."""
-        items = self.store.list_source_import_items(
+        items = self._all_source_items(
             vault_id=vault_id,
             states=["imported", "unchanged", "renamed", "skipped", "missing"],
         )
