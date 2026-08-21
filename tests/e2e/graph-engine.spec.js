@@ -2270,10 +2270,10 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       expect(after.diagnostics.lastRelationCorrections).toBe(0);
       expect(phases.every(phase => phase.global.count === 3335 && phase.global.missing === 0
         && phase.global.nonFinite === 0 && phase.global.frozen === 0 && phase.global.totalFrozen === 0
-        && phase.global.minTravel > .00005), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
+        && phase.global.minTravel > .001), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
       expect(phases.every(phase => phase.local.count === 2960 && phase.local.missing === 0
         && phase.local.nonFinite === 0 && phase.local.frozen === 0 && phase.local.totalFrozen === 0
-        && phase.local.minTravel > .00005), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
+        && phase.local.minTravel > .001), JSON.stringify(phases.map(phase => phase.local))).toBe(true);
       expect(phases.every(phase => phase.carrierCount === 375 && phase.systemCount === 375
         && phase.carrierFailures.length === 0 && phase.carrierMaxError < 1e-8),
       JSON.stringify(phases.map(phase => ({ count: phase.carrierCount, error: phase.carrierMaxError,

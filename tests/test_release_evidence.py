@@ -617,6 +617,41 @@ def test_release_evidence_rejects_prerelease_versions_against_pep440_floors(tmp_
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_requires_selected_extra_dependencies(tmp_path):
+    """The closure must include requirements from the extras the workflow installs."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        "all = ['extra-dep>=1.0; python_version >= \"3.9\"']\n"
+        "test = ['test-dep>=0.1']\n",
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM and lock carry only the core dependency; extra-dep/test-dep are missing.
+    with pytest.raises(EvidenceError, match="missing declared dependencies"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_ignores_extra_dependencies_with_inapplicable_markers(tmp_path):
+    """Extras requirements whose environment marker excludes this interpreter are
+    not required, mirroring what pip installs in the capture environment."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        "all = ['future-dep>=1.0; python_version < \"3.9\"']\n"
+        "test = ['legacy-dep>=0.1; python_version < \"3.9\"']\n",
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    evidence = _build(root, dist)
+    assert evidence["environment_lock"]["package_count"] == 2
+
+
 def test_release_evidence_rejects_sbom_with_mismatched_root_purl(tmp_path):
     """An SBOM whose metadata.component PURL names a different package must fail."""
     root = _root(tmp_path)
