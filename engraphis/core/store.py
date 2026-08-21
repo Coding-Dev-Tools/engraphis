@@ -3733,7 +3733,7 @@ class Store:
         return dict(row) if row is not None else None
 
     def list_source_import_items(self, *, vault_id: str, states: Optional[list[str]] = None,
-                                 limit: int = 10_000) -> list[dict]:
+                                 limit: int = 10_000, offset: int = 0) -> list[dict]:
         if self._source_vault_row(vault_id) is None:
             return []
         params: list[Any] = [vault_id]
@@ -3743,8 +3743,9 @@ class Store:
                 return []
             sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
             params.extend(str(state) for state in states)
-        sql += " ORDER BY relative_path LIMIT ?"
+        sql += " ORDER BY relative_path LIMIT ? OFFSET ?"
         params.append(max(1, min(100_000, int(limit))))
+        params.append(max(0, int(offset)))
         return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
     def upsert_source_import_item(self, *, vault_id: str, source_key: str, relative_path: str,
