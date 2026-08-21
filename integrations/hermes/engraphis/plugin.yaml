@@ -1,7 +1,0 @@
-name: engraphis
-version: 1.6.0
-description: "Engraphis local memory provider with scoped recall and bounded turn history."
-pip_dependencies: []
-requires_env: []
-hooks:
-  - on_session_switch
