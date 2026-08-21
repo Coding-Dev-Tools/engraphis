@@ -201,6 +201,30 @@ def _recall_score_semantics(capabilities: dict) -> dict:
         )
     return semantics
 
+
+def _vector_index_backend_label(index: Any) -> str:
+    """Label the active vector index backend for the recall envelope (additive)."""
+    if index is None:
+        return "numpy"
+    name = type(index).__name__
+    if "SqliteVec" in name:
+        return "sqlite-vec"
+    if name == "NumpyVectorIndex":
+        return "numpy"
+    return name
+
+
+def _reranker_mode_label(reranker: Any) -> str:
+    """Label the active reranker mode for the recall envelope (additive)."""
+    if reranker is None:
+        return "identity"
+    name = type(reranker).__name__
+    if "CrossEncoder" in name:
+        return "cross-encoder"
+    if name == "IdentityReranker":
+        return "identity"
+    return name
+
 def _finite_float(value: Any, default: float = 0.0) -> float:
     """Coerce persisted numeric fields without exposing NaN/Infinity downstream."""
     try:
@@ -3662,6 +3686,8 @@ class MemoryService:
             "embedding_mode": result.embedding_mode,
             "degraded_reason": result.degraded_reason,
             "vector_search_ready": result.vector_search_ready,
+            "vector_index_backend": _vector_index_backend_label(self.engine.index),
+            "reranker_mode": _reranker_mode_label(self.engine.reranker),
         }
         out = {
             "query": query, "count": result.count,
@@ -10801,6 +10827,22 @@ class MemoryService:
             scopes=[Scope.WORKSPACE, Scope.REPO, Scope.USER],
         )
         eligibility = self.store.prompt_eligibility_counts(eligibility_filter)
+
+        def _table_count(table: str) -> Optional[int]:
+            """Best-effort row count for an internal ledger table (None if unreadable)."""
+            try:
+                return int(
+                    conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                )
+            except Exception:
+                return None
+
+        # Additive health/observability counts; never part of the memory totals.
+        ledger_counts = {
+            "operation_receipts": _table_count("operation_receipts"),
+            "events": _table_count("events"),
+            "audit": _table_count("audit"),
+        }
         embedding = self.store.embedding_space_health(
             embedding_space_fingerprint(self.engine.embedder)
         )
@@ -10811,6 +10853,7 @@ class MemoryService:
             "schema_version": self.store.schema_version,
             "prompt_eligibility": eligibility,
             "embedding": embedding,
+            **ledger_counts,
         }
 
     def memory_health(self, *, workspace: str) -> dict:

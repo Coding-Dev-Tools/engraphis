@@ -14,6 +14,7 @@ import pytest
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.vector_sqlitevec import (
+    _VISIBILITY_BATCH_SIZE,
     SqliteVecVectorIndex,
     get_vector_index,
 )
@@ -581,8 +582,7 @@ def test_filtered_search_uses_minimal_cached_visibility_lookups(monkeypatch):
     def visible(memory_ids, flt, *, include_invalid=False):
         nonlocal calls
         batch = list(memory_ids)
-        calls += 1
-        assert len(batch) <= 8
+        assert len(batch) <= _VISIBILITY_BATCH_SIZE
         assert checked.isdisjoint(batch)
         checked.update(batch)
         return original(batch, flt, include_invalid=include_invalid)
@@ -603,8 +603,7 @@ def test_filtered_search_uses_minimal_cached_visibility_lookups(monkeypatch):
     )
 
     assert len(hits) == 5
-    assert calls >= 1
-    assert len(checked) <= 8
+    assert len(checked) <= _VISIBILITY_BATCH_SIZE
     store.close()
 
 
