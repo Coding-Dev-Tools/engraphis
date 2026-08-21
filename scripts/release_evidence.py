@@ -21,9 +21,11 @@ except ImportError:  # pragma: no cover - supported Python 3.9/3.10
     tomllib = None
 
 try:  # Prefer the installed packaging module when available.
+    from packaging.markers import InvalidMarker, Marker
     from packaging.specifiers import InvalidSpecifier, SpecifierSet
     from packaging.version import InvalidVersion, Version
 except ImportError:  # pragma: no cover - fallback for environments without top-level packaging
+    from pip._vendor.packaging.markers import InvalidMarker, Marker
     from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
     from pip._vendor.packaging.version import InvalidVersion, Version
 
@@ -37,6 +39,10 @@ _SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _PACKAGE_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s]+)\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _BUILDER_IMAGE = "github-hosted:ubuntu-latest/python-3.11"
+# Extras installed by the release workflow (`.github/workflows/release.yml` runs
+# `pip install ... ".[all,test]"` before capturing the SBOM), so the captured
+# closure must include every marker-applicable requirement they declare.
+_RELEASE_EXTRAS = ("all", "test")
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",
     "pip": "26.2",
@@ -271,10 +277,13 @@ def _version_satisfies(version: str, specifier: str) -> bool:
 
 
 def _declared_dependencies(root: Path) -> dict[str, str | None]:
-    """Return {canonical_name: specifier} from pyproject.toml [project].dependencies.
+    """Return {canonical_name: specifier} required in the captured SBOM closure.
 
-    Only core runtime dependencies are validated against the SBOM closure.
-    Optional extras are intentionally excluded.
+    Covers [project].dependencies plus every requirement declared by the extras
+    the release workflow installs (``_RELEASE_EXTRAS``).  PEP 508 environment
+    markers are evaluated against the running interpreter, which in the release
+    workflow is the same environment that captures the SBOM; requirements whose
+    markers do not apply are not required.
     """
     pyproject = root / "pyproject.toml"
     try:
@@ -288,9 +297,18 @@ def _declared_dependencies(root: Path) -> dict[str, str | None]:
         except (KeyError, ValueError):
             parsed = {}
         project = parsed.get("project", {}) if isinstance(parsed, dict) else {}
-        core = project.get("dependencies", []) if isinstance(project, dict) else []
-        if isinstance(core, list):
-            requirements.extend(item for item in core if isinstance(item, str))
+        if isinstance(project, dict):
+            core = project.get("dependencies", [])
+            if isinstance(core, list):
+                requirements.extend(item for item in core if isinstance(item, str))
+            extras = project.get("optional-dependencies", {})
+            if isinstance(extras, dict):
+                for extra in _RELEASE_EXTRAS:
+                    group = extras.get(extra)
+                    if isinstance(group, list):
+                        requirements.extend(
+                            item for item in group if isinstance(item, str)
+                        )
     else:
         project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
         if project is not None:
@@ -299,13 +317,38 @@ def _declared_dependencies(root: Path) -> dict[str, str | None]:
             )
             if deps_block is not None:
                 requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
+        extras_table = re.search(
+            r"(?ms)^\[project\.optional-dependencies\]\s*(.*?)(?=^\[|\Z)", raw,
+        )
+        if extras_table is not None:
+            for extra in _RELEASE_EXTRAS:
+                group = re.search(
+                    r"(?m)^" + re.escape(extra) + r"\s*=\s*\[(.*?)\]",
+                    extras_table.group(1), re.DOTALL,
+                )
+                if group is not None:
+                    requirements.extend(re.findall(r'"([^"]+)"', group.group(1)))
     deps: dict[str, str | None] = {}
     for requirement in requirements:
         if not isinstance(requirement, str) or not requirement.strip():
             continue
         name, specifier = _parse_requirement(requirement)
-        if name:
-            deps[_canonical_package_name(name)] = specifier
+        canonical = _canonical_package_name(name)
+        if not canonical or canonical == PACKAGE:
+            continue
+        marker_text = requirement.split(";", 1)[1].strip() if ";" in requirement else ""
+        if marker_text:
+            try:
+                applies = Marker(marker_text).evaluate()
+            except InvalidMarker as exc:
+                raise EvidenceError(
+                    "pyproject.toml declares an unparsable environment marker: "
+                    + marker_text
+                ) from exc
+            if not applies:
+                continue
+        if canonical not in deps or deps[canonical] is None:
+            deps[canonical] = specifier
     return deps
 
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
