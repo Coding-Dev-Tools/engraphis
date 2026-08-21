@@ -317,7 +317,7 @@ class ObsidianImporter:
         run_started = time.time()
         job_id = str(prepared["job_id"])
         import_id = str(prepared["import_id"])
-        items = self._all_source_items(vault_id=vault_id)
+        items, manifest_complete = self._all_source_items(vault_id=vault_id)
         plans, missing = self._plan(scan, vault_id, items, inspect_memories=True)
         for plan in plans:
             self.store.record_source_import_job_item(
@@ -348,7 +348,9 @@ class ObsidianImporter:
         finalized_missing: list[dict] = []
         pending_missing = list(missing)
         unreadable_directories = self._unreadable_directories(scan)
-        can_finalize_missing = scan.complete and not unreadable_directories
+        can_finalize_missing = (
+            scan.complete and not unreadable_directories and manifest_complete
+        )
         terminal_state = "completed"
         try:
             for index, plan in enumerate(plans, 1):
@@ -368,7 +370,7 @@ class ObsidianImporter:
                 self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
-                    source_keys=[item.get("source_key") for item in missing],
+                    missing_items=missing,
                 )
                 for item in missing:
                     self.store.record_source_import_job_item(
@@ -388,8 +390,11 @@ class ObsidianImporter:
                 )
                 self._persist_link_warnings(job_id, link_warnings)
             outcomes.extend(link_warnings)
-            if scan.rejected or not scan.complete or unreadable_directories or any(
-                row["status"] in {"error", "conflict", "rejected"} for row in outcomes
+            if (
+                scan.rejected or not scan.complete or unreadable_directories
+                or not manifest_complete
+                or any(row["status"] in {"error", "conflict", "rejected"}
+                       for row in outcomes)
             ):
                 terminal_state = "partial"
         except (KeyboardInterrupt, ObsidianImportCancelled):
@@ -949,13 +954,15 @@ class ObsidianImporter:
         }
 
     def _all_source_items(self, *, vault_id: str,
-                          states: Optional[list[str]] = None) -> list[dict]:
+                          states: Optional[list[str]] = None) -> tuple[list[dict], bool]:
         """Page through the full manifest so truncation cannot hide historical rows.
 
         ``list_source_import_items`` caps each page (default 10k rows); a manifest that
         outgrew one page through repeated deletions and additions must still be planned
         and reconciled in full, or rows beyond the first page silently stay live while
-        the run reports itself complete.
+        the run reports itself complete. Returns the rows and whether the whole manifest
+        was read: the paging bound (200k rows) is a memory cap, not an assumption, and a
+        manifest beyond it must push the run to partial rather than pass silently.
         """
         items: list[dict] = []
         page_size = 10_000
@@ -965,17 +972,23 @@ class ObsidianImporter:
             )
             items.extend(page)
             if len(page) < page_size:
-                break
-        return items
+                return items, True
+        return items, False
 
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> list[dict]:
-        items = self._all_source_items(
+        """Resolve derived links in bounded, cancellable, replay-safe batches."""
+        items, manifest_complete = self._all_source_items(
             vault_id=vault_id,
             states=["imported", "unchanged", "renamed", "skipped", "missing"],
         )
+        if not manifest_complete:
+            # A manifest beyond the paging bound is an incomplete view of the source;
+            # retiring derived edges against it could kill links whose targets were
+            # simply invisible. The run is already headed to partial upstream.
+            return []
         memory_by_path = {
             str(item["relative_path"]): str(item["memory_id"])
             for item in items if item.get("memory_id")
