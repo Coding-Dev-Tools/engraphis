@@ -21,14 +21,18 @@ the private cloud service is the sole authority for hosted entitlement and acces
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
+import sqlite3
 import sys
-from urllib.parse import urlsplit
+from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 from engraphis.config import DEFAULT_RELAY_URL, settings
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.sync import SyncEngine, SyncError
+from engraphis.core.sync import MAX_SYNC_GENERATION, SyncEngine, SyncError
 from engraphis.service import MemoryService
 
 
@@ -58,6 +62,113 @@ def _relay_origin(value: object) -> str:
     except ValueError:
         return ""
 
+def _open_read_only(db_path: str) -> sqlite3.Connection:
+    """Open an existing database strictly read-only; never create or migrate it."""
+    pos = quote(str(Path(db_path).absolute()).replace("\\", "/"), safe="/:")
+    conn = sqlite3.connect("file:%s?mode=ro" % pos, uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _try_value(conn: sqlite3.Connection, sql: str, params: tuple = ()):
+    try:
+        row = conn.execute(sql, params).fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else row[0]
+
+
+def _checkpoint_key(workspace_id: str, repo_id, device_id: str) -> str:
+    """Mirror SyncEngine._checkpoint_key so --status reads the exact local cursor."""
+    scope = hashlib.sha256(
+        (str(workspace_id) + "\0" + str(repo_id or "")).encode("utf-8")
+    ).hexdigest()[:24]
+    device = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:24]
+    return "sync_snapshot:%s:%s" % (scope, device)
+
+
+def _status(args: argparse.Namespace) -> int:
+    """Print LOCAL sync state only: no network I/O, no writes, always exit 0.
+
+    Reads the ``sync_state`` table directly instead of going through
+    MemoryService/Store, because opening the store would create or migrate an
+    absent database and ``Store.device_id()`` mints a device id when missing —
+    both mutations a status query must never perform. Fields that genuinely do
+    not exist locally are omitted rather than fabricated.
+    """
+    lines: list = []
+    found = False
+    try:
+        conn = _open_read_only(args.db)
+    except (OSError, ValueError, sqlite3.Error):
+        conn = None
+    if conn is not None:
+        try:
+            ws_row = _try_value(
+                conn, "SELECT id FROM workspaces WHERE name=?", (args.workspace,))
+            device_id = _try_value(
+                conn, "SELECT value FROM sync_state WHERE key='device_id'")
+            lines.append("db: %s" % Path(args.db).absolute())
+            lines.append("workspace: %s" % args.workspace)
+            if ws_row is not None:
+                found = True
+                repo_id = None
+                if args.repo:
+                    repo_id = _try_value(
+                        conn,
+                        "SELECT id FROM repos WHERE workspace_id=? AND name=?",
+                        (ws_row, args.repo),
+                    )
+                if device_id:
+                    lines.append("device_id: %s" % device_id)
+                    raw = _try_value(
+                        conn,
+                        "SELECT value FROM sync_state WHERE key=?",
+                        (_checkpoint_key(ws_row, repo_id, device_id),),
+                    )
+                    try:
+                        ckpt = json.loads(raw) if isinstance(raw, str) else None
+                        generation = ckpt["generation"]
+                        state_hash = ckpt["state_hash"]
+                    except (KeyError, TypeError, ValueError, RecursionError):
+                        generation, state_hash = None, None
+                    if (
+                        isinstance(generation, int)
+                        and not isinstance(generation, bool)
+                        and 1 <= generation <= MAX_SYNC_GENERATION
+                        and isinstance(state_hash, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", state_hash)
+                    ):
+                        lines.append("last_generation: %d" % generation)
+                        lines.append("last_state_hash: %s" % state_hash)
+                    memories = _try_value(
+                        conn,
+                        "SELECT COUNT(*) FROM memories WHERE workspace_id=?",
+                        (ws_row,),
+                    )
+                    tombstones = _try_value(
+                        conn,
+                        "SELECT COUNT(*) FROM memory_tombstones WHERE workspace_id=?",
+                        (ws_row,),
+                    )
+                    if memories is not None:
+                        lines.append("memories: %d" % memories)
+                    if tombstones is not None:
+                        lines.append("tombstones: %d" % tombstones)
+        finally:
+            conn.close()
+    remote = args.remote
+    relay = args.relay or settings.relay_url
+    if remote:
+        lines.append("remote: %s" % remote)
+    if relay:
+        lines.append("relay: %s" % relay)
+    if not found:
+        print("no local sync state")
+        return 0
+    print("\n".join(lines))
+    return 0
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Sync an Engraphis workspace across devices.")
@@ -80,6 +191,8 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=None, help="Restrict the sync to one repo name.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report what would change; write nothing (locally or to the remote).")
+    ap.add_argument("--status", action="store_true",
+                    help="Print local sync state only; no network I/O, no writes.")
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if any(
         item == flag or item.startswith(flag + "=")
@@ -92,7 +205,10 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 2
+
     args = ap.parse_args(raw_argv)
+    if args.status:
+        return _status(args)
 
     # Exactly one transport must be selected.
     use_relay = args.relay is not None
