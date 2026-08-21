@@ -35,6 +35,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 from typing import Any, Callable, Optional
 
@@ -1070,10 +1071,45 @@ def _write_immutable_report(report: dict, output: str | Path) -> None:
 
 
 def _print(report: dict) -> None:
-    print(f"\nEngraphis eval — {report['questions']} questions @ k={report['k']}")
+    # ASCII-only output: the Windows console's default cp1252 encoding cannot
+    # emit a Unicode em dash, which would crash the documented offline gate.
+    print(f"\nEngraphis eval - {report['questions']} questions @ k={report['k']}")
     print(f"  recall@k            : {report['recall_at_k']:.3f}")
     print(f"  hit@k               : {report['hit_at_k']:.3f}")
+    print(f"  mrr@k               : {report['mrr_at_k']:.3f}")
+    print(f"  ndcg@k              : {report['ndcg_at_k']:.3f}")
     print(f"  answer_token_recall : {report['answer_token_recall']:.3f}\n")
+
+
+#: Minimum recall@k / hit@k enforced by the CLI gate per bundled dataset. Both
+#: deterministic baselines score 1.0 today; the floor leaves regression headroom
+#: while still failing CI on a real retrieval collapse. Datasets not listed here
+#: (opt-in external benchmarks) carry no floor.
+_METRIC_FLOORS: dict[str, dict[str, float]] = {
+    "sample": {"recall_at_k": 0.9, "hit_at_k": 0.9},
+    "codemem": {"recall_at_k": 0.9, "hit_at_k": 0.9},
+}
+
+
+def _enforce_metric_floors(report: dict, dataset_path: str) -> None:
+    """Exit 1 when a gated dataset's retrieval metrics drop below their floor."""
+    floors = _METRIC_FLOORS.get(Path(dataset_path).stem)
+    if not floors:
+        return
+    # v2/canonical envelopes nest the legacy metrics under ``legacy_summary``.
+    summary = report.get("legacy_summary", report)
+    for metric in sorted(floors):
+        if metric not in summary:
+            continue
+        value = float(summary[metric])
+        if value < floors[metric]:
+            stem = Path(dataset_path).stem
+            print(
+                f"FLOOR VIOLATION: {stem} {metric}={value:.3f} "
+                f"< required {floors[metric]:.2f}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -1156,6 +1192,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             write_canonical_artifact(report, args.artifact, canonical=args.canonical)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
+    _enforce_metric_floors(report, args.dataset)
     if args.output_dir:
         try:
             import datetime
