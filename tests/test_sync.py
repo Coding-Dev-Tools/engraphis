@@ -158,6 +158,37 @@ def test_sync_rejects_malformed_modified_hlc_without_aborting_parser():
     }) is None
 
 
+def test_sync_rejects_malformed_scope_pointers_like_other_malformed_rows():
+    """workspace_id/repo_id arrive from untrusted bundles. Even though apply re-homes
+    them, dict_to_record is itself a trust boundary (dry-run, hashing): a present-but-
+    not-non-empty-string pointer is a malformed row, rejected exactly like a bad id."""
+    for bad in (123, True, ["ws"], {"ws": 1}, "", "\x00"):
+        assert dict_to_record({
+            "id": "mem_bad_ws", "content": "c", "workspace_id": bad,
+        }) is None, repr(bad)
+        assert dict_to_record({
+            "id": "mem_bad_repo", "content": "c", "repo_id": bad,
+        }) is None, repr(bad)
+    # Absent pointers stay absent; valid pointers survive (clamped) unchanged.
+    absent = dict_to_record({"id": "mem_no_ptrs", "content": "c"})
+    assert absent is not None
+    assert absent.workspace_id is None and absent.repo_id is None
+    good = dict_to_record({
+        "id": "mem_good_ptrs", "content": "c",
+        "workspace_id": "ws_01", "repo_id": "repo_01",
+    })
+    assert good is not None
+    assert good.workspace_id == "ws_01" and good.repo_id == "repo_01"
+    # Over-long pointers are clamped like every sibling string field, not rejected.
+    long_ptr = "x" * 300
+    clamped = dict_to_record({
+        "id": "mem_long_ptrs", "content": "c",
+        "workspace_id": long_ptr, "repo_id": long_ptr,
+    })
+    assert clamped is not None
+    assert clamped.workspace_id == "x" * 128 and clamped.repo_id == "x" * 128
+
+
 def test_sync_rejects_future_hlc_without_aborting_other_rows():
     now = time.time()
     poisoned_hlc = format_modified_hlc(

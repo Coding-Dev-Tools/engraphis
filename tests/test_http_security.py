@@ -100,6 +100,32 @@ def test_empty_environment_overrides_disable_csp_and_hsts(monkeypatch):
     assert "Strict-Transport-Security" not in response.headers
 
 
+def test_csp_disable_warning_emitted_iff_env_set_empty(monkeypatch, caplog):
+    """Opting out of CSP entirely must be observable at startup — exactly one
+    warning per app install, and only when ENGRAPHIS_CSP is explicitly empty."""
+    import logging
+
+    def csp_warnings():
+        return [r for r in caplog.records
+                if r.levelno == logging.WARNING
+                and "ENGRAPHIS_CSP" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING, logger="engraphis.http"):
+        # Env unset: default CSP active, silent.
+        _client(monkeypatch)
+        assert csp_warnings() == []
+        # Valid override: silent.
+        _client(monkeypatch, csp="default-src 'self'")
+        assert csp_warnings() == []
+        caplog.clear()
+        # Explicitly empty: exactly one warning (install is idempotent), and the
+        # header is still omitted — the warning changes no enforcement.
+        response = _client(monkeypatch, csp="").get("/")
+        warnings = csp_warnings()
+        assert len(warnings) == 1
+        assert "Content-Security-Policy" not in response.headers
+
+
 def test_configured_public_host_redirects_first_plain_http_visit(monkeypatch):
     monkeypatch.setenv(
         "ENGRAPHIS_DASHBOARD_URL", "https://team.engraphis.test")
