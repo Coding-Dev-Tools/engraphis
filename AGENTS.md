@@ -49,6 +49,8 @@ python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # coding/con
 python -m eval.ablation                                             # vector-only vs hybrid
 python -m eval.reinforcement                                        # bounded retention trajectory
 python -m eval.adversarial_memory_security                          # prompt/graph boundary
+python -m eval.grounded                                             # grounded-abstain decision gate
+python -m eval.code_arm                                             # coding-agent arm gate
 pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
@@ -89,7 +91,9 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 
 `requires-python >= 3.9` (ruff targets `py39`). CI tests the NumPy-only core on 3.9, the full
 offline stack on 3.10–3.14, and Pyright on 3.11; dedicated jobs also exercise encryption and built
-artifacts. `.github/workflows/ci.yml` is authoritative when the matrix changes.
+artifacts, and further jobs run the coverage gate (`--cov-fail-under=60`), repo hygiene, the Pi
+extension, browser accessibility, and the Docker smoke. `.github/workflows/ci.yml` is
+authoritative when the matrix changes.
 
 ---
 
