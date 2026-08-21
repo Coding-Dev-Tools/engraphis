@@ -3831,11 +3831,24 @@ class Store:
     def mark_source_import_items_missing(
         self, *, vault_id: str, seen_before: float,
         preserve_paths: Iterable[str] = (), commit: bool = True,
-        source_keys: Iterable[str] = (),
+        missing_items: Iterable[Any] = (),
     ) -> int:
+        """Mark planned rows missing, or fall back to the timestamp heuristic.
+
+        With ``missing_items`` (the planner's manifest rows), each key is updated
+        only while the row still matches its planned generation — ``last_seen_at``,
+        ``last_seen_job_id``, and a live state. A concurrent import that refreshed
+        or re-upserted the row after this run planned it therefore keeps its newer
+        state instead of being clobbered back to ``missing``, and per-key updates
+        stay clear of SQLite host-parameter limits no matter how many rows died.
+        """
         if self._source_vault_row(vault_id) is None:
             return 0
-        source_keys = {str(k) for k in source_keys if k}
+        planned = [
+            (str(item["source_key"]), item.get("last_seen_at"),
+             item.get("last_seen_job_id"))
+            for item in missing_items if item.get("source_key")
+        ]
         with self._write_operation("source_missing", commit=commit):
             for relative_path in {str(path) for path in preserve_paths if str(path)}:
                 self.conn.execute(
@@ -3843,13 +3856,19 @@ class Store:
                     "AND relative_path=? AND state NOT IN ('missing','conflict')",
                     (float(seen_before), vault_id, relative_path),
                 )
-            if source_keys:
-                placeholders = ",".join("?" for _ in source_keys)
-                return int(self.conn.execute(
-                    f"UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
-                    f"AND source_key IN ({placeholders})",
-                    (now_ts(), vault_id, *source_keys),
-                ).rowcount)
+            if planned:
+                updated = 0
+                stamp = now_ts()
+                for key, seen_at, seen_job in planned:
+                    updated += int(self.conn.execute(
+                        "UPDATE source_imports SET state='missing', missing_at=? "
+                        "WHERE vault_id=? AND source_key=? "
+                        "AND (last_seen_at IS NULL OR last_seen_at=?) "
+                        "AND (last_seen_job_id IS NULL OR last_seen_job_id=?) "
+                        "AND state NOT IN ('missing','conflict')",
+                        (stamp, vault_id, key, seen_at, seen_job),
+                    ).rowcount)
+                return updated
             return int(self.conn.execute(
                 "UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
                 "AND (last_seen_at IS NULL OR last_seen_at<?) "
