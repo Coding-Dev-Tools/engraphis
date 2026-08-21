@@ -531,6 +531,29 @@ def saved_entitlement() -> dict:
         return {}
 
 
+def saved_session_digest() -> Optional[str]:
+    """Return a ``sha256`` digest over the raw saved session bytes, or ``""`` if absent.
+
+    ``None`` means "could not determine" (unreadable or unsafe state file), which callers
+    must treat as "no evidence of change". This lets a caller detect that the session was
+    *rewritten* — a genuine reconnect always rotates the refresh credential, so the bytes
+    differ — without parsing the record or exposing any credential material. Wall-clock
+    timestamps cannot serve this role: two writes inside one coarse clock tick stamp equal
+    ``entitlement_checked_at`` values, so only content distinguishes a post-denial
+    reconnect from a pre-denial record.
+    """
+
+    try:
+        raw = read_private_text(
+            _session_path(), max_bytes=64 * 1024, allow_missing=True
+        )
+    except Exception:  # noqa: BLE001 — unreadable state must not crash a digest probe
+        return None
+    if raw is None:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def record_billing_denial() -> bool:
     """Mark the saved entitlement inactive after an authoritative billing denial.
 

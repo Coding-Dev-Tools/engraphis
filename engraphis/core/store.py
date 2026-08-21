@@ -3830,9 +3830,11 @@ class Store:
     def mark_source_import_items_missing(
         self, *, vault_id: str, seen_before: float,
         preserve_paths: Iterable[str] = (), commit: bool = True,
+        source_keys: Iterable[str] = (),
     ) -> int:
         if self._source_vault_row(vault_id) is None:
             return 0
+        source_keys = {str(k) for k in source_keys if k}
         with self._write_operation("source_missing", commit=commit):
             for relative_path in {str(path) for path in preserve_paths if str(path)}:
                 self.conn.execute(
@@ -3840,6 +3842,13 @@ class Store:
                     "AND relative_path=? AND state NOT IN ('missing','conflict')",
                     (float(seen_before), vault_id, relative_path),
                 )
+            if source_keys:
+                placeholders = ",".join("?" for _ in source_keys)
+                return int(self.conn.execute(
+                    f"UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
+                    f"AND source_key IN ({placeholders})",
+                    (now_ts(), vault_id, *source_keys),
+                ).rowcount)
             return int(self.conn.execute(
                 "UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
                 "AND (last_seen_at IS NULL OR last_seen_at<?) "

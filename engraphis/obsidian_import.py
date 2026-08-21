@@ -368,6 +368,7 @@ class ObsidianImporter:
                 self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
+                    source_keys=[item.get("source_key") for item in missing],
                 )
                 for item in missing:
                     self.store.record_source_import_job_item(

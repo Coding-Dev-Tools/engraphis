@@ -2660,6 +2660,7 @@ _entitlement_refresh_failures = 0
 # state directory is temporarily unwritable. A newer active authoritative record clears it.
 _AUTHORITATIVE_DENIAL_PENDING = threading.Event()
 _authoritative_denial_at = 0.0
+_denied_state_digests: dict = {}
 #: Same opt-out vocabulary as ``ENGRAPHIS_UPDATE_CHECK`` (see engraphis/update_check.py).
 _FALSY_SETTINGS = {"0", "false", "no", "off", "disable", "disabled"}
 
@@ -3049,23 +3050,67 @@ def _deny_entitlement_cache() -> bool:
         return False
 
 
+def _persisted_state_digest(source: str) -> Optional[str]:
+    """Digest the persisted bytes backing one entitlement source, for change detection.
+
+    ``None`` means "could not determine" and must be treated as "unchanged" — a probe
+    failure must never look like the superseding rewrite it cannot prove. Wall-clock
+    timestamps cannot order a reconnect against a denial: two writes inside one coarse
+    clock tick stamp equal ``entitlement_checked_at``/``fetched_at`` values, so only
+    content distinguishes a post-denial reconnect from a pre-denial record.
+    """
+
+    try:
+        if source == "session":
+            from engraphis import cloud_session
+
+            return cloud_session.saved_session_digest()
+        if source == "cloud":
+            path = _entitlement_cache_path()
+            if path is None:
+                return ""
+            from engraphis.private_state import read_private_text
+
+            raw = read_private_text(
+                path, max_bytes=_ENTITLEMENT_MAX_RESPONSE_BYTES, allow_missing=True
+            )
+            if raw is None:
+                return ""
+            return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    except Exception:  # noqa: BLE001 - an unreadable state file must fail closed
+        return None
+    return None
+
+
 def _mark_authoritative_denial() -> None:
     """Make an authoritative cloud denial visible before persistence starts."""
 
-    global _authoritative_denial_at
+    global _authoritative_denial_at, _denied_state_digests
     with _ENTITLEMENT_REFRESH_LOCK:
         _authoritative_denial_at = time.time()
+        _denied_state_digests = {
+            source: _persisted_state_digest(source) for source in ("session", "cloud")
+        }
         _AUTHORITATIVE_DENIAL_PENDING.set()
 
 
-def _clear_superseded_denial(checked_at: float) -> bool:
-    """Clear the process guard only for a newer active authoritative answer."""
+def _clear_superseded_denial(known_source: str) -> bool:
+    """Clear the process guard only for a state rewritten after the denial.
+
+    A genuine reconnect rewrites the session (the control plane rotates the refresh
+    credential) or the entitlement cache with a fresh answer. If the bytes backing
+    ``known_source`` are exactly the ones the denial observed, the active-looking record
+    predates the denial — however equal their wall-clock stamps are — and must not
+    resurrect grants the control plane just refused.
+    """
 
     global _authoritative_denial_at
     with _ENTITLEMENT_REFRESH_LOCK:
+        current = _persisted_state_digest(known_source)
         if (
             _AUTHORITATIVE_DENIAL_PENDING.is_set()
-            and checked_at > _authoritative_denial_at
+            and current is not None
+            and current != _denied_state_digests.get(known_source)
         ):
             _AUTHORITATIVE_DENIAL_PENDING.clear()
             _authoritative_denial_at = 0.0
@@ -3357,7 +3402,7 @@ def _plan_entitlement() -> dict:
         if (
             known
             and bool(known.get("cloud_access_active"))
-            and _clear_superseded_denial(known_checked_at)
+            and _clear_superseded_denial(known_source)
         ):
             return _resolved_entitlement(known, source=known_source)
         with _ENTITLEMENT_REFRESH_LOCK:
