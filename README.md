@@ -396,14 +396,6 @@ including `engraphis_check_update`, is in the [MCP tool reference](https://githu
 For installation, configuration, lifecycle commands, and the local trust boundary, see the
 [Pi extension guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md).
 
-### Hermes provider
-
-Engraphis also ships a native Hermes memory-provider plugin with local prefetch, bounded turn
-capture, scoped recall, and explicit secure erase. Install Engraphis in the Hermes Python
-environment, copy the provider, then select it with `hermes memory setup`. See the
-[Hermes integration guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/hermes/README.md). The provider never installs itself or
-downloads an embedding model.
-
 ## Quickstart: repository graph
 
 ```bash

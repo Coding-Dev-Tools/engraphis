@@ -149,6 +149,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
   interpolation, eliminating a fragile SQL construction pattern (SEC-002).
 - The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
   PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
+
+### Removed
+
+- The Hermes memory-provider plugin integration (`integrations/hermes/`, its
+  `ENGRAPHIS_HERMES_*` environment surface, and its integration test) is withdrawn from
+  the repository ahead of the v1.6 tag. The provider remains available in the v1.5
+  release history for anyone who already copied it.
 ## [1.6] - 2026-08-15
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted
