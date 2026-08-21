@@ -1349,6 +1349,11 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
     metadata["provenance"] = provenance
     try:
         engine.store.advance_memory_modified_hlc(memory_id, commit=False)
+        engine.store.audit(
+            "consolidation", "safety_inherit", memory_id,
+            f"sensitivity={sensitivity}; trusted={trusted}",
+            commit=False,
+        )
         engine.store.conn.execute(
             "UPDATE memories SET sensitivity=?, metadata=?, provenance=? WHERE id=?",
             (sensitivity,

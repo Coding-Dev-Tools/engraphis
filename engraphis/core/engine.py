@@ -613,6 +613,9 @@ class MemoryEngine:
         only when their stored vectors need this lifecycle. The marker is committed
         *after* every eligible record is indexed, so an interrupted rebuild safely
         repeats on the next startup rather than leaving a mixed mapping marked current.
+        Paging covers only records whose canonical vector is missing or stamped with
+        another fingerprint, so a restart resumes where the previous pass stopped
+        instead of re-embedding the whole store from scratch.
         """
         identity = str(getattr(self.embedder, "embedding_identity", "") or "").strip()
         version = str(getattr(self.embedder, "embedding_version", "") or "").strip()
@@ -658,8 +661,9 @@ class MemoryEngine:
         after_id = ""
         try:
             while True:
-                records = self.store.list_memories_page(
-                    after_id=after_id, limit=EMBEDDING_REBUILD_BATCH, include_invalid=True,
+                records = self.store.list_memories_needing_vectors_page(
+                    fingerprint=fingerprint, after_id=after_id,
+                    limit=EMBEDDING_REBUILD_BATCH,
                 )
                 if not records:
                     break
@@ -1858,7 +1862,25 @@ class MemoryEngine:
         """
         try:
             conflicts = detect_conflicts(new_text, (rec for _, rec in neighbors))
-        except Exception:
+        except Exception as exc:
+            failure_type = type(exc).__name__
+            logger.warning(
+                "conflict detection failed (%s); treating as no conflict",
+                failure_type,
+            )
+            try:
+                self.store.audit(
+                    "resolver",
+                    "conflict_detect_failed",
+                    new_id or workspace_id or "resolution",
+                    "failure_type=%s" % failure_type,
+                    commit=not self.store.conn.transaction_owned_by_current_thread(),
+                )
+            except Exception as audit_exc:
+                logger.warning(
+                    "could not audit conflict-detection failure (%s)",
+                    type(audit_exc).__name__,
+                )
             return None
         if not conflicts:
             return None
