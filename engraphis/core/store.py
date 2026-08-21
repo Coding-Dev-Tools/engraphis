@@ -3733,19 +3733,29 @@ class Store:
         return dict(row) if row is not None else None
 
     def list_source_import_items(self, *, vault_id: str, states: Optional[list[str]] = None,
-                                 limit: int = 10_000, offset: int = 0) -> list[dict]:
+                                 limit: int = 10_000, after_path: str = "",
+                                 after_id: str = "") -> list[dict]:
+        """Page the manifest by ``(relative_path, id)`` cursor, not OFFSET.
+
+        OFFSET is applied to a live ``ORDER BY`` result: a concurrent rename or insert
+        shifts unread rows across the page boundary and they are silently skipped while
+        the pager believes it saw everything. A keyset cursor is immune — every row at
+        or after the cursor is returned exactly once regardless of concurrent writes.
+        """
         if self._source_vault_row(vault_id) is None:
             return []
         params: list[Any] = [vault_id]
         sql = "SELECT * FROM source_imports WHERE vault_id=?"
+        if after_path or after_id:
+            sql += " AND (relative_path>? OR (relative_path=? AND id>?))"
+            params.extend([str(after_path), str(after_path), str(after_id)])
         if states is not None:
             if not states:
                 return []
             sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
             params.extend(str(state) for state in states)
-        sql += " ORDER BY relative_path LIMIT ? OFFSET ?"
+        sql += " ORDER BY relative_path, id LIMIT ?"
         params.append(max(1, min(100_000, int(limit))))
-        params.append(max(0, int(offset)))
         return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
     def upsert_source_import_item(self, *, vault_id: str, source_key: str, relative_path: str,

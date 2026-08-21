@@ -955,25 +955,37 @@ class ObsidianImporter:
 
     def _all_source_items(self, *, vault_id: str,
                           states: Optional[list[str]] = None) -> tuple[list[dict], bool]:
-        """Page through the full manifest so truncation cannot hide historical rows.
+        """Page the full manifest by keyset cursor so nothing is skipped or miscounted.
 
         ``list_source_import_items`` caps each page (default 10k rows); a manifest that
         outgrew one page through repeated deletions and additions must still be planned
-        and reconciled in full, or rows beyond the first page silently stay live while
-        the run reports itself complete. Returns the rows and whether the whole manifest
-        was read: the paging bound (200k rows) is a memory cap, not an assumption, and a
-        manifest beyond it must push the run to partial rather than pass silently.
+        and reconciled in full. The ``(relative_path, id)`` cursor is immune to the
+        OFFSET failure mode, where a concurrent rename shifts an unread row across the
+        page boundary so it is silently skipped while the pager believes it saw
+        everything; a row renamed below the already-read range degrades into the
+        content-hash rename detection instead. Returns the rows and whether the whole
+        manifest was read: the 200k-row bound is a memory cap, and one extra row is
+        probed past it so a manifest of exactly that size is not misreported as
+        truncated.
         """
         items: list[dict] = []
         page_size = 10_000
+        cursor_path = cursor_id = ""
         for _ in range(20):  # bounded: at most 200k manifest rows per import run
             page = self.store.list_source_import_items(
-                vault_id=vault_id, states=states, limit=page_size, offset=len(items),
+                vault_id=vault_id, states=states, limit=page_size,
+                after_path=cursor_path, after_id=cursor_id,
             )
             items.extend(page)
             if len(page) < page_size:
                 return items, True
-        return items, False
+            cursor_path = str(page[-1].get("relative_path") or "")
+            cursor_id = str(page[-1].get("id") or "")
+        extra = self.store.list_source_import_items(
+            vault_id=vault_id, states=states, limit=1,
+            after_path=cursor_path, after_id=cursor_id,
+        )
+        return items, not extra
 
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
