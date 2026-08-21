@@ -1,7 +1,8 @@
 # Engraphis v3 architecture
 
 This document is the design outline for the repo-graph, intent-native memory, resource-ingestion,
-retention-supervision, and privacy-receipt additions introduced with schema version 3.
+retention-supervision, and privacy-receipt additions introduced in the schema-3 era (the
+current schema version is 16).
 
 ```mermaid
 flowchart LR
