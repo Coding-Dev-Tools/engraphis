@@ -548,3 +548,43 @@ def test_empty_dataset_is_a_valid_zero_sized_evaluation():
     assert report["recall_at_k"] == 0.0
     assert report["hit_at_k"] == 0.0
     assert report["detail"] == []
+
+CODEMEM_DATASET = Path(__file__).resolve().parent.parent / "eval" / "datasets" / "codemem.jsonl"
+
+
+def test_codemem_dataset_meets_release_floor_at_k5():
+    """The coding-agent wedge must hold the same 0.9 recall/hit floor as sample."""
+    report = run(load_dataset(str(CODEMEM_DATASET)), k=5)
+    assert report["recall_at_k"] >= 0.9
+    assert report["hit_at_k"] >= 0.9
+
+
+def test_sample_dataset_meets_release_floor_at_k5():
+    report = run(load_dataset(str(DATASET)), k=5)
+    assert report["recall_at_k"] >= 0.9
+    assert report["hit_at_k"] >= 0.9
+
+
+def test_harness_main_enforces_metric_floors(monkeypatch, capsys):
+    """A gated dataset below its floor exits 1 with a clear failure line."""
+    import eval.harness as harness
+
+    monkeypatch.setitem(harness._METRIC_FLOORS, "sample", {"recall_at_k": 1.1})
+    with pytest.raises(SystemExit) as excinfo:
+        harness_main(["--dataset", str(DATASET), "--k", "5"])
+    assert excinfo.value.code == 1
+    assert "FLOOR VIOLATION" in capsys.readouterr().err
+
+
+def test_harness_main_passes_ungated_datasets_without_a_floor(monkeypatch, tmp_path):
+    """Datasets absent from the floor registry keep the old always-exit-0 behavior."""
+    ungated = tmp_path / "ungated.jsonl"
+    ungated.write_text(
+        json.dumps({
+            "id": "ungated",
+            "memories": [{"tag": "deploy", "text": "The deploy marker is coral."}],
+            "questions": [{"q": "what is the deploy marker?", "supporting": ["deploy"]}],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    assert harness_main(["--dataset", str(ungated), "--k", "3"]) is None
