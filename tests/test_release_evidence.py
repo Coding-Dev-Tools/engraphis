@@ -624,8 +624,8 @@ def test_release_evidence_requires_selected_extra_dependencies(tmp_path):
         '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
         'dependencies = ["alpha-package>=1.0"]\n'
         "[project.optional-dependencies]\n"
-        "all = ['extra-dep>=1.0; python_version >= \"3.9\"']\n"
-        "test = ['test-dep>=0.1']\n",
+        "all = [\"extra-dep>=1.0; python_version >= '3.9'\"]\n"
+        "test = [\"test-dep>=0.1\"]\n",
         encoding="utf-8",
     )
     dist = _dist(root)
@@ -643,8 +643,8 @@ def test_release_evidence_ignores_extra_dependencies_with_inapplicable_markers(t
         '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
         'dependencies = ["alpha-package>=1.0"]\n'
         "[project.optional-dependencies]\n"
-        "all = ['future-dep>=1.0; python_version < \"3.9\"']\n"
-        "test = ['legacy-dep>=0.1; python_version < \"3.9\"']\n",
+        "all = [\"future-dep>=1.0; python_version < '3.9'\"]\n"
+        "test = [\"legacy-dep>=0.1; python_version < '3.9'\"]\n",
         encoding="utf-8",
     )
     dist = _dist(root)
