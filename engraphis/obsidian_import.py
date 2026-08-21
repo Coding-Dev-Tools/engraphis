@@ -383,7 +383,7 @@ class ObsidianImporter:
                         planned_action="missing", result_state="missing",
                     )
                 for item in missing:
-                    if item in finalized:
+                    if str(item.get("source_key") or "") in marked_keys:
                         continue
                     # The generation guard left this row live: a concurrent import
                     # refreshed it after this run planned it missing. The job history
