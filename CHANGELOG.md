@@ -97,6 +97,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Added `docs/GRAPH_PERFORMANCE.md` documenting the two graph presentation profiles,
   worker layout, progressive rendering, and the 20,000-node / 200,000-relation safety
   ceilings.
+- Source-import manifest paging now uses keyset (cursor) pagination instead of OFFSET,
+  so concurrent writes during a source re-import can no longer skip or duplicate rows
+  mid-scan (PR #154).
 
 ### Fixed
 
@@ -131,8 +134,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
   to register, instead of replaying the same broken asset response.
 - Existing Galaxy preferences migrate only the retired `48` orbital-separation default to `60`;
   deliberate custom values, including Gravity `0`, remain unchanged.
+- Source-import hardening lands via separate PR #154: deterministic missing-item detection
+  now guards an unknown baseline instead of reporting spurious misses, denial-guard
+  supersession binds digests computed from the parsed record rather than raw input,
+  import-job finalization is generation-guarded so a stale worker cannot finalize over a
+  newer attempt, and the finalized-state check completes in constant time.
 
 ### Security
+
 
 - HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths back
   to the client, preventing filesystem structure leakage (SEC-001).

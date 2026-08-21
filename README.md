@@ -79,7 +79,7 @@ its counting boundary explicit.
 These values are evidence IDs `offline-chunking` and `offline-performance` in
 [`offline-fixtures-v1.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v1.json),
 SHA-256
-`c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2`.
+`0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
@@ -455,7 +455,9 @@ hit = mem.recall("why did we change auth?", workspace="acme", repo="api")
 print(hit["context"])
 ```
 
-The same `MemoryService` backs the dashboard and the MCP server.
+The same `MemoryService` backs the dashboard and the MCP server. The package root also
+intentionally exposes the low-level engine facade (`MemoryEngine`, `create_memory_engine`)
+for advanced composition, while `MemoryService` remains the high-level service API.
 
 New writes support `session`, `repo`, and `workspace` visibility. `scope="user"` is reserved and
 rejected until records carry an immutable owner identity; it must not be treated as private
@@ -608,6 +610,12 @@ Cloud Sync is an optional hosted Pro/Team service. The public package includes t
 and deterministic merge implementation; hosted relay and account operations are separate. See
 [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md) for setup, encryption, merge behavior, and the local folder exchange.
 
+The public package ships the same sync client as a console script and CLI verb:
+`engraphis-sync` (installed entry point), `engraphis sync ...`, and
+`python -m scripts.sync --status` for local-only state without network activity. See
+[Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md) for
+flags, encryption, merge behavior, and the local folder exchange.
+
 ---
 
 ## Security and trust boundaries
@@ -733,6 +741,8 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
 | `ENGRAPHIS_UPDATE_CACHE` | `86400` | Update-check cache TTL in seconds, bounded to `1..31622400`; this is never a cache-file path |
+| `ENGRAPHIS_UPDATE_CHECK` | Off | Opt-in release reminder surfaced in the dashboard, server startup log, and MCP. Update checks run only when this is set to an affirmative value; `0` keeps them off. |
+| `ENGRAPHIS_UPDATE_URL` | Not set | Overrides the release-check source URL; the outbound client accepts HTTPS and rejects private/reserved destinations. |
 | `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API. A saved rotating credential stays bound to the control endpoint recorded for its family; reconnect to change it. |
 | `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API. A saved rotating credential stays bound to its recorded compute endpoint; reconnect to change it. |
 | `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | Not set | Hosted organization bound to this customer session |
