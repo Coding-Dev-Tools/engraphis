@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -325,6 +326,30 @@ def cmd_review_approve(args: argparse.Namespace) -> None:
     finally:
         service.store.close()
 
+def _startup_error(exc: BaseException) -> str:
+    """Map a service-startup failure to one redacted, actionable CLI line.
+
+    Mirrors scripts/start_dashboard.py:_startup_error. Messages stay value-free
+    where third-party text could embed credentials or private paths; the
+    configured database path itself is owner-visible and safe to name.
+    """
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return ("A required dependency is missing. Run engraphis-init --check to see "
+                "which optional extra provides it.")
+    if isinstance(exc, sqlite3.Error):
+        return ("Could not open the Engraphis database — run engraphis-init --check "
+                "to verify the configured database path.")
+    if isinstance(exc, OSError):
+        return (f"File or permission error while starting the service "
+                f"({type(exc).__name__}). Run engraphis-init --check for diagnostics.")
+    if isinstance(exc, RuntimeError):
+        # Backend/provider RuntimeErrors can embed proxy credentials, certificate
+        # paths, or endpoint URLs. Redact to the exception type so operator output
+        # stays value-free.
+        return ("Service initialization failed during backend/model setup. "
+                "Run engraphis-init --check for diagnostics.")
+    return f"Command failed ({type(exc).__name__})."
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -400,11 +425,13 @@ def main() -> None:
     p.set_defaults(func=cmd_review_approve)
 
     args = parser.parse_args()
-    _emit_update_notice()
     try:
         args.func(args)
     except ValidationError as exc:
         print(f"Error: {exc}")
+        sys.exit(1)
+    except (sqlite3.Error, OSError, ImportError, RuntimeError) as exc:
+        print(f"Error: {_startup_error(exc)}")
         sys.exit(1)
 
 

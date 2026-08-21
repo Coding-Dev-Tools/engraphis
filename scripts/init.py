@@ -294,6 +294,10 @@ def main(argv=None) -> int:
             return 1
         print(f"wrote {env_file}")
         print(f"  database -> {db_path}")
+        if db_path.parent == Path.cwd():
+            print("  note: this database path is pinned to the current directory; "
+                  "runtime tools will use this pinned path (ENGRAPHIS_DB_PATH "
+                  "overrides it).")
         if key_path is not None:
             print(f"  encryption -> SQLCipher key file {key_path}")
         elif not args.no_encryption:
