@@ -48,6 +48,10 @@ jobs:
         run: python -m eval.reinforcement
       - name: Adversarial memory prompt-boundary gate
         run: python -m eval.adversarial_memory_security
+      - name: Grounded-recall decision gate
+        run: python -m eval.grounded
+      - name: Code-agent arm gate
+        run: python -m eval.code_arm
 
   typecheck:
     name: core + backends typecheck (Python 3.11)
@@ -113,6 +117,8 @@ jobs:
         run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
+      - name: Retrieval eval gate — CodeMem (coding-agent wedge, incl. conflict resolution)
+        run: python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
       - name: Ablation
         run: python -m eval.ablation
       - name: Reinforcement state-transition gate

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import sys
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
@@ -278,15 +279,25 @@ def _semantic_confidence_calibration_contrast() -> tuple[bool, bool]:
 
 def main() -> None:
     ds = load_dataset(str(Path(__file__).resolve().parent / "datasets" / "sample.jsonl"))
-    print("Engraphis ablation — recall@5")
+    print("Engraphis ablation - recall@5")
     print(f"  vector-only  : {_score(ds, k=5, hybrid=False)}")
     print(f"  hybrid-1hop  : {_score(ds, k=5, hybrid=True, graph_mode='1hop')}")
     print(f"  hybrid-ppr   : {_score(ds, k=5, hybrid=True, graph_mode='ppr')}")
+
+    failures: list[str] = []
+
+    age_delta = _ordinary_recall_age_delta()
     print("\nEngraphis ordinary-recall age ablation")
     print(
         "  equal-reinforcement score delta (recent - 1y old): "
-        f"{_ordinary_recall_age_delta():.8f}  (expected 0.00000000)"
+        f"{age_delta:.8f}  (expected 0.00000000)"
     )
+    if age_delta != 0:
+        failures.append(
+            f"ordinary-recall age delta {age_delta:.8f} != 0 "
+            "(equal reinforcement must erase age bias)"
+        )
+
     default_weak_first, calibrated_lexical_first = _semantic_confidence_calibration_contrast()
     print("\nEngraphis semantic-confidence micro-ablation (not a benchmark)")
     print(f"  default weak singleton wins : {default_weak_first}")
@@ -295,18 +306,30 @@ def main() -> None:
     mh_path = Path(__file__).resolve().parent / "datasets" / "graph_multihop.jsonl"
     if mh_path.exists():
         mh = load_dataset(str(mh_path))
-        print("\nEngraphis ablation (multi-hop graph dataset) — arm-level recall@5")
+        print("\nEngraphis ablation (multi-hop graph dataset) - arm-level recall@5")
         print("  (answers sit 2 entity-hops from the query; which arm can REACH them?)")
+        graph_1hop = _arm_recall(mh, k=5, arm="graph1hop")
+        graph_ppr = _arm_recall(mh, k=5, arm="graphppr")
         print(f"  vector arm   : {_arm_recall(mh, k=5, arm='vector')}")
-        print(f"  graph 1-hop  : {_arm_recall(mh, k=5, arm='graph1hop')}   (reaches 1 hop only)")
-        print(f"  graph PPR    : {_arm_recall(mh, k=5, arm='graphppr')}   (multi-hop walk)")
-        print("\nEngraphis retrieval-policy fixture — recall@5")
+        print(f"  graph 1-hop  : {graph_1hop}   (reaches 1 hop only)")
+        print(f"  graph PPR    : {graph_ppr}   (multi-hop walk)")
+        if graph_ppr <= graph_1hop:
+            failures.append(
+                f"multi-hop PPR recall@5 {graph_ppr} <= 1-hop recall@5 {graph_1hop} "
+                "(the multi-hop walk must beat the single-hop arm)"
+            )
+        print("\nEngraphis retrieval-policy fixture - recall@5")
         print(f"  balanced     : {_score(mh, k=5, hybrid=True)}")
         print(
             "  auto         : "
             f"{_score(mh, k=5, hybrid=True, retrieval_profile='auto')} "
             "(opt-in graph specialization)"
         )
+
+    if failures:
+        for failure in failures:
+            print(f"INVARIANT VIOLATION: {failure}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
