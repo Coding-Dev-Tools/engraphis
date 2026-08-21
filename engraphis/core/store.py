@@ -3842,7 +3842,7 @@ class Store:
         self, *, vault_id: str, seen_before: float,
         preserve_paths: Iterable[str] = (), commit: bool = True,
         missing_items: Iterable[Any] = (),
-    ) -> int:
+    ) -> list[str]:
         """Mark planned rows missing, or fall back to the timestamp heuristic.
 
         With ``missing_items`` (the planner's manifest rows), each key is updated
@@ -3851,9 +3851,11 @@ class Store:
         or re-upserted the row after this run planned it therefore keeps its newer
         state instead of being clobbered back to ``missing``, and per-key updates
         stay clear of SQLite host-parameter limits no matter how many rows died.
+        Returns the source_keys actually marked, so callers can finalize job history
+        and reports against reality instead of the plan.
         """
         if self._source_vault_row(vault_id) is None:
-            return 0
+            return []
         planned = [
             (str(item["source_key"]), item.get("last_seen_at"),
              item.get("last_seen_job_id"))
@@ -3867,24 +3869,38 @@ class Store:
                     (float(seen_before), vault_id, relative_path),
                 )
             if planned:
-                updated = 0
+                marked: list[str] = []
                 stamp = now_ts()
                 for key, seen_at, seen_job in planned:
-                    updated += int(self.conn.execute(
+                    if self.conn.execute(
                         "UPDATE source_imports SET state='missing', missing_at=? "
                         "WHERE vault_id=? AND source_key=? "
                         "AND (last_seen_at IS NULL OR last_seen_at=?) "
                         "AND (last_seen_job_id IS NULL OR last_seen_job_id=?) "
                         "AND state NOT IN ('missing','conflict')",
                         (stamp, vault_id, key, seen_at, seen_job),
-                    ).rowcount)
-                return updated
-            return int(self.conn.execute(
-                "UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
-                "AND (last_seen_at IS NULL OR last_seen_at<?) "
-                "AND state NOT IN ('missing','conflict')",
-                (now_ts(), vault_id, float(seen_before)),
-            ).rowcount)
+                    ).rowcount:
+                        marked.append(key)
+                return marked
+            marked_rows = [
+                str(row["source_key"]) for row in self.conn.execute(
+                    "SELECT source_key FROM source_imports WHERE vault_id=? "
+                    "AND (last_seen_at IS NULL OR last_seen_at<?) "
+                    "AND state NOT IN ('missing','conflict')",
+                    (vault_id, float(seen_before)),
+                ).fetchall()
+            ]
+            if not marked_rows:
+                return []
+            for start in range(0, len(marked_rows), 900):
+                chunk = marked_rows[start:start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE source_imports SET state='missing', missing_at=? "
+                    f"WHERE vault_id=? AND source_key IN ({placeholders})",
+                    (now_ts(), vault_id, *chunk),
+                )
+            return marked_rows
 
     def get_source_import(self, import_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM source_imports WHERE id=?", (import_id,)).fetchone()
