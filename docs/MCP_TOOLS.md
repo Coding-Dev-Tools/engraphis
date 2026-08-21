@@ -109,7 +109,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
 | Session | `engraphis_start_session` / `engraphis_end_session` | Starts or closes a work session. Exact retries are safe; `force_new=true` creates another session. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
-| Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. |
+| Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
