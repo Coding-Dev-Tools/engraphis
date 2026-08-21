@@ -56,6 +56,8 @@ def test_canonical_offline_gate_tracks_ci() -> None:
         "python -m eval.ablation",
         "python -m eval.reinforcement",
         "python -m eval.adversarial_memory_security",
+        "python -m eval.grounded",
+        "python -m eval.code_arm",
         "pyright",
     )
 
