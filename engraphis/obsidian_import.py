@@ -367,18 +367,33 @@ class ObsidianImporter:
                     progress(dict(outcome))
             self._check_cancel(job_id, cancel_check)
             if can_finalize_missing:
-                self.store.mark_source_import_items_missing(
+                marked_keys = set(self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
                     missing_items=missing,
-                )
-                for item in missing:
+                ))
+                finalized = [
+                    item for item in missing
+                    if str(item.get("source_key") or "") in marked_keys
+                ]
+                for item in finalized:
                     self.store.record_source_import_job_item(
                         job_id=job_id, source_id=item.get("id"),
                         relative_path=str(item.get("relative_path") or "(missing)"),
                         planned_action="missing", result_state="missing",
                     )
-                finalized_missing = missing
+                for item in missing:
+                    if item in finalized:
+                        continue
+                    # The generation guard left this row live: a concurrent import
+                    # refreshed it after this run planned it missing. The job history
+                    # must not claim a live source was removed.
+                    self.store.record_source_import_job_item(
+                        job_id=job_id, source_id=item.get("id"),
+                        relative_path=str(item.get("relative_path") or "(missing)"),
+                        planned_action="missing", result_state="skipped",
+                    )
+                finalized_missing = finalized
                 pending_missing = []
             # Link reconciliation is safe only for a complete view of the source.
             # An incomplete scan must not retire a valid edge merely because its target
