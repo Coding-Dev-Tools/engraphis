@@ -51,7 +51,7 @@ from engraphis.core.context import RegexTokenCounter
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -1902,6 +1902,159 @@ class MemoryService:
             "failed": len(failed_indices),
             "results": results,
         }
+
+    def remember_many(self, facts: list[dict], *, workspace: str,
+                      repo: Optional[str] = None, session_id: Optional[str] = None,
+                      mtype: str = "semantic", scope: Optional[str] = None,
+                      source: str = "agent", trusted: bool = False,
+                      _local_agent_operator: bool = False,
+                      _ingress: str = "service") -> dict:
+        """Store a fan-out batch with within-batch resolution and evidence edges.
+
+        Unlike :meth:`remember_batch` (which loops ordinary single writes and can
+        leave duplicates across items), this runs the engine's batch assembly:
+        one shared transaction, each fact also resolved against its already-resolved
+        siblings, and afterwards batch siblings sharing a non-empty ``subject_key``
+        or ``provenance.source`` are wired with evidence-labeled ``related`` edges.
+        All-or-nothing: any engine failure rolls back every fact in the batch.
+
+        Each item accepts ``content`` (required) plus optional ``title``, ``mtype``,
+        ``importance``, ``keywords``, ``metadata``, ``subject_key``, ``claim_kind``,
+        and ``valid_from``. Provenance/trust is decided once for the whole batch —
+        a sub-agent fleet shares one origin.
+        """
+        if not isinstance(facts, list):
+            raise ValidationError("facts must be a list")
+        if not facts:
+            raise ValidationError("facts list must not be empty")
+        if len(facts) > 500:
+            raise ValidationError("facts list must not exceed 500 items")
+
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        default_mt = _enum(mtype, MemoryType, "mtype")
+        scope_was_omitted = scope is None
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
+        local_agent_provenance = (
+            _local_agent_provenance(source, ingress=_ingress)
+            if _local_agent_operator else None
+        )
+        provenance = (
+            _local_cli_provenance()
+            if _local_agent_operator and source == "cli" else
+            local_agent_provenance
+            if local_agent_provenance is not None else
+            _canonical_write_provenance(
+                source, trusted, raw_ingest=False, ingress=_ingress
+            )
+        )
+        wid = self._get_or_create_workspace(ws)
+        rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        session = self._session_for_write(session_id, wid, rid)
+        if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
+            rid = session.get("repo_id")
+            if rid:
+                row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (rid,)
+                ).fetchone()
+                rp = row["name"] if row else None
+        if sc == Scope.REPO and rid is None:
+            if scope_was_omitted:
+                sc = Scope.WORKSPACE
+            else:
+                raise ValidationError("repo scope requires a repo-backed session_id")
+
+        specs: list[FactSpec] = []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                raise ValidationError("each fact must be a dict")
+            content = _clean_text(
+                fact.get("content"), field="content", max_chars=MAX_CONTENT_CHARS
+            )
+            title = _clean_text(
+                fact.get("title", ""), field="title", max_chars=MAX_TITLE_CHARS,
+                required=False,
+            )
+            _reject_secret_capture((
+                ("content", content), ("title", title),
+                ("keywords", fact.get("keywords")),
+                ("metadata", fact.get("metadata")),
+                ("subject_key", fact.get("subject_key", "")),
+                ("claim_kind", fact.get("claim_kind", "")),
+            ))
+            mt = (
+                _enum(fact["mtype"], MemoryType, "mtype")
+                if fact.get("mtype") else default_mt
+            )
+            try:
+                importance = float(fact.get("importance", 0.0))
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError("importance must be a number")
+            if not math.isfinite(importance):
+                raise ValidationError("importance must be finite")
+            importance = max(0.0, min(1.0, importance))
+            valid_from = _optional_timestamp(
+                fact.get("valid_from"), field="valid_from"
+            )
+            evidence_source = _clean_text(
+                fact.get("evidence_source", ""), field="evidence_source",
+                max_chars=MAX_NAME_CHARS, required=False,
+            )
+            specs.append(FactSpec(
+                content=content,
+                title=title,
+                mtype=mt,
+                importance=importance,
+                keywords=_clean_keywords(fact.get("keywords")),
+                metadata={
+                    **_clean_metadata(fact.get("metadata")),
+                    "provenance": provenance,
+                },
+                subject_key=_clean_text(
+                    fact.get("subject_key", ""), field="subject_key",
+                    max_chars=MAX_TITLE_CHARS, required=False,
+                ),
+                claim_kind=_clean_text(
+                    fact.get("claim_kind", ""), field="claim_kind",
+                    max_chars=MAX_NAME_CHARS, required=False,
+                ),
+                valid_from=valid_from,
+                evidence_source=evidence_source or None,
+            ))
+
+        try:
+            results = self.engine.remember_many(
+                specs, workspace_id=wid, repo_id=rid, session_id=session_id,
+                scope=sc,
+            )
+        except ValueError as exc:
+            if str(exc).startswith("valid_from "):
+                raise ValidationError(str(exc)) from exc
+            if session_id and str(exc) in {
+                f"no session with id '{session_id}'",
+                "session_id does not belong to that workspace/repo",
+                "session_id is not active",
+            }:
+                raise ValidationError(str(exc)) from exc
+            raise
+        ops = [r.get("op", "") for r in results]
+        out = {
+            "workspace": ws, "repo": rp, "scope": sc.value, "stored": True,
+            "total": len(results), "ops": ops,
+            "results": [
+                {"id": r.get("id"), "op": r.get("op"),
+                 **({"reason": r["reason"]} if r.get("reason") else {}),
+                 **({"superseded": r["superseded"]}
+                    if r.get("superseded") is not None else {})}
+                for r in results
+            ],
+        }
+        self.store.record_receipt(
+            "remember_many", workspace_id=wid, repo_id=rid or "",
+            actor=provenance["source"], target_count=len(results),
+            status="batch", metadata={"scope": sc.value, "ops": ops},
+        )
+        return out
 
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",

@@ -1,7 +1,7 @@
 # Engraphis MCP tools: reference
 
-The Classic server registers 34 direct tools and the Smart gateway registers nine; two names
-overlap, for 41 distinct public tool names. Parameters are `name (type, default)`: no default
+The Classic server registers 35 direct tools and the Smart gateway registers nine; two names
+overlap, for 42 distinct public tool names. Parameters are `name (type, default)`: no default
 means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
 instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
@@ -54,6 +54,27 @@ Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `ad
 `policy` and `reasons` codes).
 
 > Prefer `dedupe=True` (default). It is what keeps the store contradiction-free without an LLM.
+
+### `engraphis_remember_many`
+Store a batch of facts from parallel agents (fan-out sub-agents, a research sweep, a review
+council) in one atomic, deduplicated write, instead of many separate `remember` calls.
+
+- `facts (list[dict])`: each item needs `content` and optionally `title`, `mtype`,
+  `importance` (0..1), `keywords`, `metadata`, `subject_key`, `claim_kind`,
+  `valid_from` (Unix timestamp), and `evidence_source` (a declared citeable origin for the
+  fact, e.g. `"subagent-7"`; defaults to none).
+- `workspace (str, "default")`, `repo (str, None)`, `session_id (str, None)`.
+- `mtype (str, "semantic")`: default type for items without their own.
+- `scope (str, None)`: same visibility rules as `engraphis_remember`.
+- `source (str, "agent")`, `trusted (bool, true)`: one provenance for the whole batch.
+
+The whole batch lands in one transaction (all-or-nothing); each fact is also resolved against
+the siblings already resolved earlier in the batch, so duplicates reinforce and keyed claims
+supersede within the batch. Afterwards, siblings that share a non-empty `subject_key` or the
+same declared `evidence_source` get `related` graph edges labeled with that evidence: facts
+with no declared evidence stay unwired ("no shared source, no edge"). Returns
+`{workspace, repo, scope, stored:true, total, ops:[…], results:[{id, op}, …]}` with one entry
+per input fact, in order.
 
 ### `engraphis_record_event`
 Append one raw occurrence to the append-only event ledger. Event rows are not memories: they are

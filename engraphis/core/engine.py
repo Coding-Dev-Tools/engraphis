@@ -31,6 +31,7 @@ from engraphis.core.conflicts import detect_conflicts
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
+    FactSpec,
     GraphTraversalPolicy,
     QueryPlanner,
     RetentionDecision,
@@ -129,6 +130,11 @@ _USER_SCOPE_WRITE_ERROR = (
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
 EVOLVE_MAX_LINKS = 3
+
+# Batch writes (remember_many): maximum facts accepted per call. Matches the sync
+# APPLY_BATCH ceiling; callers with more facts must chunk. Bounds the pairwise
+# evidence-edge scan in _evolve_batch.
+MAX_FACTS_PER_BATCH = 500
 
 # The deterministic detector's contradiction/obsolete reports below this severity are
 # too weak to justify a durable ``conflicts_with`` relation. The detector floors its
@@ -843,7 +849,8 @@ class MemoryEngine:
                  subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _approval_override: bool = False,
-                 _transactional_finalizer: Optional[Callable[[str], None]] = None) -> dict:
+                 _transactional_finalizer: Optional[Callable[[str], None]] = None,
+                 extra_neighbors: Optional[list] = None) -> dict:
         """Store one memory with deterministic conflict resolution.
 
         Returns ``{"id", "op", ...}`` where ``op`` is one of:
@@ -1007,6 +1014,7 @@ class MemoryEngine:
                         claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
                         poisoning=poisoning, trusted_write=trusted_write,
                         defer_external_index=defer_external_index,
+                        extra_neighbors=extra_neighbors,
                     )
                     if (
                         owns_session_transaction
@@ -1028,6 +1036,7 @@ class MemoryEngine:
                         poisoning=poisoning, trusted_write=trusted_write,
                         transactional_finalizer=_transactional_finalizer,
                         defer_external_index=defer_external_index,
+                        extra_neighbors=extra_neighbors,
                     )
                 if owns_lifecycle_transaction:
                     self.store.conn.commit()
@@ -1039,6 +1048,301 @@ class MemoryEngine:
                         and self.store.conn.transaction_owned_by_current_thread()):
                     self.store.conn.rollback()
                 raise
+
+    def remember_many(self, facts, *, workspace_id: str,
+                      repo_id: Optional[str] = None, session_id: Optional[str] = None,
+                      mtype: MemoryType = MemoryType.SEMANTIC,
+                      scope: Optional[Scope] = None) -> list[dict]:
+        """Store a batch of facts with within-batch resolution and evidence edges.
+
+        Implements the fan-out → collect → wire lifecycle for parallel-agent output:
+        all facts are embedded in one call, each fact is resolved against existing
+        memory AND the siblings already resolved earlier in this batch (so duplicates
+        deduplicate and keyed claims supersede within the batch), every insert shares
+        one transaction (all-or-nothing), and afterwards batch siblings that share a
+        non-empty ``subject_key`` or ``provenance.source`` are wired together with
+        evidence-labeled ``related`` edges ("no shared source, no edge" — similarity
+        alone never creates a sibling edge).
+
+        Accepts ``FactSpec`` items or bare strings. Returns one result dict per fact,
+        in input order, with the same shape as ``remember_with_resolution`` results.
+        The whole batch rolls back if any fact fails.
+        """
+        specs: list[FactSpec] = []
+        for fact in facts:
+            if isinstance(fact, str):
+                specs.append(FactSpec(content=fact))
+            elif isinstance(fact, FactSpec):
+                specs.append(fact)
+            else:
+                raise TypeError(
+                    "facts must contain FactSpec instances or strings, "
+                    f"got {type(fact).__name__}"
+                )
+        if not specs:
+            return []
+        if len(specs) > MAX_FACTS_PER_BATCH:
+            raise ValueError(
+                f"batch exceeds MAX_FACTS_PER_BATCH ({MAX_FACTS_PER_BATCH}); chunk the input"
+            )
+
+        scope_was_omitted = scope is None
+        sc = (
+            Scope.REPO if (repo_id or session_id) else Scope.WORKSPACE
+        ) if scope is None else Scope(scope)
+        if sc == Scope.USER:
+            raise ValueError(_USER_SCOPE_WRITE_ERROR)
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None:
+                raise ValueError(f"no session with id '{session_id}'")
+            if session["workspace_id"] != workspace_id or (
+                    repo_id is not None and session.get("repo_id") != repo_id):
+                raise ValueError("session_id does not belong to that workspace/repo")
+            if sc in (Scope.SESSION, Scope.REPO) and repo_id is None:
+                repo_id = session.get("repo_id")
+        if sc == Scope.SESSION and not session_id:
+            raise ValueError("session scope requires session_id")
+        if sc == Scope.REPO and not repo_id:
+            if scope_was_omitted:
+                sc = Scope.WORKSPACE
+            else:
+                raise ValueError("repo scope requires repo_id")
+        if sc in (Scope.WORKSPACE, Scope.USER) and repo_id:
+            raise ValueError(f"{sc.value} scope requires repo_id to be omitted")
+
+        # Per-fact validation and poisoning assessment happen before embedding; the
+        # metadata/provenance normalization below mirrors _resolve_and_store's own
+        # handling so each fact lands as an ordinary trusted local write would.
+        prepared: list[dict] = []
+        texts: list[str] = []
+        for spec in specs:
+            content = str(spec.content or "").strip()
+            if not content:
+                raise ValueError("every fact needs non-empty content")
+            title = str(spec.title or "").strip()
+            keywords = list(spec.keywords or [])
+            reject_secrets((("title", title), ("content", content),
+                            ("keywords", keywords), ("metadata", spec.metadata),
+                            ("subject_key", spec.subject_key),
+                            ("claim_kind", spec.claim_kind)))
+            valid_from = spec.valid_from
+            if valid_from is not None:
+                try:
+                    valid_from = float(valid_from)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("valid_from must be a finite timestamp") from exc
+                if not math.isfinite(valid_from):
+                    raise ValueError("valid_from must be a finite timestamp")
+            write_metadata = dict(spec.metadata or {})
+            provenance = write_metadata.get("provenance")
+            if isinstance(provenance, dict):
+                provenance = dict(provenance)
+            else:
+                provenance = dict(spec.provenance) if isinstance(
+                    spec.provenance, dict) else {}
+            provenance.setdefault("trusted", True)
+            provenance.setdefault("trust_origin", "local_engine")
+            provenance.setdefault("source", "local_engine")
+            if provenance.get("trusted") is True:
+                provenance.setdefault("review_state", REVIEW_APPROVED)
+            else:
+                provenance.setdefault("review_state", REVIEW_PENDING)
+            write_metadata["provenance"] = provenance
+            if self.embedding_space:
+                write_metadata["embed_model"] = self.embedding_space
+            poisoning = assess_untrusted_payload(
+                content, title=title, metadata=write_metadata)
+            mt = spec.mtype if spec.mtype is not None else mtype
+            text = f"{title}\n{content}" if title else content
+            evidence_source = str(spec.evidence_source or "").strip()
+            prepared.append({
+                "content": content, "title": title, "text": text, "mtype": mt,
+                "importance": float(spec.importance or 0.0), "keywords": keywords,
+                "metadata": write_metadata, "valid_from": valid_from,
+                "subject_key": str(spec.subject_key or "").strip(),
+                "claim_kind": str(spec.claim_kind or "").strip(),
+                "poisoning": poisoning,
+                "evidence_source": evidence_source,
+            })
+            if not poisoning.quarantined:
+                texts.append(text)
+
+        persistent_store = not _is_memory_database_path(self.store.path)
+        if texts and persistent_store:
+            if not self.embedding_space:
+                raise RuntimeError(
+                    "persistent writes require an embedder with a durable "
+                    "embedding_identity and embedding_version"
+                )
+            if not self.store.embedding_space_ready(self.embedding_space):
+                raise RuntimeError(
+                    "the configured embedding space is not active; restart through "
+                    "MemoryEngine.create() to complete the guarded rebuild"
+                )
+        # One embed call for the whole batch, before taking the write lock — same
+        # posture as single writes: the expensive part stays outside serialization.
+        vectors_by_text: dict[str, np.ndarray] = {}
+        if texts:
+            embedded = self.embedder.embed(texts)
+            if len(embedded) != len(texts):
+                raise RuntimeError("embedder returned the wrong number of vectors")
+            vectors_by_text = dict(zip(texts, embedded))
+        for item in prepared:
+            item["vec"] = (
+                None if item["poisoning"].quarantined else vectors_by_text[item["text"]]
+            )
+        # Pairwise cosine between batch siblings (vectors L2-normalized first so
+        # dot == cosine). Row i holds sibling i's similarity to every earlier
+        # sibling, used to feed real evidence into within-batch resolution.
+        batch_sims: list[list[float]] = []
+        vecs = [item["vec"] for item in prepared]
+        if any(v is not None for v in vecs):
+            dim = self.embedder.dim
+            matrix = np.zeros((len(vecs), dim), dtype=np.float32)
+            for idx, v in enumerate(vecs):
+                if v is not None:
+                    norm = float(np.linalg.norm(v))
+                    matrix[idx] = (
+                        np.asarray(v, dtype=np.float32) / norm if norm > 0 else 0.0
+                    )
+            gram = matrix @ matrix.T
+            batch_sims = [
+                [float(gram[i][j]) if vecs[j] is not None else 0.0
+                 for j in range(len(vecs))]
+                for i in range(len(vecs))
+            ]
+        else:
+            batch_sims = [[0.0] * len(vecs) for _ in vecs]
+
+        results: list[dict] = []
+        resolved: list[tuple[int, MemoryRecord]] = []  # (prepared idx, record)
+        inserted: list[tuple[str, dict]] = []  # (memory_id, prepared item)
+        pending_vectors: list[tuple[str, np.ndarray]] = []
+
+        with self._write_lock:
+            caller_owned_transaction = (
+                self.store.conn.transaction_owned_by_current_thread()
+            )
+            if (
+                caller_owned_transaction
+                and any(item["vec"] is not None for item in prepared)
+                and vector_index_requires_sync(self.index, self.store)
+                and not vector_index_shares_store_transaction(self.index, self.store)
+            ):
+                raise RuntimeError(
+                    "caller-owned transactions cannot write through a separate vector "
+                    "index; commit or roll back before remembering"
+                )
+            owns_transaction = False
+            try:
+                if not caller_owned_transaction:
+                    self.store.conn.execute("BEGIN IMMEDIATE")
+                    owns_transaction = True
+                with self.store.conn.defer_commits():
+                    for index_i, item in enumerate(prepared):
+                        extra_neighbors = [
+                            (batch_sims[index_i][sibling_i], rec)
+                            for sibling_i, rec in resolved
+                        ]
+                        result = self._resolve_and_store(
+                            item["content"], text=item["text"], vec=item["vec"],
+                            workspace_id=workspace_id, repo_id=repo_id,
+                            session_id=session_id, mtype=item["mtype"], scope=sc,
+                            title=item["title"], importance=item["importance"],
+                            confidence=None, keywords=item["keywords"],
+                            metadata=item["metadata"],
+                            valid_from=item["valid_from"],
+                            resolve_conflicts=True, candidate_k=5,
+                            subject_key=item["subject_key"],
+                            claim_kind=item["claim_kind"],
+                            poisoning=item["poisoning"],
+                            defer_external_index=True,
+                            extra_neighbors=extra_neighbors,
+                        )
+                        results.append(result)
+                        mid = result.get("id")
+                        if (
+                            result.get("op") in {"add", "invalidate", "relate"}
+                            and isinstance(mid, str) and mid
+                        ):
+                            rec = self.store.get_memory(mid)
+                            if rec is not None:
+                                resolved.append((index_i, rec))
+                                inserted.append((mid, item))
+                        if item["vec"] is not None and isinstance(mid, str) and mid:
+                            pending_vectors.append((mid, item["vec"]))
+                    linked_pairs = self._evolve_batch(inserted)
+                    self._audit_batch_evolve(linked_pairs)
+                if owns_transaction:
+                    self.store.conn.commit()
+                for memory_id, vec in pending_vectors:
+                    self._upsert_external_vector(memory_id, vec)
+                return results
+            except BaseException:
+                if ((owns_transaction or caller_owned_transaction)
+                        and self.store.conn.transaction_owned_by_current_thread()):
+                    self.store.conn.rollback()
+                raise
+
+    def _evolve_batch(self, inserted: list) -> list[tuple[str, str, str]]:
+        """Wire evidence-based edges between batch siblings.
+
+        Two inserted facts get a ``related`` edge only when they share a non-empty
+        ``subject_key`` or the same *explicitly declared* ``evidence_source``
+        (``FactSpec.evidence_source`` / a caller-supplied ``provenance.source``) —
+        shared, citeable evidence, never mere embedding proximity and never the
+        engine's own default provenance. Bounded by EVOLVE_MAX_LINKS per memory;
+        best-effort: failures warn and never break the batch.
+        """
+        links: list[tuple[str, str, str]] = []
+        link_counts: dict[str, int] = {}
+        for i in range(len(inserted)):
+            mid_a, item_a = inserted[i]
+            for j in range(i + 1, len(inserted)):
+                mid_b, item_b = inserted[j]
+                reason = ""
+                key_a = item_a["subject_key"]
+                key_b = item_b["subject_key"]
+                if key_a and key_a == key_b:
+                    reason = f"shared subject_key: {key_a}"
+                else:
+                    src_a = item_a.get("evidence_source") or ""
+                    src_b = item_b.get("evidence_source") or ""
+                    if src_a and src_a == src_b:
+                        reason = f"shared source: {src_a}"
+                if not reason:
+                    continue
+                if link_counts.get(mid_a, 0) >= EVOLVE_MAX_LINKS or \
+                        link_counts.get(mid_b, 0) >= EVOLVE_MAX_LINKS:
+                    continue
+                try:
+                    if self.store.has_link(mid_a, mid_b):
+                        continue
+                    self.store.add_link(
+                        mid_a, mid_b, "related", reason=reason, commit=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 — best-effort wiring
+                    self._warn_redacted_failure("batch evolution", exc)
+                    continue
+                links.append((mid_a, mid_b, reason))
+                link_counts[mid_a] = link_counts.get(mid_a, 0) + 1
+                link_counts[mid_b] = link_counts.get(mid_b, 0) + 1
+        return links
+
+    def _audit_batch_evolve(self, links: list) -> None:
+        """Best-effort audit row summarizing the batch's evidence-edge wiring."""
+        if not links:
+            return
+        try:
+            detail = "; ".join(f"{a} <-> {b} ({reason})" for a, b, reason in links[:20])
+            self.store.audit(
+                "resolver", "batch_evolve",
+                links[0][0], f"{len(links)} evidence links: {detail}"[:1000],
+                commit=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._warn_redacted_failure("batch evolution audit", exc)
 
     def _publish_result_vector(self, result: dict, vec: Optional[np.ndarray]) -> None:
         """Publish one newly committed Store vector to a separate injected index."""
@@ -1087,7 +1391,8 @@ class MemoryEngine:
                            poisoning: Optional[PoisoningDecision] = None,
                            trusted_write: bool = True,
                            transactional_finalizer: Optional[Callable[[str], None]] = None,
-                           defer_external_index: bool = False) -> dict:
+                           defer_external_index: bool = False,
+                           extra_neighbors: Optional[list] = None) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
         ``self._write_lock`` for the whole call (atomicity of the resolve decision).
 
@@ -1107,6 +1412,7 @@ class MemoryEngine:
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
                 claim_kind=claim_kind, valid_at=valid_from, content=content,
+                extra_neighbors=extra_neighbors,
             )
         if (resolve_conflicts and trusted_write and not poisoning.quarantined
                 and subject_key and valid_from is not None):
@@ -1419,7 +1725,14 @@ class MemoryEngine:
                 )
                 self.store.conn.commit()
             except Exception as exc:  # noqa: BLE001 — best-effort repair, never fail the write
-                if self.store.conn.transaction_owned_by_current_thread():
+                # Inside commit deferral (batch writes) a rollback here would target the
+                # OUTER savepoint and discard earlier facts in the same batch. Deferral
+                # keeps the failed repair's partial statements inside the caller's
+                # boundary; the outer owner decides settle-or-discard for the whole batch.
+                if (
+                    self.store.conn.transaction_owned_by_current_thread()
+                    and not getattr(self.store.conn._pin, "defer_commits", 0)
+                ):
                     self.store.conn.rollback()
                 self._warn_redacted_failure("conflict repair", exc)
         out: dict[str, object]
@@ -1702,12 +2015,20 @@ class MemoryEngine:
                                    scope: Scope, mtype: MemoryType, candidate_k: int,
                                    subject_key: str = "", claim_kind: str = "",
                                    valid_at: Optional[float] = None,
-                                   content: Optional[str] = None):
+                                   content: Optional[str] = None,
+                                   extra_neighbors: Optional[list] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors, conflicted_with)``
         so the caller can also evolve the neighborhood and persist a conflict repair.
         An injected-index failure uses the canonical stored-vector mirror; if that scan
-        also fails, resolution aborts rather than blindly inserting overlapping truth."""
+        also fails, resolution aborts rather than blindly inserting overlapping truth.
+
+        ``extra_neighbors`` are additional ``(similarity, MemoryRecord)`` pairs the
+        caller already holds (batch siblings resolved earlier in the same transaction,
+        which deferred vector publication cannot yet surface). They are appended to
+        the candidate list before ``resolve()`` runs; the resolver applies the same
+        key/similarity floors to them as to any other neighbor.
+        """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id if scope == Scope.SESSION else None,
@@ -1822,6 +2143,11 @@ class MemoryEngine:
             for record in authoritative:
                 if record.id not in known_ids:
                     neighbors.append((1.0, record))
+        if extra_neighbors:
+            known_ids = {rec.id for _, rec in neighbors}
+            for sim, rec in extra_neighbors:
+                if rec.id not in known_ids:
+                    neighbors.append((sim, rec))
         decision = resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
             candidate_content=content,
