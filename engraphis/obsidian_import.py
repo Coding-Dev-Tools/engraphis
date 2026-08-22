@@ -367,6 +367,9 @@ class ObsidianImporter:
                     progress(dict(outcome))
             self._check_cancel(job_id, cancel_check)
             if can_finalize_missing:
+                # Set membership: O(1) average per lookup, replacing the previous
+                # quadratic list scan over up to 200k items — a complexity fix,
+                # not a timing-sensitive comparison.
                 marked_keys = set(self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
