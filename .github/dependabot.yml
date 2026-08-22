@@ -26,3 +26,9 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    groups:
+      # codeql-action's init and analyze steps must always bump together —
+      # a mixed-version pair fails CodeQL's analyze post-action step.
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
