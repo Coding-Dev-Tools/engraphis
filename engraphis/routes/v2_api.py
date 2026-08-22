@@ -2660,6 +2660,7 @@ _entitlement_refresh_failures = 0
 # state directory is temporarily unwritable. A newer active authoritative record clears it.
 _AUTHORITATIVE_DENIAL_PENDING = threading.Event()
 _authoritative_denial_at = 0.0
+_denied_state_digests: dict = {}
 #: Same opt-out vocabulary as ``ENGRAPHIS_UPDATE_CHECK`` (see engraphis/update_check.py).
 _FALSY_SETTINGS = {"0", "false", "no", "off", "disable", "disabled"}
 
@@ -2859,27 +2860,27 @@ def _normalized_features(values: object, plan: str) -> list:
     return sorted(granted & allowed & set(_FEATURE_LABELS))
 
 
-def _session_entitlement() -> dict:
-    """Return the entitlement the control plane put on this client's own session.
+def _session_entitlement_snapshot() -> tuple[dict, Optional[str]]:
+    """Read the session once; return its entitlement and the digest of those bytes.
 
-    Shaped exactly like ``_read_entitlement_cache`` so both persisted answers feed the
-    resolver identically and only their precedence differs. Reads state only — no network —
-    and never raises: this is on the ``/api/bootstrap`` boot path.
+    The digest travels with the parse: a caller comparing against the denial baseline
+    must judge the exact bytes ``known`` was parsed from, not whatever the file contains
+    by the time the comparison runs.
     """
 
     try:
         from engraphis import cloud_session
-        reader = getattr(cloud_session, "saved_entitlement", None)
-        declared = reader() if reader is not None else None
+        reader = getattr(cloud_session, "saved_entitlement_snapshot", None)
+        declared, digest = reader() if reader is not None else ({}, None)
         if not isinstance(declared, dict) or not declared:
-            return {}
+            return {}, digest
         # A deployment pinned to ``ENGRAPHIS_CLOUD_ORGANIZATION_ID`` may be pointed at a
         # different organization than the saved session was registered for. Refuse to
         # relabel one customer's plan with another's, exactly as the entitlements read
         # refuses a mis-routed answer.
         pinned = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
         if pinned and pinned != str(declared.get("organization_id") or ""):
-            return {}
+            return {}, digest
         plan = _normalized_plan(declared.get("plan"))
         active = bool(declared.get("cloud_access_active"))
         resolved = {
@@ -2895,36 +2896,50 @@ def _session_entitlement() -> dict:
             "fetched_at": float(declared.get("entitlement_checked_at") or 0.0),
         }
         resolved.update(_trial_facts(declared))
-        return resolved
+        return resolved, digest
     except Exception:  # noqa: BLE001 - a badge must never break /bootstrap
-        return {}
+        return {}, None
 
 
-def _read_entitlement_cache() -> dict:
-    """Return the last cached ``GET /v1/entitlements`` answer, or ``{}``. Never raises.
+def _session_entitlement() -> dict:
+    """Return the entitlement the control plane put on this client's own session.
 
-    Secondary to ``_session_entitlement``: this file exists only for a control plane that
-    does not yet return the entitlement on registration and refresh.
+    Shaped exactly like ``_read_entitlement_cache`` so both persisted answers feed the
+    resolver identically and only their precedence differs. Reads state only — no network —
+    and never raises: this is on the ``/api/bootstrap`` boot path.
+    """
+
+    return _session_entitlement_snapshot()[0]
+
+
+def _read_entitlement_cache_snapshot() -> tuple[dict, Optional[str]]:
+    """Read the cache once; return its entitlement and the digest of those bytes.
+
+    Same binding rule as ``_session_entitlement_snapshot``: the supersession check must
+    judge the bytes ``known`` was parsed from, so the denial-persistence cache rewrite
+    landing mid-read cannot pose as a newer active answer.
     """
 
     path = _entitlement_cache_path()
     if path is None:
-        return {}
+        return {}, ""
+    digest: Optional[str]
     try:
         from engraphis.private_state import read_private_text
         raw = read_private_text(
             path, max_bytes=_ENTITLEMENT_MAX_RESPONSE_BYTES, allow_missing=True
         )
     except Exception:  # noqa: BLE001 - an unreadable cache is just "nothing known yet"
-        return {}
+        return {}, None
     if not raw:
-        return {}
+        return {}, ""
+    digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
     try:
         value = json.loads(raw)
     except (ValueError, RecursionError):
-        return {}
+        return {}, digest
     if not isinstance(value, dict) or value.get("schema") != _ENTITLEMENT_CACHE_SCHEMA:
-        return {}
+        return {}, digest
     # Validate rather than coerce the plan: a corrupt value must be *discarded* so the
     # caller falls through to its own inference. Coercing it would quietly downgrade a
     # connected paying customer to the free local core on a damaged file.
@@ -2932,7 +2947,7 @@ def _read_entitlement_cache() -> dict:
     if not isinstance(stored_plan, str) or stored_plan.strip().lower() not in (
         "pro", "team", "local", "free"
     ):
-        return {}
+        return {}, digest
     try:
         fetched_at = float(value.get("fetched_at") or 0.0)
     except (TypeError, ValueError, OverflowError):
@@ -2954,7 +2969,7 @@ def _read_entitlement_cache() -> dict:
     organization_id = str(value.get("organization_id") or "")
     current = _configured_organization_id()
     if not current or organization_id != current:
-        return {}
+        return {}, digest
     plan = _normalized_plan(stored_plan)
     # Mirror _session_entitlement: an inactive entitlement publishes no features. Today
     # hosted_plan_summary re-zeroes them downstream, but any future consumer reading
@@ -2971,7 +2986,17 @@ def _read_entitlement_cache() -> dict:
     # so a cache written by an older build simply has none of them and reads back as "not a
     # trial" rather than as a corrupt entry.
     resolved.update(_trial_facts(value))
-    return resolved
+    return resolved, digest
+
+
+def _read_entitlement_cache() -> dict:
+    """Return the last cached ``GET /v1/entitlements`` answer, or ``{}``. Never raises.
+
+    Secondary to ``_session_entitlement``: this file exists only for a control plane that
+    does not yet return the entitlement on registration and refresh.
+    """
+
+    return _read_entitlement_cache_snapshot()[0]
 
 
 def _write_entitlement_cache(entitlement: dict) -> bool:
@@ -3049,23 +3074,73 @@ def _deny_entitlement_cache() -> bool:
         return False
 
 
+def _persisted_state_digest(source: str) -> Optional[str]:
+    """Digest the persisted bytes backing one entitlement source, for change detection.
+
+    ``None`` means "could not determine" and must be treated as "unchanged" — a probe
+    failure must never look like the superseding rewrite it cannot prove. Wall-clock
+    timestamps cannot order a reconnect against a denial: two writes inside one coarse
+    clock tick stamp equal ``entitlement_checked_at``/``fetched_at`` values, so only
+    content distinguishes a post-denial reconnect from a pre-denial record.
+    """
+
+    try:
+        if source == "session":
+            from engraphis import cloud_session
+
+            return cloud_session.saved_session_digest()
+        if source == "cloud":
+            path = _entitlement_cache_path()
+            if path is None:
+                return ""
+            from engraphis.private_state import read_private_text
+
+            raw = read_private_text(
+                path, max_bytes=_ENTITLEMENT_MAX_RESPONSE_BYTES, allow_missing=True
+            )
+            if raw is None:
+                return ""
+            return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    except Exception:  # noqa: BLE001 - an unreadable state file must fail closed
+        return None
+    return None
+
+
 def _mark_authoritative_denial() -> None:
     """Make an authoritative cloud denial visible before persistence starts."""
 
-    global _authoritative_denial_at
+    global _authoritative_denial_at, _denied_state_digests
     with _ENTITLEMENT_REFRESH_LOCK:
         _authoritative_denial_at = time.time()
+        _denied_state_digests = {
+            source: _persisted_state_digest(source) for source in ("session", "cloud")
+        }
         _AUTHORITATIVE_DENIAL_PENDING.set()
 
 
-def _clear_superseded_denial(checked_at: float) -> bool:
-    """Clear the process guard only for a newer active authoritative answer."""
+def _clear_superseded_denial(known_source: str, observed_digest: Optional[str]) -> bool:
+    """Clear the process guard only for an answer parsed from post-denial bytes.
+
+    ``observed_digest`` fingerprints the exact bytes ``known`` was parsed from, captured
+    in the same read — never a fresh stat of a file that may have changed since. A
+    genuine reconnect rewrites the session (the control plane rotates the refresh
+    credential) or the entitlement cache with a fresh answer, so its digest differs from
+    the baseline the denial captured. Equal digests mean the active-looking record
+    predates the denial — however equal their wall-clock stamps are, and even when the
+    denial's own persistence write landed between the parse and this check — and must
+    not resurrect grants the control plane just refused. Unknown digests on either side
+    (unreadable state at denial or parse time) can never prove supersession, so the
+    guard sticks — fail-closed — until the next denial cycle or process restart.
+    """
 
     global _authoritative_denial_at
     with _ENTITLEMENT_REFRESH_LOCK:
+        baseline = _denied_state_digests.get(known_source)
         if (
             _AUTHORITATIVE_DENIAL_PENDING.is_set()
-            and checked_at > _authoritative_denial_at
+            and baseline is not None
+            and observed_digest is not None
+            and observed_digest != baseline
         ):
             _AUTHORITATIVE_DENIAL_PENDING.clear()
             _authoritative_denial_at = 0.0
@@ -3345,10 +3420,10 @@ def _plan_entitlement() -> dict:
     if _AUTHORITATIVE_DENIAL_PENDING.is_set():
         # Reads are safe here: only access is overridden. Keeping the last known paid plan
         # lets the UI direct a lapsed Team customer to billing without restoring any grant.
-        known = _session_entitlement()
+        known, observed_digest = _session_entitlement_snapshot()
         known_source = "session"
         if not known:
-            known = _read_entitlement_cache()
+            known, observed_digest = _read_entitlement_cache_snapshot()
             known_source = "cloud"
         try:
             known_checked_at = float(known.get("fetched_at") or 0.0)
@@ -3357,7 +3432,7 @@ def _plan_entitlement() -> dict:
         if (
             known
             and bool(known.get("cloud_access_active"))
-            and _clear_superseded_denial(known_checked_at)
+            and _clear_superseded_denial(known_source, observed_digest)
         ):
             return _resolved_entitlement(known, source=known_source)
         with _ENTITLEMENT_REFRESH_LOCK:
