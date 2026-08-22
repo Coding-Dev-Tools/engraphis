@@ -1160,8 +1160,18 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                                    "tokens_freed": _mem_tokens(m)})
         if not dry_run:
             try:
+                # A coarse host clock (~15.6 ms ticks on Windows) can tie the
+                # sweep's ``now`` to a memory's ingest instant, and closing at
+                # exactly valid_from yields a zero-width
+                # [valid_from, valid_to) window that no as_of read can see.
+                # Archives must stay historically visible, so keep the closed
+                # interval non-degenerate; the store-level close contract for
+                # exact caller-supplied instants is untouched.
+                close_at = now
+                if m.valid_from is not None and close_at <= m.valid_from:
+                    close_at = m.valid_from + 1e-6
                 store.close_validity(
-                    m.id, at=now, actor="consolidation",
+                    m.id, at=close_at, actor="consolidation",
                     reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
             except Exception as exc:
                 report["errors"].append(_error_entry([m], exc))
