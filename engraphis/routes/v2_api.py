@@ -227,6 +227,12 @@ _MANAGED_ERROR_FALLBACK = "managed cloud operation failed"
 #: status-keyed public text (see ``_managed_error_message``), so nothing legitimate comes
 #: close; a message that does is by definition not the fixed copy and is dropped.
 _MANAGED_ERROR_MAX_CHARS = 300
+#: Cooldown for identical managed-cloud warnings. The dashboard UI polls these
+#: endpoints on a cadence, so a lapsed account would otherwise write one
+#: identical warning per poll. Logging only: ``_record_authoritative_denial``
+#: below still runs on every denial.
+_MANAGED_WARN_COOLDOWN_SECONDS = 300.0
+_managed_warn_last: dict = {}
 
 
 def _managed_error_message(exc) -> str:
@@ -270,8 +276,16 @@ def _managed_call(fn, *args, **kwargs):
         # until a later background entitlement poll happens to run.
         if exc.status in {401, 402, 403}:
             _record_authoritative_denial()
-        logger.warning("managed cloud operation failed (%s, status=%s, transient=%s)",
-                       type(exc).__name__, exc.status, exc.transient)
+        warn_key = (type(exc).__name__, exc.status, bool(exc.transient))
+        now = time.monotonic()
+        last_warn = _managed_warn_last.get(warn_key)
+        if last_warn is None or now - last_warn >= _MANAGED_WARN_COOLDOWN_SECONDS:
+            _managed_warn_last[warn_key] = now
+            logger.warning("managed cloud operation failed (%s, status=%s, transient=%s)",
+                           type(exc).__name__, exc.status, exc.transient)
+        else:
+            logger.debug("managed cloud operation failed (%s, status=%s, transient=%s)",
+                         type(exc).__name__, exc.status, exc.transient)
         detail = {"error": _managed_error_message(exc), "managed_cloud": True,
                   "transient": exc.transient}
         if exc.code in {"consent_required", "cloud_unconfigured"}:
