@@ -413,7 +413,11 @@ def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
 
 def environment_lock_artifact(
         root: Path, path: Path, sbom: Path, version: str) -> dict[str, Any]:
-    """Require the exact build freeze to equal the Python SBOM package closure."""
+    """Require every SBOM package to appear in the build freeze (lock ⊇ SBOM).
+
+    The lock may contain extras such as build tooling that the SBOM does not
+    declare; a lock missing any SBOM package is rejected.
+    """
     if not path.is_file() or path.is_symlink():
         raise EvidenceError("build environment lock is missing")
     relative = _relative_path(root, path)
