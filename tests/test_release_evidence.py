@@ -759,6 +759,7 @@ def test_release_evidence_rejects_sbom_with_non_pypi_component_purl(tmp_path):
     with pytest.raises(EvidenceError, match="lacks a valid PyPI PURL"):
         _build(root, dist, inputs=inputs)
 
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
