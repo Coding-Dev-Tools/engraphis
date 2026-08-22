@@ -1155,23 +1155,24 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         r = scoring.retention(m.stability, m.last_access, now)
         if r >= archive_below:
             continue
+        # A coarse host clock (~15.6 ms ticks on Windows) can tie the sweep's
+        # ``now`` to a memory's ingest instant. Closing [t, t) there would be
+        # invisible to every as_of read, and fabricating width (valid_from +
+        # 1us) would leave the row live-visible until the next tick sample —
+        # both wrong. Defer instead: leave the memory live for this sweep and
+        # let a strictly later sweep close it with ordinary half-open
+        # semantics. Production sweeps are minutes apart, so deferral is
+        # unobservable there; only same-tick test fixtures can hit it.
+        if m.valid_from is not None and now <= m.valid_from:
+            report["archive_deferred"] = report.get("archive_deferred", 0) + 1
+            continue
         archived_tokens += _mem_tokens(m)
         report["archived"].append({"id": m.id, "retention": round(r, 4),
                                    "tokens_freed": _mem_tokens(m)})
         if not dry_run:
             try:
-                # A coarse host clock (~15.6 ms ticks on Windows) can tie the
-                # sweep's ``now`` to a memory's ingest instant, and closing at
-                # exactly valid_from yields a zero-width
-                # [valid_from, valid_to) window that no as_of read can see.
-                # Archives must stay historically visible, so keep the closed
-                # interval non-degenerate; the store-level close contract for
-                # exact caller-supplied instants is untouched.
-                close_at = now
-                if m.valid_from is not None and close_at <= m.valid_from:
-                    close_at = m.valid_from + 1e-6
                 store.close_validity(
-                    m.id, at=close_at, actor="consolidation",
+                    m.id, at=now, actor="consolidation",
                     reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
             except Exception as exc:
                 report["errors"].append(_error_entry([m], exc))
