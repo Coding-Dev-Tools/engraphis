@@ -32,7 +32,8 @@ SMART_TOOL_NAMES = {
 # This is deliberately an exact snapshot, rather than a count-only check: a
 # legacy client may depend on either deprecated alias retaining its behavior.
 CLASSIC_TOOL_NAMES = {
-    "engraphis_remember", "engraphis_recall", "engraphis_recall_context",
+    "engraphis_remember", "engraphis_remember_many",
+    "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline", "engraphis_recall_proactive",
     "engraphis_retire", "engraphis_forget", "engraphis_secure_erase",
     "engraphis_pin", "engraphis_correct", "engraphis_promote", "engraphis_link",
@@ -100,7 +101,7 @@ def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch
 
     classic = _tools(server, "classic_mcp")
     assert set(classic) == CLASSIC_TOOL_NAMES
-    assert len(classic) == 34
+    assert len(classic) == 35
     # These aliases carry distinct historical defaults and must not disappear.
     assert {"engraphis_answer", "engraphis_forget"} <= set(classic)
 
