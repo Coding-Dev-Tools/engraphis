@@ -205,6 +205,10 @@ def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
     selected = classic_server if classic else smart_server
     assert selected.settings.host == host
     assert selected.settings.port == 9876
+    # The standalone HTTP service must run stateless: in-memory session ids die
+    # with every restart, and the next client request then 404s ("Session
+    # terminated"), parking gateway clients with zero registered tools.
+    assert selected.settings.stateless_http is True
     assert runs == [{"transport": "streamable-http"}]
     middleware = TransportSecurityMiddleware(selected.settings.transport_security)
 
