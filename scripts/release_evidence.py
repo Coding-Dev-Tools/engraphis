@@ -387,6 +387,94 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
     return packages
 
 
+def _python_component_refs(component: Any) -> set[str]:
+    """Return the identity refs (bom-ref / purl) a CycloneDX component carries."""
+    if not isinstance(component, dict):
+        return set()
+    return {
+        value for value in (component.get("bom-ref"), component.get("purl"))
+        if isinstance(value, str) and value
+    }
+
+
+def _validate_python_sbom_dependency_closure(
+    document: dict[str, Any], declared_names: set[str],
+) -> None:
+    """Validate the CycloneDX dependency graph of the captured Python SBOM.
+
+    The pinned capture generator (cyclonedx-bom 7.3.0) emits one
+    ``dependencies`` entry per component plus the project root, with
+    ``dependsOn`` resolved against installed distribution metadata. The graph
+    is optional here because lock-to-SBOM closure coverage in
+    ``environment_lock_artifact`` already rejects truncated captures
+    deterministically; when present it must be coherent: every ``dependsOn``
+    ref must resolve to the root or a listed component, and every declared
+    requirement must be transitively reachable from the project root.
+    Workflow-installed build tooling (pip, build, twine, ...) is legitimately
+    captured yet unreachable from the root, so full-graph reachability from
+    the root alone is intentionally not required.
+    """
+    entries = document.get("dependencies")
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise EvidenceError("SBOM dependency graph must be a JSON array")
+    edges: dict[str, list[str]] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("ref"), str)
+            or not entry["ref"]
+        ):
+            raise EvidenceError("SBOM dependency graph entries must carry string refs")
+        children = entry.get("dependsOn", [])
+        if not isinstance(children, list) or any(
+            not isinstance(child, str) or not child for child in children
+        ):
+            raise EvidenceError("SBOM dependency graph dependsOn must list string refs")
+        edges[entry["ref"]] = children
+    metadata_component = document.get("metadata", {}).get("component")
+    root_refs = _python_component_refs(metadata_component)
+    known_refs = set(root_refs)
+    ref_names: dict[str, str] = {}
+    for component in document.get("components", []):
+        name = component.get("name") if isinstance(component, dict) else None
+        refs = _python_component_refs(component)
+        if not isinstance(name, str) or not refs:
+            continue
+        canonical = _canonical_package_name(name)
+        for ref in refs:
+            known_refs.add(ref)
+            ref_names[ref] = canonical
+        if not any(ref in edges for ref in refs):
+            raise EvidenceError(
+                "SBOM dependency graph is missing an entry for component " + name
+            )
+    for children in edges.values():
+        for child in children:
+            if child not in edges and child not in known_refs:
+                raise EvidenceError(
+                    "SBOM dependency graph references unknown component ref: " + child
+                )
+    frontier = list(root_refs)
+    reachable_refs = set(root_refs)
+    while frontier:
+        ref = frontier.pop()
+        for child in edges.get(ref, ()):
+            if child not in reachable_refs:
+                reachable_refs.add(child)
+                frontier.append(child)
+    reachable_names = {
+        ref_names[ref] for ref in reachable_refs if ref in ref_names
+    }
+    unreachable = declared_names - reachable_names
+    if unreachable:
+        raise EvidenceError(
+            "declared dependencies are unreachable from the SBOM root "
+            "in the dependency graph: " + ", ".join(sorted(unreachable))
+        )
+
+
 def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
     """Validate and fingerprint the build-captured Python CycloneDX SBOM."""
     if not path.is_file():
@@ -413,10 +501,17 @@ def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
 
 def environment_lock_artifact(
         root: Path, path: Path, sbom: Path, version: str) -> dict[str, Any]:
-    """Require every SBOM package to appear in the build freeze (lock ⊇ SBOM).
+    """Require the captured freeze and the Python SBOM to describe one closure.
 
-    The lock may contain extras such as build tooling that the SBOM does not
-    declare; a lock missing any SBOM package is rejected.
+    The comparison is two-sided after name canonicalization: every SBOM
+    package must appear in the lock at the same version (version skew fails),
+    and every locked package must be inventoried by the SBOM. The pinned
+    generator (cyclonedx-bom 7.3.0, ``cyclonedx-py environment``) inventories
+    the whole build environment including workflow-installed tooling, so a
+    lock entry missing from the SBOM means a truncated capture, not expected
+    tooling overhead. A truncated SBOM that keeps the root and every direct
+    requirement but drops transitive packages would otherwise pass a
+    one-directional subset check and let incomplete release evidence publish.
     """
     if not path.is_file() or path.is_symlink():
         raise EvidenceError("build environment lock is missing")
@@ -497,8 +592,17 @@ def environment_lock_artifact(
         raise EvidenceError(
             "SBOM contains no dependency components beyond the " + PACKAGE + " root"
         )
+    _validate_python_sbom_dependency_closure(document, declared_names)
     if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
+    missing_from_sbom = sorted(
+        {name for name, _ in packages} - {name for name, _ in sbom_packages}
+    )
+    if missing_from_sbom:
+        raise EvidenceError(
+            "Python SBOM omits captured environment packages "
+            "(truncated closure): " + ", ".join(missing_from_sbom)
+        )
     return {
         "filename": path.name,
         "path": relative,

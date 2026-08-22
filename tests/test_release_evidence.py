@@ -68,6 +68,13 @@ def _release_inputs(root, dist):
                         "purl": "pkg:pypi/engraphis@1.2.3",
                     },
                 },
+                "dependencies": [
+                    {
+                        "ref": "pkg:pypi/engraphis@1.2.3",
+                        "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+                    },
+                    {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+                ],
                 "components": [
                     {
                         "type": "library",
@@ -374,18 +381,91 @@ def test_release_evidence_rejects_lock_with_conflicting_versions(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
-def test_release_evidence_accepts_lock_superset_of_sbom(tmp_path):
-    """The lock may contain extra build-tool packages not in the SBOM."""
+def test_release_evidence_rejects_lock_packages_missing_from_sbom(tmp_path):
+    """A locked package absent from the SBOM means a truncated capture.
+
+    cyclonedx-bom 7.3.0 (``cyclonedx-py environment``) inventories the whole
+    build environment, including workflow-installed tooling such as pip and
+    setuptools, so a captured lock and SBOM name-set must match after
+    canonicalization; a lock-only entry is how a transitive-only package
+    could vanish while every direct name check still succeeds.
+    """
     root = _root(tmp_path)
     dist = _dist(root)
     inputs = _release_inputs(root, dist)
-    # Lock has the SBOM packages plus extra build tools
     inputs["environment_lock"].write_text(
         "alpha-package==1.0\nengraphis==1.2.3\npip==26.2\nsetuptools==83.0.0\n",
         encoding="utf-8",
     )
-    # Should not raise — SBOM ⊆ lock
-    _build(root, dist, inputs=inputs)
+    with pytest.raises(EvidenceError, match="truncated closure"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_omitting_transitive_packages(tmp_path):
+    """A truncated SBOM keeping root + direct deps but dropping a transitive
+    package must fail even without any dependency graph present."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # beta-package reaches the environment only transitively through
+    # alpha-package; the lock still lists it while the SBOM omits it.
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nbeta-package==0.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="truncated closure"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_dangling_dependency_graph_ref(tmp_path):
+    """A dependsOn ref resolving to nothing must fail the dependency-graph check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["components"].append(
+        {
+            "type": "library",
+            "name": "beta-package",
+            "version": "0.9",
+            "purl": "pkg:pypi/beta-package@0.9",
+        }
+    )
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {
+            "ref": "pkg:pypi/alpha-package@1.0",
+            "dependsOn": ["pkg:pypi/ghost-package@9.9"],
+        },
+        {"ref": "pkg:pypi/beta-package@0.9", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nbeta-package==0.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="unknown component ref"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_unreachable_declared_dependency(tmp_path):
+    """A declared dependency present in the SBOM but not reachable from the
+    project root through the dependency graph must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["dependencies"] = [
+        {"ref": "pkg:pypi/engraphis@1.2.3", "dependsOn": []},
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    with pytest.raises(EvidenceError, match="unreachable from the SBOM root"):
+        _build(root, dist, inputs=inputs)
+
 
 def test_release_evidence_rejects_empty_sbom_package_set(tmp_path):
     """An SBOM with no Python components must not pass the subset check."""
