@@ -863,7 +863,7 @@ function graphData(){
  if(GDATA_CACHE&&GDATA_CACHE.graph===GRAPH&&GDATA_CACHE.hideIso===hideIso)return GDATA_CACHE.data;
  if(GRAPH_FULL){
   /* The flat all-node worker accepts the scene's node and from/to edge shapes directly.
-     Avoid cloning and decorating up to 20k nodes and 200k relations for quality-only paint. */
+     Avoid cloning and decorating the maximum view for quality-only paint. */
   const data={nodes:GRAPH.nodes||[],links:GRAPH.edges||[]};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
  }
  let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
@@ -1227,7 +1227,7 @@ function loadAllGraphEngine(){
  if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2';
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3';
    script.onload=()=>{typeof EngraphisAllGraph==='undefined'?reject(new Error('All-node graph asset loaded without registering EngraphisAllGraph')):resolve()};
    script.onerror=()=>reject(new Error('All-node graph asset could not load'));
    document.head.appendChild(script);
@@ -1243,7 +1243,7 @@ function loadGraphEngine(loadAll=false){
   if(!GRAPH_ENGINE_LOADING){
    GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
     const script=document.createElement('script');
-   script.src='/v2-assets/engraphis-graph.js?v=20260814-galaxy-gravity-3';
+   script.src='/v2-assets/engraphis-graph.js?v=20260819-v24-physics-final';
     /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
        resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
     script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
