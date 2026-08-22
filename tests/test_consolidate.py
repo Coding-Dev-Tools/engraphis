@@ -1950,13 +1950,19 @@ def test_archive_preserves_vector_for_historical_recall():
         mtype=MemoryType.WORKING,
         resolve_conflicts=False,
     )
+    # Windows wall-clock resolution (~15.6 ms) can tie the memory's creation stamp to
+    # ``archived_at``, collapsing [valid_from, archived_at) to a zero-width interval that
+    # the half-open temporal predicate hides at every as_of. Back-date creation so this
+    # test asserts archival semantics, not host clock granularity.
+    created_at = time.time() - 3_600
     eng.store.conn.execute(
-        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
-        (time.time() - 86_400, stale),
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        (time.time() - 86_400, created_at, stale),
     )
     eng.store.conn.commit()
 
-    archived_at = time.time()
+    archived_at = time.time() + 3_600
+
     report = consolidate(eng, workspace_id=wid, now=archived_at)
 
     assert [row["id"] for row in report["archived"]] == [stale]
@@ -1971,6 +1977,43 @@ def test_archive_preserves_vector_for_historical_recall():
     )
     assert [chunk["id"] for chunk in historical.chunks] == [stale]
 
+
+
+def test_archive_tied_to_ingest_stays_historically_visible():
+    """Consolidation one clock tick after ingest must not erase the fact.
+
+    Coarse host clocks can hand ``consolidate`` a ``now`` equal to the
+    memory's ``valid_from``. The archive close must keep the validity
+    interval non-degenerate so an as_of read at that shared instant still
+    reproduces the memory; a zero-width [valid_from, valid_to) window would
+    hide it from every read, including historical ones.
+    """
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale = eng.remember(
+        "Fleeting note captured moments before the sweep.",
+        workspace_id=wid,
+        mtype=MemoryType.WORKING,
+        resolve_conflicts=False,
+    )
+    tied_at = time.time()
+    eng.store.conn.execute(
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        (tied_at - 86_400, tied_at, stale),
+    )
+    eng.store.conn.commit()
+
+    report = consolidate(eng, workspace_id=wid, now=tied_at)
+
+    assert [row["id"] for row in report["archived"]] == [stale]
+    archived = eng.store.get_memory(stale)
+    assert archived.valid_to is not None and archived.valid_to > archived.valid_from
+    historical = eng.recall_engine.recall(
+        "What fleeting note was captured before the sweep?",
+        SearchFilter(workspace_id=wid, as_of=archived.valid_from),
+        reinforce=False,
+    )
+    assert [chunk["id"] for chunk in historical.chunks] == [stale]
 
 # ── explicit local consolidation command ─────────────────────────────────────
 
