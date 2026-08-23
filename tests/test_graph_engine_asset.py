@@ -366,7 +366,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2"
+        "/v2-assets/engraphis-graph-every.js?v=20260822-every-18"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -9644,8 +9644,8 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
                         source.index("function ensureGraphAssets(")]
-    assert "engraphis-graph-all.js?v=20260814-all-controls-2" in all_loader
-    assert "engraphis-graph-all.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
+    assert "engraphis-graph-every.js?" in all_loader  # cache-buster version intentionally unpinned
+    assert "engraphis-graph-every.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles
     assert ".force-graph-container .grabbable:active {" in styles

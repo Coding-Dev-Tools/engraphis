@@ -397,7 +397,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   const allAssetRequests = [];
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith('/v2-assets/engraphis-graph-all.js')) allAssetRequests.push(request.url());
+    if (pathname.endsWith('/v2-assets/engraphis-graph-every.js')) allAssetRequests.push(request.url());
   });
   const requests = await mockApi(page);
   await page.goto('/');
