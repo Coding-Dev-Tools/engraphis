@@ -227,6 +227,6 @@ def test_ledger_routes_the_every_layout_and_restores_filters() -> None:
     assert "engraphis-graph-every.js" in ledger and "EngraphisEveryGraph" in ledger
     assert "EngraphisAllGraph" not in ledger
     assert 'data-graph-preset-choice="every"' in markup
-    assert 'id="graph-show-all"' in markup and "hidden" in markup  # kept for listeners, hidden
+    assert 'id="graph-show-all"' not in markup  # fully removed, Every node chip is the entry
     assert "state.everyPriorFilters" in ledger                      # filter restore contract
     assert "setGraphMinDegree(0, false)" in ledger
