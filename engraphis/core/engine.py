@@ -1113,7 +1113,7 @@ class MemoryEngine:
 
         # Per-fact validation and poisoning assessment happen before embedding; the
         # metadata/provenance normalization below mirrors _resolve_and_store's own
-        # handling so each fact lands as an ordinary trusted local write would.
+        # handling, so each fact's resolution trust follows its normalized provenance.
         prepared: list[dict] = []
         texts: list[str] = []
         for spec in specs:
@@ -1149,6 +1149,10 @@ class MemoryEngine:
             else:
                 provenance.setdefault("review_state", REVIEW_PENDING)
             write_metadata["provenance"] = provenance
+            # Mirror the single-write path: whether this fact may resolve against,
+            # supersede, or mint graph state for existing memory is decided by its
+            # normalized provenance envelope, never by a blanket True default.
+            trusted_write = prompt_eligible(provenance, write_metadata)
             if self.embedding_space:
                 write_metadata["embed_model"] = self.embedding_space
             poisoning = assess_untrusted_payload(
@@ -1163,6 +1167,7 @@ class MemoryEngine:
                 "subject_key": str(spec.subject_key or "").strip(),
                 "claim_kind": str(spec.claim_kind or "").strip(),
                 "poisoning": poisoning,
+                "trusted_write": trusted_write,
                 "evidence_source": evidence_source,
             })
             if not poisoning.quarantined:
@@ -1236,14 +1241,27 @@ class MemoryEngine:
                 )
             owns_transaction = False
             try:
-                if not caller_owned_transaction:
+                if session_id:
+                    # The pre-transaction existence/ownership check cannot serialize
+                    # with a concurrent end_session; re-read status under the same
+                    # write lock the batch commits in so a close that wins first
+                    # rejects this batch instead of inheriting its writes.
+                    owns_transaction = self.store.begin_session_write(
+                        session_id, workspace_id=workspace_id, repo_id=repo_id
+                    )
+                elif not caller_owned_transaction:
                     self.store.conn.execute("BEGIN IMMEDIATE")
                     owns_transaction = True
                 with self.store.conn.defer_commits():
                     for index_i, item in enumerate(prepared):
+                        # Vector-search candidates are already filtered to the
+                        # resolving fact's memory type; siblings must obey the same
+                        # rule or an overlapping cross-type restatement could drive
+                        # the ADD/NOOP/INVALIDATE decision unweighted.
                         extra_neighbors = [
                             (batch_sims[index_i][sibling_i], rec)
                             for sibling_i, rec in resolved
+                            if rec.mtype == item["mtype"]
                         ]
                         result = self._resolve_and_store(
                             item["content"], text=item["text"], vec=item["vec"],
@@ -1257,6 +1275,7 @@ class MemoryEngine:
                             subject_key=item["subject_key"],
                             claim_kind=item["claim_kind"],
                             poisoning=item["poisoning"],
+                            trusted_write=item["trusted_write"],
                             defer_external_index=True,
                             extra_neighbors=extra_neighbors,
                         )
@@ -1270,7 +1289,15 @@ class MemoryEngine:
                             if rec is not None:
                                 resolved.append((index_i, rec))
                                 inserted.append((mid, item))
-                        if item["vec"] is not None and isinstance(mid, str) and mid:
+                        if (
+                            result.get("op") in {"add", "invalidate", "relate"}
+                            and item["vec"] is not None
+                            and isinstance(mid, str) and mid
+                        ):
+                            # Only a newly inserted record may publish its vector:
+                            # a noop's mid belongs to the pre-existing memory, and
+                            # republishing would overwrite it with the candidate's
+                            # vector even though the stored content never changed.
                             pending_vectors.append((mid, item["vec"]))
                     linked_pairs = self._evolve_batch(inserted)
                     self._audit_batch_evolve(linked_pairs)
