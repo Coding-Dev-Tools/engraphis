@@ -3616,9 +3616,14 @@ def test_status_without_repo_still_reports_workspace_totals(tmp_path, capsys):
 
 
 def test_status_for_an_absent_repo_reports_an_empty_scope(tmp_path, capsys):
-    """A missing --repo name must not fall back to the workspace-wide total."""
+    """A missing --repo name must not fall back to the workspace-wide total —
+    neither in the counts nor by presenting the workspace checkpoint."""
     db, workspace, _, _ = _status_db(tmp_path)
     _run_status(db, workspace, repo="does-not-exist")
     out = capsys.readouterr().out
     assert "memories: 0" in out
     assert "tombstones: 0" in out
+    # The workspace checkpoint must not stand in for the requested scope.
+    assert "last_generation" not in out
+    assert "last_state_hash" not in out
+    assert "(not found locally)" in out

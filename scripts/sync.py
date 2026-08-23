@@ -142,8 +142,12 @@ def _status(args: argparse.Namespace) -> int:
                         "SELECT id FROM repos WHERE workspace_id=? AND name=?",
                         (ws_row, args.repo),
                     )
+                repo_missing = bool(args.repo) and repo_id is None
                 if device_id:
                     lines.append("device_id: %s" % device_id)
+                if device_id and not repo_missing:
+                    # The workspace checkpoint may only stand in for the
+                    # requested scope while that scope exists locally.
                     raw = _try_value(
                         conn,
                         "SELECT value FROM sync_state WHERE key=?",
@@ -164,18 +168,20 @@ def _status(args: argparse.Namespace) -> int:
                     ):
                         lines.append("last_generation: %d" % generation)
                         lines.append("last_state_hash: %s" % state_hash)
-                    if args.repo and repo_id is None:
-                        # The requested repository does not exist locally: its
-                        # scope is empty, not the workspace-wide total.
-                        memories, tombstones = 0, 0
-                    else:
-                        memories, tombstones = _scoped_counts(
-                            conn, ws_row, repo_id=repo_id,
-                        )
-                    if memories is not None:
-                        lines.append("memories: %d" % memories)
-                    if tombstones is not None:
-                        lines.append("tombstones: %d" % tombstones)
+                if repo_missing:
+                    # --repo named a repository this workspace does not have:
+                    # report an explicitly empty scope rather than letting the
+                    # workspace checkpoint describe it.
+                    lines.append("repo: %s (not found locally)" % args.repo)
+                    memories, tombstones = 0, 0
+                else:
+                    memories, tombstones = _scoped_counts(
+                        conn, ws_row, repo_id=repo_id,
+                    )
+                if memories is not None:
+                    lines.append("memories: %d" % memories)
+                if tombstones is not None:
+                    lines.append("tombstones: %d" % tombstones)
         finally:
             conn.close()
     remote = args.remote

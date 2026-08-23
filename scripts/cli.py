@@ -39,18 +39,35 @@ def _emit_update_notice() -> None:
         pass
 
 
+class _ServiceStartupError(Exception):
+    """Marks a failure raised while constructing the MemoryService itself.
+
+    Command-phase failures of the same builtin types (a bad input path, a
+    locked database mid-operation) must not be mislabeled as startup problems,
+    so construction is wrapped in this dedicated marker and main() maps only
+    this type through _startup_error.
+    """
+
+    def __init__(self, original: BaseException) -> None:
+        self.original = original
+        super().__init__(str(original))
+
+
 def _service() -> MemoryService:
-    return MemoryService.create(
-        settings.db_path,
-        embed_model=settings.embed_model or None,
-        embed_revision=getattr(settings, "embed_revision", "") or None,
-        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-        embed_dim=settings.embed_dim or 384,
-        vector_backend=settings.vector_backend,
-        rerank_model=getattr(settings, "rerank_model", "") or None,
-        rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        extractor=settings.extractor,
-    )
+    try:
+        return MemoryService.create(
+            settings.db_path,
+            embed_model=settings.embed_model or None,
+            embed_revision=getattr(settings, "embed_revision", "") or None,
+            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+            embed_dim=settings.embed_dim or 384,
+            vector_backend=settings.vector_backend,
+            rerank_model=getattr(settings, "rerank_model", "") or None,
+            rerank_revision=getattr(settings, "rerank_revision", "") or None,
+            extractor=settings.extractor,
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised as the startup marker
+        raise _ServiceStartupError(exc) from exc
 
 
 def _metadata_object(value: str) -> dict:
@@ -430,8 +447,18 @@ def main() -> None:
     except ValidationError as exc:
         print(f"Error: {exc}")
         sys.exit(1)
+    except _ServiceStartupError as exc:
+        # Construction-phase failures keep the redacted, actionable
+        # startup guidance (missing extra, bad database path, backend setup).
+        print(f"Error: {_startup_error(exc.original)}")
+        sys.exit(1)
     except (sqlite3.Error, OSError, ImportError, RuntimeError) as exc:
-        print(f"Error: {_startup_error(exc)}")
+        # Command-phase failures of the same builtin types: the service is up,
+        # so startup advice would mislead. Stay value-free — type name plus a
+        # bare strerror never echoes the offending path or credential text.
+        detail = getattr(exc, "strerror", "") or ""
+        suffix = f": {detail}" if detail else ""
+        print(f"Error: command failed ({type(exc).__name__}){suffix}.")
         sys.exit(1)
 
 
