@@ -13,16 +13,16 @@ The dashboard has two explicit graph presentations:
 
 Design contract: **all geometry is uploaded once and only re-uploaded when data, layout,
 colours, or filters change; camera moves touch two uniforms.** Pan/zoom frame cost is
-independent of node count — nothing on the GPU moves when you pan.
+independent of node count - nothing on the GPU moves when you pan.
 
 - **Worker** (`engraphis-graph-every-worker.js`): capacity validation, typed-array
   compaction, deterministic community-seeded placement (districts packed tight, centres
   spread wide), and 26 bounded relaxation passes streamed as `preview → ready → progress →
   layout` messages. Springs are community-aware: intra-district springs run strong,
   cross-district springs weak, and district centroids repel each other so neighbourhoods
-  stay separated. The worker is silent once a layout settles — it never sees camera traffic.
+  stay separated. The worker is silent once a layout settles - it never sees camera traffic.
 - **Renderer**: WebGL2-only (unsupported browsers get an explicit error). Zoom-out
-  readability comes from additive glow density — crowded regions melt into brightness —
+  readability comes from additive glow density - crowded regions melt into brightness -
   with continuous shader-side LOD instead of hard tiers. Edges reveal progressively by
   weight as you zoom (bridges always render, tinted gold). Hovering or highlighting a node
   dims everything outside its direct neighbourhood and marks its relations with directional
