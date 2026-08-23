@@ -413,10 +413,10 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   await page.locator('#graph-as-of').fill('2026-08-14');
   await page.getByRole('tab', { name: 'Explore' }).click();
   await page.locator('[data-graph-layer="code"]').click();
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
 
-  await expect(page.locator('#graph-show-all')).toHaveText('High quality');
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter by exact repository name…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
   await expect(page.locator('#graph-depth')).toBeEnabled();
@@ -459,8 +459,8 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   const allAccessibility = await new AxeBuilder({ page }).analyze();
   expect(allAccessibility.violations).toEqual([]);
 
-  await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveText('Show all nodes');
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
   await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
@@ -504,7 +504,7 @@ test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', 
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('3 entities');
 
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
   await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
@@ -1256,7 +1256,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Every node' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   const paletteNotice = page.locator('#notice-banner');
