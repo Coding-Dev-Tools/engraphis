@@ -173,9 +173,13 @@ class LLMClient:
         return self._chat_openai_compat(messages, system, temperature, max_tokens, timeout)
 
     def synthesize_thought(self, context: str, *, temperature: float = 0.3,
-                           max_tokens: int = 512,
+                           max_tokens: int = 4096,
                            thought_prompt: Optional[str] = None) -> dict[str, Any]:
-        """Phase 2 thought synthesis — returns parsed JSON latent state."""
+        """Phase 2 thought synthesis — returns parsed JSON latent state.
+
+        The default completion budget leaves headroom for reasoning models that
+        spend hidden reasoning tokens before emitting the JSON payload.
+        """
         # Security: user-supplied thought_prompt is appended as guidance, never
         # allowed to replace the system prompt entirely. This prevents prompt
         # injection via the /memories/thoughts route.
@@ -243,9 +247,12 @@ class LLMClient:
         key, 401, wrong base URL, unreachable host) without a stack trace.
         """
         try:
+            # Reasoning models spend the completion budget on hidden reasoning
+            # tokens before any visible content; a tiny cap can return an empty
+            # reply and read as a false negative.
             reply = self.chat(
                 [{"role": "user", "content": "Reply with the single word: ok"}],
-                temperature=0.0, max_tokens=5,
+                temperature=0.0, max_tokens=1024,
             )
             return {"ok": True, "reply": (reply or "").strip()[:200],
                     "error": "", "provider": self.provider, "model": self.model}
