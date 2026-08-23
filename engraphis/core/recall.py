@@ -2047,6 +2047,14 @@ def _consolidation_evidence(
                 relation = str(link.get("relation") or "")
                 if relation not in ("consolidates", "profiles"):
                     continue
+                endpoint_a = str(link.get("a") or "").strip()
+                endpoint_b = str(link.get("b") or "").strip()
+                # The digest is one endpoint of the link; the other is the
+                # summarized source memory it must expose as evidence.
+                other = endpoint_b if endpoint_a == record.id else endpoint_a
+                if not other or other == record.id:
+                    continue
+                append_visible(other)
         except Exception as exc:
             # Link lookup is best-effort evidence enrichment, never a recall failure.
             logger.warning(
