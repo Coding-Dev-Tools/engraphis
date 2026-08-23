@@ -1298,3 +1298,7 @@ body[data-theme="paper"] .graph-header {
   .metrics { grid-template-columns: 1fr 1fr; }
   .graph-actions { flex-wrap: wrap; }
 }
+   here (static CSS, CSP-safe) rather than mutating element.style at runtime. */
+div[data-graph-style]:focus {
+  outline: none;
+}

@@ -4,30 +4,60 @@ The dashboard has two explicit graph presentations:
 
 - **High quality** requests an overview capped at 1,000 entity nodes and 2,000 relations and
   keeps the existing shaded renderer and interaction behavior.
-- **All nodes · LOD** requests the complete entity projection up to 20,000 nodes and the
-  existing 200,000-relation safety ceiling. An exact repository filter can add its code overlay
-  within the same final-node ceiling. All relationships remain indexed in the worker;
-  zoomed-out views paint points only, medium zoom paints ranked/visible edges, and focused views
-  reveal local labels and relationships. The all-node renderer uses flat dots by design.
+- **Every node** (layout chip "Every node") requests the complete entity projection up to
+  20,000 nodes and the existing 200,000-relation safety ceiling via the dedicated Every-node
+  engine (`engraphis-graph-every.js` + `engraphis-graph-every-worker.js`). An exact repository
+  filter can add its code overlay within the same final-node ceiling.
 
-All-node preparation runs in `engraphis-graph-worker.js`. WebGL2 is the supported performance
-target; browsers without WebGL2 use a flatter Canvas fallback with stricter practical edge
-budgets. The all-node path has no live force simulation. Layout presets and force controls run
-bounded deterministic settling passes in the worker; relation-flow markers animate only a capped
-visible subset and become static directional cues when reduced motion or Freeze is active.
+## The Every-node engine
 
-Every shared graph control has an All-node behavior: minimum relations and unlinked toggles filter
-worker visibility, neighbourhood depth bounds a focused traversal, relation layers and history
-ghosts rebuild the ranked paint set, auto-collapse reduces zoomed-out communities to representative
-nodes, and colour, palette, size, labels, line width, fit, reflow, export, and focus remain live.
+Design contract: **all geometry is uploaded once and only re-uploaded when data, layout,
+colours, or filters change; camera moves touch two uniforms.** Pan/zoom frame cost is
+independent of node count — nothing on the GPU moves when you pan.
 
-The Playwright fixture `tests/e2e/graph-all-performance.spec.js` builds 20,000 nodes and 200,000
-dense relationships, verifies progressive point/relationship handoff, exercises pan/zoom/focus,
-and fails if post-handoff long tasks exceed 50 ms. Run it with the normal Playwright suite on a
-mid-range desktop with hardware-accelerated WebGL2 enabled.
+- **Worker** (`engraphis-graph-every-worker.js`): capacity validation, typed-array
+  compaction, deterministic community-seeded placement (districts packed tight, centres
+  spread wide), and 26 bounded relaxation passes streamed as `preview → ready → progress →
+  layout` messages. Springs are community-aware: intra-district springs run strong,
+  cross-district springs weak, and district centroids repel each other so neighbourhoods
+  stay separated. The worker is silent once a layout settles — it never sees camera traffic.
+- **Renderer**: WebGL2-only (unsupported browsers get an explicit error). Zoom-out
+  readability comes from additive glow density — crowded regions melt into brightness —
+  with continuous shader-side LOD instead of hard tiers. Edges reveal progressively by
+  weight as you zoom (bridges always render, tinted gold). Hovering or highlighting a node
+  dims everything outside its direct neighbourhood and marks its relations with directional
+  arrows and relation names; picking runs through a local spatial grid with no worker
+  round-trip. Labels are decluttered by screen-space occupancy (rank-first). Community
+  regions paint as tinted district hulls with hub-derived labels.
+- **Interaction**: pointer drag/wheel zoom, two-pointer pinch, keyboard (arrows pan,
+  +/- zoom, F fit, Escape clears selection). A screen-reader live region announces scene
+  totals and hovered entities; canvases are labelled decorative layers.
+
+Measured worker settle times (deterministic fixture, see `python -m eval.graph_every_bench`,
+run inside the dev distrobox where node is available):
+
+| Scale | Settle time |
+|---|---|
+| 2,000 nodes / 2,667 relations | ~320 ms |
+| 20,000 nodes / 26,667 relations | ~1.2 s |
+
+Settle is a one-off cost per data/relayout; per-frame render cost does not grow with node
+count. Reduced-motion preferences freeze relation-flow markers. WebGL2 is required.
+
+## Shared controls
+
+Every shared graph control has an Every-node behaviour: minimum relations and unlinked
+toggles filter visibility (entering Every-node shows all nodes; leaving restores the
+person's overview filters), presets re-run the seeded layout with new force settings,
+colour/size/style/palette remain live, and colour, labels, fit, reflow, export, and focus
+remain live. Focus-depth traversal and auto-collapse are not yet implemented in the engine;
+their controls are disabled honestly while in Every-node mode rather than silently doing
+nothing.
+
+The Playwright e2e coverage for graph routing lives in `tests/e2e/ledger.spec.js`; the
+worker/renderer contract is pinned by `tests/test_graph_every_asset.py`, which executes the
+real worker in Node and asserts the renderer's structural invariants.
 
 If the server has more than 20,000 final nodes or more than 200,000 raw relationships, the
-all profile refuses the request with an explicit capacity response. Narrow by repository or entity
-type, or reduce the workspace graph; it never silently samples the all-node projection. Time,
-layer, and relation filters still shape an accepted scene, but are not advertised as ways around
-the raw entity and relationship safety ceilings because those limits are enforced first.
+profile refuses the request with an explicit capacity response. Narrow by repository or entity
+type, or reduce the workspace graph; it never silently samples the projection.
