@@ -131,6 +131,15 @@ def main(argv=None) -> None:
     server.settings.host = args.host
     server.settings.port = args.port
     server.settings.transport_security = _transport_security(args.host, args.port)
+    # Restart-resilient transport. FastMCP's default *stateful* mode tracks MCP
+    # session ids in memory, so every service bounce (pm2 resurrect, watchdog,
+    # manual restart) invalidates all live session ids: the client's next request
+    # gets a 404, the mcp SDK raises "Session terminated", and Hermes' gateway
+    # client parks for its full retry interval with zero registered tools.
+    # Stateless mode makes each POST self-contained per the MCP spec, so any
+    # healthy process can answer any request. Spec-compliant clients handle the
+    # absent GET SSE stream (the server answers 405 and clients skip it).
+    server.settings.stateless_http = True
     _eager_exact_backend_check()
     server.run(transport=args.transport)
 

@@ -4843,6 +4843,32 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(row) for row in rows]
 
+    def list_memories_needing_vectors_page(self, *, fingerprint: str,
+                                           after_id: str = "",
+                                           limit: int = 500) -> list[MemoryRecord]:
+        """Return one keyset page of memories whose canonical vector is missing or stale.
+
+        The versioned-embedding rebuild must be resumable: paging only rows whose
+        ``mem_vectors`` row is absent or stamped with another fingerprint lets an
+        interrupted rebuild skip already-converted records on restart. A missing
+        vector needs embedding just as much as a stale one, so rows without any
+        ``mem_vectors`` row are returned too. Unscoped and invalid-inclusive, like
+        the rebuild's previous full-scan paging.
+        """
+        sql = (
+            "SELECT m.* FROM memories AS m "
+            "LEFT JOIN mem_vectors AS v ON v.id = m.id "
+            "WHERE (v.id IS NULL OR COALESCE(v.model, '') <> ?)"
+        )
+        params: list[Any] = [str(fingerprint)]
+        if after_id:
+            sql += " AND m.id>?"
+            params.append(after_id)
+        sql += " ORDER BY m.id LIMIT ?"
+        params.append(max(1, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_record(row) for row in rows]
+
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted",
@@ -5574,6 +5600,11 @@ class Store:
                 "other backups separately; a running agent may already have read the secret."
             ),
         }
+
+    def search(self, query: str, k: int = 20,
+               *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
+        """LexicalIndex protocol surface (``core.interfaces``); the BM25/LIKE arm."""
+        return self.fts_search(query, k, filter=filter)
 
     def fts_search(self, query: str, k: int = 20,
                    *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
@@ -7823,6 +7854,12 @@ class Store:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
         sql += " ORDER BY m.ingested_at DESC"
+        # Bounded SQL window: prompt-eligible rows can be sparse relative to the raw
+        # LIKE match set, so cap the scan instead of streaming the whole repo. The
+        # Python-side eligibility filter and result cap below are unchanged — with a
+        # normal match set the window never truncates.
+        sql += " LIMIT ?"
+        params.append(max(int(limit) * 50, 1000))
         # This derived bridge feeds impact analysis. Filter sources before counting
         # them, so a newer pending import cannot consume the bounded public window.
         out = []
