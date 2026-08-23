@@ -114,3 +114,8 @@ cookies.txt
 
 # uv lockfile (generated tooling, not a project dependency)
 uv.lock
+
+# Every-node stress fixtures (local only)
+.scratch-*.db*
+.seed20k.py
+.seed-graph.py
