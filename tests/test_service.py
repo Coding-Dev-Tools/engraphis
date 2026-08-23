@@ -8,6 +8,7 @@ why/timeline/proactive tools.
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pytest
@@ -1545,6 +1546,50 @@ def test_import_folder_respects_file_pattern(tmp_path, monkeypatch):
     assert any("text note" in m["content"] for m in r["memories"])
 
 
+def test_import_folder_truncation_is_surfaced(tmp_path, monkeypatch):
+    """A folder over the file ceiling must not silently import an alphabetically-first
+    slice: the report carries matched_total/truncated plus an actionable warning."""
+    from engraphis.service import MAX_IMPORT_FILES
+
+    for i in range(MAX_IMPORT_FILES + 5):
+        (tmp_path / f"note-{i:05d}.md").write_text(f"note {i}")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(tmp_path))
+    assert report["matched_total"] == MAX_IMPORT_FILES + 5
+    assert report["truncated"] is True
+    assert report["scanned"] == MAX_IMPORT_FILES
+    assert any("first" in warning for entry in report["warnings"]
+               for warning in entry.get("warnings", []))
+    # The imported slice must still work normally.
+    assert report["imported"] == MAX_IMPORT_FILES
+
+
+def test_import_folder_unreadable_files_are_counted(tmp_path, monkeypatch):
+    """Enumeration-time stat/resolve failures must appear in the report instead of
+    vanishing (e.g. paths beyond the Windows MAX_PATH limit)."""
+    good = tmp_path / "good.md"
+    good.write_text("readable note")
+    (tmp_path / "locked.md").write_text("will fail resolve")
+
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *, strict=False):
+        if "locked" in str(self):
+            raise OSError("resolve failed (simulated long-path/lock)")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(service_module.Path, "resolve", fake_resolve)
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(tmp_path))
+    assert report["unreadable"] == 1
+    assert report["imported"] == 1
+    assert any("could not be read" in warning
+               for entry in report["warnings"]
+               for warning in entry.get("warnings", []))
+
+
 def test_import_folder_missing_path_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
     s = _svc()
@@ -1658,10 +1703,42 @@ def test_import_files_marks_untrusted_with_upload_kind():
 
 
 def test_import_files_caps_count():
+    from engraphis.service import MAX_IMPORT_FILES
+
     s = _svc()
-    too_many = [{"name": f"f{i}.md", "content": "x"} for i in range(600)]
+    ok = [{"name": f"ok{i}.md", "content": f"note {i}"} for i in range(MAX_IMPORT_FILES)]
+    report = s.import_files(workspace="acme", files=ok)
+    assert report["imported"] == MAX_IMPORT_FILES
+    too_many = [{"name": f"f{i}.md", "content": "x"}
+                for i in range(MAX_IMPORT_FILES + 1)]
     with pytest.raises(ValidationError):
         s.import_files(workspace="acme", files=too_many)
+
+
+def test_import_files_isolates_per_file_failures(monkeypatch):
+    """One pathological file must degrade to a per-file error, not void the batch —
+    this is the regression behind 'Import failed: Internal Server Error'."""
+    s = _svc()
+
+    def exploding_extract(name, data):
+        if name == "bad.md":
+            raise RecursionError("deep-nested JSON upload")
+        return real_extractor.extract_bytes(name, data)
+
+    from engraphis.backends.resources import get_resource_extractor as _real_get
+    real_extractor = _real_get()
+    monkeypatch.setattr(
+        "engraphis.backends.resources.get_resource_extractor",
+        staticmethod(lambda: SimpleNamespace(extract_bytes=exploding_extract)),
+    )
+    report = s.import_files(workspace="acme", files=[
+        {"name": "good1.md", "content": "A fact about herons."},
+        {"name": "bad.md", "content": "pathological"},
+        {"name": "good2.md", "content": "A fact about egrets."},
+    ])
+    assert report["errors"] == 1
+    assert report["imported"] == 2
+    assert any(item["file"] == "bad.md" for item in report["details"])
 
 
 def test_import_files_rejects_non_list():

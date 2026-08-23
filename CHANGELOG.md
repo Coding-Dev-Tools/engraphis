@@ -7,7 +7,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
-
 - Direct black-hole children now receive compact, deterministic orbital lanes near the black
   hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
   clearance, while community-child planets remain in their local moving frame; oversized Galaxy
@@ -100,9 +99,25 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Source-import manifest paging now uses keyset (cursor) pagination instead of OFFSET,
   so concurrent writes during a source re-import can no longer skip or duplicate rows
   mid-scan (PR #154).
+- Local file/folder imports now accept up to 1,500 files per batch (was 500), with the total
+  batch ceiling scaled to 750 MB so the average per-file allowance is unchanged; document-wizard
+  scanner ceilings move in lockstep.
+- Folder imports report truncation explicitly: a folder with more matching files than the
+  ceiling now warns and returns `truncated`/`matched_total`/`unreadable` fields instead of
+  silently importing an alphabetically-first slice that looks complete.
 
 ### Fixed
 
+- Importing more than 1,000 files through the dashboard no longer fails with "Internal Server
+  Error": wizard upload routes parse multipart forms under the advertised 1,500-file ceiling
+  instead of Starlette's hidden 1,000-part parser default, oversized batches return a clear 413,
+  and large vault uploads no longer trip the dashboard's 8 MB default body limit.
+- One unreadable or pathological file (locked, deep-nested JSON, concurrent writer) now degrades
+  to a per-file error instead of rolling back the entire import batch with a 500.
+- Document/Obsidian import jobs whose worker died with the process are marked failed on the next
+  status poll (`worker_lease_expired`) instead of reporting `running` forever.
+- Cloud-placeholder files (OneDrive Files-On-Demand) on Windows are hydrated and imported rather
+  than rejected as non-regular files; symlinks and junctions remain blocked.
 - Galaxy layout now packs each complete solar-system envelope before orbital seeding and keeps
   those envelopes separated with rigid carrier translations during live motion. Compact server
   targets can no longer stack large systems near the black hole, while local planet positions,
