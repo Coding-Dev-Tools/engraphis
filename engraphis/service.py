@@ -290,6 +290,7 @@ MAX_GRAPH_INDEX_MEMORIES = 20_000
 MAX_GRAPH_INDEX_WORKERS = 2
 GRAPH_INDEX_BATCH_SIZE = 100
 GRAPH_INDEX_LEASE_SECONDS = 60.0
+IMPORT_JOB_LEASE_SECONDS = 900.0
 GRAPH_INDEX_JOB_HISTORY = 100
 GRAPH_INDEX_SHUTDOWN_SECONDS = 10.0
 DEFAULT_CODE_QUERY_CAPACITY = 10_000
@@ -7687,9 +7688,16 @@ class MemoryService:
         restart. Mirrors _recover_stale_graph_jobs' lease semantics so a crashed wizard
         import reports 'failed: worker_lease_expired' instead of polling as 'running'
         forever.
+
+        Import jobs use a substantially longer lease (IMPORT_JOB_LEASE_SECONDS) than
+        graph-index workers: the per-batch heartbeat only advances between documents,
+        and a single large file (big PDF, OCR image, transcription) can legitimately
+        spend longer than the graph lease inside one parse/ingest. The heartbeat is
+        the progress-aware expiry marker — it resets the lease age whenever the job's
+        processed-files count advances, so a live mid-file worker is never failed.
         """
         now = time.time()
-        cutoff = now - GRAPH_INDEX_LEASE_SECONDS
+        cutoff = now - IMPORT_JOB_LEASE_SECONDS
         where = ("kind IN ('document_import','obsidian_import') "
                  "AND state IN ('queued','running') "
                  "AND COALESCE(heartbeat_at, created_at)<?")
