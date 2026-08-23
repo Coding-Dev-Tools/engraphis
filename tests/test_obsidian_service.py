@@ -1,6 +1,7 @@
 """Real-service coverage for the owner-only Obsidian import facade."""
 from __future__ import annotations
 
+import hashlib
 import time
 
 import pytest
@@ -41,6 +42,52 @@ def _import(service: MemoryService, files: list[tuple[str, bytes]], **kwargs) ->
         vault_label="Team notes", confirmed=True, **kwargs,
     )
     return started, _await_job(service, started)
+
+
+def test_preview_pages_the_full_manifest_like_execution():
+    service = _service()
+    try:
+        started, imported = _import(
+            service,
+            [
+                ("A.md", b"# A\n"),
+                ("B.md", b"# B\n"),
+                ("C.md", b"# C\n"),
+            ],
+        )
+        vault_id = started["vault_id"]
+        assert imported["state"] == "completed"
+
+        # Push the vault manifest past the default 10k list-page boundary with
+        # filler identity rows that sort before the scan set, so an unpaged
+        # preview loses exactly the rows a real oversized vault would lose.
+        for i in range(10_001):
+            service.store.upsert_source_import_item(
+                vault_id=vault_id,
+                source_key=hashlib.sha256(f"seed-{i}".encode()).hexdigest(),
+                relative_path=f"0000-seed-{i:05d}.md",
+            )
+
+        preview = service.preview_obsidian_upload(
+            files=[("A.md", b"# A\n"), ("D.md", b"# D\n")],
+            attachment_manifest=[],
+            workspace="alpha",
+            vault_label="Team notes",
+            vault_id=vault_id,
+        )
+
+        # An unpaged preview reads only the first list page, so manifest rows
+        # beyond the boundary vanish from the report entirely. The paged reader
+        # must surface every manifest row: A plans as unchanged and B/C — not
+        # part of this preview's scan — are reported as missing, not dropped.
+        statuses = {
+            row["relative_path"]: row["status"] for row in preview["files"]
+        }
+        assert statuses["A.md"] != "missing"
+        assert "B.md" in statuses
+        assert "C.md" in statuses
+    finally:
+        service.close()
 
 
 def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guards(monkeypatch):

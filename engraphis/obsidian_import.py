@@ -511,7 +511,9 @@ class ObsidianImporter:
                 scope=scope, memory_type=memory_type, strict_root=strict_root,
             )
             if manifest is None:
-                items = self.store.list_source_import_items(vault_id=str(vault["id"]))
+                # Page the manifest like import_scan does so previews on manifests
+                # larger than one list page plan against the full item set.
+                items, _ = self._all_source_items(vault_id=str(vault["id"]))
             else:
                 items = [row for row in items if row.get("vault_id") == vault.get("id")]
         else:
