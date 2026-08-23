@@ -87,6 +87,29 @@ def _checkpoint_key(workspace_id: str, repo_id, device_id: str) -> str:
     return "sync_snapshot:%s:%s" % (scope, device)
 
 
+def _scoped_counts(
+    conn: sqlite3.Connection, workspace_id: str, *,
+    repo_id: str | None = None,
+) -> tuple[int | None, int | None]:
+    """Count memories and tombstones for the requested status scope.
+
+    A resolved ``--repo`` scopes both counts to that repository's rows so a
+    sibling repository's data is never reported; without ``--repo`` the whole
+    workspace is counted.
+    """
+    memory_sql = "SELECT COUNT(*) FROM memories WHERE workspace_id=?"
+    tombstone_sql = "SELECT COUNT(*) FROM memory_tombstones WHERE workspace_id=?"
+    params: tuple = (workspace_id,)
+    if repo_id is not None:
+        memory_sql += " AND repo_id=?"
+        tombstone_sql += " AND repo_id=?"
+        params = (workspace_id, repo_id)
+    return (
+        _try_value(conn, memory_sql, params),
+        _try_value(conn, tombstone_sql, params),
+    )
+
+
 def _status(args: argparse.Namespace) -> int:
     """Print LOCAL sync state only: no network I/O, no writes, always exit 0.
 
@@ -141,16 +164,14 @@ def _status(args: argparse.Namespace) -> int:
                     ):
                         lines.append("last_generation: %d" % generation)
                         lines.append("last_state_hash: %s" % state_hash)
-                    memories = _try_value(
-                        conn,
-                        "SELECT COUNT(*) FROM memories WHERE workspace_id=?",
-                        (ws_row,),
-                    )
-                    tombstones = _try_value(
-                        conn,
-                        "SELECT COUNT(*) FROM memory_tombstones WHERE workspace_id=?",
-                        (ws_row,),
-                    )
+                    if args.repo and repo_id is None:
+                        # The requested repository does not exist locally: its
+                        # scope is empty, not the workspace-wide total.
+                        memories, tombstones = 0, 0
+                    else:
+                        memories, tombstones = _scoped_counts(
+                            conn, ws_row, repo_id=repo_id,
+                        )
                     if memories is not None:
                         lines.append("memories: %d" % memories)
                     if tombstones is not None:
