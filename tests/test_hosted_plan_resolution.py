@@ -1045,6 +1045,10 @@ def test_newer_active_session_clears_the_process_denial_guard(monkeypatch) -> No
     _connect(monkeypatch, pinned_token=False)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
     v2_api._mark_authoritative_denial()
+    # Windows wall-clock resolution (~15.6 ms) can tie this stamp to the
+    # bootstrap's entitlement_checked_at, so force strict ordering: this test
+    # asserts supersession logic, not host clock granularity.
+    v2_api._authoritative_denial_at -= 1.0
     response = {
         "refresh_credential": "engr_rt_reconnected",
         "organization_id": ORGANIZATION,

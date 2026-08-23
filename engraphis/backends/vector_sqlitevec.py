@@ -14,6 +14,7 @@ MATCH directly, so ``search`` expands the KNN window until it has enough visible
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 import sys
 from numbers import Integral
@@ -24,10 +25,15 @@ import numpy as np
 from engraphis.backends.embedder_deterministic import MAX_EMBEDDING_DIM
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import SearchFilter, VectorIndex
-from engraphis.core.store import Store
+from engraphis.core.store import IN_CLAUSE_CHUNK, Store
+
+logger = logging.getLogger("engraphis")
 
 _INDEX_FORMAT_VERSION = 3
-_VISIBILITY_BATCH_SIZE = 8
+# Visibility checks are plain IN-chunks over canonical ids (identical semantics at
+# any chunk size); match the store's IN_CLAUSE_CHUNK so a widening round costs
+# len(unchecked)/500 round-trips instead of len(unchecked)/8.
+_VISIBILITY_BATCH_SIZE = IN_CLAUSE_CHUNK
 _COVERAGE_BATCH_SIZE = 500
 _DELETE_BATCH_SIZE = 500
 _COVERAGE_RTOL = 1e-6
@@ -549,7 +555,11 @@ def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto") -> V
         return NumpyVectorIndex(store, dim=dimension)
     try:
         return SqliteVecVectorIndex(store, dimension)
-    except Exception:
+    except Exception as exc:
         if prefer == "sqlite-vec":
             raise
+        logger.warning(
+            "sqlite-vec vector index unavailable (%s); falling back to NumpyVectorIndex",
+            type(exc).__name__,
+        )
         return NumpyVectorIndex(store, dim=dimension)

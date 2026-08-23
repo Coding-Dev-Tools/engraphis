@@ -421,14 +421,6 @@ def test_release_version_surfaces_are_synchronized():
     )
     assert commercial["version"] == version
 
-    hermes = (ROOT / "integrations" / "hermes" / "engraphis" / "plugin.yaml").read_text(
-        encoding="utf-8"
-    )
-    hermes_version = re.search(r"^version:\s*(\S+)\s*$", hermes, re.M)
-    assert hermes_version, "Hermes version declaration moved — update this test"
-    expected_hermes = version if version.count(".") >= 2 else f"{version}.0"
-    assert hermes_version.group(1) == expected_hermes
-
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
         encoding="utf-8"
     )

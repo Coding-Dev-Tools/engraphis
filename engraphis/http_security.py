@@ -131,6 +131,13 @@ def install(app) -> None:
 
     csp_override = os.environ.get("ENGRAPHIS_CSP")
     csp = DEFAULT_CSP if csp_override is None else csp_override.strip()
+    if csp_override is not None and not csp:
+        # Runs once per app (the idempotency guard above): a deployment that opted
+        # out of CSP entirely must be observable at startup, not silent.
+        logger.warning(
+            "ENGRAPHIS_CSP is set to an empty string: no Content-Security-Policy "
+            "header will be sent on any response."
+        )
 
     hsts = os.environ.get("ENGRAPHIS_HSTS")
     hsts = DEFAULT_HSTS if hsts is None else hsts.strip()
