@@ -9,7 +9,7 @@ alone never creates a sibling edge).
 """
 import pytest
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import FactSpec
+from engraphis.core.interfaces import FactSpec, MemoryType
 
 
 def _engine():
@@ -69,6 +69,39 @@ def test_shared_subject_key_supersedes_within_batch():
     assert results[0]["op"] == "add"
     assert results[1]["op"] == "invalidate"
     assert results[0]["id"] in results[1]["superseded"]
+
+
+def test_cross_type_sibling_does_not_drive_resolution():
+    """Sibling candidates obey the same memory-type filter as vector search: an
+    identical restatement of a *different* type must not dedupe against its
+    cross-type sibling, while the same-type restatement still does."""
+    eng, wid, rid = _engine()
+    results = eng.remember_many(
+        [
+            FactSpec(
+                content="The deploy script runs migrations before restarting workers.",
+                mtype=MemoryType.SEMANTIC,
+            ),
+            FactSpec(
+                content="The deploy script runs migrations before restarting workers.",
+                mtype=MemoryType.EPISODIC,
+            ),
+        ],
+        workspace_id=wid, repo_id=rid,
+    )
+    assert results[0]["op"] == "add"
+    assert results[1]["op"] == "add"
+    assert results[1]["id"] != results[0]["id"]
+    # Positive control: the same restatement within one type resolves NOOP.
+    again = eng.remember_many(
+        [FactSpec(
+            content="The deploy script runs migrations before restarting workers.",
+            mtype=MemoryType.EPISODIC,
+        )],
+        workspace_id=wid, repo_id=rid,
+    )
+    assert again[0]["op"] == "noop"
+    assert again[0]["id"] == results[1]["id"]
 
 
 def test_shared_provenance_source_creates_evidence_edge():
@@ -206,6 +239,31 @@ def test_service_remember_many_supersedes_keyed_claims():
     assert out["ops"] == ["add", "invalidate"]
 
 
+def test_untrusted_batch_cannot_supersede_and_stays_pending():
+    """An external-source batch is untrusted end-to-end: like single untrusted
+    writes it cannot resolve against or invalidate live memory, and every stored
+    record keeps pending, trusted=False provenance rather than minting trusted
+    graph state."""
+    from engraphis.service import MemoryService
+
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    svc = MemoryService(eng)
+    out = svc.remember_many(
+        [
+            {"content": "Rate limit is 60 rpm.", "subject_key": "api.rate_limit"},
+            {"content": "Rate limit is 120 rpm.", "subject_key": "api.rate_limit"},
+        ],
+        workspace="w", source="api",
+    )
+    assert out["ops"] == ["add", "add"]  # no supersession despite shared subject_key
+    assert len({r["id"] for r in out["results"]}) == 2
+    for r in out["results"]:
+        rec = eng.store.get_memory(r["id"])
+        prov = rec.metadata["provenance"]
+        assert prov["trusted"] is False
+        assert prov["review_state"] == "pending"
+
+
 def test_mcp_tool_registered():
     import asyncio
 
@@ -216,3 +274,95 @@ def test_mcp_tool_registered():
         t.name for t in asyncio.run(mcp_server.classic_mcp.list_tools())
     }
     assert "engraphis_remember_many" in tools
+
+
+class _PublicationSpyIndex:
+    """Delegates search to the engine's canonical index but records the explicit
+    post-commit publications a separately-backed index (e.g. sqlite-vec) receives."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.published: list[str] = []
+
+    def search(self, vec, k, *, filter=None):
+        return self._inner.search(vec, k, filter=filter)
+
+    def upsert(self, ids, _vecs, meta=None, *, commit=True):
+        self.published.extend(ids)
+
+    def delete(self, ids, *, commit=True):
+        pass
+
+
+def test_noop_resolved_fact_does_not_publish_vector_for_existing_memory():
+    """A batch fact resolving NOOP against a pre-existing memory must leave that
+    memory's published vector untouched: only newly inserted records are queued
+    for external-index publication, otherwise the candidate vector would
+    overwrite the stored record's vector although its content never changed."""
+    eng, wid, rid = _engine()
+    spy = _PublicationSpyIndex(eng.index)
+    eng.index = spy
+
+    fact = FactSpec(content="Deploy cutoff is Friday 17:00 UTC.",
+                    subject_key="deploy.cutoff", claim_kind="policy",
+                    valid_from=1_000_000.0)
+    first = eng.remember_many([fact], workspace_id=wid, repo_id=rid)
+    assert first[0]["op"] == "add"
+    existing_id = first[0]["id"]
+    assert spy.published == [existing_id]
+
+    second = eng.remember_many(
+        [FactSpec(content=fact.content, subject_key=fact.subject_key,
+                  claim_kind=fact.claim_kind, valid_from=fact.valid_from)],
+        workspace_id=wid, repo_id=rid,
+    )
+    assert second[0]["op"] == "noop"
+    assert second[0]["id"] == existing_id
+    assert spy.published == [existing_id]
+
+
+def test_batch_publishes_each_newly_inserted_record_exactly_once():
+    """Inserted siblings publish once each; a sibling that resolves NOOP against
+    an earlier insert adds no second publication for the same memory id."""
+    eng, wid, rid = _engine()
+    spy = _PublicationSpyIndex(eng.index)
+    eng.index = spy
+
+    results = eng.remember_many(
+        ["alpha fact", "alpha fact", "distinct beta fact"],
+        workspace_id=wid, repo_id=rid,
+    )
+    assert results[0]["op"] == "add"
+    assert results[1]["op"] == "noop"
+    assert results[2]["op"] == "add"
+    assert sorted(spy.published) == sorted({results[0]["id"], results[2]["id"]})
+
+
+def test_session_ended_between_validation_and_transaction_rejects_batch():
+    """A session closed after the early ownership check but before the batch
+    transaction fails cleanly instead of attaching its writes to an ended
+    session: the in-transaction liveness revalidation rejects the whole batch."""
+    eng, wid, rid = _engine()
+    sid = eng.store.start_session(wid, rid)
+
+    real_get_session = eng.store.get_session
+
+    def get_session_then_end(session_id):
+        session = real_get_session(session_id)
+        eng.store.end_session(session_id)
+        return session
+
+    eng.store.get_session = get_session_then_end
+    try:
+        with pytest.raises(ValueError, match="not active"):
+            eng.remember_many(
+                ["late fact for a closing session"],
+                workspace_id=wid, repo_id=rid, session_id=sid,
+            )
+    finally:
+        eng.store.get_session = real_get_session
+
+    rows = eng.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM memories WHERE session_id=?", (sid,)
+    ).fetchone()
+    assert rows["n"] == 0
