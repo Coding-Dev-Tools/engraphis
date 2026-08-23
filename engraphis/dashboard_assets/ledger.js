@@ -4412,16 +4412,16 @@
   });
   all('[data-graph-preset-choice]').forEach(control => control.addEventListener('click', () => {
     const preset = control.dataset.graphPresetChoice;
-    /* Every node is its own presentation: selecting it loads the complete LOD scene, and
-       any named layout leaves it. The old Show-all toggle stays in the DOM for state
-       restore compatibility but is hidden from the toolbar. */
-    if (preset === 'every' || state.graphMode === 'full') {
+    /* Every node is its own presentation: selecting the Every node chip loads the
+       complete LOD scene; the Show-all toggle remains the canonical exit that
+       restores overview filters. Other layout presets while in Every-node re-run
+       the seeded Every-node layout without leaving the presentation. */
+    if (preset === 'every') {
       byId('graph-preset').value = preset;
       clearGraphSavedView();
       syncGraphChoices();
       saveGraphPreferences();
-      const wantedMode = preset === 'every' ? 'full' : 'overview';
-      if (wantedMode === 'full') {
+      if (state.graphMode !== 'full') {
         /* Every node means every node: entering the map clears the unlinked/degree
            filters that the overview uses, but remembers them so leaving restores the
            person's overview exactly as they had configured it. */
@@ -4433,20 +4433,29 @@
         }
         setGraphMinDegree(0, false);
         setGraphShowUnlinked(true, false);
-      } else if (state.everyPriorFilters) {
-        const prior = state.everyPriorFilters;
-        state.everyPriorFilters = null;
-        setGraphMinDegree(prior.minDegree, false);
-        setGraphShowUnlinked(prior.unlinked, false);
-      }
-      if (state.graphMode !== wantedMode) {
         cancelGraphRepositoryReload();
-        state.graphMode = wantedMode;
+        state.graphMode = 'full';
         updateGraphModeControls();
         loadGraph({ force: true });
-      } else if (preset === 'every' && state.graphEngine && state.graphEngine.setPreset) {
+      } else if (state.graphEngine && state.graphEngine.setPreset) {
         state.graphEngine.setPreset('every');
       }
+      return;
+    }
+    if (state.graphMode === 'full') {
+      byId('graph-preset').value = preset;
+      clearGraphSavedView();
+      syncGraphChoices();
+      saveGraphPreferences();
+      if (state.graphEngine && state.graphEngine.setPreset) {
+        const result = state.graphEngine.setPreset(preset);
+        if (result && typeof result === 'object') syncGraphTuning(result);
+      } else {
+        syncGraphTuning(graphPresetTuning(preset));
+      }
+      updateGraphModeControls();
+      if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
+      if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
       return;
     }
     const resumeLayout = state.graphFrozen;
@@ -4506,7 +4515,28 @@
   });
   byId('graph-show-all').addEventListener('click', () => {
     cancelGraphRepositoryReload();
-    state.graphMode = state.graphMode === 'full' ? 'overview' : 'full';
+    const entering = state.graphMode !== 'full';
+    if (entering) {
+      if (!state.everyPriorFilters) {
+        state.everyPriorFilters = {
+          minDegree: Number(byId('graph-min-degree').value) || 0,
+          unlinked: byId('graph-show-unlinked').getAttribute('aria-pressed') === 'true',
+        };
+      }
+      setGraphMinDegree(0, false);
+      setGraphShowUnlinked(true, false);
+      byId('graph-preset').value = 'every';
+    } else if (state.everyPriorFilters) {
+      const prior = state.everyPriorFilters;
+      state.everyPriorFilters = null;
+      setGraphMinDegree(prior.minDegree, false);
+      setGraphShowUnlinked(prior.unlinked, false);
+      if (byId('graph-preset').value === 'every') byId('graph-preset').value = 'galaxy';
+    }
+    state.graphMode = entering ? 'full' : 'overview';
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
     updateGraphModeControls();
     loadGraph({ force: true });
   });
