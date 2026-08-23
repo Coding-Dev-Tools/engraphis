@@ -2397,10 +2397,11 @@ class MemoryService:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
-                logger.warning("folder import failed for one file (%s)", type(exc).__name__)
+                logger.warning("folder import failed for one file (%s): %s",
+                               type(exc).__name__, exc)
                 errors += 1
-                details.append({"file": f.name,
-                                "error": str(exc) or "file could not be imported"})
+                from engraphis.core.documents import _safe_reason
+                details.append({"file": f.name, "error": _safe_reason(exc)})
                 continue
             except (OSError, ValueError, RecursionError, MemoryError) as exc:
                 # One unreadable/oversized/pathological file must degrade to a per-file
@@ -2537,9 +2538,11 @@ class MemoryService:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
-                logger.info("uploaded resource extraction failed (%s)", type(exc).__name__)
+                logger.info("uploaded resource extraction failed (%s): %s",
+                            type(exc).__name__, exc)
                 errors += 1
-                details.append({"file": name, "error": str(exc) or "resource could not be imported"})
+                from engraphis.core.documents import _safe_reason
+                details.append({"file": name, "error": _safe_reason(exc)})
                 continue
             except (OSError, ValueError, RecursionError, MemoryError) as exc:
                 # One unreadable/pathological upload must degrade to a per-file error,
