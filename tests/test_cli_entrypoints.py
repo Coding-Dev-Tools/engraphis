@@ -753,3 +753,41 @@ def test_embedding_repair_refuses_a_missing_path_without_creating_it(
         repair_embed_dim.repair(str(missing), backup=False)
 
     assert not missing.exists()
+
+
+def test_cli_startup_failure_keeps_startup_guidance(monkeypatch, capsys):
+    """Construction failures keep the redacted, actionable startup line — and
+    stay value-free even when the underlying error embeds credentials."""
+    def broken_create(*_args, **_kwargs):
+        raise RuntimeError("backend exploded with secret=xyz")
+
+    # Patch the class, not _service: the real _service must wrap the raise so
+    # main() sees the _ServiceStartupError marker, not a bare RuntimeError.
+    monkeypatch.setattr(cli, "MemoryService",
+                        SimpleNamespace(create=broken_create))
+    monkeypatch.setattr(cli.sys, "argv", ["engraphis-cli", "recall", "blue"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "Service initialization failed during backend/model setup" in out
+    assert "secret=xyz" not in out
+
+
+def test_cli_command_phase_oserror_is_not_labeled_startup(monkeypatch, capsys):
+    """An OSError raised by the command body (e.g. ingest-file on a directory)
+    must not be mislabeled as a service-startup failure."""
+    svc = SimpleNamespace(store=SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli, "_service", lambda: svc)
+
+    def failing_cmd(_args):
+        raise IsADirectoryError(13, "Is a directory")
+
+    monkeypatch.setattr(cli.sys, "argv", ["engraphis-cli", "ingest-file", "."])
+    monkeypatch.setattr(cli, "cmd_ingest_file", failing_cmd)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "command failed (IsADirectoryError): Is a directory" in out
+    assert "starting the service" not in out
