@@ -7,6 +7,7 @@ siblings that share a non-empty ``subject_key`` or ``provenance.source`` are wir
 with evidence-labeled ``related`` edges ("no shared source, no edge" — similarity
 alone never creates a sibling edge).
 """
+import pytest
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import FactSpec
 
@@ -208,6 +209,7 @@ def test_service_remember_many_supersedes_keyed_claims():
 def test_mcp_tool_registered():
     import asyncio
 
+    pytest.importorskip("mcp", reason="optional 'mcp' extra not installed")
     import engraphis.mcp_server as mcp_server
 
     tools = {

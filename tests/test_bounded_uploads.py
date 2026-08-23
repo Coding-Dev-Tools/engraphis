@@ -70,39 +70,41 @@ def test_bounded_route_accepts_full_ceiling(monkeypatch, tmp_path):
 def test_bounded_route_maps_too_many_fields(monkeypatch, tmp_path):
     """Starlette raises 'Too many fields' at parse time; our handler must map it to
     a clean client error rather than an unhandled failure."""
-    from engraphis.dashboard_app import _BoundedUploadRoute
-
     with _client(monkeypatch, tmp_path) as client:
         response = client.post(
             "/api/workspaces/import-documents/preview",
-            data={"field": str(i) for i in range(64)},
+            data={f"field{i}": str(i) for i in range(64)},
             files=_wizard_upload(1),
         )
-        assert response.status_code in {400, 422}
-        body = response.json()
-        detail = body.get("detail")
-        if isinstance(detail, dict):
-            assert "invalid upload form" in str(detail.get("error", ""))
-        # The class must still carry the explicit field ceiling either way.
-        assert _BoundedUploadRoute._MAX_FORM_FIELDS == 14
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "invalid upload form"
 
 
-def test_wizard_routes_use_bounded_route_class():
-    """The four wizard routes must be registered through the bounded route class,
-    so the parser ceiling cannot silently regress to Starlette's default."""
-    from engraphis.dashboard_app import create_app
+def test_bounded_upload_router_installs_route_class():
+    """The router mechanism must install _BoundedUploadRoute on every path in
+    _BOUNDED_UPLOAD_PATHS (and only those). Asserted on router.routes rather than
+    app.routes: newer FastAPI wraps included routers in one composite object
+    instead of flattening per-path routes."""
+    from engraphis.dashboard_app import (
+        _BOUNDED_UPLOAD_PATHS,
+        _BoundedUploadRouter,
+    )
 
-    app = create_app()
-    bounded_paths = {
-        "/api/workspaces/import-documents/preview",
-        "/api/workspaces/import-documents/run",
-        "/api/workspaces/import-obsidian/preview",
-        "/api/workspaces/import-obsidian/run",
+    def _endpoint():  # noqa: ANN202 - test stub
+        return {}
+
+    router = _BoundedUploadRouter()
+    for index, path in enumerate(sorted(_BOUNDED_UPLOAD_PATHS)):
+        router.add_api_route(path, _endpoint, methods=["POST"])
+    router.add_api_route("/unrelated", _endpoint, methods=["POST"])
+
+    classes = {
+        route.path: type(route).__name__
+        for route in router.routes
+        if hasattr(route, "path")
     }
-    seen = {}
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        if path in bounded_paths:
-            seen[path] = type(route).__name__
-    assert set(seen) == bounded_paths
-    assert {name for name in seen.values()} == {"_BoundedUploadRoute"}
+    for path in _BOUNDED_UPLOAD_PATHS:
+        assert classes[path] == "_BoundedUploadRoute", path
+    assert classes["/unrelated"] == "APIRoute"
+    # Every bounded path is one of the multipart upload surfaces.
+    assert all(path.endswith(("/preview", "/run")) for path in _BOUNDED_UPLOAD_PATHS)
