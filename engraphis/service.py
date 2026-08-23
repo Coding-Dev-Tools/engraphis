@@ -24,6 +24,7 @@ import contextvars
 import logging
 import math
 import copy
+import sqlite3
 import time
 import threading
 import unicodedata
@@ -258,11 +259,17 @@ MAX_CONTEXT_TASK_CHARS = 10_000
 MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
 # upload; these bound resource use, not access scope, same framing as index_repo's
-# max_files/max_file_bytes).
-MAX_IMPORT_FILES = 500
+# max_files/max_file_bytes). Count raised 500→1,500 with total scaled 250 MB→750 MB so
+# the average per-file allowance (0.5 MB) is unchanged; per-file caps stay fixed.
+# Upload transports buffer accepted parts in RAM up to this total before dispatch —
+# acceptable for the local-first single-user posture; network deployments should keep
+# tighter reverse-proxy body caps (SECURITY.md §2). Keep MAX_VAULT_BYTES (core/
+# obsidian.py) and MAX_DOCUMENT_TREE_BYTES (core/documents.py) in lockstep so wizard
+# scanners never silently undercut the transport ceiling.
+MAX_IMPORT_FILES = 1_500
 MAX_IMPORT_FILE_BYTES = 2_000_000
 MAX_IMPORT_RESOURCE_BYTES = 100_000_000
-MAX_IMPORT_TOTAL_BYTES = 250_000_000
+MAX_IMPORT_TOTAL_BYTES = 750_000_000
 # Analytical graph scenes rank the candidate graph before applying the much smaller
 # browser scene budget. Keep that server-side candidate set finite as well: graph rows
 # are user/sync writable, and an unbounded Louvain/PageRank request would otherwise be a
@@ -928,10 +935,18 @@ def _resolve_import_root(raw_path: str) -> Path:
     return folder
 
 
-def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
+def _iter_import_files(
+    folder: Path, pattern: str, max_files: int,
+) -> tuple[list, int, int]:
     """Files under ``folder`` matching the glob ``pattern`` (default ``*.md``), skipping
     VCS/dependency directories and capped at ``max_files`` — a resource bound, not a
     security boundary (the boundary is ``_resolve_import_root``).
+
+    Returns ``(files, matched_total, unreadable)`` so callers can surface silent
+    truncation instead of importing an alphabetically-first slice that looks complete.
+    ``matched_total`` counts every regular-file match seen before the cap; ``unreadable``
+    counts candidates whose stat/resolve failed (e.g. paths beyond the Windows MAX_PATH
+    limit without LongPathsEnabled) — previously these vanished from all counts.
 
     Symlink escape guard: ``rglob`` follows symlinked directories, so a symlink placed
     somewhere under an allowed root (by anything that ever had write access there) could
@@ -939,9 +954,9 @@ def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
     candidate is re-resolved and re-contained here, the same check the root itself got."""
     import fnmatch
     files: list = []
+    matched_total = 0
+    unreadable = 0
     for f in sorted(folder.rglob("*")):
-        if len(files) >= max_files:
-            break
         if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
             continue
         try:
@@ -950,12 +965,16 @@ def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
             real = f.resolve(strict=True)
             rel = real.relative_to(folder)
         except (OSError, ValueError):
+            unreadable += 1
             continue
         parts = rel.parts
         if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
             continue
+        matched_total += 1
+        if len(files) >= max_files:
+            continue
         files.append(real)
-    return files
+    return files, matched_total, unreadable
 
 
 def _title_from_content(content: str, fallback: str) -> str:
@@ -2280,7 +2299,12 @@ class MemoryService:
                 metadata={**(extra_provenance or {}), "import_file": name},
             )
             return {"file": name, "id": r["id"], "op": r["op"]}
-        except ValidationError as exc:
+        except (ValidationError, ValueError, sqlite3.Error, RecursionError,
+                MemoryError) as exc:
+            # One bad file must degrade to a per-file error, not void the whole batch
+            # (e.g. sqlite3.OperationalError "database is locked" from a concurrent
+            # CLI/MCP writer, embedder ValueError, or a crafted deep-nested JSON upload
+            # blowing json.loads recursion).
             logger.info("uploaded resource import rejected (%s)", type(exc).__name__)
             return {"file": name, "error": "resource could not be imported"}
 
@@ -2341,7 +2365,9 @@ class MemoryService:
 
         folder = _resolve_import_root(raw_path)
         wid = self._get_or_create_workspace(ws)
-        files = _iter_import_files(folder, pattern, MAX_IMPORT_FILES)
+        files, matched_total, unreadable = _iter_import_files(
+            folder, pattern, MAX_IMPORT_FILES,
+        )
         total_bytes = 0
         for file in files:
             try:
@@ -2352,7 +2378,10 @@ class MemoryService:
             raise ValidationError(
                 f"import batch is too large (max {MAX_IMPORT_TOTAL_BYTES} bytes)"
             )
-        from engraphis.backends.resources import get_resource_extractor
+        from engraphis.backends.resources import (
+            ResourceExtractionError,
+            get_resource_extractor,
+        )
         resource_extractor = get_resource_extractor()
 
         imported, skipped, errors, derived_facts = 0, 0, 0, 0
@@ -2364,13 +2393,23 @@ class MemoryService:
                     details.append({"file": f.name, "error": "file too large"})
                     continue
                 resource = resource_extractor.extract_path(str(f))
-            except (OSError, ValueError) as exc:
+            except ResourceExtractionError as exc:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
                 logger.warning("folder import failed for one file (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": f.name, "error": "file could not be imported"})
+                details.append({"file": f.name,
+                                "error": str(exc) or "file could not be imported"})
+                continue
+            except (OSError, ValueError, RecursionError, MemoryError) as exc:
+                # One unreadable/oversized/pathological file must degrade to a per-file
+                # error, not void the whole batch with an unhandled 500.
+                logger.warning("folder import failed for one file (%s)", type(exc).__name__)
+                errors += 1
+                reason = "file is locked or unreadable" if isinstance(exc, OSError) \
+                    else "file content could not be processed"
+                details.append({"file": f.name, "error": reason})
                 continue
             rel = f.relative_to(folder).as_posix()
             resource_meta = {
@@ -2413,10 +2452,27 @@ class MemoryService:
         self.store.audit(actor, "import_folder", wid,
                          f"{raw_path} ({imported} imported)")
         self.store.conn.commit()
-        return {"workspace": ws, "path": str(folder), "scanned": len(files),
+        truncated = matched_total > len(files)
+        if truncated:
+            warnings.insert(0, {
+                "file": "", "warnings": [
+                    f"folder contains {matched_total} matching files; imported the "
+                    f"first {len(files)} (max {MAX_IMPORT_FILES}). Narrow the path or "
+                    f"file pattern to reach the rest.",
+                ],
+            })
+        if unreadable:
+            warnings.append({
+                "file": "", "warnings": [
+                    f"{unreadable} file(s) could not be read (locked, or path too long)",
+                ],
+            })
+        return {"workspace": ws, "path": str(folder),
+                "scanned": len(files), "matched_total": matched_total,
+                "truncated": truncated, "unreadable": unreadable,
                 "imported": imported, "skipped": skipped, "errors": errors,
-                "derived_facts": derived_facts, "details": details[:50],
-                "warnings": warnings[:50]}
+                "derived_facts": derived_facts, "details": details[:200],
+                "warnings": warnings[:200]}
 
     @_rollback_service_transaction
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
@@ -2450,7 +2506,10 @@ class MemoryService:
             )
 
         wid = self._get_or_create_workspace(ws)
-        from engraphis.backends.resources import get_resource_extractor
+        from engraphis.backends.resources import (
+            ResourceExtractionError,
+            get_resource_extractor,
+        )
         resource_extractor = get_resource_extractor()
         imported, skipped, errors, derived_facts = 0, 0, 0, 0
         details, warnings = [], []
@@ -2474,13 +2533,22 @@ class MemoryService:
                 continue
             try:
                 resource = resource_extractor.extract_bytes(name, bytes(raw))
-            except ValueError as exc:
+            except ResourceExtractionError as exc:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
                 logger.info("uploaded resource extraction failed (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": name, "error": "resource could not be imported"})
+                details.append({"file": name, "error": str(exc) or "resource could not be imported"})
+                continue
+            except (OSError, ValueError, RecursionError, MemoryError) as exc:
+                # One unreadable/pathological upload must degrade to a per-file error,
+                # not void the whole batch with an unhandled 500.
+                logger.info("uploaded resource extraction failed (%s)", type(exc).__name__)
+                errors += 1
+                reason = "upload is locked or unreadable" if isinstance(exc, OSError) \
+                    else "upload content could not be processed"
+                details.append({"file": name, "error": reason})
                 continue
             resource_meta = {
                 **resource.metadata,
@@ -2522,7 +2590,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"workspace": ws, "scanned": len(files), "imported": imported,
                 "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
-                "details": details[:50], "warnings": warnings[:50]}
+                "details": details[:200], "warnings": warnings[:200]}
 
     # ── Universal local document import (v2 source manifest) ────────────────
     def _document_registered_target(
@@ -2932,6 +3000,7 @@ class MemoryService:
         clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
         if wid is None:
             raise KeyError(clean_id)
+        self._recover_stale_import_jobs()
         row = self.store.conn.execute(
             "SELECT * FROM jobs WHERE id=? AND workspace_id=? "
             "AND kind IN ('document_import','obsidian_import')",
@@ -3399,6 +3468,7 @@ class MemoryService:
         clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
         if wid is None:
             raise KeyError(clean_id)
+        self._recover_stale_import_jobs()
         row = self.store.conn.execute(
             "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='obsidian_import'",
             (clean_id, wid),
@@ -7605,6 +7675,53 @@ class MemoryService:
                 self.store.conn.rollback()
             raise
         return len(rows)
+
+    def _recover_stale_import_jobs(self) -> int:
+        """Fail document/obsidian import jobs whose worker died with its process.
+
+        Import workers heartbeat per document batch (obsidian_import._update_job_progress),
+        so a stale heartbeat means the process died — daemon threads never survive a
+        restart. Mirrors _recover_stale_graph_jobs' lease semantics so a crashed wizard
+        import reports 'failed: worker_lease_expired' instead of polling as 'running'
+        forever.
+        """
+        now = time.time()
+        cutoff = now - GRAPH_INDEX_LEASE_SECONDS
+        where = ("kind IN ('document_import','obsidian_import') "
+                 "AND state IN ('queued','running') "
+                 "AND COALESCE(heartbeat_at, created_at)<?")
+        rows = self.store.conn.execute(
+            f"SELECT id FROM jobs WHERE {where}", (cutoff,),
+        ).fetchall()
+        if not rows:
+            return 0
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The staleness predicate is repeated in the UPDATE so a worker that
+            # heartbeats or finishes between the SELECT above and the lock below
+            # is never falsely failed (mirrors _recover_stale_graph_jobs'
+            # in-transaction re-selection).
+            errors = json.dumps(
+                [{"code": "worker_lease_expired"}],
+                sort_keys=True, separators=(",", ":"),
+            )
+            recovered = 0
+            for row in rows:
+                cursor = self.store.conn.execute(
+                    "UPDATE jobs SET state='failed', errors=?, finished_at=?, "
+                    f"heartbeat_at=? WHERE id=? AND {where}",
+                    (errors, now, now, row["id"], cutoff),
+                )
+                recovered += max(0, int(cursor.rowcount))
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.commit()
+        except BaseException:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            raise
+        return recovered
 
     def _assert_no_active_graph_job(self, *workspace_ids: str) -> None:
         for workspace_id in dict.fromkeys(value for value in workspace_ids if value):

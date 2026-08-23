@@ -65,7 +65,11 @@ def test_import_files_redacts_resource_extractor_value_error(monkeypatch):
     assert report["skipped"] == 0
     assert report["errors"] == 1
     assert report["derived_facts"] == 0
-    assert report["details"] == [{"file": "note.md", "error": "resource could not be imported"}]
+    # Plain ValueErrors are NOT ResourceExtractionError (the safe-message channel),
+    # so they take the fully-generic processing-failure reason.
+    assert report["details"] == [
+        {"file": "note.md", "error": "upload content could not be processed"},
+    ]
     assert secret not in repr(report)
 
 
