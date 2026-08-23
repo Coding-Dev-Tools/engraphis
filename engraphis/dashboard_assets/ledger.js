@@ -4417,11 +4417,11 @@
        restores overview filters. Other layout presets while in Every-node re-run
        the seeded Every-node layout without leaving the presentation. */
     if (preset === 'every') {
-      byId('graph-preset').value = preset;
-      clearGraphSavedView();
-      syncGraphChoices();
-      saveGraphPreferences();
       if (state.graphMode !== 'full') {
+        byId('graph-preset').value = preset;
+        clearGraphSavedView();
+        syncGraphChoices();
+        saveGraphPreferences();
         /* Every node means every node: entering the map clears the unlinked/degree
            filters that the overview uses, but remembers them so leaving restores the
            person's overview exactly as they had configured it. */
@@ -4437,8 +4437,23 @@
         state.graphMode = 'full';
         updateGraphModeControls();
         loadGraph({ force: true });
-      } else if (state.graphEngine && state.graphEngine.setPreset) {
-        state.graphEngine.setPreset('every');
+      } else {
+        // Clicking Every node while already in Every-node exits back to overview,
+        // mirroring the old Show-all toggle but now via the layout chip.
+        if (state.everyPriorFilters) {
+          const prior = state.everyPriorFilters;
+          state.everyPriorFilters = null;
+          setGraphMinDegree(prior.minDegree, false);
+          setGraphShowUnlinked(prior.unlinked, false);
+        }
+        byId('graph-preset').value = 'galaxy';
+        cancelGraphRepositoryReload();
+        state.graphMode = 'overview';
+        clearGraphSavedView();
+        syncGraphChoices();
+        saveGraphPreferences();
+        updateGraphModeControls();
+        loadGraph({ force: true });
       }
       return;
     }
