@@ -1914,3 +1914,92 @@ def test_document_import_launcher_marks_job_failed_when_worker_start_raises(monk
         (DocumentImporter.JOB_KIND,),
     ).fetchone()
     assert row is not None and row["state"] == "failed"
+
+
+def _insert_running_import_job(s, *, kind="document_import", heartbeat_at=None,
+                               created_at=None):
+    """Insert a synthetic running import job with a controllable lease marker."""
+    s.create_workspace("acme")
+    wid = s.store.conn.execute(
+        "SELECT id FROM workspaces WHERE name='acme'"
+    ).fetchone()["id"]
+    now = time.time()
+    s.store.conn.execute(
+        "INSERT INTO jobs(id, workspace_id, kind, state, dry_run, total_items, "
+        "processed_items, counts, errors, request, cancel_requested, runner_id, "
+        "heartbeat_at, created_at) VALUES (?,?,?,'running',0,3,1,'{}','[]','{}',0,"
+        "'test-runner',?,?)",
+        (f"job_{kind}_{int(now*1000)}", wid, kind,
+         now if heartbeat_at is None else heartbeat_at,
+         now if created_at is None else created_at),
+    )
+    s.store.conn.commit()
+    return s.store.conn.execute(
+        "SELECT id FROM jobs WHERE workspace_id=? AND kind=? ORDER BY created_at DESC LIMIT 1",
+        (wid, kind),
+    ).fetchone()["id"]
+
+
+def test_live_import_job_mid_file_past_old_threshold_is_not_failed():
+    """A worker mid-file past the 60s graph lease must not be killed by polling.
+
+    Import workers heartbeat between documents, so a single large file (big PDF,
+    OCR image, transcription) can legitimately spend longer than the graph-index
+    lease inside one parse. The import lease is substantially longer and resets
+    whenever the heartbeat (processed-files progress) advances.
+    """
+    from engraphis.service import GRAPH_INDEX_LEASE_SECONDS, IMPORT_JOB_LEASE_SECONDS
+
+    assert IMPORT_JOB_LEASE_SECONDS > GRAPH_INDEX_LEASE_SECONDS
+    s = _svc()
+    try:
+        now = time.time()
+        job_id = _insert_running_import_job(
+            s, heartbeat_at=now - (GRAPH_INDEX_LEASE_SECONDS + 30.0),
+        )
+
+        # First poll: stale past the old threshold, well inside the import lease.
+        report = s.get_document_import_job(job_id, workspace="acme")
+        assert report["state"] == "running"
+
+        # Worker finishes the file and heartbeats again; lease age resets and the
+        # job must stay running on subsequent polls.
+        s.store.conn.execute(
+            "UPDATE jobs SET heartbeat_at=?, processed_items=processed_items+1 "
+            "WHERE id=?",
+            (time.time(), job_id),
+        )
+        s.store.conn.commit()
+        report = s.get_document_import_job(job_id, workspace="acme")
+        assert report["state"] == "running"
+        row = s.store.conn.execute(
+            "SELECT state, errors FROM jobs WHERE id=?", (job_id,),
+        ).fetchone()
+        assert row["state"] == "running"
+        assert "worker_lease_expired" not in row["errors"]
+    finally:
+        s.close()
+
+
+def test_dead_import_worker_still_transitions_to_failed():
+    """A genuinely dead worker (no heartbeat past the import lease) must fail."""
+    import json
+
+    from engraphis.service import IMPORT_JOB_LEASE_SECONDS
+
+    s = _svc()
+    try:
+        now = time.time()
+        job_id = _insert_running_import_job(
+            s, heartbeat_at=now - (IMPORT_JOB_LEASE_SECONDS + 60.0),
+        )
+        report = s.get_document_import_job(job_id, workspace="acme")
+        assert report["state"] == "failed"
+        row = s.store.conn.execute(
+            "SELECT state, errors, finished_at FROM jobs WHERE id=?", (job_id,),
+        ).fetchone()
+        assert row["state"] == "failed"
+        assert json.loads(row["errors"]) == [{"code": "worker_lease_expired"}]
+        assert row["finished_at"] is not None
+    finally:
+        s.close()
