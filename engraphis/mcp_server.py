@@ -498,11 +498,13 @@ def engraphis_remember_many(
                                      "as a list of objects: each needs 'content' and "
                                      "optionally 'title', 'importance' (0..1), "
                                      "'keywords', 'subject_key' (stable claim subject "
-                                     "like 'api.rate_limit'), 'claim_kind', and "
+                                     "like 'api.rate_limit'), 'claim_kind', "
+                                     "'evidence_source' (per-fact origin label; facts "
+                                     "sharing one get evidence-labeled links), and "
                                      "'valid_from' (Unix timestamp). All facts are "
                                      "stored in one transaction; each is deduplicated "
                                      "against the others, and facts that share a "
-                                     "subject_key or source are linked with "
+                                     "subject_key or evidence_source are linked with "
                                      "evidence-labeled edges.", min_length=1,
                                      max_length=500)],
     workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product "
@@ -533,8 +535,9 @@ def engraphis_remember_many(
     set of findings (fan-out sub-agents, a research sweep, a review council): the
     whole batch lands in a single transaction, each fact is resolved against the
     others (duplicates reinforce, keyed claims supersede), and facts sharing a
-    ``subject_key`` or source get evidence-labeled graph edges so the merge is a
-    growing graph rather than a pile of prose.
+    ``subject_key`` or an explicit per-fact ``evidence_source`` get
+    evidence-labeled graph edges so the merge is a growing graph rather than a
+    pile of prose.
 
     Returns:
         str: JSON ``{"workspace","repo","scope","stored":true,"total","ops",
