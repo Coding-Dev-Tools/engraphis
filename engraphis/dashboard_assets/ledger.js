@@ -2327,12 +2327,6 @@
     updateGraphGalaxyControls();
     const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Galaxy gravity';
     byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'High quality'} · ${preset}`;
-    const toggle = byId('graph-show-all');
-    if (toggle) {
-      toggle.textContent = full ? 'High quality' : 'Show all nodes';
-      toggle.setAttribute('aria-pressed', String(full));
-      toggle.title = full ? 'Return to the high-quality graph view' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entity nodes with progressive level-of-detail rendering`;
-    }
   }
 
   function graphIsGalaxy() {
@@ -4527,33 +4521,6 @@
     clearGraphSavedView();
     saveGraphPreferences();
     if (state.graphMode !== 'full') loadGraph({ force: true });
-  });
-  byId('graph-show-all').addEventListener('click', () => {
-    cancelGraphRepositoryReload();
-    const entering = state.graphMode !== 'full';
-    if (entering) {
-      if (!state.everyPriorFilters) {
-        state.everyPriorFilters = {
-          minDegree: Number(byId('graph-min-degree').value) || 0,
-          unlinked: byId('graph-show-unlinked').getAttribute('aria-pressed') === 'true',
-        };
-      }
-      setGraphMinDegree(0, false);
-      setGraphShowUnlinked(true, false);
-      byId('graph-preset').value = 'every';
-    } else if (state.everyPriorFilters) {
-      const prior = state.everyPriorFilters;
-      state.everyPriorFilters = null;
-      setGraphMinDegree(prior.minDegree, false);
-      setGraphShowUnlinked(prior.unlinked, false);
-      if (byId('graph-preset').value === 'every') byId('graph-preset').value = 'galaxy';
-    }
-    state.graphMode = entering ? 'full' : 'overview';
-    clearGraphSavedView();
-    syncGraphChoices();
-    saveGraphPreferences();
-    updateGraphModeControls();
-    loadGraph({ force: true });
   });
   byId('graph-tune-min-degree').addEventListener('input', event => {
     setGraphMinDegree(event.target.value);
