@@ -37,7 +37,7 @@ jobs:
       - name: Unit tests (full suite — extras-gated tests included)
         run: |
           python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
-          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Retrieval eval gate — CodeMem (coding-agent wedge, incl. conflict resolution)
@@ -114,7 +114,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy "pytest<9"
       - name: Unit tests (extras-gated tests skip; the core must pass)
-        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Retrieval eval gate — CodeMem (coding-agent wedge, incl. conflict resolution)
@@ -184,7 +184,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" pytest-cov
       - name: Coverage run (all extras-gated tests, tracked modules)
-        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest" --cov=engraphis --cov-report=term-missing --cov-fail-under=60
+        run: ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest" --cov=engraphis --cov-report=term-missing --cov-fail-under=60
 
   hygiene:
     name: repo hygiene gate (no stray DBs/logs)
