@@ -452,7 +452,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   const persistedInAllMode = await page.evaluate(() => JSON.parse(
     localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
   ));
-  expect(persistedInAllMode.showUnlinked).toBe(false);
+  expect(persistedInAllMode.showUnlinked).toBe(true);
   expect(persistedInAllMode.layers.code).toBe(true);
   expect(persistedInAllMode.includeCode).toBe(true);
   expect(persistedInAllMode.flow).toBe(true);
