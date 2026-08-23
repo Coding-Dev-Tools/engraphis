@@ -174,6 +174,7 @@
     radial: 'Radial',
     constellation: 'Constellation',
     galaxy: 'Galaxy gravity',
+    every: 'Every node',
   };
   const GRAPH_STYLE_NOTES = {
     cyber: 'Iridescent PVD over graphite — cyan, violet, and magenta across each node.',
@@ -417,12 +418,12 @@
   }
 
   function ensureGraphAllAsset() {
-    if (window.EngraphisAllGraph) return Promise.resolve();
+    if (window.EngraphisEveryGraph) return Promise.resolve();
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2'),
-        'EngraphisAllGraph', controller.signal,
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260822-every-18'),
+        'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
       graphAllAssetsController = controller;
@@ -2234,6 +2235,10 @@
   function openGraphConnections(item) {
     if (!item || !item.id) return;
     cancelGraphConnectionMemoryLoad();
+    state.graphConnectionsFocusId = String(item.id);
+    state.graphConnectionsFocusLabel = item.name || item.label || item.id;
+    const focusButton = byId('graph-connections-focus');
+    if (focusButton) focusButton.hidden = !state.graphEngine;
     const dialog = byId('graph-connections-dialog');
     const entries = graphConnectionEntries(item);
     const title = item.name || item.label || item.id;
@@ -2292,7 +2297,7 @@
     ['graph-min-degree', 'graph-tune-min-degree', 'graph-collapse', 'graph-depth',
       'graph-show-unlinked', 'graph-flow', 'graph-flow-speed', 'graph-orbits-pause'].forEach(id => {
       const control = byId(id);
-      if (control) control.disabled = false;
+      if (control) { control.disabled = false; control.title = ''; }
     });
     all('[data-graph-layer="code"]').forEach(control => {
       control.disabled = false;
@@ -2300,6 +2305,16 @@
         ? 'Choose an exact repository first, then add its code overlay within the All-node capacity.'
         : '';
     });
+    /* Focus-depth and auto-collapse are not implemented in the Every-node engine yet.
+       Disable them honestly instead of leaving controls that silently do nothing. */
+    if (full && byId('graph-preset').value === 'every') {
+      ['graph-collapse', 'graph-depth'].forEach(id => {
+        const control = byId(id);
+        if (!control) return;
+        control.disabled = true;
+        control.title = 'Not yet available in the Every-node view.';
+      });
+    }
     const lodNote = byId('graph-lod-note');
     if (lodNote) lodNote.hidden = !full;
     byId('graph-reheat').textContent = full ? 'Reflow layout' : 'Reheat layout';
@@ -3090,7 +3105,7 @@
         if (!fullGraph && (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime)) {
           releaseGraphAssetsAttempt(graphAssetsPromise);
         }
-        if (fullGraph && !window.EngraphisAllGraph) {
+        if (fullGraph && !window.EngraphisEveryGraph) {
           releaseGraphAllAssetsAttempt(graphAllAssetsPromise);
         }
         if (!controller.signal.aborted) controller.abort();
@@ -3172,7 +3187,7 @@
             && (node.system_anchor_id !== undefined
               || Number.isFinite(Number(node.galactic_radius))));
         const graphFactory = galaxyQuality ? window.EngraphisGraph
-          : fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
+          : fullGraph ? window.EngraphisEveryGraph : window.EngraphisGraph;
         if (!graphFactory || typeof graphFactory.create !== 'function') {
           throw new Error(fullGraph
             ? galaxyQuality ? 'Galaxy graph engine is unavailable'
@@ -4397,6 +4412,43 @@
   });
   all('[data-graph-preset-choice]').forEach(control => control.addEventListener('click', () => {
     const preset = control.dataset.graphPresetChoice;
+    /* Every node is its own presentation: selecting it loads the complete LOD scene, and
+       any named layout leaves it. The old Show-all toggle stays in the DOM for state
+       restore compatibility but is hidden from the toolbar. */
+    if (preset === 'every' || state.graphMode === 'full') {
+      byId('graph-preset').value = preset;
+      clearGraphSavedView();
+      syncGraphChoices();
+      saveGraphPreferences();
+      const wantedMode = preset === 'every' ? 'full' : 'overview';
+      if (wantedMode === 'full') {
+        /* Every node means every node: entering the map clears the unlinked/degree
+           filters that the overview uses, but remembers them so leaving restores the
+           person's overview exactly as they had configured it. */
+        if (!state.everyPriorFilters) {
+          state.everyPriorFilters = {
+            minDegree: Number(byId('graph-min-degree').value) || 0,
+            unlinked: byId('graph-show-unlinked').getAttribute('aria-pressed') === 'true',
+          };
+        }
+        setGraphMinDegree(0, false);
+        setGraphShowUnlinked(true, false);
+      } else if (state.everyPriorFilters) {
+        const prior = state.everyPriorFilters;
+        state.everyPriorFilters = null;
+        setGraphMinDegree(prior.minDegree, false);
+        setGraphShowUnlinked(prior.unlinked, false);
+      }
+      if (state.graphMode !== wantedMode) {
+        cancelGraphRepositoryReload();
+        state.graphMode = wantedMode;
+        updateGraphModeControls();
+        loadGraph({ force: true });
+      } else if (preset === 'every' && state.graphEngine && state.graphEngine.setPreset) {
+        state.graphEngine.setPreset('every');
+      }
+      return;
+    }
     const resumeLayout = state.graphFrozen;
     byId('graph-preset').value = preset;
     if (state.graphEngine && resumeLayout) {
@@ -4554,6 +4606,12 @@
     exportGraphJson();
   });
   byId('graph-connections-close').addEventListener('click', closeGraphConnections);
+  byId('graph-connections-focus').addEventListener('click', () => {
+    const id = state.graphConnectionsFocusId;
+    if (!id) return;
+    closeGraphConnections();
+    revealGraphNode(id, state.graphConnectionsFocusLabel || 'Selected entity');
+  });
   byId('graph-connections-dialog').addEventListener('click', event => {
     if (event.target === event.currentTarget) closeGraphConnections();
   });
