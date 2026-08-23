@@ -3543,3 +3543,82 @@ def test_relay_push_exhausts_retries_and_raises(monkeypatch):
     with pytest.raises(RelayError, match="HTTP 503"):
         transport.push("bundle-dev_a.json", b"payload")
     assert calls["count"] == 1 + MAX_PUSH_RETRIES
+
+
+def _status_db(tmp_path):
+    """Build a two-repo local database with distinct memory/tombstone counts."""
+    from scripts.sync import _checkpoint_key
+
+    path = str(tmp_path / "status.db")
+    store = Store(path)
+    workspace = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    for repo_id, count in ((repo_a, 2), (repo_b, 3)):
+        for n in range(count):
+            store.add_memory(MemoryRecord(
+                id="mem_%s_%d" % (repo_id[-4:], n),
+                content="repo scoped row",
+                scope=Scope.REPO,
+                workspace_id=workspace,
+                repo_id=repo_id,
+            ))
+        store.add_memory_tombstone(
+            "tombstone_%s" % repo_id[-4:],
+            workspace_id=workspace,
+            repo_id=repo_id,
+        )
+    # add_memory_tombstone leaves the commit to the caller.
+    store.conn.commit()
+    device = store.device_id()
+    store.close()
+    return path, "w", repo_a, _checkpoint_key(workspace, repo_a, device)
+
+
+def _run_status(db, workspace, repo=None):
+    import argparse
+
+    from scripts import sync as sync_cli
+
+    sync_cli._status(argparse.Namespace(
+        db=db, workspace=workspace, repo=repo, remote="", relay="",
+    ))
+
+
+def test_status_counts_are_scoped_to_the_requested_repo(tmp_path, capsys):
+    """``--status --repo X`` must report only X's rows, never the workspace total."""
+    db, workspace, _, checkpoint_key = _status_db(tmp_path)
+    import sqlite3
+
+    # A repo-scoped checkpoint must exist so the status path reaches the counters.
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state(key, value) VALUES (?, ?)",
+            (checkpoint_key, json.dumps({"generation": 3, "state_hash": "a" * 64})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _run_status(db, workspace, repo="repo-a")
+    out = capsys.readouterr().out
+    assert "memories: 2" in out
+    assert "tombstones: 1" in out
+
+
+def test_status_without_repo_still_reports_workspace_totals(tmp_path, capsys):
+    db, workspace, _, _ = _status_db(tmp_path)
+    _run_status(db, workspace, repo=None)
+    out = capsys.readouterr().out
+    assert "memories: 5" in out
+    assert "tombstones: 2" in out
+
+
+def test_status_for_an_absent_repo_reports_an_empty_scope(tmp_path, capsys):
+    """A missing --repo name must not fall back to the workspace-wide total."""
+    db, workspace, _, _ = _status_db(tmp_path)
+    _run_status(db, workspace, repo="does-not-exist")
+    out = capsys.readouterr().out
+    assert "memories: 0" in out
+    assert "tombstones: 0" in out
