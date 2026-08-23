@@ -1729,7 +1729,7 @@ def test_import_files_isolates_per_file_failures(monkeypatch):
     real_extractor = _real_get()
     monkeypatch.setattr(
         "engraphis.backends.resources.get_resource_extractor",
-        staticmethod(lambda: SimpleNamespace(extract_bytes=exploding_extract)),
+        lambda: SimpleNamespace(extract_bytes=exploding_extract),
     )
     report = s.import_files(workspace="acme", files=[
         {"name": "good1.md", "content": "A fact about herons."},
