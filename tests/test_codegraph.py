@@ -454,3 +454,24 @@ def test_tree_sitter_indexer_javascript():
     fi = idx.index_file("calc.js", js_src, "javascript")
     fqnames = {s.fqname for s in fi.symbols}
     assert "add" in fqnames and "Calc.addOne" in fqnames
+
+
+def test_regex_indexer_extracts_same_file_call_edges():
+    """The numpy-only floor has no tree-sitter: the regex fallback must still
+    emit caller→callee edges for same-file symbols, or the code-arm bridge
+    cannot hop a caller to its callee (regression: code-arm recall 0.0)."""
+    idx = RegexSymbolIndexer()
+    src = (
+        "def revoke_active_device_links():\n"
+        "    return 'stale'\n"
+        "\n"
+        "def rotate_refresh_token():\n"
+        "    revoke_active_device_links()\n"
+        "    missing_helper()\n"
+        "    return 'ok'\n"
+    )
+    fi = idx.index_file("auth.py", src, "python")
+    calls = {(e.src, e.dst) for e in fi.edges if e.relation == "calls"}
+    assert ("rotate_refresh_token", "revoke_active_device_links") in calls
+    # Callees are restricted to indexed symbol names: unknown names emit nothing.
+    assert all(dst != "missing_helper" for _, dst in calls)
