@@ -32,7 +32,7 @@ from xml.etree import ElementTree
 
 from engraphis.core.obsidian import parse_obsidian_note
 from engraphis.core.secrets import secret_kind
-from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
+from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 
 IMPORTER_VERSION = "1"
@@ -40,7 +40,9 @@ MAX_DOCUMENT_BYTES = 100_000_000
 MAX_DOCUMENT_CHARS = 100_000
 MAX_DOCUMENT_WARNINGS = 100
 MAX_DOCUMENT_FILES = 10_000
-MAX_DOCUMENT_TREE_BYTES = 250_000_000
+# Lockstep with service.MAX_IMPORT_TOTAL_BYTES (750 MB): the wizard scanner must never
+# silently undercut the upload transport ceiling.
+MAX_DOCUMENT_TREE_BYTES = 750_000_000
 MAX_CONTAINER_MEMBERS = 2_000
 MAX_CONTAINER_XML_BYTES = 20_000_000
 MAX_XML_ATTRIBUTE_METADATA_CHARS = 8_000
@@ -382,7 +384,7 @@ def scan_document_tree(
     selected = Path(root_path)
     try:
         selected_info = os.lstat(selected)
-        if selected.is_symlink() or _is_reparse_point(selected_info):
+        if selected.is_symlink() or _is_link_indirection(selected_info):
             raise DocumentParseError("source root cannot be a symlink")
         root = selected.resolve(strict=True)
     except OSError as exc:
@@ -1663,7 +1665,7 @@ def _safe_reason(exc: BaseException) -> str:
 
 def _read_tree_file(root: Path, path: Path) -> Tuple[bytes, int]:
     before = os.lstat(path)
-    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_reparse_point(before):
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_link_indirection(before):
         raise DocumentParseError("unsafe file type")
     if not _is_within(root, path.resolve(strict=True)):
         raise DocumentParseError("path escapes source root")
@@ -1671,7 +1673,7 @@ def _read_tree_file(root: Path, path: Path) -> Tuple[bytes, int]:
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or _is_reparse_point(opened) or not _same_identity(before, opened):
+        if not stat.S_ISREG(opened.st_mode) or _is_link_indirection(opened) or not _same_identity(before, opened):
             raise DocumentParseError("file changed during scan")
         if opened.st_size > MAX_DOCUMENT_BYTES:
             raise DocumentParseError("document exceeds 100000000 byte safety limit")
@@ -1688,7 +1690,7 @@ def _read_tree_file(root: Path, path: Path) -> Tuple[bytes, int]:
         finished, after = os.fstat(fd), os.lstat(path)
         if (not _same_identity(opened, finished) or opened.st_size != finished.st_size
                 or opened.st_mtime_ns != finished.st_mtime_ns or stat.S_ISLNK(after.st_mode)
-                or _is_reparse_point(after)
+                or _is_link_indirection(after)
                 or not _same_identity(finished, after) or not _is_within(root, path.resolve(strict=True))):
             raise DocumentParseError("file changed during scan")
         return b"".join(chunks), int(finished.st_mtime_ns)
@@ -1725,7 +1727,7 @@ def _walk_tree(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str
         try:
             relative = entry.relative_to(root)
             info = entry.lstat()
-            if entry.is_symlink() or _is_reparse_point(info):
+            if entry.is_symlink() or _is_link_indirection(info):
                 yield entry, "symlink skipped"
             elif not _is_within(root, entry.resolve()):
                 yield entry, "path escapes source root"
