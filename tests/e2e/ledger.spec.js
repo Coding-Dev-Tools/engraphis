@@ -483,7 +483,7 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   expect(allAssetRequests).toHaveLength(1);
 });
 
-test('Ledger keeps authored Galaxy coordinates in the Every-node renderer', async ({ page }) => {
+test('Ledger keeps authored Galaxy coordinates on the orbit renderer in Every-node view', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
@@ -518,7 +518,9 @@ test('Ledger keeps authored Galaxy coordinates in the Every-node renderer', asyn
 
   await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
+  // Authored Galaxy scenes intentionally stay on the quality/orbit renderer; the dedicated
+  // Every-node WebGL canvas is reserved for non-Galaxy complete scenes.
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
   await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
 });
 

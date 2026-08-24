@@ -18,6 +18,7 @@
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
+    graphDataPreset: 'galaxy',
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
     graphDataAsOf: null,
@@ -1142,6 +1143,7 @@
     state.workspace = name;
     state.graphWorkspace = '';
     state.graphData = null;
+    state.graphDataPreset = 'galaxy';
     state.graphDataIncludeCode = false;
     state.graphDataShowUnlinked = false;
     state.graphDataRepo = '';
@@ -3490,6 +3492,7 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
+        state.graphDataPreset = byId('graph-preset').value;
         state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
@@ -3531,9 +3534,14 @@
           : fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
             ? `All nodes exceed the server capacity. Enter an exact repository filter or reduce the workspace graph. (${error.message})`
           : `Graph unavailable: ${error.message}. Choose Reload data to try again.`;
-        if (state.graphData && state.graphDataMode !== targetMode) {
-          state.graphMode = state.graphDataMode;
+        if (state.graphData) {
+          if (state.graphDataMode !== targetMode) state.graphMode = state.graphDataMode;
+          /* The toolbar preset changes before a replacement request begins. Restore the
+             committed preset together with the committed renderer so a failed Every-node
+             transition cannot leave aria-pressed and the active engine disagreeing. */
+          byId('graph-preset').value = state.graphDataPreset || 'galaxy';
           updateGraphModeControls();
+          syncGraphChoices();
         }
         // Restore the committed renderer's freeze/overlay state. The old engine survived
         // because we never mutated state.graphEngine on the failure path.
