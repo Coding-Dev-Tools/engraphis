@@ -3,7 +3,7 @@
    geometry, and a bounded overlay communicates relation direction without moving nodes. */
 (function () {
   'use strict';
-  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260814-all-controls-2';
+  const WORKER_URL = '/v2-assets/engraphis-graph-worker.js?v=20260817-all-nodes-lod-3';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const FLOW_EDGE_LIMIT = 900;
