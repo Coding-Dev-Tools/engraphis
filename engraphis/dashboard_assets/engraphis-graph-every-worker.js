@@ -351,6 +351,9 @@
     if (data.type === 'prepare') {
       generation += 1;
       const gen = generation;
+      /* A rejected replacement must not leave the previous model available to a later
+         settings/reheat message after the renderer has entered its error state. */
+      model = null;
       model = buildModel(data.payload || {});
       if (!model) return;
       seedPositions();
