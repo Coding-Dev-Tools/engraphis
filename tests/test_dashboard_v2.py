@@ -930,7 +930,8 @@ def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkey
         assert "showUnlinked: state.graphShowUnlinked" in script.text
         assert "includeCode: state.graphIncludeCode" in script.text
         assert "minDegree: number(byId('graph-min-degree').value)" in script.text
-        assert "if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();" in script.text
+        assert "if (loadAll) {" in script.text
+        assert "return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);" in script.text
         assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in script.text
         assert "scopeControl.disabled = full" not in script.text
         assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text

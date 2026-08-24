@@ -438,12 +438,11 @@
     /* The complete profile is an independent worker/WebGL renderer. Galaxy is the exception:
        its solar-system view needs the authoritative hierarchical orbit integrator, so a full
        Galaxy request uses the quality engine with the complete payload instead of the static
-       all-node worker. Other full presets retain the worker/WebGL path and its 20k-node cap. */
-    if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();
-    if (loadAll && graphIsGalaxy()) {
-      /* Load both candidates before the complete scene arrives. The factory decision below is
-         data-sensitive: an ordinary graph that merely uses the Galaxy preset keeps the worker,
-         while an authored star/planet scene gets the live hierarchical engine. */
+       all-node worker. The factory decision is data-sensitive, not toolbar-sensitive: the
+       Every-node chip changes the preset to "every" before the scene arrives, and a fast click
+       can race the overview load. Keep both candidates available so an authored star/planet
+       scene cannot select an engine whose asset is still in flight. */
+    if (loadAll) {
       return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
     }
     const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
@@ -3102,7 +3101,7 @@
         rejectTimeout = reject;
       });
       const timeout = window.setTimeout(() => {
-        if (!fullGraph && (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime)) {
+        if (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime) {
           releaseGraphAssetsAttempt(graphAssetsPromise);
         }
         if (fullGraph && !window.EngraphisEveryGraph) {
