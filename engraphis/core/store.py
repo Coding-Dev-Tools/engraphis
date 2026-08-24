@@ -3733,17 +3733,28 @@ class Store:
         return dict(row) if row is not None else None
 
     def list_source_import_items(self, *, vault_id: str, states: Optional[list[str]] = None,
-                                 limit: int = 10_000) -> list[dict]:
+                                 limit: int = 10_000, after_path: str = "",
+                                 after_id: str = "") -> list[dict]:
+        """Page the manifest by ``(relative_path, id)`` cursor, not OFFSET.
+
+        OFFSET is applied to a live ``ORDER BY`` result: a concurrent rename or insert
+        shifts unread rows across the page boundary and they are silently skipped while
+        the pager believes it saw everything. A keyset cursor is immune — every row at
+        or after the cursor is returned exactly once regardless of concurrent writes.
+        """
         if self._source_vault_row(vault_id) is None:
             return []
         params: list[Any] = [vault_id]
         sql = "SELECT * FROM source_imports WHERE vault_id=?"
+        if after_path or after_id:
+            sql += " AND (relative_path>? OR (relative_path=? AND id>?))"
+            params.extend([str(after_path), str(after_path), str(after_id)])
         if states is not None:
             if not states:
                 return []
             sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
             params.extend(str(state) for state in states)
-        sql += " ORDER BY relative_path LIMIT ?"
+        sql += " ORDER BY relative_path, id LIMIT ?"
         params.append(max(1, min(100_000, int(limit))))
         return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
@@ -3830,9 +3841,26 @@ class Store:
     def mark_source_import_items_missing(
         self, *, vault_id: str, seen_before: float,
         preserve_paths: Iterable[str] = (), commit: bool = True,
-    ) -> int:
+        missing_items: Iterable[Any] = (),
+    ) -> list[str]:
+        """Mark planned rows missing, or fall back to the timestamp heuristic.
+
+        With ``missing_items`` (the planner's manifest rows), each key is updated
+        only while the row still matches its planned generation — ``last_seen_at``,
+        ``last_seen_job_id``, and a live state. A concurrent import that refreshed
+        or re-upserted the row after this run planned it therefore keeps its newer
+        state instead of being clobbered back to ``missing``, and per-key updates
+        stay clear of SQLite host-parameter limits no matter how many rows died.
+        Returns the source_keys actually marked, so callers can finalize job history
+        and reports against reality instead of the plan.
+        """
         if self._source_vault_row(vault_id) is None:
-            return 0
+            return []
+        planned = [
+            (str(item["source_key"]), item.get("last_seen_at"),
+             item.get("last_seen_job_id"))
+            for item in missing_items if item.get("source_key")
+        ]
         with self._write_operation("source_missing", commit=commit):
             for relative_path in {str(path) for path in preserve_paths if str(path)}:
                 self.conn.execute(
@@ -3840,12 +3868,39 @@ class Store:
                     "AND relative_path=? AND state NOT IN ('missing','conflict')",
                     (float(seen_before), vault_id, relative_path),
                 )
-            return int(self.conn.execute(
-                "UPDATE source_imports SET state='missing', missing_at=? WHERE vault_id=? "
-                "AND (last_seen_at IS NULL OR last_seen_at<?) "
-                "AND state NOT IN ('missing','conflict')",
-                (now_ts(), vault_id, float(seen_before)),
-            ).rowcount)
+            if planned:
+                marked: list[str] = []
+                stamp = now_ts()
+                for key, seen_at, seen_job in planned:
+                    if self.conn.execute(
+                        "UPDATE source_imports SET state='missing', missing_at=? "
+                        "WHERE vault_id=? AND source_key=? "
+                        "AND (last_seen_at IS NULL OR last_seen_at=?) "
+                        "AND (last_seen_job_id IS NULL OR last_seen_job_id=?) "
+                        "AND state NOT IN ('missing','conflict')",
+                        (stamp, vault_id, key, seen_at, seen_job),
+                    ).rowcount:
+                        marked.append(key)
+                return marked
+            marked_rows = [
+                str(row["source_key"]) for row in self.conn.execute(
+                    "SELECT source_key FROM source_imports WHERE vault_id=? "
+                    "AND (last_seen_at IS NULL OR last_seen_at<?) "
+                    "AND state NOT IN ('missing','conflict')",
+                    (vault_id, float(seen_before)),
+                ).fetchall()
+            ]
+            if not marked_rows:
+                return []
+            for start in range(0, len(marked_rows), 900):
+                chunk = marked_rows[start:start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE source_imports SET state='missing', missing_at=? "
+                    f"WHERE vault_id=? AND source_key IN ({placeholders})",
+                    (now_ts(), vault_id, *chunk),
+                )
+            return marked_rows
 
     def get_source_import(self, import_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM source_imports WHERE id=?", (import_id,)).fetchone()

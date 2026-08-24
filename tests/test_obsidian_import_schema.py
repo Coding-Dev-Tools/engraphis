@@ -48,7 +48,7 @@ def test_source_manifest_is_scoped_idempotent_and_marks_missing():
             importer_version="1", seen_at=10,
         )
         assert item_id.startswith("src_")
-        assert store.mark_source_import_items_missing(vault_id=vault_id, seen_before=11) == 1
+        assert len(store.mark_source_import_items_missing(vault_id=vault_id, seen_before=11)) == 1
         item = store.get_source_import_item(vault_id=vault_id, source_key="b" * 64)
         assert item["state"] == "missing"
         store.upsert_source_import_item(
