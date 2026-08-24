@@ -635,6 +635,10 @@ def run_managed_job(service: Any, workspace: str, kind: str, *,
     if not resolved_id:
         raise CloudFeatureError("The selected workspace does not exist.", status=404)
     cloud = client or CloudFeatureClient.from_environment(resolved_id)
+    # Read the entitlement-gated policy before taking the local write lock. The snapshot
+    # builder reserves and commits a generation, so uploading first would let a lapsed
+    # subscriber mutate local state before the Cloud control plane returns 402.
+    cloud.get_policy(resolved_id)
     workspace_id, snapshot = build_managed_snapshot(service, workspace)
     receipt = cloud.upload_snapshot(workspace_id, snapshot)
     generation = int(receipt.get("generation", snapshot["generation"]))

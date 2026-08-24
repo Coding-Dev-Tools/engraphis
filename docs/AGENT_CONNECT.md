@@ -38,7 +38,7 @@ middleware. Do not expose it through a LAN address or proxy. For a remote deploy
 `engraphis[all]`, set a strong `ENGRAPHIS_API_TOKEN`, terminate TLS, and use the dashboard's
 authenticated `/mcp` endpoint instead.
 
-Use `engraphis-mcp-http --classic` only for an existing integration that requires the 34 direct
+Use `engraphis-mcp-http --classic` only for an existing integration that requires the 35 direct
 tool names. New integrations should keep the nine-tool Smart default.
 
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support

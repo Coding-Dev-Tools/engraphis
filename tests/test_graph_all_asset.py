@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,36 @@ LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 MARKUP = ROOT / "engraphis" / "dashboard_assets" / "index.html"
 STYLES = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
 
+
+
+def _srgb_to_linear(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _luminance(r, g, b):
+    return 0.2126 * _srgb_to_linear(r) + 0.7152 * _srgb_to_linear(g) + 0.0722 * _srgb_to_linear(b)
+
+
+def _hex_luminance(hex_color):
+    h = hex_color.lstrip("#")
+    return _luminance(int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255)
+
+
+def _contrast_ratio(l1, l2):
+    lighter, darker = max(l1, l2), min(l1, l2)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _composite_rgba_luminance(r, g, b, a, bg_hex):
+    h = bg_hex.lstrip("#")
+    bg_r = int(h[0:2], 16) / 255
+    bg_g = int(h[2:4], 16) / 255
+    bg_b = int(h[4:6], 16) / 255
+    return _luminance(
+        r / 255 * a + bg_r * (1 - a),
+        g / 255 * a + bg_g * (1 - a),
+        b / 255 * a + bg_b * (1 - a),
+    )
 
 def _run_worker(nodes, links):
     source = json.dumps(WORKER.read_text(encoding="utf-8"))
@@ -30,9 +61,11 @@ context.self.onmessage({{ data: {{ type: 'camera', x: 0, y: 0, scale: 1.5, width
 const high = messages.filter(message => message.type === 'visible').at(-1);
 context.self.onmessage({{ data: {{ type: 'hit', request: 9, x: 0, y: 0, scale: 1 }} }});
 const hit = messages.filter(message => message.type === 'hit').at(-1);
-console.log(JSON.stringify({{ready: {{nodes: ready.totalNodes, links: ready.totalLinks, ids: ready.ids, positions: ready.positions.constructor.name, edges: ready.edgeSources.constructor.name}}, lod: {{low: low.drawnLinks, medium: medium.drawnLinks, high: high.drawnLinks}}, hit: hit.index}}));
+console.log(JSON.stringify({{ready: {{nodes: ready.totalNodes, links: ready.totalLinks, ids: ready.ids, positions: ready.positions.constructor.name, edges: ready.edgeSources.constructor.name}}, lod: {{low: low.drawnLinks, medium: medium.drawnLinks, high: high.drawnLinks, lowNodes: low.nodes.length, mediumNodes: medium.nodes.length, highNodes: high.nodes.length}}, hit: hit.index}}));
 """
-    result = subprocess.run(["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
+    )
     return json.loads(result.stdout)
 
 
@@ -44,6 +77,47 @@ def test_all_worker_compacts_identity_builds_typed_arrays_and_hits_spatial_index
     assert result["lod"]["low"] == 0
     assert result["lod"]["medium"] <= 7 and result["lod"]["high"] <= 7
     assert result["hit"] >= 0
+
+
+def test_all_worker_enforces_hysteretic_progressive_node_budgets():
+    nodes = [
+        {"id": f"n-{index}", "community_id": f"community-{index}"}
+        for index in range(5_000)
+    ]
+    result = _run_worker(nodes, [])
+    assert result["lod"]["lowNodes"] <= 500
+    assert result["lod"]["mediumNodes"] <= 3_000
+    assert result["lod"]["highNodes"] <= 5_000
+
+
+def test_all_worker_reserves_a_focused_node_when_the_lod_budget_is_full():
+    source = json.dumps(WORKER.read_text(encoding="utf-8"))
+    nodes = [{"id": f"leaf-{index}"} for index in range(6_000)]
+    nodes.extend([{"id": "hub"}, {"id": "focused"}])
+    links = [{"source": "focused", "target": "hub"}]
+    links.extend({"source": "hub", "target": f"leaf-{index}"} for index in range(6_000))
+    payload = json.dumps({"nodes": nodes, "links": links})
+    script = f"""
+const vm = require('vm'); const messages = [];
+const context = {{ self: {{ postMessage: message => messages.push(message) }} }};
+vm.runInNewContext({source}, context);
+const send = data => context.self.onmessage({{ data }});
+const latest = type => messages.filter(message => message.type === type).at(-1);
+send({{ type: 'prepare', payload: {payload} }});
+const ready = latest('ready');
+const focused = ready.ids.indexOf('focused');
+send({{ type: 'focus', index: focused }});
+send({{ type: 'camera', x: 0, y: 0, scale: 0.8, width: 100000, height: 100000 }});
+const visible = latest('visible');
+console.log(JSON.stringify({{ count: visible.nodes.length, focused,
+  retained: Array.from(visible.nodes).includes(focused) }}));
+"""
+    result = subprocess.run(
+        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
+    )
+    report = json.loads(result.stdout)
+    assert report["count"] <= 3_000
+    assert report["retained"] is True
 
 
 def test_all_renderer_is_flat_worker_webgl_and_not_a_live_force_simulation():
@@ -59,6 +133,8 @@ def test_all_renderer_is_flat_worker_webgl_and_not_a_live_force_simulation():
     assert "adjacencyOffsets" in worker and "edgePositions" in worker
     assert "lastCameraKey" in worker and "edgePositions.buffer" in worker
     assert "for (let index = 0; index < state.ids.length; index += 1) if (inViewport" not in worker
+    assert "nodeSeen" in worker and "nodeStamp" in worker
+    assert "ranked.sort" not in worker
 
 
 def test_all_renderer_declares_capacity_and_progressive_lod_profile():
@@ -195,6 +271,9 @@ send({{ type: 'scope', scope: {{ minDegree: 0, showUnlinked: true, depth: 1 }} }
 send({{ type: 'collapse', value: 'auto' }});
 send({{ type: 'camera', x: 0, y: 0, scale: 0.2, width: 100000, height: 100000 }});
 const collapsed = latest('visible');
+send({{ type: 'collapse', value: false }});
+send({{ type: 'camera', x: 1, y: 0, scale: 0.2, width: 100000, height: 100000 }});
+const expanded = latest('visible');
 send({{ type: 'focus', index: ready.ids.indexOf('a') }});
 send({{ type: 'camera', x: 0, y: 0, scale: 1.5, width: 100000, height: 100000 }});
 const depthOne = latest('visible');
@@ -207,18 +286,21 @@ const layered = latest('visible');
 console.log(JSON.stringify({{
   filtered: ids(filtered.nodes), filteredEdges: filtered.drawnLinks,
   collapsed: ids(collapsed.nodes), isCollapsed: collapsed.collapsed,
+  expanded: ids(expanded.nodes), isExpanded: !expanded.collapsed,
   depthOne: ids(depthOne.nodes), depthTwo: ids(depthTwo.nodes),
   layeredEdges: layered.drawnLinks,
 }}));
 """
     result = subprocess.run(
-        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True,
+        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
     )
     report = json.loads(result.stdout)
     assert report["filtered"] == ["b"]
     assert report["filteredEdges"] == 0
     assert report["isCollapsed"] is True
     assert set(report["collapsed"]) == {"b", "d", "lonely"}
+    assert report["isExpanded"] is True
+    assert set(report["expanded"]) == {"a", "b", "c", "d", "e", "lonely"}
     assert report["depthOne"] == ["a", "b"]
     assert report["depthTwo"] == ["a", "b", "c"]
     assert report["layeredEdges"] == 0
@@ -268,7 +350,6 @@ const reheated = latest('layout');
 def test_all_renderer_has_bounded_directional_flow_and_worker_control_messages():
     renderer = RENDERER.read_text(encoding="utf-8")
     worker = WORKER.read_text(encoding="utf-8")
-    styles = STYLES.read_text(encoding="utf-8")
     assert "FLOW_EDGE_LIMIT = 900" in renderer
     assert "FLOW_FRAME_MS = 34" in renderer
     assert "function drawRelationFlow(now)" in renderer
@@ -283,14 +364,44 @@ def test_all_renderer_has_bounded_directional_flow_and_worker_control_messages()
     assert "element.setAttribute('data-graph-style', opts.style || 'cyber')" in renderer
     assert "element.setAttribute('data-graph-style', state.styleName)" in renderer
     assert "element.removeAttribute('data-graph-style')" in renderer
-    assert 'body[data-theme="paper"] .graph-header' in styles
+
+def test_paper_classic_effective_paint_contrast_meets_wcag_aa():
+    """Paper+Classic labels >=4.5:1; nodes/edges/focus >=3:1 on graph bg."""
+    renderer = RENDERER.read_text(encoding="utf-8")
+    styles = STYLES.read_text(encoding="utf-8")
+    paper_block = re.search(r'body\[data-theme="paper"\]\s*\{([^}]+)\}', styles)
+    assert paper_block, "Paper theme block missing from CSS"
+    paper_bg = re.search(r"--c-inset:\s*(#[0-9a-fA-F]{6})", paper_block.group(1)).group(1)
+    bg_lum = _hex_luminance(paper_bg)
+    classic_match = re.search(r"LIGHT_CLASSIC_PALETTE\s*=\s*\[([^\]]+)\]", renderer)
+    assert classic_match, "Light Classic palette missing from renderer"
+    classic_colors = re.findall(r"'(#[0-9a-fA-F]{6})'", classic_match.group(1))
+    assert len(classic_colors) >= 4, f"Expected >=4 Classic colors, got {len(classic_colors)}"
+    for hc in classic_colors:
+        ratio = _contrast_ratio(_hex_luminance(hc), bg_lum)
+        assert ratio >= 3.0, f"Classic node {hc} on Paper {paper_bg}: {ratio:.2f}:1 < 3:1"
+    paint_match = re.search(
+        r"LIGHT_CLASSIC_PAINT\s*=\s*\{([^}]+)\}", renderer, re.DOTALL,
+    )
+    assert paint_match, "Light Classic paint tokens missing from renderer"
+    paint = paint_match.group(1)
+    label = re.search(r"label:\s*'(#[0-9a-fA-F]{6})'", paint)
+    edge = re.search(r"canvasEdge:\s*'(#[0-9a-fA-F]{6})'", paint)
+    focus = re.search(r"focus:\s*'(#[0-9a-fA-F]{6})'", paint)
+    assert label and edge and focus
+    label_ratio = _contrast_ratio(_hex_luminance(label.group(1)), bg_lum)
+    edge_ratio = _contrast_ratio(_hex_luminance(edge.group(1)), bg_lum)
+    focus_ratio = _contrast_ratio(_hex_luminance(focus.group(1)), bg_lum)
+    assert label_ratio >= 4.5, f"Label on {paper_bg}: {label_ratio:.2f}:1 < 4.5:1"
+    assert edge_ratio >= 3.0, f"Edge on {paper_bg}: {edge_ratio:.2f}:1 < 3:1"
+    assert focus_ratio >= 3.0, f"Focus on {paper_bg}: {focus_ratio:.2f}:1 < 3:1"
 
 
 def test_ledger_routes_every_shared_sidebar_control_to_the_dedicated_all_renderer():
     ledger = LEDGER.read_text(encoding="utf-8")
     markup = MARKUP.read_text(encoding="utf-8")
-    assert "if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();" in ledger
-    assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in ledger
+    assert "if (loadAll) return ensureGraphAllAsset();" in ledger
+    assert "const graphFactory = fullGraph ? window.EngraphisAllGraph" in ledger
     assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in ledger
     assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in ledger
     assert "minDegree: number(byId('graph-min-degree').value)" in ledger
@@ -304,3 +415,95 @@ def test_ledger_routes_every_shared_sidebar_control_to_the_dedicated_all_rendere
     ):
         assert f'id="{control}"' in markup
     assert 'id="graph-lod-note"' in markup
+
+
+def test_all_worker_refines_authored_galaxy_coordinates_with_force_controls():
+    source = json.dumps(WORKER.read_text(encoding="utf-8"))
+    payload = json.dumps({
+        "nodes": [
+            {"id": "black-hole", "community_id": "core", "x": 11.25, "y": -7.5},
+            {"id": "star", "community_id": "solar", "x": 83.75, "y": 42.5},
+        ],
+        "links": [{"source": "black-hole", "target": "star", "strength": 8}],
+    })
+    script = f"""
+const vm = require('vm'); const messages = [];
+const context = {{ self: {{ postMessage: message => messages.push(message) }} }};
+vm.runInNewContext({source}, context);
+const send = data => context.self.onmessage({{ data }});
+const latest = type => messages.filter(message => message.type === type).at(-1);
+    send({{ type: 'settings', settings: {{ mode: 'galaxy' }}, relayout: false }});
+    send({{ type: 'prepare', payload: {payload} }});
+const initial = Array.from(latest('ready').positions);
+send({{ type: 'settings', settings: {{ springStiffness: 0 }}, relayout: true }});
+const zeroSpring = Array.from(latest('layout').positions);
+send({{ type: 'settings', settings: {{ gravity: 400, repel: 120, link: 40,
+  gravitationalConstant: 2, blackHoleMass: 2, localGravitationalConstant: 2,
+  damping: 0, springStiffness: 2 }}, relayout: true }});
+const relayout = Array.from(latest('layout').positions);
+send({{ type: 'reheat' }});
+const reheated = Array.from(latest('layout').positions);
+console.log(JSON.stringify({{ initial, zeroSpring, relayout, reheated }}));
+"""
+    result = subprocess.run(
+        ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
+    )
+    report = json.loads(result.stdout)
+    expected = [11.25, -7.5, 83.75, 42.5]
+    assert report["initial"] == expected
+    assert report["zeroSpring"] == expected
+    assert report["relayout"] != expected
+    assert report["reheated"] == report["relayout"]
+
+
+def test_ledger_restores_the_committed_renderer_after_post_readiness_stale_exit():
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "destroyCandidate();\n            restoreCommittedRenderer();\n            return;" in ledger
+    assert "destroyCandidate();\n          restoreCommittedRenderer();\n          return;" in ledger
+
+
+def test_all_renderer_bounds_camera_work_and_exposes_readiness():
+    renderer = RENDERER.read_text(encoding="utf-8")
+    worker = WORKER.read_text(encoding="utf-8")
+    assert "cameraInFlight" in renderer and "pendingCamera" in renderer
+    assert "revision: message && message.revision" in worker
+    assert "type: 'camera-ack'" in worker
+    assert "whenReady()" in renderer
+    assert "await Promise.race([candidateEngine.whenReady(), timeoutPromise])" in (
+        LEDGER.read_text(encoding="utf-8")
+    )
+
+def test_ledger_all_mode_toggle_uses_fixed_label_with_aria_pressed():
+    """The All-nodes toggle must keep a fixed label; aria-pressed carries state."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "toggle.textContent = 'All nodes'" in ledger
+    assert "toggle.setAttribute('aria-pressed', String(full))" in ledger
+    # Reject the prior inverted-label pattern.
+    assert "button.textContent=full?'High quality':'Show all nodes'" not in ledger
+
+
+def test_ledger_full_mode_hides_quality_only_motion_rows():
+    """Freeze and orbit-pause rows are hidden in full mode; relation flow stays."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "freezeRow.hidden = full" in ledger
+    assert "orbitPause.hidden = full" in ledger
+    # Relation flow is not hidden by the full-mode branch.
+    assert "graph-flow" in ledger
+
+
+def test_ledger_recovery_copy_names_reload_data_and_real_filters_only():
+    """Recovery copy must say 'Reload data' and never name fake filters."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "Choose Reload data to try again." in ledger
+    assert "retry.textContent = busy ? 'Reloading graph…' : 'Reload data'" in ledger
+    assert "Try adjusting your filters" not in ledger
+
+
+def test_ledger_export_disclosure_focuses_png_and_restores_trigger():
+    """Export menu opening focuses PNG; Escape/outside-focus restores trigger."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "byId('graph-export-png').focus()" in ledger
+    assert "trigger.setAttribute('aria-expanded', 'true')" in ledger
+    assert "trigger.setAttribute('aria-expanded', 'false')" in ledger
+    assert "setGraphExportMenuOpen(false, true)" in ledger
+    assert "graphExportWrap.addEventListener('keydown'" in ledger
