@@ -434,14 +434,16 @@ const send = data => context.self.onmessage({{ data }});
 const latest = type => messages.filter(message => message.type === type).at(-1);
     send({{ type: 'settings', settings: {{ mode: 'galaxy' }}, relayout: false }});
     send({{ type: 'prepare', payload: {payload} }});
-    const initial = Array.from(latest('ready').positions);
+const initial = Array.from(latest('ready').positions);
+send({{ type: 'settings', settings: {{ springStiffness: 0 }}, relayout: true }});
+const zeroSpring = Array.from(latest('layout').positions);
 send({{ type: 'settings', settings: {{ gravity: 400, repel: 120, link: 40,
   gravitationalConstant: 2, blackHoleMass: 2, localGravitationalConstant: 2,
   damping: 0, springStiffness: 2 }}, relayout: true }});
 const relayout = Array.from(latest('layout').positions);
 send({{ type: 'reheat' }});
 const reheated = Array.from(latest('layout').positions);
-console.log(JSON.stringify({{ initial, relayout, reheated }}));
+console.log(JSON.stringify({{ initial, zeroSpring, relayout, reheated }}));
 """
     result = subprocess.run(
         ["node", "-"], cwd=ROOT, check=True, capture_output=True, text=True, input=script,
@@ -449,6 +451,7 @@ console.log(JSON.stringify({{ initial, relayout, reheated }}));
     report = json.loads(result.stdout)
     expected = [11.25, -7.5, 83.75, 42.5]
     assert report["initial"] == expected
+    assert report["zeroSpring"] == expected
     assert report["relayout"] != expected
     assert report["reheated"] == report["relayout"]
 
