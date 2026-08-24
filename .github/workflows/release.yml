@@ -84,6 +84,7 @@ jobs:
           python -m pip list --format=freeze \
             | LC_ALL=C sort -f > build-environment-evidence/environment.lock
           cyclonedx-py environment --output-reproducible --of JSON \
+            --pyproject pyproject.toml \
             -o build-environment-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json
 
       - name: Build source and universal wheel distributions
