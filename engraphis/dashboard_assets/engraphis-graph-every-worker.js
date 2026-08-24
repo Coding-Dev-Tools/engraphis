@@ -15,6 +15,11 @@
   const SPACING = 13;
   const MAP_SCALE = 3;
   const BRIDGE_LIMIT = 512;
+  /* Centroid separation is useful while communities are few, but its exact pair pass is
+     intentionally bounded. Once every node is its own (or a very small) community, the node
+     spatial hash below is the safer O(n) separation mechanism; an unbounded centroid pass would
+     turn an otherwise supported 20k-node payload into a quadratic stall. */
+  const MAX_CENTROID_GROUPS = 512;
 
   let model = null;
   let settings = { repel: 48, link: 16, gravity: 48 };
@@ -286,18 +291,20 @@
     }
     const separation = scaledSpacing * 2.6;
     const pushStrength = 0.05;
-    for (let a = 0; a < stats.list.length; a += 1) {
-      for (let b = a + 1; b < stats.list.length; b += 1) {
-        const A = stats.list[a], B = stats.list[b];
-        const ddx = B.x - A.x, ddy = B.y - A.y;
-        const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.001;
-        const desired = separation + A.r + B.r;
-        if (dist >= desired) continue;
-        const f = (desired - dist) / dist * pushStrength;
-        const fx = ddx * f / A.members.length, fy = ddy * f / A.members.length;
-        const gx = ddx * f / B.members.length, gy = ddy * f / B.members.length;
-        for (const index of A.members) { dx[index] -= fx; dy[index] -= fy; }
-        for (const index of B.members) { dx[index] += gx; dy[index] += gy; }
+    if (stats.list.length <= MAX_CENTROID_GROUPS) {
+      for (let a = 0; a < stats.list.length; a += 1) {
+        for (let b = a + 1; b < stats.list.length; b += 1) {
+          const A = stats.list[a], B = stats.list[b];
+          const ddx = B.x - A.x, ddy = B.y - A.y;
+          const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.001;
+          const desired = separation + A.r + B.r;
+          if (dist >= desired) continue;
+          const f = (desired - dist) / dist * pushStrength;
+          const fx = ddx * f / A.members.length, fy = ddy * f / A.members.length;
+          const gx = ddx * f / B.members.length, gy = ddy * f / B.members.length;
+          for (const index of A.members) { dx[index] -= fx; dy[index] -= fy; }
+          for (const index of B.members) { dx[index] += gx; dy[index] += gy; }
+        }
       }
     }
 

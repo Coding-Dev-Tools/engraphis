@@ -12,7 +12,9 @@
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;
+  const LABEL_CANDIDATE_MAX = LABEL_MAX * 8;
   const FLOW_EDGE_LIMIT = 900;
+  const REGION_LIMIT = 512;
   const FLOW_FRAME_MS = 34;
   /* Zoom bands are RATIOS of the current camera scale to the fitted-scene scale, so the
      LOD behaviour is identical whether the world holds 500 or 20,000 nodes: below ~half
@@ -152,7 +154,7 @@
       scope: { minDegree: 0, showUnlinked: true, depth: 2 },
       collapse: false, collapsed: false,
       focus: -1, hover: -1, hoverPoint: [0, 0], focusPoint: [0, 0],
-      neighbors: null, ready: false, visibleCount: 0,
+      neighbors: null, incidentEdges: null, connectionHighlights: null, ready: false, visibleCount: 0,
       frame: 0, labelFrame: 0, flowPaintAt: 0, layoutPending: false, lastLabelKey: '',
       drag: null, pickGrid: null, pickDirty: true,
       destroyed: false, paused: false, unsupported: !gl, error: null,
@@ -427,7 +429,7 @@
           count: members.length,
         });
       }
-      state.communityRegions = regions;
+      state.communityRegions = regions.sort((a, b) => b.count - a.count).slice(0, REGION_LIMIT);
     }
     function drawRegions() {
       if (!underlayContext || !state.ready || !state.communityRegions.length) return;
@@ -557,49 +559,60 @@
       if (!labelContext || !state.ready) return;
       const anchors = hotAnchors();
       if (!anchors.length || !state.edgeVertexCount) return;
-      const anchorSet = new Set(anchors);
+      const seenEdges = new Set();
       const showRelation = zoomRatio() > 0.55;
       labelContext.save();
       labelContext.strokeStyle = "rgba(244,211,127,0.9)";
       labelContext.fillStyle = "rgba(244,211,127,0.9)";
-      for (let edge = 0; edge < state.totalLinks; edge += 1) {
-        const source = state.edgeSources[edge], target = state.edgeTargets[edge];
-        if (!anchorSet.has(source) && !anchorSet.has(target)) continue;
-        const a = screen(state.positions[source * 2], state.positions[source * 2 + 1]);
-        const b = screen(state.positions[target * 2], state.positions[target * 2 + 1]);
-        if ((a[0] < -20 && b[0] < -20) || (a[0] > state.width + 20 && b[0] > state.width + 20)
-          || (a[1] < -20 && b[1] < -20) || (a[1] > state.height + 20 && b[1] > state.height + 20)) continue;
-        labelContext.lineWidth = 1.6;
-        labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
-        /* Direction cue at 62% of the run: source → target. Dark halo keeps it visible
-           over dense background lines; size grows as you zoom in. */
-        const t = 0.62, tipX = a[0] + (b[0] - a[0]) * t, tipY = a[1] + (b[1] - a[1]) * t;
-        const angle = Math.atan2(b[1] - a[1], b[0] - a[0]);
-        const head = clamp(6 + zoomRatio() * 3, 6, 13);
-        labelContext.strokeStyle = 'rgba(6,10,14,0.85)';
-        labelContext.lineWidth = head * 0.9;
-        labelContext.lineCap = 'round';
-        labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
-        labelContext.strokeStyle = 'rgba(244,211,127,0.95)';
-        labelContext.lineWidth = 2;
-        labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
-        labelContext.fillStyle = 'rgba(244,211,127,0.98)';
-        labelContext.beginPath();
-        labelContext.moveTo(tipX, tipY);
-        labelContext.lineTo(tipX - Math.cos(angle - 0.42) * head, tipY - Math.sin(angle - 0.42) * head);
-        labelContext.lineTo(tipX - Math.cos(angle + 0.42) * head, tipY - Math.sin(angle + 0.42) * head);
-        labelContext.closePath(); labelContext.fill();
-        const relation = String(state.edgeRelations[edge] || "");
-        if (showRelation && relation && relation !== "relates_to") {
-          const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-          labelContext.font = "10px ui-sans-serif,system-ui,sans-serif";
-          const width = labelContext.measureText(relation).width;
-          labelContext.fillStyle = "rgba(9,14,20,0.88)";
-          labelContext.fillRect(mx - width / 2 - 4, my - 8, width + 8, 15);
-          labelContext.fillStyle = "rgba(244,222,168,0.95)";
-          labelContext.textBaseline = "middle"; labelContext.textAlign = "left";
-          labelContext.fillText(relation, mx - width / 2, my);
-          labelContext.fillStyle = "rgba(244,211,127,0.9)";
+      let drawn = 0;
+      for (const anchor of anchors) {
+        const incident = state.incidentEdges && state.incidentEdges[anchor] || [];
+        const incidentLimit = Math.min(incident.length, FLOW_EDGE_LIMIT);
+        for (let slot = 0; slot < incidentLimit && drawn < FLOW_EDGE_LIMIT; slot += 1) {
+          const edge = incident[slot];
+          if (seenEdges.has(edge)) continue;
+          seenEdges.add(edge);
+          /* A single hub can own the entire relation budget; keep the accessible focus layer
+             bounded even though the GPU still retains every relation in its static buffer. */
+          if (drawn >= FLOW_EDGE_LIMIT) continue;
+          const source = state.edgeSources[edge], target = state.edgeTargets[edge];
+          const a = screen(state.positions[source * 2], state.positions[source * 2 + 1]);
+          const b = screen(state.positions[target * 2], state.positions[target * 2 + 1]);
+          if ((a[0] < -20 && b[0] < -20) || (a[0] > state.width + 20 && b[0] > state.width + 20)
+            || (a[1] < -20 && b[1] < -20) || (a[1] > state.height + 20 && b[1] > state.height + 20)) continue;
+          drawn += 1;
+          labelContext.lineWidth = 1.6;
+          labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
+          /* Direction cue at 62% of the run: source → target. Dark halo keeps it visible
+             over dense background lines; size grows as you zoom in. */
+          const t = 0.62, tipX = a[0] + (b[0] - a[0]) * t, tipY = a[1] + (b[1] - a[1]) * t;
+          const angle = Math.atan2(b[1] - a[1], b[0] - a[0]);
+          const head = clamp(6 + zoomRatio() * 3, 6, 13);
+          labelContext.strokeStyle = 'rgba(6,10,14,0.85)';
+          labelContext.lineWidth = head * 0.9;
+          labelContext.lineCap = 'round';
+          labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
+          labelContext.strokeStyle = 'rgba(244,211,127,0.95)';
+          labelContext.lineWidth = 2;
+          labelContext.beginPath(); labelContext.moveTo(a[0], a[1]); labelContext.lineTo(b[0], b[1]); labelContext.stroke();
+          labelContext.fillStyle = 'rgba(244,211,127,0.98)';
+          labelContext.beginPath();
+          labelContext.moveTo(tipX, tipY);
+          labelContext.lineTo(tipX - Math.cos(angle - 0.42) * head, tipY - Math.sin(angle - 0.42) * head);
+          labelContext.lineTo(tipX - Math.cos(angle + 0.42) * head, tipY - Math.sin(angle + 0.42) * head);
+          labelContext.closePath(); labelContext.fill();
+          const relation = String(state.edgeRelations[edge] || "");
+          if (showRelation && relation && relation !== "relates_to") {
+            const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+            labelContext.font = "10px ui-sans-serif,system-ui,sans-serif";
+            const width = labelContext.measureText(relation).width;
+            labelContext.fillStyle = "rgba(9,14,20,0.88)";
+            labelContext.fillRect(mx - width / 2 - 4, my - 8, width + 8, 15);
+            labelContext.fillStyle = "rgba(244,222,168,0.95)";
+            labelContext.textBaseline = "middle"; labelContext.textAlign = "left";
+            labelContext.fillText(relation, mx - width / 2, my);
+            labelContext.fillStyle = "rgba(244,211,127,0.9)";
+          }
         }
       }
       labelContext.restore();
@@ -633,12 +646,7 @@
       const titleFont = '600 13px ui-sans-serif,system-ui,sans-serif';
       const metaFont = '11px ui-sans-serif,system-ui,sans-serif';
       /* Relation analysis at a glance: the strongest connections, strongest first. */
-      let connections = [];
-      if (state.neighbors && state.neighbors[index]) {
-        connections = state.neighbors[index]
-          .slice().sort((a, b) => (state.degrees[b] || 0) - (state.degrees[a] || 0))
-          .slice(0, 3);
-      }
+      const connections = state.connectionHighlights && state.connectionHighlights[index] || [];
       labelContext.save();
       labelContext.font = titleFont;
       const titleWidth = labelContext.measureText(title).width;
@@ -754,12 +762,13 @@
       const focusNeighborhood = anchor >= 0 && state.neighbors && state.neighbors[anchor];
       if (focusNeighborhood) {
         consider(anchor);
-        for (const neighbor of state.neighbors[anchor]) {
+        const neighborhoodLimit = Math.min(state.neighbors[anchor].length, LABEL_CANDIDATE_MAX);
+        for (let slot = 0; slot < neighborhoodLimit; slot += 1) {
           if (drawn >= LABEL_MAX) break;
-          consider(neighbor);
+          consider(state.neighbors[anchor][slot]);
         }
       }
-      for (let rank = 0; rank < state.topNodes.length && drawn < LABEL_MAX; rank += 1) {
+      for (let rank = 0; rank < Math.min(state.topNodes.length, LABEL_CANDIDATE_MAX) && drawn < LABEL_MAX; rank += 1) {
         if (!focusNeighborhood) consider(state.topNodes[rank]);
         else break;
       }
@@ -944,11 +953,34 @@
           /* Neighbourhood adjacency powers hover focus: hovering a node dims everything
              that is not the node, its direct relations, or their connecting edges. */
           state.neighbors = state.ids.map(() => []);
+          state.incidentEdges = state.ids.map(() => []);
           for (let edge = 0; edge < state.totalLinks; edge += 1) {
             const source = state.edgeSources[edge], target = state.edgeTargets[edge];
-            if (state.neighbors[source]) state.neighbors[source].push(target);
-            if (state.neighbors[target]) state.neighbors[target].push(source);
+            if (state.neighbors[source]) {
+              state.neighbors[source].push(target);
+              state.incidentEdges[source].push(edge);
+            }
+            if (state.neighbors[target]) {
+              state.neighbors[target].push(source);
+              state.incidentEdges[target].push(edge);
+            }
           }
+          state.connectionHighlights = state.neighbors.map(neighbors => {
+            const top = [];
+            for (const neighbor of neighbors) {
+              let slot = top.length;
+              for (let index = 0; index < top.length; index += 1) {
+                if ((state.degrees[neighbor] || 0) > (state.degrees[top[index]] || 0)) {
+                  slot = index; break;
+                }
+              }
+              if (slot < 3) {
+                top.splice(slot, 0, neighbor);
+                if (top.length > 3) top.pop();
+              }
+            }
+            return top;
+          });
         }
         state.ready = true;
         refreshVisibility(false);
@@ -1231,6 +1263,7 @@
       nodeProgram = edgeProgram = null;
       nodeBuffers = {}; edgeBuffers = {};
       state.ids = []; state.idIndex = new Map(); state.labels = []; state.types = []; state.communities = [];
+      state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
       state.positions = new Float32Array(0);
       state.nodeFlags = state.nodeGhosts = new Uint8Array(0);
       state.nodeColors = state.nodeSizes = new Float32Array(0);

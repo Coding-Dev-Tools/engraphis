@@ -17,8 +17,14 @@ MARKUP = ROOT / "engraphis" / "dashboard_assets" / "index.html"
 
 WORKER_HARNESS = """
 const vm = require('vm'); const fs = require('fs'); const messages = [];
+let stopAtFirstProgress = false; const startedAt = Date.now();
 const src = fs.readFileSync('engraphis/dashboard_assets/engraphis-graph-every-worker.js', 'utf8');
-const ctx = { self: { postMessage: m => messages.push(m) },
+const ctx = { self: { postMessage: m => {
+  messages.push(m);
+  if (stopAtFirstProgress && m.type === 'progress' && m.pass === 1) {
+    console.log(JSON.stringify({ firstPassMs: Date.now() - startedAt })); process.exit(0);
+  }
+} },
   setTimeout: (f, t) => setTimeout(f, 0), clearTimeout: t => clearTimeout(t) };
 vm.runInNewContext(src, ctx);
 const send = data => ctx.self.onmessage({ data });
@@ -211,6 +217,18 @@ def test_renderer_cleans_up_host_element_listeners_on_destroy() -> None:
     assert "element.replaceChildren();" in destroy_body
 
 
+def test_renderer_focus_decorations_use_incident_edges_not_full_link_scan() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    hot_body = renderer[renderer.index("function drawHotEdgeDecorations") : renderer.index("function drawFocusRing")]
+    assert "state.incidentEdges" in hot_body
+    assert "state.totalLinks" not in hot_body
+    assert "FLOW_EDGE_LIMIT" in hot_body
+    assert "incidentLimit = Math.min(incident.length, FLOW_EDGE_LIMIT)" in hot_body
+    assert "connectionHighlights" in renderer
+    assert "LABEL_CANDIDATE_MAX" in renderer
+    assert "state.incidentEdges = state.ids.map(() => []);" in renderer
+
+
 def test_renderer_exposes_capacity_and_every_preset() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     worker = WORKER.read_text(encoding="utf-8")
@@ -233,6 +251,22 @@ def test_worker_untagged_nodes_share_one_district_not_n_singletons() -> None:
     )
     report = _run_worker(script)
     assert report["uniqueDistricts"] == 1
+
+
+def test_worker_many_communities_bound_centroid_separation() -> None:
+    """Many tagged singleton communities must not reintroduce an O(n^2) first pass."""
+    script = """
+const started = Date.now();
+stopAtFirstProgress = true;
+const nodes = Array.from({ length: 20000 }, (_, i) => ({ id: `n${i}`, community_id: `c${i}` }));
+send({ type: 'prepare', payload: { nodes, links: [] } });
+"""
+    result = subprocess.run(
+        ["node", "-e", WORKER_HARNESS + script], cwd=ROOT, check=True,
+        capture_output=True, text=True, timeout=5,
+    )
+    report = json.loads(result.stdout)
+    assert report["firstPassMs"] < 4000
 
 
 def test_renderer_create_runs_without_throwing_in_a_minimal_dom() -> None:
