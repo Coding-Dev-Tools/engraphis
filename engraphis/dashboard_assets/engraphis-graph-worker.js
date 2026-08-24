@@ -143,7 +143,7 @@
       const nodeCount = state.positions.length / 2;
       const desired = clamp((galaxyMode ? 20 : 10) + link * 1.25
         - (galaxyMode ? 8 * 1.25 : 0), 14, 112);
-      const springForce = clamp((galaxyMode ? Math.abs(spring - 1) * 0.018 : 0.025 + spring * 0.018),
+      const springForce = clamp((galaxyMode ? Math.max(0, spring - 1) * 0.018 : 0.025 + spring * 0.018),
         galaxyMode ? 0 : 0.025, 0.2)
         * (mode === 'compact' ? 1.22 : mode === 'original' ? 0.72 : 1);
       const settle = 1 / (1 + Math.min(12, damping) * 0.18);
