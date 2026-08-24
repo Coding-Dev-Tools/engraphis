@@ -2035,9 +2035,11 @@ def test_graph_load_busy_disables_controls_and_updates_recovery_copy(monkeypatch
     """During load, retry/show-all are disabled and recovery copy names Reload data."""
     with _client(monkeypatch, tmp_path) as client:
         script = client.get("/v2-assets/ledger.js")
-        # Busy state disables the two primary load controls.
+        # Busy state disables reload and the Every-node preset.
         assert "function setGraphLoadControlsBusy(busy, disableRetry = true)" in script.text
-        assert "'graph-show-all', 'graph-retry'" in script.text
+        assert "const controls = disableRetry ? ['graph-retry'] : []" in script.text
+        assert "[data-graph-preset-choice=\"every\"]" in script.text
+        assert "every.disabled = busy" in script.text
         assert "control.disabled = busy" in script.text
         # Recovery copy uses actionable "Reload data", not vague retry language.
         assert "retry.textContent = busy ? 'Reloading graph…' : 'Reload data'" in script.text

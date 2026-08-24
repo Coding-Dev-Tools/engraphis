@@ -3175,11 +3175,13 @@
   }
 
   function setGraphLoadControlsBusy(busy, disableRetry = true) {
-    const controls = disableRetry ? ['graph-show-all', 'graph-retry'] : ['graph-show-all'];
+    const controls = disableRetry ? ['graph-retry'] : [];
     controls.forEach(id => {
       const control = byId(id);
       if (control) control.disabled = busy;
     });
+    const every = document.querySelector('[data-graph-preset-choice="every"]');
+    if (every) every.disabled = busy;
     const retry = byId('graph-retry');
     if (retry && ((busy && disableRetry) || !busy)) {
       retry.textContent = busy ? 'Reloading graph…' : 'Reload data';
