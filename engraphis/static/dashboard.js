@@ -1214,8 +1214,21 @@ function loadForceGraph(){
  });
  return FORCE_GRAPH_LOADING;
 }
-let GRAPH_ENGINE_LOADING=null,GRAPH_ENGINE_RETRY=0;
-function loadGraphEngine(){
+let GRAPH_ENGINE_LOADING=null,GRAPH_ENGINE_RETRY=0,ALL_GRAPH_ENGINE_LOADING=null;
+function loadAllGraphEngine(){
+ if(typeof EngraphisEveryGraph!=='undefined')return Promise.resolve();
+ if(!ALL_GRAPH_ENGINE_LOADING){
+  ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260823-every-19';
+   script.onload=()=>{typeof EngraphisEveryGraph==='undefined'?reject(new Error('Every-node graph asset loaded without registering EngraphisEveryGraph')):resolve()};
+   script.onerror=()=>reject(new Error('Every-node graph asset could not load'));
+   document.head.appendChild(script);
+  });
+  ALL_GRAPH_ENGINE_LOADING.catch(()=>{});
+ }
+ return ALL_GRAPH_ENGINE_LOADING;
+}
+function loadGraphEngine(loadAll=false){
   let engineReady;
   if(typeof EngraphisGraph!=='undefined'){GRAPH_ENGINE_RETRY=0;engineReady=Promise.resolve();}
  else{
@@ -1240,15 +1253,18 @@ function loadGraphEngine(){
  /* Mark the memoized promise handled. graphRender() can start this fetch on a pass that
     returns before attaching its own handler, and an unhandled rejection would print the exact
     console error this lazy-loading exists to remove. Callers still receive the rejection. */
- return engineReady;
+ return loadAll?engineReady.then(()=>loadAllGraphEngine()):engineReady;
 }
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
+ const graphFull=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
     `?graph-engine=next` deep link costs one round trip rather than two. */
- const engineMissing=typeof EngraphisGraph==='undefined';
- const enginePending=(!GRAPH_ENGINE_FAILED&&graphEngineEnabled())&&engineMissing?loadGraphEngine():null;
- if(typeof ForceGraph==='undefined'){
+ const engineMissing=typeof EngraphisGraph==='undefined'||(graphFull&&typeof EngraphisEveryGraph==='undefined');
+ /* All mode owns a dedicated bounded renderer and must remain available after a quality-renderer
+    runtime failure. The quality failure latch only authorizes the small legacy overview. */
+ const enginePending=(graphFull||(!GRAPH_ENGINE_FAILED&&graphEngineEnabled()))&&engineMissing?loadGraphEngine(graphFull):null;
+ if(!graphFull&&typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   loadForceGraph().then(()=>graphRender(fit,reheat)).catch(error=>{
@@ -1266,6 +1282,11 @@ function graphRender(fit=true,reheat=true){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   enginePending.then(()=>graphRender(fit,reheat)).catch(error=>{
+   if(graphFull){
+    empty.textContent=error.message+'; return to High quality or reload the dashboard assets.';
+    graphSetLayoutStatus('All-node engine unavailable',false);
+    return;
+   }
    /* Latches GRAPH_ENGINE_FAILED, so the re-entry below takes the classic path and this
       cannot loop. */
    graphEngineFallback(error);
@@ -1274,6 +1295,13 @@ function graphRender(fit=true,reheat=true){
   return;
  }
  const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData();
+ if(graphFull){
+  if(graphRenderEngine(data,fit,reheat))return;
+  showAs(empty,true,'flex');
+  empty.textContent='All-node renderer unavailable; return to High quality or reload the dashboard assets.';
+  graphSetLayoutStatus('All-node engine unavailable',false);
+  return;
+ }
  if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;
  /* Read AFTER the opt-in attempt: a failing engine resets GACTIVE_DATA precisely so the
     classic renderer below rebuilds from scratch instead of assuming the canvas is current. */
