@@ -43,5 +43,5 @@ def test_design_linter_dependency_is_exactly_pinned():
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
     version = package["devDependencies"]["impeccable"]
-    assert version == "3.5.0"
+    assert version == "3.6.0"
     assert package_lock["packages"]["node_modules/impeccable"]["version"] == version
