@@ -419,7 +419,8 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   await expect(page.locator('#graph-mode')).toContainText('All nodes');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter by exact repository name…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
-  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-depth')).toBeDisabled();
+  await expect(page.locator('#graph-depth')).toHaveAttribute('title', 'Not yet available in the Every-node view.');
   await expect(page.locator('#graph-flow')).toBeEnabled();
   await expect(page.locator('[data-graph-layer="code"]')).toBeEnabled();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
@@ -430,7 +431,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allQuery.repo).toBe('agent-memory');
   expect(allQuery.include_code).toBe('true');
   expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
-  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
   await page.locator('[data-graph-preset-choice="compact"]').click();
   await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
   await page.locator('[data-graph-color-choice="type"]').click();
