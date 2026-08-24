@@ -14,6 +14,7 @@ WORKER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every-worker
 RENDERER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
 LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 MARKUP = ROOT / "engraphis" / "dashboard_assets" / "index.html"
+CSS = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
 
 WORKER_HARNESS = """
 const vm = require('vm'); const fs = require('fs'); const messages = [];
@@ -106,6 +107,8 @@ setTimeout(() => {
     nodes: ready.ids.length,
     layout_count: layouts.length,
     final_fit: layouts.at(-1).fit,
+    first_pass: layouts[0].pass,
+    final_pass: layouts.at(-1).pass,
     settled: layouts.length > 1 && layouts.at(-1).positions.some((v, i) => v !== layouts[0].positions[i]),
     bounds_present: typeof ready.bounds.minX === 'number',
     top_nodes: ready.topNodes.length,
@@ -116,6 +119,8 @@ setTimeout(() => {
     assert report["order_ok"] is True
     assert report["counts"]["progress"] == 26  # REFINE_PASSES fully accounted for
     assert report["counts"]["layout"] == 7     # every 4th pass plus the final one
+    assert report["first_pass"] == 4
+    assert report["final_pass"] == 26
     assert report["nodes"] == 120
     assert report["final_fit"] is True
     assert report["settled"] is True
@@ -196,6 +201,26 @@ def test_renderer_uploads_change_driven_and_reports_honest_edge_counts() -> None
     assert "drawnLinks: drawn" in renderer
     assert "hiddenLinks: Math.max(0, state.totalLinks - drawn)" in renderer
     assert "state.bridges && state.edgeBridges[index]" in renderer  # toggle re-upload
+
+
+def test_renderer_scales_picking_and_highlight_points_in_world_units() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    assert "pointSize(best) + 7 / Math.max(0.005, state.camera.scale)" in renderer
+    assert "state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];" in renderer
+
+
+def test_renderer_layers_the_retina_safe_underlay_without_capturing_input() -> None:
+    css = CSS.read_text(encoding="utf-8")
+    assert ".graph-canvas .engraphis-all-underlay" in css
+    assert ".graph-canvas .engraphis-all-underlay { pointer-events: none; }" in css
+
+
+def test_ledger_preserves_falsy_graph_endpoints() -> None:
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "function graphEndpoint(value)" in ledger
+    assert "source: item.from ?? graphEndpoint(item.source)" in ledger
+    assert "target: item.to ?? graphEndpoint(item.target)" in ledger
+    assert "item.source !== undefined && item.source !== null" in ledger
 
 
 def test_renderer_export_is_synchronous_and_composites_every_layer() -> None:

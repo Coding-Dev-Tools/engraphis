@@ -523,7 +523,10 @@
         }
       }
       if (best < 0) return -1;
-      const reach = pointSize(best) * state.camera.scale + 7;
+      /* bestDist is measured in world units while pointSize and the extra touch slop are
+         screen pixels. Convert the hit radius back into world units so picking remains
+         usable at both fit-to-view and close-reading zoom levels. */
+      const reach = pointSize(best) + 7 / Math.max(0.005, state.camera.scale);
       return bestDist <= reach * reach ? best : -1;
     }
 
@@ -901,6 +904,11 @@
     function applyLayout(positions, bounds, doFit) {
       state.positions = positions || state.positions;
       state.bounds = bounds || state.bounds;
+      [[state.hover, 'hoverPoint'], [state.focus, 'focusPoint']].forEach(([index, key]) => {
+        if (index >= 0 && index * 2 + 1 < state.positions.length) {
+          state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];
+        }
+      });
       uploadNodePositions();
       uploadEdges();
       state.pickDirty = true;
@@ -1002,10 +1010,12 @@
         return;
       }
       if (message.type === 'layout') {
-        state.layoutPending = false;
+        const pass = Number(message.pass), total = Number(message.total);
+        state.layoutPending = Number.isFinite(pass) && Number.isFinite(total)
+          ? pass < total : message.fit !== true;
         if (!state.ready) return;
         applyLayout(message.positions, message.bounds, message.fit === true);
-        stats({ layoutPending: false });
+        stats({ layoutPending: state.layoutPending });
         return;
       }
     }

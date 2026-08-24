@@ -2029,13 +2029,18 @@
     }));
   }
 
+  function graphEndpoint(value) {
+    if (value && typeof value === 'object') return value.id ?? value;
+    return value;
+  }
+
   function graphLinks(payload) {
     const source = payload.edges || payload.links || [];
     return source.map((item, index) => ({
       ...item,
       id: item.id || `edge-${index}`,
-      source: item.from || (item.source && (item.source.id || item.source)),
-      target: item.to || (item.target && (item.target.id || item.target)),
+      source: item.from ?? graphEndpoint(item.source),
+      target: item.to ?? graphEndpoint(item.target),
       label: item.label || item.relation || 'related',
       layer: item.layer || 'semantic',
       valid_from: item.valid_from,
@@ -2047,7 +2052,8 @@
       ghost: item.ghost === true,
       bridge: item.bridge === true,
       visible_by_default: item.visible_by_default !== false,
-    })).filter(item => item.source && item.target);
+    })).filter(item => item.source !== undefined && item.source !== null
+      && item.target !== undefined && item.target !== null);
   }
 
   function revealGraphNode(id, label = 'Selected entity') {
@@ -2157,7 +2163,7 @@
   }
 
   async function showGraphConnectionMemories(item, includeHistory = false) {
-    if (!item || !item.id || !state.workspace) return;
+    if (!item || item.id === undefined || item.id === null || !state.workspace) return;
     cancelGraphConnectionMemoryLoad();
     const request = ++state.graphConnectionsRequest;
     const workspace = state.workspace;
@@ -2233,7 +2239,7 @@
   }
 
   function openGraphConnections(item) {
-    if (!item || !item.id) return;
+    if (!item || item.id === undefined || item.id === null) return;
     cancelGraphConnectionMemoryLoad();
     state.graphConnectionsFocusId = String(item.id);
     state.graphConnectionsFocusLabel = item.name || item.label || item.id;

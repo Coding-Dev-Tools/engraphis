@@ -338,6 +338,8 @@
           type: 'layout',
           positions: model.positions.slice(),
           bounds: { ...model.bounds },
+          pass,
+          total: REFINE_PASSES,
           fit: pass === REFINE_PASSES ? fitFinal === true : false,
         });
       }
