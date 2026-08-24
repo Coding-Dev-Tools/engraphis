@@ -1173,15 +1173,16 @@ def test_orbit_hierarchy_uses_nearest_larger_connected_parent_for_moons():
         "moon-b": (2.0, 1.0),
     }
     nodes = {
-        node_id: {
-            "id": node_id,
-            "gravity_mass": mass,
-            "scene_rank": mass / 16.0,
-            "weighted_degree": degree,
-            "visual_radius": graph_scene_module._visual_radius(mass),
-            "community_id": "solar",
-            "anchor_role": "community" if node_id == "star" else "none",
-            "ghost": False,
+            node_id: {
+                "id": node_id,
+                "label": node_id,
+                "gravity_mass": mass,
+                "scene_rank": mass / 16.0,
+                "weighted_degree": degree,
+                "visual_radius": graph_scene_module._visual_radius(mass),
+                "community_id": "solar",
+                "anchor_role": "community" if node_id == "star" else "none",
+                "ghost": False,
         }
         for node_id, (mass, degree) in specs.items()
     }
@@ -1224,6 +1225,17 @@ def test_orbit_hierarchy_uses_nearest_larger_connected_parent_for_moons():
         + nodes["moon-a"]["orbit_radius"]
         + nodes["moon-a"]["visual_radius"]
     )
+
+    graph = {
+        "edges": edges,
+        "community_members": {"solar": list(nodes)},
+        "community_anchors": {"solar": "star"},
+        "nodes": nodes,
+    }
+    summary = graph_scene_module._community_summaries(
+        graph, {"solar"}, set(nodes), system_radii
+    )[0]
+    assert summary["radius"] >= system_radii["solar"]
 
 
 def test_community_spiral_packs_compact_preferred_targets_without_envelope_overlap():
