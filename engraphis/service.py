@@ -8656,7 +8656,15 @@ class MemoryService:
             )
             touching_params: list[Any] = [wid, t, t, t, known_t, known_t]
         else:
-            touching_params = [wid]
+            touching_sql += (
+                "AND (touching_edge.valid_from IS NULL "
+                "OR touching_edge.valid_from<=?) "
+                "AND (touching_edge.ingested_at IS NULL "
+                "OR touching_edge.ingested_at<=?) "
+                "AND (touching_edge.expired_at IS NULL "
+                "OR ?<touching_edge.expired_at) "
+            )
+            touching_params = [wid, t, known_t, known_t]
         touching_sql += (
             "LEFT JOIN edge_supports touching_support "
             "ON touching_support.edge_id=touching_edge.id "
@@ -8675,6 +8683,16 @@ class MemoryService:
                 "OR ?<touching_support.expired_at) "
             )
             touching_params.extend((t, t, t, known_t, known_t))
+        else:
+            touching_sql += (
+                "AND (touching_support.valid_from IS NULL "
+                "OR touching_support.valid_from<=?) "
+                "AND (touching_support.ingested_at IS NULL "
+                "OR touching_support.ingested_at<=?) "
+                "AND (touching_support.expired_at IS NULL "
+                "OR ?<touching_support.expired_at) "
+            )
+            touching_params.extend((t, known_t, known_t))
         touching_sql += (
             "LEFT JOIN memories touching_memory "
             "ON touching_memory.id=touching_support.memory_id "
@@ -8694,6 +8712,17 @@ class MemoryService:
                 "OR ?<touching_memory.expired_at) "
             )
             touching_params.extend((wid, t, t, t, known_t, known_t))
+        else:
+            touching_sql += (
+                "AND touching_memory.workspace_id=? "
+                "AND (touching_memory.valid_from IS NULL "
+                "OR touching_memory.valid_from<=?) "
+                "AND (touching_memory.ingested_at IS NULL "
+                "OR touching_memory.ingested_at<=?) "
+                "AND (touching_memory.expired_at IS NULL "
+                "OR ?<touching_memory.expired_at) "
+            )
+            touching_params.extend((wid, t, known_t, known_t))
         touching_sql += "WHERE selected_entity.workspace_id=? "
         touching_params.append(wid)
         if repo_id:
@@ -8718,7 +8747,8 @@ class MemoryService:
         if include_history:
             touching_sql += (
                 "COUNT(touching_edge.id)=0 OR MAX(CASE "
-                "WHEN touching_support.edge_id IS NULL THEN 1 "
+                "WHEN NOT EXISTS (SELECT 1 FROM edge_supports touching_any_support "
+                "WHERE touching_any_support.edge_id=touching_edge.id) THEN 1 "
                 "WHEN touching_memory.id IS NOT NULL "
                 "AND touching_memory.workspace_id=? "
                 "AND COALESCE(touching_memory.scope, 'workspace')!='session' "

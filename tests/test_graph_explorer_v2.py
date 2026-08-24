@@ -3924,6 +3924,53 @@ def test_history_visibility_cap_ignores_edges_learned_after_known_at(monkeypatch
     assert "history-future-edge" not in edge_ids
 
 
+def test_history_entity_visibility_ignores_edges_learned_after_known_at():
+    """Future private rows must not hide entities from an earlier history view."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="history-future-source", name="History Future Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="history-future-target", name="History Future Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="history-future-entity-edge", src=source, dst=target,
+        relation="future", workspace_id=workspace_id,
+    ))
+    memory_id = service.store.add_memory(MemoryRecord(
+        id="history-future-private-memory", content="future private evidence",
+        workspace_id=workspace_id, scope=Scope.SESSION, session_id="future-session",
+    ))
+    service.store.add_edge_support(
+        "history-future-entity-edge", {"source": "manual", "memory_id": memory_id},
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=200 "
+        "WHERE id='history-future-entity-edge'"
+    )
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=0, ingested_at=200 "
+        "WHERE id=?", (memory_id,)
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+        include_history=True, valid_at=100, known_at=100,
+    )
+
+    member_ids = {
+        member_id for node in scene["nodes"]
+        for member_id in node.get("member_ids", [])
+    }
+    assert {source, target} <= member_ids
+    assert scene["edges"] == []
+
+
 def test_live_scene_keeps_entities_before_future_edge_known_at():
     """An edge learned after known_at must not hide its otherwise unlinked nodes."""
     service = MemoryService.create(":memory:", graph_extractor="none")
