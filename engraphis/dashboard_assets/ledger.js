@@ -422,7 +422,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3'),
+        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260815-merge-ready-1'),
         'EngraphisAllGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -435,17 +435,10 @@
   }
 
   function ensureGraphAssets(loadAll = false) {
-    /* The complete profile is an independent worker/WebGL renderer. Galaxy is the exception:
-       its solar-system view needs the authoritative hierarchical orbit integrator, so a full
-       Galaxy request uses the quality engine with the complete payload instead of the static
-       all-node worker. Other full presets retain the worker/WebGL path and its 20k-node cap. */
-    if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();
-    if (loadAll && graphIsGalaxy()) {
-      /* Load both candidates before the complete scene arrives. The factory decision below is
-         data-sensitive: an ordinary graph that merely uses the Galaxy preset keeps the worker,
-         while an authored star/planet scene gets the live hierarchical engine. */
-      return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
-    }
+    /* Complete scenes always use the worker/WebGL renderer. Galaxy hierarchy is already
+       encoded in canonical server coordinates; loading ForceGraph here would restore the
+       duplicate live simulation that Show all is specifically designed to avoid. */
+    if (loadAll) return ensureGraphAllAsset();
     const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
     if (!coreReady && !graphAssetsPromise) {
       const controller = new AbortController();
@@ -456,7 +449,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260819-v24-physics-final'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2300,7 +2293,7 @@
       ? 'Filter by exact repository name'
       : 'Filter to a repository or topic';
     ['graph-min-degree', 'graph-tune-min-degree', 'graph-collapse', 'graph-depth',
-      'graph-show-unlinked', 'graph-flow', 'graph-flow-speed', 'graph-orbits-pause'].forEach(id => {
+      'graph-show-unlinked', 'graph-flow', 'graph-flow-speed'].forEach(id => {
       const control = byId(id);
       if (control) control.disabled = false;
     });
@@ -2313,9 +2306,10 @@
     const lodNote = byId('graph-lod-note');
     if (lodNote) lodNote.hidden = !full;
     byId('graph-reheat').textContent = full ? 'Reflow layout' : 'Reheat layout';
-    byId('graph-freeze-label').textContent = full ? 'Freeze LOD motion' : 'Freeze simulation';
-    byId('graph-freeze-detail').textContent = full ? 'hold flow' : 'pause physics';
-    byId('graph-freeze').setAttribute('aria-label', full ? 'Freeze LOD motion' : 'Freeze simulation');
+    const freezeRow = byId('graph-freeze-row');
+    if (freezeRow) freezeRow.hidden = full;
+    const orbitPause = byId('graph-orbit-pause-row');
+    if (orbitPause) orbitPause.hidden = full;
     const style = byId('graph-style').value;
     const styleNotes = full ? GRAPH_LOD_STYLE_NOTES : GRAPH_STYLE_NOTES;
     byId('graph-style-note').textContent = styleNotes[style] || styleNotes.classic;
@@ -2324,7 +2318,7 @@
     byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'High quality'} · ${preset}`;
     const toggle = byId('graph-show-all');
     if (toggle) {
-      toggle.textContent = full ? 'High quality' : 'See all nodes · LOD';
+      toggle.textContent = 'All nodes';
       toggle.setAttribute('aria-pressed', String(full));
       toggle.title = full ? 'Return to the High quality graph' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entities and ${GRAPH_ALL_EDGE_LIMIT.toLocaleString()} relationships with progressive LOD rendering`;
     }
@@ -2378,10 +2372,9 @@
     byId('graph-spacetime-note').textContent = full
       ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
       : 'Drag and release a node to slingshot it into a new orbit.';
-    byId('graph-orbits-pause-label').textContent = full ? 'Pause relation motion' : 'Pause orbits';
-    byId('graph-orbits-pause-detail').textContent = full ? 'LOD' : 'physics';
-    byId('graph-orbits-pause').setAttribute('aria-label', full
-      ? 'Pause relation motion' : 'Pause orbital physics');
+    byId('graph-orbits-pause-label').textContent = 'Pause orbits';
+    byId('graph-orbits-pause-detail').textContent = 'physics';
+    byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
   }
 
   function setChoicePressed(selector, dataKey, selected) {
@@ -2624,7 +2617,7 @@
     const next = on === true;
     state.graphShowUnlinked = next;
     const control = byId('graph-show-unlinked');
-    control.textContent = next ? 'Hide unlinked nodes' : 'Show unlinked nodes';
+    control.textContent = 'Unlinked nodes';
     control.setAttribute('aria-pressed', String(next));
     control.title = next
       ? 'Hide entities that have no relations in this graph view'
@@ -2864,6 +2857,10 @@
       ...graphPresetTuning(preset),
       ...(view.tuning && typeof view.tuning === 'object' ? view.tuning : {}),
     });
+    syncGraphSpacetimeTuning(
+      view.spacetimeTuning && typeof view.spacetimeTuning === 'object'
+        ? view.spacetimeTuning : {}
+    );
     setGraphMinDegree(view.minDegree == null ? 1 : view.minDegree, false);
     setGraphDepth(view.depth == null ? 2 : view.depth, false);
     setGraphShowUnlinked(view.showUnlinked === true, false);
@@ -2893,6 +2890,9 @@
         graph.setGhosts(byId('graph-ghosts').checked);
       }, false, !state.graphFrozen);
       state.graphEngine.freeze(state.graphFrozen);
+    }
+    if (state.graphSpacetimeOverlay) {
+      state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
     }
     saveGraphPreferences();
     if (previousIncludeCode !== state.graphIncludeCode
@@ -2984,6 +2984,20 @@
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  }
+
+  function setGraphExportMenuOpen(open, restoreTriggerFocus = false) {
+    const trigger = byId('graph-export');
+    const menu = byId('graph-export-menu');
+    if (open) {
+      menu.hidden = false;
+      trigger.setAttribute('aria-expanded', 'true');
+      byId('graph-export-png').focus();
+      return;
+    }
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreTriggerFocus || menu.contains(document.activeElement)) trigger.focus();
+    menu.hidden = true;
   }
 
   function exportGraphJson() {
@@ -3139,6 +3153,18 @@
       && request.repo === (byId('graph-repo-filter').value || '').trim());
   }
 
+  function setGraphLoadControlsBusy(busy, disableRetry = true) {
+    const controls = disableRetry ? ['graph-show-all', 'graph-retry'] : ['graph-show-all'];
+    controls.forEach(id => {
+      const control = byId(id);
+      if (control) control.disabled = busy;
+    });
+    const retry = byId('graph-retry');
+    if (retry && ((busy && disableRetry) || !busy)) {
+      retry.textContent = busy ? 'Reloading graph…' : 'Reload data';
+    }
+  }
+
   function retryGraphLoad() {
     // A Retry click starts a new request rather than inheriting a timed-out promise. Keep its
     // pending state local to the button so rapid clicks cannot repeatedly cancel fresh work.
@@ -3198,6 +3224,17 @@
     state.graphLoadRepo = targetRepo;
     state.graphLoadController = controller;
     if (previousController && !previousController.signal.aborted) previousController.abort();
+    // The initial load remains retryable; once a user explicitly starts a replacement, lock
+    // the retry control until that transaction settles so repeated clicks cannot churn it.
+    setGraphLoadControlsBusy(true, force);
+    const oldEngine = state.graphEngine;
+    const oldOverlay = state.graphSpacetimeOverlay;
+    /* Loading is a transaction: freeze the committed renderer before fetching its replacement.
+       A failed request restores it; a successful request destroys it immediately before commit. */
+    if (state.graphEngine && typeof state.graphEngine.freeze === 'function') {
+      state.graphEngine.freeze(true);
+    }
+    if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(false);
     byId('graph-canvas').setAttribute('aria-busy', 'true');
     byId('graph-empty').hidden = false;
     byId('graph-empty').textContent = fullGraph
@@ -3210,6 +3247,48 @@
       const timeoutPromise = new Promise((_, reject) => {
         rejectTimeout = reject;
       });
+      // Transactional candidate tracking: host/engine/overlay live here until commit.
+      // destroyCandidate() is the single cleanup path for stale, error, and timeout outcomes.
+      const restoreCommittedRenderer = () => {
+        /* A newer request owns the committed renderer while it is replacing this one. Do not
+           thaw that renderer from a stale response; its own transaction will settle it. */
+        if (state.graphEngine !== oldEngine
+          || (state.graphLoadController && state.graphLoadController !== controller)) return;
+        if (oldEngine && typeof oldEngine.freeze === 'function') {
+          oldEngine.freeze(state.graphFrozen);
+        }
+        if (oldOverlay) oldOverlay.setEnabled(graphIsGalaxy());
+      };
+      let candidateHost = null;
+      let candidateEngine = null;
+      let candidateOverlay = null;
+      let candidateStats = null;
+      let candidateMetrics = null;
+      const destroyCandidate = () => {
+        if (!candidateEngine) {
+          candidateOverlay = null;
+          if (candidateHost && candidateHost.parentNode) {
+            candidateHost.remove();
+          }
+          candidateHost = null;
+          return;
+        }
+        // Keep committed references live: renderer callbacks close over candidateEngine.
+        // Nulling it here would make every post-readiness stats/metrics callback look stale.
+        if (state.graphEngine === candidateEngine) return;
+        if (candidateOverlay && typeof candidateOverlay.destroy === 'function') {
+          try { candidateOverlay.destroy(); } catch (_) { /* best-effort */ }
+        }
+        candidateOverlay = null;
+        if (typeof candidateEngine.destroy === 'function') {
+          try { candidateEngine.destroy(); } catch (_) { /* best-effort */ }
+        }
+        candidateEngine = null;
+        if (candidateHost && candidateHost.parentNode) {
+          candidateHost.remove();
+        }
+        candidateHost = null;
+      };
       const timeout = window.setTimeout(() => {
         if (!fullGraph && (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime)) {
           releaseGraphAssetsAttempt(graphAssetsPromise);
@@ -3245,7 +3324,10 @@
           ]),
           timeoutPromise,
         ]);
-        if (!isCurrentGraphLoad(request)) return;
+        if (!isCurrentGraphLoad(request)) {
+          restoreCommittedRenderer();
+          return;
+        }
         if (payload && payload.error) throw new Error(String(payload.error));
         const scene = payload.scene && typeof payload.scene === 'object' ? payload.scene : payload;
         const data = {
@@ -3260,25 +3342,8 @@
           metadata: scene.metadata || payload.metadata || {},
           layout_seed: scene.layout_seed ?? (scene.meta && scene.meta.layout_seed) ?? (payload.meta && payload.meta.layout_seed),
         };
-        state.graphData = data;
-        state.graphWorkspace = targetWorkspace;
-        state.graphDataMode = targetMode;
-        state.graphDataIncludeCode = targetIncludeCode;
-        state.graphDataShowUnlinked = targetShowUnlinked;
-        state.graphDataAsOf = targetAsOf;
-        state.graphDataRepo = targetRepo;
         const sceneMeta = scene.meta || payload.meta || {};
-        if (sceneMeta.degraded && sceneMeta.requested_include_code
-          && sceneMeta.include_code === false) {
-          state.graphIncludeCode = false;
-          state.graphDataIncludeCode = false;
-          setGraphLayers({ ...graphLayerState(), code: false });
-          saveGraphPreferences();
-          showNotice(sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter'
-            ? 'Code overlay skipped for this workspace. Choose a repository filter to include code relationships.'
-            : 'Code overlay was unavailable for this request. Showing the entity graph.');
-        }
-        state.graphMeta = {
+        const nextMeta = {
           ...sceneMeta,
           nodes_available: sceneMeta.nodes_available == null ? (sceneMeta.total_nodes == null
             ? data.nodes.length : sceneMeta.total_nodes) : sceneMeta.nodes_available,
@@ -3286,40 +3351,43 @@
             ? (sceneMeta.truncated == null ? fullGraph : !sceneMeta.truncated)
             : sceneMeta.nodes_complete,
         };
-        if (state.graphSpacetimeOverlay) {
-          state.graphSpacetimeOverlay.destroy();
-          state.graphSpacetimeOverlay = null;
-        }
-        if (state.graphEngine) state.graphEngine.destroy();
-        const galaxyQuality = fullGraph && graphIsGalaxy()
-          && data.nodes.some(node => node.anchor_role === 'community'
-            && (node.system_anchor_id !== undefined
-              || Number.isFinite(Number(node.galactic_radius))));
-        const graphFactory = galaxyQuality ? window.EngraphisGraph
-          : fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
+        const responseIncludeCode = sceneMeta.include_code === false ? false : targetIncludeCode;
+        const codeOverlayDegraded = targetIncludeCode && !responseIncludeCode;
+        const oldHost = byId('graph-canvas');
+        // oldEngine/oldOverlay were captured before the first await so the failure path
+        // can restore the exact committed renderer even when candidate setup never begins.
+        candidateHost = oldHost.cloneNode(false);
+        candidateHost.id = `graph-canvas-candidate-${request.id}`;
+        candidateHost.classList.add('graph-canvas-candidate');
+        candidateHost.setAttribute('aria-hidden', 'true');
+        oldHost.insertAdjacentElement('afterend', candidateHost);
+        const graphFactory = fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
         if (!graphFactory || typeof graphFactory.create !== 'function') {
           throw new Error(fullGraph
-            ? galaxyQuality ? 'Galaxy graph engine is unavailable'
-              : 'all-node graph engine asset is unavailable'
+            ? 'all-node graph engine asset is unavailable'
             : 'graph engine asset is unavailable');
         }
-        state.graphEngine = graphFactory.create(byId('graph-canvas'), {
-          renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview',
+        candidateEngine = graphFactory.create(candidateHost, {
+          renderMode: fullGraph ? 'all' : 'overview',
           onNodeClick: item => openGraphConnections(item),
-          onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
+          onBackgroundClick: () => candidateEngine.clearFocus(),
           onStats: stats => {
-            if (state.graphLoadRequest === request.id) graphStatsChanged(stats);
+            if (state.graphEngine === candidateEngine
+              && state.graphLoadRequest === request.id) graphStatsChanged(stats);
+            else if (state.graphLoadRequest === request.id) candidateStats = stats;
           },
           onMetrics: metrics => {
-            if (state.graphLoadRequest === request.id) graphMetricsChanged(metrics);
+            if (state.graphEngine === candidateEngine
+              && state.graphLoadRequest === request.id) graphMetricsChanged(metrics);
+            else if (state.graphLoadRequest === request.id) candidateMetrics = metrics;
           },
           onError: error => {
-            if (!fullGraph || state.graphLoadRequest !== request.id
-              || state.graphMode !== 'full') return;
+            if (state.graphEngine !== candidateEngine || !fullGraph
+              || state.graphLoadRequest !== request.id || state.graphMode !== 'full') return;
             byId('graph-empty').hidden = false;
             byId('graph-empty').textContent = error && error.code === 'GRAPH_CAPACITY'
-              ? `All nodes exceed renderer capacity. Narrow by repository or entity type. (${error.message})`
-              : 'The All Nodes renderer stopped. Choose Reload data to start a fresh worker.';
+              ? `All nodes exceed renderer capacity. Enter an exact repository filter or reduce the workspace graph. (${error.message})`
+              : 'The all-node renderer stopped. Choose Reload data to start a fresh worker.';
             byId('graph-canvas').setAttribute('aria-busy', 'false');
           },
           onCollapseChange: collapsed => {
@@ -3339,18 +3407,20 @@
             }
           },
         });
-        state.graphEngine.apply(graph => {
+        candidateEngine.apply(graph => {
           graph.setPreset(byId('graph-preset').value);
           graph.setStyle(byId('graph-style').value);
           graph.setColorBy(byId('graph-color').value);
           graph.setThemeColors(graphThemeColors());
-          applyGraphPalette(byId('graph-palette').value);
+          const paletteName = byId('graph-palette').value;
+          graph.setPalette(paletteName);
+          if (paletteName === 'custom') graph.setTypeColors(GRAPH_CUSTOM_PALETTE);
           graph.setSettings({
             ...graphTuningEngineSettings(),
             ...graphSpacetimeEngineSettings(),
             flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
             labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
-            frozen: state.graphFrozen,
+            frozen: fullGraph ? false : state.graphFrozen,
           });
           graph.setScope(graphScope());
           graph.setLayers(graphLayerState());
@@ -3361,31 +3431,96 @@
           graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
-        if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime
+        candidateEngine.setData(data);
+        candidateEngine.freeze(fullGraph ? false : state.graphFrozen);
+        if (!fullGraph && window.EngraphisSpacetime
           && window.EngraphisSpacetime.create) {
-          state.graphSpacetimeOverlay = window.EngraphisSpacetime.create(
-            byId('graph-canvas'), state.graphEngine
+          candidateOverlay = window.EngraphisSpacetime.create(
+            candidateHost, candidateEngine
           );
-          state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+          candidateOverlay.setEnabled(graphIsGalaxy());
         }
-        state.graphEngine.setData(data);
-        state.graphEngine.freeze(state.graphFrozen);
+        if (typeof candidateEngine.whenReady === 'function') {
+          await Promise.race([candidateEngine.whenReady(), timeoutPromise]);
+          if (!isCurrentGraphLoad(request)) {
+            destroyCandidate();
+            restoreCommittedRenderer();
+            return;
+          }
+        }
+        oldHost.id = `graph-canvas-retired-${request.id}`;
+        candidateHost.id = 'graph-canvas';
+        candidateHost.classList.remove('graph-canvas-candidate');
+        candidateHost.removeAttribute('aria-hidden');
+        oldHost.replaceWith(candidateHost);
+        candidateHost = null;
+        state.graphEngine = candidateEngine;
+        state.graphSpacetimeOverlay = candidateOverlay;
+        state.graphData = data;
+        state.graphWorkspace = targetWorkspace;
+        state.graphDataMode = targetMode;
+        state.graphDataIncludeCode = responseIncludeCode;
+        state.graphDataShowUnlinked = targetShowUnlinked;
+        state.graphDataAsOf = targetAsOf;
+        state.graphDataRepo = targetRepo;
+        state.graphMeta = nextMeta;
+        if (codeOverlayDegraded) {
+          state.graphIncludeCode = false;
+          const layers = { ...graphLayerState(), code: false };
+          setGraphLayers(layers);
+          candidateEngine.setLayers(layers);
+          clearGraphSavedView();
+          saveGraphPreferences();
+          showNotice(sceneMeta.degraded_reason === 'code_overlay_requires_repository_filter'
+            ? 'Code overlay needs a repository filter; showing entity relationships only.'
+            : 'Code overlay is unavailable; showing entity relationships only.');
+        }
+        if (oldOverlay) oldOverlay.destroy();
+        if (oldEngine) oldEngine.destroy();
         byId('graph-empty').hidden = Boolean(data.nodes.length);
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
         updateGraphFacts(data);
+        // Candidate stats emitted before commit are retained, then published only after the
+        // renderer transaction commits. Raw payload counts are wrong when a frozen renderer
+        // has already applied repository, layer, ghost, or collapse visibility filters.
+        graphStatsChanged(candidateStats || { nodes: data.nodes.length, links: data.links.length });
+        if (candidateMetrics) graphMetricsChanged(candidateMetrics);
         updateGraphLayerCounts(data, scene.layers || payload.layers);
       } catch (error) {
-        if (!isCurrentGraphLoad(request)) return;
+        if (!isCurrentGraphLoad(request)) {
+          destroyCandidate();
+          restoreCommittedRenderer();
+          return;
+        }
+        destroyCandidate();
         byId('graph-empty').hidden = false;
         byId('graph-empty').textContent = error && error.name === 'AbortError'
-          ? `${fullGraph ? 'All-node graph' : 'High-quality graph'} loading timed out. Choose Retry to try again.`
+          ? `${fullGraph ? 'All-node graph' : 'High-quality graph'} loading timed out. Choose Reload data to try again.`
           : fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
-            ? `All nodes exceed the 20,000-entity or 200,000-relationship capacity. Narrow by repository or entity type. (${error.message})`
-          : `Graph unavailable: ${error.message}`;
+            ? `All nodes exceed the server capacity. Enter an exact repository filter or reduce the workspace graph. (${error.message})`
+          : `Graph unavailable: ${error.message}. Choose Reload data to try again.`;
+        if (state.graphData && state.graphDataMode !== targetMode) {
+          state.graphMode = state.graphDataMode;
+          updateGraphModeControls();
+        }
+        // Restore the committed renderer's freeze/overlay state. The old engine survived
+        // because we never mutated state.graphEngine on the failure path.
+        if (oldEngine && typeof oldEngine.freeze === 'function') {
+          oldEngine.freeze(state.graphFrozen);
+        }
+        if (oldOverlay) {
+          oldOverlay.setEnabled(graphIsGalaxy());
+        }
       } finally {
+        // Safety net: if control left the try/catch without committing or cleaning up
+        // (e.g. an unexpected throw in finally itself), ensure no candidate leaks.
+        destroyCandidate();
         window.clearTimeout(timeout);
-        if (isCurrentGraphLoad(request)) byId('graph-canvas').setAttribute('aria-busy', 'false');
+        if (state.graphLoadRequest === request.id && state.graphLoadController === controller) {
+          byId('graph-canvas').setAttribute('aria-busy', 'false');
+          setGraphLoadControlsBusy(false);
+        }
         if (state.graphLoadController === controller) state.graphLoadController = null;
       }
     })();
@@ -4586,7 +4721,6 @@
   byId('graph-show-all').addEventListener('click', () => {
     cancelGraphRepositoryReload();
     state.graphMode = state.graphMode === 'full' ? 'overview' : 'full';
-    updateGraphModeControls();
     loadGraph({ force: true });
   });
   byId('graph-tune-min-degree').addEventListener('input', event => {
@@ -4671,20 +4805,32 @@
     if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
     saveGraphPreferences();
   });
+  const graphExportWrap = byId('graph-export').closest('.graph-export-wrap');
   byId('graph-export').addEventListener('click', () => {
-    const menu = byId('graph-export-menu');
-    const open = menu.hidden;
-    menu.hidden = !open;
-    byId('graph-export').setAttribute('aria-expanded', String(open));
+    setGraphExportMenuOpen(byId('graph-export-menu').hidden);
+  });
+  graphExportWrap.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || byId('graph-export-menu').hidden) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setGraphExportMenuOpen(false, true);
+  });
+  document.addEventListener('focusin', event => {
+    if (!byId('graph-export-menu').hidden && !graphExportWrap.contains(event.target)) {
+      setGraphExportMenuOpen(false);
+    }
+  });
+  document.addEventListener('pointerdown', event => {
+    if (!byId('graph-export-menu').hidden && !graphExportWrap.contains(event.target)) {
+      setGraphExportMenuOpen(false);
+    }
   });
   byId('graph-export-png').addEventListener('click', () => {
-    byId('graph-export-menu').hidden = true;
-    byId('graph-export').setAttribute('aria-expanded', 'false');
+    setGraphExportMenuOpen(false, true);
     exportGraphPng();
   });
   byId('graph-export-json').addEventListener('click', () => {
-    byId('graph-export-menu').hidden = true;
-    byId('graph-export').setAttribute('aria-expanded', 'false');
+    setGraphExportMenuOpen(false, true);
     exportGraphJson();
   });
   byId('graph-connections-close').addEventListener('click', closeGraphConnections);
