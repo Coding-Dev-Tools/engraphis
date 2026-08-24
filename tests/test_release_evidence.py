@@ -498,6 +498,29 @@ def test_release_evidence_rejects_dependency_graph_entry_without_component(tmp_p
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_duplicate_dependency_graph_ref(tmp_path):
+    """Repeated graph refs must not overwrite an earlier contradictory edge."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/ghost-package@9.9"],
+        },
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="duplicate ref"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_unreachable_declared_dependency(tmp_path):
     """A declared dependency present in the SBOM but not reachable from the
     project root through the dependency graph must fail."""

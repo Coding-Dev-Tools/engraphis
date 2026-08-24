@@ -436,7 +436,12 @@ def _validate_python_sbom_dependency_closure(
             not isinstance(child, str) or not child for child in children
         ):
             raise EvidenceError("SBOM dependency graph dependsOn must list string refs")
-        edges[entry["ref"]] = children
+        ref = entry["ref"]
+        if ref in edges:
+            raise EvidenceError(
+                "SBOM dependency graph contains duplicate ref: " + ref
+            )
+        edges[ref] = children
     metadata_component = document.get("metadata", {}).get("component")
     root_refs = _python_component_refs(metadata_component)
     known_refs = set(root_refs)
