@@ -63,9 +63,9 @@ def test_dependency_automation_covers_every_root_ecosystem():
     )
     package = json.loads(_text("package.json"))
     lock = json.loads(_text("package-lock.json"))
-    assert package["devDependencies"]["impeccable"] == "3.5.0"
-    assert lock["packages"][""]["devDependencies"]["impeccable"] == "3.5.0"
-    assert lock["packages"]["node_modules/impeccable"]["version"] == "3.5.0"
+    assert package["devDependencies"]["impeccable"] == "3.6.0"
+    assert lock["packages"][""]["devDependencies"]["impeccable"] == "3.6.0"
+    assert lock["packages"]["node_modules/impeccable"]["version"] == "3.6.0"
 
 
 def test_playwright_server_never_opens_the_developers_configured_database():
