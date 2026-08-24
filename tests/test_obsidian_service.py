@@ -124,6 +124,30 @@ def test_preview_defers_missing_rows_when_manifest_is_truncated(monkeypatch):
         service.close()
 
 
+def test_late_manifest_truncation_marks_import_partial(monkeypatch):
+    service = _service()
+    try:
+        original = ObsidianImporter._all_source_items
+        calls = 0
+
+        def _late_truncation(self, *, vault_id, states=None):
+            nonlocal calls
+            calls += 1
+            items, complete = original(self, vault_id=vault_id, states=states)
+            return items, complete if calls == 1 else False
+
+        monkeypatch.setattr(ObsidianImporter, "_all_source_items", _late_truncation)
+        _, report = _import(
+            service,
+            [("A.md", b"# A\nSee [[B]].\n"), ("B.md", b"# B\n")],
+        )
+
+        assert calls >= 2
+        assert report["state"] == "partial"
+    finally:
+        service.close()
+
+
 def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guards(monkeypatch):
     service = _service()
     try:

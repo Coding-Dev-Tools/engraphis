@@ -409,11 +409,13 @@ class ObsidianImporter:
             # An incomplete scan must not retire a valid edge merely because its target
             # was hidden by a transient filesystem or scan-budget failure.
             link_warnings: list[dict] = []
+            links_manifest_complete = True
             if can_finalize_missing:
-                link_warnings = self._reconcile_links(
+                link_warnings, links_manifest_complete = self._reconcile_links(
                     scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
                 )
                 self._persist_link_warnings(job_id, link_warnings)
+                manifest_complete = manifest_complete and links_manifest_complete
             outcomes.extend(link_warnings)
             if (
                 scan.rejected or not scan.complete or unreadable_directories
@@ -1050,7 +1052,7 @@ class ObsidianImporter:
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Resolve derived links in bounded, cancellable, replay-safe batches."""
         items, manifest_complete = self._all_source_items(
             vault_id=vault_id,
@@ -1060,7 +1062,7 @@ class ObsidianImporter:
             # A manifest beyond the paging bound is an incomplete view of the source;
             # retiring derived edges against it could kill links whose targets were
             # simply invisible. The run is already headed to partial upstream.
-            return []
+            return [], False
         memory_by_path = {
             str(item["relative_path"]): str(item["memory_id"])
             for item in items if item.get("memory_id")
@@ -1228,7 +1230,7 @@ class ObsidianImporter:
                 self.store.conn.rollback()
             raise
         flush()
-        return warnings
+        return warnings, True
 
     def _persist_link_warnings(self, job_id: str, warnings: list[dict]) -> None:
         """Attach reconciliation warnings to the durable polling rows."""
