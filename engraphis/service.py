@@ -8606,13 +8606,65 @@ class MemoryService:
             "ON touching_edge.workspace_id=? "
             "AND (touching_edge.src=selected_entity.id "
             "OR touching_edge.dst=selected_entity.id) "
+        )
+        # A live scene must classify entities from the same world/system-time edge
+        # population used by the later edge query. Keep the historical joins intact
+        # for time-travel scenes so closed relations can still identify ghost endpoints.
+        if not include_history:
+            touching_sql += (
+                "AND (touching_edge.valid_from IS NULL "
+                "OR touching_edge.valid_from<=?) "
+                "AND (touching_edge.valid_to IS NULL "
+                "OR ?<touching_edge.valid_to "
+                "OR (touching_edge.valid_to_recorded_at IS NOT NULL "
+                "AND ?<touching_edge.valid_to_recorded_at)) "
+                "AND (touching_edge.ingested_at IS NULL "
+                "OR touching_edge.ingested_at<=?) "
+                "AND (touching_edge.expired_at IS NULL "
+                "OR ?<touching_edge.expired_at) "
+            )
+            touching_params: list[Any] = [wid, t, t, t, known_t, known_t]
+        else:
+            touching_params = [wid]
+        touching_sql += (
             "LEFT JOIN edge_supports touching_support "
             "ON touching_support.edge_id=touching_edge.id "
+        )
+        if not include_history:
+            touching_sql += (
+                "AND (touching_support.valid_from IS NULL "
+                "OR touching_support.valid_from<=?) "
+                "AND (touching_support.valid_to IS NULL "
+                "OR ?<touching_support.valid_to "
+                "OR (touching_support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<touching_support.valid_to_recorded_at)) "
+                "AND (touching_support.ingested_at IS NULL "
+                "OR touching_support.ingested_at<=?) "
+                "AND (touching_support.expired_at IS NULL "
+                "OR ?<touching_support.expired_at) "
+            )
+            touching_params.extend((t, t, t, known_t, known_t))
+        touching_sql += (
             "LEFT JOIN memories touching_memory "
             "ON touching_memory.id=touching_support.memory_id "
-            "WHERE selected_entity.workspace_id=? "
         )
-        touching_params: list[Any] = [wid, wid]
+        if not include_history:
+            touching_sql += (
+                "AND touching_memory.workspace_id=? "
+                "AND (touching_memory.valid_from IS NULL "
+                "OR touching_memory.valid_from<=?) "
+                "AND (touching_memory.valid_to IS NULL "
+                "OR ?<touching_memory.valid_to "
+                "OR (touching_memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<touching_memory.valid_to_recorded_at)) "
+                "AND (touching_memory.ingested_at IS NULL "
+                "OR touching_memory.ingested_at<=?) "
+                "AND (touching_memory.expired_at IS NULL "
+                "OR ?<touching_memory.expired_at) "
+            )
+            touching_params.extend((wid, t, t, t, known_t, known_t))
+        touching_sql += "WHERE selected_entity.workspace_id=? "
+        touching_params.append(wid)
         if repo_id:
             touching_sql += (
                 "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
@@ -8629,20 +8681,33 @@ class MemoryService:
                 touching_sql += f"AND selected_entity.etype IN ({marks}) "
                 touching_params.extend(clean_types)
         # Private-only relation histories must not consume the public candidate cap.
-        # Keep the workspace-wide scan so a shared entity touched by an unrelated
-        # session-private edge remains hidden, but return only entities with no edge
-        # history or at least one non-session, same-workspace support. The grouped
-        # public-edge test also handles mixed public/private evidence correctly.
-        touching_sql += (
-            "GROUP BY selected_entity.id "
-            "HAVING COUNT(touching_edge.id)=0 OR MAX(CASE "
-            "WHEN touching_support.edge_id IS NULL THEN 1 "
-            "WHEN touching_memory.id IS NOT NULL "
-            "AND touching_memory.workspace_id=? "
-            "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
-            "THEN 1 ELSE 0 END)=1 "
-            "ORDER BY selected_entity.id LIMIT ?"
-        )
+        # Keep the workspace-wide scan for history views so a shared entity touched by
+        # an unrelated session-private edge remains hidden and ghost endpoints survive.
+        touching_sql += "GROUP BY selected_entity.id HAVING "
+        if include_history:
+            touching_sql += (
+                "COUNT(touching_edge.id)=0 OR MAX(CASE "
+                "WHEN touching_support.edge_id IS NULL THEN 1 "
+                "WHEN touching_memory.id IS NOT NULL "
+                "AND touching_memory.workspace_id=? "
+                "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
+                "THEN 1 ELSE 0 END)=1 "
+            )
+        else:
+            touching_sql += (
+                "COUNT(touching_edge.id)>0 AND MAX(CASE "
+                "WHEN NOT EXISTS (SELECT 1 FROM edge_supports touching_any_support "
+                "WHERE touching_any_support.edge_id=touching_edge.id) THEN 1 "
+                "WHEN touching_support.edge_id IS NOT NULL "
+                "AND touching_memory.id IS NOT NULL "
+                "AND touching_memory.workspace_id=? "
+                "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
+                "THEN 1 ELSE 0 END)=1 "
+            )
+        touching_sql += "ORDER BY selected_entity.id LIMIT ?"
+        # The cap applies to connected public candidates; isolated rows are paged and
+        # bounded by the entity query below, while stale/private history stays available
+        # to the entity privacy predicate without consuming this live cap.
         touching_params.extend((wid, touching_entity_cap + 1))
         touching_rows = self.store.conn.execute(
             touching_sql, touching_params,
@@ -8674,10 +8739,11 @@ class MemoryService:
             raise ValidationError(
                 "graph analysis exceeds the entity candidate limit; filter by repository"
             )
-        # The cap query also returns unlinked entities so they participate in the
-        # bounded candidate count, but only entities with an actual relation history
+        # History-mode cap rows also include unlinked entities so they participate in
+        # the bounded candidate count. Only entities with an actual relation history
         # belong in this set; otherwise an isolated public node would be filtered out
-        # by the later privacy projection.
+        # by the later privacy projection. Live rows are connected-only because the
+        # unlinked population is bounded by the paged entity query below.
         historical_touching_ids = {
             str(row["id"]) for row in touching_rows
             if row["id"] and int(row["touching_count"] or 0) > 0
@@ -8710,23 +8776,70 @@ class MemoryService:
         # Match the privacy classification above in the entity query itself. A private-only
         # touched entity must not look like an unlinked public node simply because the
         # bounded candidate scan intentionally omits private rows from its result set.
+        entity_sql += " AND (NOT EXISTS (SELECT 1 FROM edges hidden_edge "
         entity_sql += (
-            " AND (NOT EXISTS (SELECT 1 FROM edges hidden_edge "
             "WHERE hidden_edge.workspace_id=? "
             "AND (hidden_edge.src=entity.id OR hidden_edge.dst=entity.id)) "
             "OR EXISTS (SELECT 1 FROM edges public_edge "
-            "LEFT JOIN edge_supports public_support "
-            "ON public_support.edge_id=public_edge.id "
-            "LEFT JOIN memories public_memory "
-            "ON public_memory.id=public_support.memory_id "
-            "WHERE public_edge.workspace_id=? "
-            "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
-            "AND (public_support.edge_id IS NULL OR ("
-            "public_memory.workspace_id=? "
-            "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
-            ")"
         )
-        entity_params.extend((wid, wid, wid))
+        entity_params.extend((wid,))
+        if not include_history:
+            entity_sql += (
+                "WHERE public_edge.workspace_id=? "
+                "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
+                "AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) "
+                "AND (public_edge.valid_to IS NULL OR ?<public_edge.valid_to "
+                "OR (public_edge.valid_to_recorded_at IS NOT NULL "
+                "AND ?<public_edge.valid_to_recorded_at)) "
+                "AND (public_edge.ingested_at IS NULL OR public_edge.ingested_at<=?) "
+                "AND (public_edge.expired_at IS NULL OR ?<public_edge.expired_at) "
+                "AND (NOT EXISTS (SELECT 1 FROM edge_supports public_any_support "
+                "WHERE public_any_support.edge_id=public_edge.id) "
+                "OR EXISTS (SELECT 1 FROM edge_supports public_support "
+                "JOIN memories public_memory "
+                "ON public_memory.id=public_support.memory_id "
+                "WHERE public_support.edge_id=public_edge.id "
+                "AND (public_support.valid_from IS NULL "
+                "OR public_support.valid_from<=?) "
+                "AND (public_support.valid_to IS NULL OR ?<public_support.valid_to "
+                "OR (public_support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<public_support.valid_to_recorded_at)) "
+                "AND (public_support.ingested_at IS NULL "
+                "OR public_support.ingested_at<=?) "
+                "AND (public_support.expired_at IS NULL "
+                "OR ?<public_support.expired_at) "
+                "AND public_memory.workspace_id=? "
+                "AND (public_memory.valid_from IS NULL "
+                "OR public_memory.valid_from<=?) "
+                "AND (public_memory.valid_to IS NULL "
+                "OR ?<public_memory.valid_to "
+                "OR (public_memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<public_memory.valid_to_recorded_at)) "
+                "AND (public_memory.ingested_at IS NULL "
+                "OR public_memory.ingested_at<=?) "
+                "AND (public_memory.expired_at IS NULL "
+                "OR ?<public_memory.expired_at) "
+                "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
+            )
+            entity_params.extend((
+                wid, t, t, t, known_t, known_t,
+                t, t, t, known_t, known_t,
+                wid, t, t, t, known_t, known_t,
+            ))
+        else:
+            entity_sql += (
+                "LEFT JOIN edge_supports public_support "
+                "ON public_support.edge_id=public_edge.id "
+                "LEFT JOIN memories public_memory "
+                "ON public_memory.id=public_support.memory_id "
+                "WHERE public_edge.workspace_id=? "
+                "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
+                "AND (public_support.edge_id IS NULL OR ("
+                "public_memory.workspace_id=? "
+                "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
+            )
+            entity_params.extend((wid, wid))
+        entity_sql += ")"
         # Page until the cap is reached after session-scope pruning so private
         # evidence cannot crowd out public entities in the candidate set.
         entity_rows = []

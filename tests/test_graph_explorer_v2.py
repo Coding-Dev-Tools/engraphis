@@ -3884,6 +3884,31 @@ def test_live_visibility_cap_ignores_closed_relations(monkeypatch):
     assert {edge["id"] for edge in scene["edges"]} == {"edge_bg"}
 
 
+def test_live_entity_cap_ignores_closed_edge_only_entities(monkeypatch):
+    """Closed-only endpoints must not consume the live entity candidate cap."""
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    old_source = service.store.upsert_entity(Node(
+        id="old-source", name="Old Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    old_target = service.store.upsert_entity(Node(
+        id="old-target", name="Old Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_old", src=old_source, dst=old_target, relation="old",
+        workspace_id=workspace_id,
+    ))
+    service.store.invalidate_edge("edge_old", at=time.time())
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_ENTITIES", 3)
+
+    scene = service.graph_scene(workspace="acme")
+
+    assert {node["label"] for node in scene["nodes"]} == {"Alpha", "Beta", "Gamma"}
+    assert {edge["id"] for edge in scene["edges"]} == {"edge_ab", "edge_bg"}
+
+
 def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
     """Private-only groups are filtered before the public visibility cap."""
     service = MemoryService.create(":memory:", graph_extractor="none")
