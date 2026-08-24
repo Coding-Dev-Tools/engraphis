@@ -1,4 +1,4 @@
-﻿# Engraphis
+# Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
@@ -13,8 +13,10 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
   <br>
-  <sup>Knowledge Graph Â· run <code>engraphis-dashboard</code> to see it live</sup>
+  <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
+
+**Grounded, not guessed.** Memory with receipts. Local by default. [Explore the proof gallery](https://github.com/Coding-Dev-Tools/engraphis/tree/main/docs/advertising) or [read the campaign guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/advertising/campaign.md).
 
 ---
 
@@ -69,9 +71,9 @@ its counting boundary explicit.
 
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
-| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens â†’ structure-aware chunks: **214.3** tokens | **526.0 fewer tokens per question** (**71.1% lower**, about **3.5Ã— smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
-| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens â†’ chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8Ã— smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
-| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens â†’ compact proxy: **10,202** tokens | **13,608 proxy tokens avoided** (**57.15% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.3** tokens | **526.0 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
+| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,202** tokens | **13,608 proxy tokens avoided** (**57.15% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
@@ -91,7 +93,7 @@ savings.
 
 The measures are deliberately separate and **must not be added together**: chunking counts the
 content of retrieved memory records before `ContextPacker`, whereas compact recall counts a
-serialized JSON-shape payload proxy. â€œTokens to evidenceâ€ is the size of the smallest
+serialized JSON-shape payload proxy. “Tokens to evidence” is the size of the smallest
 retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
 accuracy. Chunking creates more focused stored records, so this is a context-efficiency result,
 not a storage-reduction claim.
@@ -193,7 +195,7 @@ for the short version of how much less history an agent has to carry.
 
 | Agent need | What Engraphis changes |
 |---|---|
-| Remember a project across sessions | Stores typed memory in a `workspace â†’ repo â†’ session` hierarchy and provides a last-session handoff. |
+| Remember a project across sessions | Stores typed memory in a `workspace → repo → session` hierarchy and provides a last-session handoff. |
 | Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal; `fast` can skip graph traversal for small or latency-sensitive vaults. |
 | Know what is true now and what changed | Preserves bi-temporal history and supersession chains instead of silently overwriting a fact. |
 | Avoid confident guesses | Returns cited evidence or explicitly abstains when support is too weak. |
@@ -207,7 +209,7 @@ signup, or API key and stays in a SQLite file on your machine.
 
 **Ledger** is the primary local interface for recall, memories, graph exploration, provenance,
 workspaces, and manual consolidation. **Classic** preserves the former full tool suite; both use
-the same local data. Switch in **Manage â†’ Settings â†’ Interface** (Ledger) or **Settings â†’
+the same local data. Switch in **Manage → Settings → Interface** (Ledger) or **Settings →
 Appearance & Engine** (Classic).
 
 ### Start it on every platform
@@ -216,7 +218,7 @@ Appearance & Engine** (Classic).
 |----------|-----|
 | **Windows** | Double-click **Engraphis Dashboard** on your Desktop or Start Menu (install: `engraphis-dashboard --install-shortcuts`) |
 | **macOS** | Double-click **Engraphis Dashboard.app** on your Desktop (install: same command) |
-| **Linux** | Desktop entry in Applications â†’ Development (GNOME/KDE/etc.) |
+| **Linux** | Desktop entry in Applications → Development (GNOME/KDE/etc.) |
 | **Docker** | `docker compose up`: see `docker-compose.yml` for the one-command deployment |
 | **Any** | `engraphis-dashboard` in a terminal |
 
@@ -250,7 +252,7 @@ SQLite, local embeddings, and `numpy` only.
 
 The memory engine, embeddings, conflict resolution, and recall stay local without an LLM. An
 explicitly configured provider adds structured extraction, cited synthesis, consolidation, and
-retention supervision. Configure it in **Settings â†’ Connect an LLM**. The activity view records
+retention supervision. Configure it in **Settings → Connect an LLM**. The activity view records
 outcomes, never keys, prompts, or raw provider responses. See the
 [LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md) for setup and privacy choices.
 
@@ -341,14 +343,14 @@ available, creates a private key sidecar, and can be overridden with `--no-encry
 
 ```bash
 pip install "engraphis[server]"
-engraphis-dashboard                   # â†’ http://127.0.0.1:8700
-engraphis-dashboard --install-shortcuts   # â†’ Desktop + Start Menu icons
+engraphis-dashboard                   # → http://127.0.0.1:8700
+engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 ```
 
 ### Docker
 
 ```bash
-docker compose up                     # â†’ http://127.0.0.1:8700
+docker compose up                     # → http://127.0.0.1:8700
 ```
 
 For Docker Compose persistence and loopback-port configuration, see the
@@ -511,7 +513,7 @@ Engraphis separates automatic write resolution from explicit human governance:
 | `retire` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
 | `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; source episodes remain live |
 
-Manual Nâ†’1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
+Manual N→1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
 
 ```python
 a = mem.remember("Deploys happen Friday at 3pm.", workspace="acme")
@@ -559,20 +561,20 @@ when you are ready to evaluate the service boundary and billing options.
 
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
-| Dashboard WebUI (with built-in inspector) | âœ“ | âœ“ | âœ“ |
-| Memory engine + Smart MCP (Classic 35-tool compatibility) | âœ“ | âœ“ | âœ“ |
-| Version-chain diffs, offline knowledge graph | âœ“ | âœ“ | âœ“ |
-| Manual local consolidation (dry-run by default) | âœ“ | âœ“ | âœ“ |
-| Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | âœ“ | âœ“ | âœ“ |
-| Hosted Cloud Sync | | âœ“ | âœ“ |
-| Hosted Analytics | | âœ“ | âœ“ |
-| Hosted Auto Consolidation + retention policy | | âœ“ | âœ“ |
-| Hosted Auto Dreaming + managed proposals | | âœ“ | âœ“ |
-| Priority support | | âœ“ | âœ“ |
-| Hosted multi-user dashboard: invitations, logins, roles, seat management | | | âœ“ |
-| Hosted Team audit log + CSV export | | | âœ“ |
-| 72-hour pending invitations (resend/revoke) | | | âœ“ |
-| Scoped, expiring per-user agent and sync tokens | | | âœ“ |
+| Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 35-tool compatibility) | ✓ | ✓ | ✓ |
+| Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
+| Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
+| Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
+| Hosted Cloud Sync | | ✓ | ✓ |
+| Hosted Analytics | | ✓ | ✓ |
+| Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
+| Hosted Auto Dreaming + managed proposals | | ✓ | ✓ |
+| Priority support | | ✓ | ✓ |
+| Hosted multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
+| Hosted Team audit log + CSV export | | | ✓ |
+| 72-hour pending invitations (resend/revoke) | | | ✓ |
+| Scoped, expiring per-user agent and sync tokens | | | ✓ |
 
 ---
 
@@ -638,7 +640,7 @@ When using `ENGRAPHIS_DB_KEY_FILE`, provision a regular secret file readable onl
 service identity. Engraphis rejects links, reparse points, hard links, malformed text, and
 oversized key files rather than following an unexpected filesystem object.
 
-> An existing plaintext database cannot be opened with a key: migrate it (dump â†’ import
+> An existing plaintext database cannot be opened with a key: migrate it (dump → import
 > into a fresh keyed DB). See `.env.example` for all encryption options.
 
 ---
@@ -662,7 +664,7 @@ set `ENGRAPHIS_EMBED_MODEL=local:/absolute/model/path`, or explicitly set
 `ENGRAPHIS_EMBED_MODEL` to an empty value to use dependency-free deterministic hashing in
 lexical degraded mode.
 
-The dashboardâ€™s **Import local documents** flow offers the same preview, target scope, source
+The dashboard’s **Import local documents** flow offers the same preview, target scope, source
 label, conflict policy, cancellation, and resumable progress. Re-imports are idempotent,
 preserve temporal history, and report source removals without hard-deleting memories. Obsidian
 remains the rich Markdown adapter for frontmatter, aliases, wikilinks, and attachment references:
@@ -719,8 +721,8 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_ALLOW_AUTOMATIC_CRITICAL_RETENTION` | `false` | Opt in only when an LLM supervisor may automatically assign the long-lived `critical` class; explicit user-selected critical retention is unaffected |
 | `ENGRAPHIS_WHISPER_MODEL` | Not set | Enables local faster-whisper audio/video transcription |
 | `ENGRAPHIS_POSTGRES_DSN` | Not set | CLI-only PostgreSQL source; used for the connection and never stored |
-| `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1â€“120) |
-| `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1â€“300000) |
+| `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
+| `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1–300000) |
 | `ENGRAPHIS_GRAPH_TOKEN` | Not set | Bearer token for `engraphis-graph-server`; required off-loopback |
 | `ENGRAPHIS_GRAPH_HOST` / `ENGRAPHIS_GRAPH_PORT` | `127.0.0.1` / `8720` | Read-only graph/recall server bind address |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
@@ -751,28 +753,28 @@ Engraphis load it.
 
 ```
 engraphis/
-â”œâ”€â”€ engraphis/
-â”‚   â”œâ”€â”€ core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
-â”‚   â”œâ”€â”€ backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
-â”‚   â”œâ”€â”€ factory.py           # outer v2 composition root; selects and injects concrete backends
-â”‚   â”œâ”€â”€ service.py           # validated MemoryService facade
-â”‚   â”œâ”€â”€ mcp_server.py        # Smart MCP gateway + 35-tool Classic compatibility server
-â”‚   â”œâ”€â”€ dashboard_app.py     # dashboard WebUI (FastAPI)
-â”‚   â”œâ”€â”€ dashboard_assets/    # primary Ledger interface + graph engine
-â”‚   â”œâ”€â”€ classic_assets/      # selectable full operator dashboard backup
-â”‚   â”œâ”€â”€ read_only_api.py     # token-protected recall/repository-graph HTTP surface
-â”‚   â”œâ”€â”€ hosted_client.py     # hosted URLs, plan labels, and endpoint validation only
-â”‚   â”œâ”€â”€ licensing.py         # compatibility facade for hosted presentation metadata
-â”‚   â”œâ”€â”€ cloud_session.py     # rotating hosted customer-session client
-â”‚   â”œâ”€â”€ cloud_features.py    # consented managed-feature protocol client
-â”‚   â”œâ”€â”€ config.py / app.py   # env settings / REST server
-â”‚   â””â”€â”€ static/              # compatibility dashboard asset paths
-â”œâ”€â”€ eval/                    # offline retrieval eval harness + datasets
-â”œâ”€â”€ tests/                   # offline-first pytest suite and release/security contracts
-â”œâ”€â”€ scripts/                 # dashboard, server, graph, CLI, connect, update, consolidation, sync
-â”œâ”€â”€ docs/                    # product, API, hosting, sync, and provider guides
-â”œâ”€â”€ Dockerfile / docker-compose.yml
-â””â”€â”€ pyproject.toml
+├── engraphis/
+│   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
+│   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
+│   ├── factory.py           # outer v2 composition root; selects and injects concrete backends
+│   ├── service.py           # validated MemoryService facade
+│   ├── mcp_server.py        # Smart MCP gateway + 35-tool Classic compatibility server
+│   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
+│   ├── dashboard_assets/    # primary Ledger interface + graph engine
+│   ├── classic_assets/      # selectable full operator dashboard backup
+│   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
+│   ├── hosted_client.py     # hosted URLs, plan labels, and endpoint validation only
+│   ├── licensing.py         # compatibility facade for hosted presentation metadata
+│   ├── cloud_session.py     # rotating hosted customer-session client
+│   ├── cloud_features.py    # consented managed-feature protocol client
+│   ├── config.py / app.py   # env settings / REST server
+│   └── static/              # compatibility dashboard asset paths
+├── eval/                    # offline retrieval eval harness + datasets
+├── tests/                   # offline-first pytest suite and release/security contracts
+├── scripts/                 # dashboard, server, graph, CLI, connect, update, consolidation, sync
+├── docs/                    # product, API, hosting, sync, and provider guides
+├── Dockerfile / docker-compose.yml
+└── pyproject.toml
 ```
 
 New capability belongs in the v2 path (`engraphis/core/`, `engraphis/backends/`, and
