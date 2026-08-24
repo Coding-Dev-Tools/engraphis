@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260822-every-17';
+  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260823-every-19';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;
@@ -115,21 +115,22 @@
     canvas.className = 'engraphis-all-canvas';
     labels.className = 'engraphis-all-labels';
     underlay.className = 'engraphis-all-underlay';
-    canvas.setAttribute('aria-hidden', 'true');
+    /* The GL canvas carries the scene's role/label (set in handleWorkerMessage),
+       so it must stay in the accessibility tree; only the label/underlay layers
+       are decorative. */
     labels.setAttribute('aria-hidden', 'true');
     underlay.setAttribute('aria-hidden', 'true');
+    /* Screen-reader surface: the live region announces the scene summary and hovered
+       entity, and the host carries a descriptive label. Declared before first use. */
+    const liveRegion = document.createElement('div');
+    liveRegion.className = 'sr-only';
+    liveRegion.setAttribute('aria-live', 'polite');
     /* Region hulls live UNDER the GL scene; node points and lit paths sit in the middle;
        decluttered labels, flow markers, arrows, and the hover card paint on top. */
     element.replaceChildren(underlay, canvas, labels);
     element.appendChild(liveRegion);
     const underlayContext = underlay.getContext('2d');
     element.setAttribute('data-graph-style', opts.style || 'cyber');
-    /* Screen-reader surface: the canvases are decorative; the live region announces the
-       scene summary and hovered entity, and the host carries a descriptive label. */
-    const liveRegion = document.createElement('div');
-    liveRegion.className = 'sr-only';
-    liveRegion.setAttribute('aria-live', 'polite');
-
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: true, powerPreference: 'high-performance' });
     const labelContext = labels.getContext('2d');
 

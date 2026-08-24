@@ -422,7 +422,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260822-every-18'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260823-every-19'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -3176,7 +3176,10 @@
           state.graphSpacetimeOverlay = null;
         }
         if (state.graphEngine) state.graphEngine.destroy();
-        const galaxyQuality = fullGraph && graphIsGalaxy()
+        /* Authored-Galaxy detection must key off scene markers, not the toolbar preset:
+           entering Every via its chip sets the preset to 'every', but a complete scene
+           with system anchors still needs the hierarchical orbit engine and overlay. */
+        const galaxyQuality = fullGraph
           && data.nodes.some(node => node.anchor_role === 'community'
             && (node.system_anchor_id !== undefined
               || Number.isFinite(Number(node.galactic_radius))));
@@ -3251,7 +3254,7 @@
           state.graphSpacetimeOverlay = window.EngraphisSpacetime.create(
             byId('graph-canvas'), state.graphEngine
           );
-          state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+          state.graphSpacetimeOverlay.setEnabled(galaxyQuality || graphIsGalaxy());
         }
         state.graphEngine.setData(data);
         state.graphEngine.freeze(state.graphFrozen);

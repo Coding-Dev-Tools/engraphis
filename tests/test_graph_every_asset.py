@@ -221,6 +221,78 @@ def test_renderer_exposes_capacity_and_every_preset() -> None:
     assert "MAP_SCALE" in worker   # the map-spread constant
 
 
+def test_worker_untagged_nodes_share_one_district_not_n_singletons() -> None:
+    """Untagged graphs must not make centroid separation quadratic in node count."""
+    script = (
+        "const nodes = Array.from({ length: 2000 }, (_, i) => ({ id: 'n' + i }));\n"
+        "send({ type: 'prepare', payload: { nodes, links: [] }});\n"
+        "setTimeout(() => {\n"
+        "  const ready = latest('ready');\n"
+        "  console.log(JSON.stringify({ uniqueDistricts: new Set(ready.communities).size }));\n"
+        "}, 50);\n"
+    )
+    report = _run_worker(script)
+    assert report["uniqueDistricts"] == 1
+
+
+def test_renderer_create_runs_without_throwing_in_a_minimal_dom() -> None:
+    """Construction must not hit the live-region TDZ before WebGL capability is known."""
+    harness = """
+const vm = require('vm'); const fs = require('fs');
+function makeCanvas() {
+  return { className: '', style: {}, width: 0, height: 0,
+    setAttribute() {}, getAttribute() { return null; }, getContext() { return null; },
+    addEventListener() {}, removeEventListener() {} };
+}
+const host = {
+  className: '', style: {}, setAttribute() {}, getAttribute() { return null; },
+  replaceChildren() {}, appendChild() {}, addEventListener() {}, removeEventListener() {},
+  querySelector() { return null; }, querySelectorAll() { return []; },
+  getBoundingClientRect() { return { width: 800, height: 600, top: 0, left: 0, right: 800, bottom: 600 }; },
+};
+const win = {
+  addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
+  document: {
+    createElement(tag) {
+      if (String(tag).toLowerCase() === 'canvas') return makeCanvas();
+      return { className: '', style: {}, setAttribute() {}, getAttribute() { return null; },
+        addEventListener() {}, removeEventListener() {} };
+    },
+    addEventListener() {}, removeEventListener() {},
+    body: { classList: { toggle() {}, add() {}, remove() {} } },
+  },
+  requestAnimationFrame() { return 0; }, cancelAnimationFrame() {},
+  matchMedia() { return { matches: false, addEventListener() {} }; },
+  devicePixelRatio: 1, navigator: { userAgent: 'contract-test' },
+};
+win.window = win;
+try {
+  vm.runInNewContext(fs.readFileSync('engraphis/dashboard_assets/engraphis-graph-every.js', 'utf8'), win);
+  const factory = win.EngraphisEveryGraph;
+  if (!factory || typeof factory.create !== 'function') throw new Error('create missing');
+  factory.create(host, {});
+  console.log(JSON.stringify({ ok: true }));
+} catch (err) {
+  console.log(JSON.stringify({ ok: false, error: String(err && err.message) }));
+}
+"""
+    result = subprocess.run(
+        ["node", "-e", harness], cwd=ROOT, check=True, capture_output=True, text=True, timeout=60,
+    )
+    report = json.loads(result.stdout)
+    assert report["ok"], report.get("error")
+
+
+def test_renderer_keeps_labeled_gl_canvas_accessible() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    assert "canvas.setAttribute('aria-hidden'" not in renderer
+    assert "labels.setAttribute('aria-hidden', 'true');" in renderer
+    assert "underlay.setAttribute('aria-hidden', 'true');" in renderer
+    assert renderer.index("const liveRegion = document.createElement('div')") < renderer.index(
+        "element.appendChild(liveRegion)",
+    )
+
+
 def test_ledger_routes_the_every_layout_and_restores_filters() -> None:
     ledger = LEDGER.read_text(encoding="utf-8")
     markup = MARKUP.read_text(encoding="utf-8")
@@ -230,3 +302,9 @@ def test_ledger_routes_the_every_layout_and_restores_filters() -> None:
     assert 'id="graph-show-all"' not in markup  # fully removed, Every node chip is the entry
     assert "state.everyPriorFilters" in ledger                      # filter restore contract
     assert "setGraphMinDegree(0, false)" in ledger
+
+
+def test_ledger_keeps_authored_galaxy_scenes_on_the_hierarchical_engine() -> None:
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "const galaxyQuality = fullGraph\n          && data.nodes.some" in ledger
+    assert "state.graphSpacetimeOverlay.setEnabled(galaxyQuality || graphIsGalaxy())" in ledger

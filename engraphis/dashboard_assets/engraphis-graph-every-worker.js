@@ -78,8 +78,10 @@
       labels[index] = String(node.name || node.label || ids[index]);
       types[index] = String(node.type || '');
       ghostFlags[index] = node.ghost ? 1 : 0;
+      /* Untagged nodes share one implicit district so centroid separation stays
+         O(distinct community tags), rather than becoming an O(n^2) node pair loop. */
       const group = node.community_id !== undefined && node.community_id !== null
-        ? String(node.community_id) : String(index);
+        ? String(node.community_id) : null;
       if (!communityIndex.has(group)) communityIndex.set(group, communityIndex.size);
       communities[index] = communityIndex.get(group);
       const mass = Number(node.evidence_mass);
