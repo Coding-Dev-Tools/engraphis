@@ -210,6 +210,71 @@ def test_recall_resolves_consolidation_evidence_once(monkeypatch):
     store.close()
 
 
+def test_legacy_digest_with_only_link_table_sources_yields_evidence():
+    """A legacy/repaired digest whose source ids live ONLY in the persisted
+    ``consolidates`` links (no redundant provenance id list) still exposes them
+    as citable evidence in both the direct helper and the recall response."""
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(":memory:")
+    eng = _recall_engine(store)
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    approved = {"source": "test", "trusted": True, "review_state": "approved"}
+    source_ids = []
+    for run in (7, 8):
+        content = f"Deploy failed after the cache invalidation change in run {run}."
+        source_ids.append(store.add_memory(MemoryRecord(
+            id="",
+            content=content,
+            mtype=MemoryType.EPISODIC,
+            scope=Scope.REPO,
+            workspace_id=wid,
+            repo_id=rid,
+            metadata={"provenance": approved},
+            provenance=approved,
+            embedding=eng.embedder.embed([content])[0],
+        )))
+    digest_content = "Cache invalidation changes repeatedly broke deploys."
+    digest_id = store.add_memory(MemoryRecord(
+        id="",
+        content=digest_content,
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
+        workspace_id=wid,
+        repo_id=rid,
+        # Consolidation marker present, but NO redundant ``consolidates`` list.
+        metadata={"provenance": {
+            "source": "consolidation",
+            "trusted": True,
+            "review_state": "approved",
+        }},
+        provenance={
+            "source": "consolidation",
+            "trusted": True,
+            "review_state": "approved",
+        },
+        embedding=eng.embedder.embed([digest_content])[0],
+    ))
+    for source_id in source_ids:
+        store.add_link(digest_id, source_id, "consolidates")
+
+    flt = SearchFilter(workspace_id=wid, repo_id=rid)
+    assert set(_consolidation_evidence(
+        store.get_memory(digest_id), store=store, flt=flt,
+    )) == set(source_ids)
+
+    result = eng.recall(
+        "cache invalidation deploy failures", flt, k=4, reinforce=False,
+    )
+    chunk = next(item for item in result.chunks if item["id"] == digest_id)
+    assert set(chunk["consolidation_source_ids"]) == set(source_ids)
+    assert set(result.source_metadata[digest_id]["consolidation_source_ids"]) == (
+        set(source_ids)
+    )
+    store.close()
+
+
 def test_consolidation_evidence_stays_inside_the_active_repo_scope():
     """Provenance source ids must not cross a repo recall boundary."""
     from engraphis.core.interfaces import MemoryRecord, Scope

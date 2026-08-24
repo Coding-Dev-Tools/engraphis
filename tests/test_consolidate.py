@@ -247,11 +247,13 @@ def test_consolidate_archives_decayed_transients_but_not_pinned():
     pinned = eng.remember("Blocked on the vendor contract renewal.", workspace_id=wid,
                           repo_id=rid, mtype=MemoryType.WORKING)
     eng.pin(pinned)
-    # Age both far past any plausible retention: tiny stability, ancient last_access.
+    # Age both far past any plausible retention: tiny stability, ancient
+    # last_access, and a back-dated creation so the sweep cannot tie ingest.
     old = time.time() - 90 * 86400
     for mid in (stale, pinned):
         eng.store.conn.execute(
-            "UPDATE memories SET stability=0.5, last_access=? WHERE id=?", (old, mid))
+            "UPDATE memories SET stability=0.5, last_access=?, valid_from=? WHERE id=?",
+            (old, old, mid))
     eng.store.conn.commit()
 
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
@@ -720,9 +722,12 @@ def test_consolidate_archive_reports_freed_tokens():
     rid = eng.store.get_or_create_repo(wid, "r")
     mid = eng.remember("Temporary: blocked on CI quota until the weekend.",
                        workspace_id=wid, repo_id=rid, mtype=MemoryType.WORKING)
+    # Back-date creation too: a same-tick sweep would defer the archive
+    # instead of closing it, and this test asserts the closed-path report.
     old = time.time() - 90 * 86400
-    eng.store.conn.execute("UPDATE memories SET stability=0.5, last_access=? WHERE id=?",
-                           (old, mid))
+    eng.store.conn.execute(
+        "UPDATE memories SET stability=0.5, last_access=?, valid_from=? WHERE id=?",
+        (old, old + 1.0, mid))
     eng.store.conn.commit()
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
     assert report["archived"] and report["archived"][0]["tokens_freed"] > 0
@@ -1559,8 +1564,8 @@ def test_archive_batches_all_eligible_transients(monkeypatch):
     ]
     old = time.time() - 86_400
     eng.store.conn.executemany(
-        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
-        [(old, memory_id) for memory_id in stale_ids],
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        [(old, old, memory_id) for memory_id in stale_ids],
     )
     eng.store.conn.executemany(
         "UPDATE mem_vectors SET vector=zeroblob(?) WHERE id=?",
@@ -1929,8 +1934,11 @@ def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):
     wid = eng.store.get_or_create_workspace("w")
     stale = eng.remember("Scratch note from an old session.", workspace_id=wid,
                          mtype=MemoryType.WORKING, resolve_conflicts=False)
-    eng.store.conn.execute("UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
-                           (time.time() - 86_400, stale))
+    # Back-date creation so the default-now sweep cannot tie ingest and defer
+    # the archive this test asserts.
+    eng.store.conn.execute(
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        (time.time() - 86_400, time.time() - 86_400, stale))
     eng.store.conn.commit()
     for n in range(5):
         eng.remember(f"Durable architecture note {n}.", workspace_id=wid,
@@ -1950,13 +1958,19 @@ def test_archive_preserves_vector_for_historical_recall():
         mtype=MemoryType.WORKING,
         resolve_conflicts=False,
     )
+    # Windows wall-clock resolution (~15.6 ms) can tie the memory's creation stamp to
+    # ``archived_at``, collapsing [valid_from, archived_at) to a zero-width interval that
+    # the half-open temporal predicate hides at every as_of. Back-date creation so this
+    # test asserts archival semantics, not host clock granularity.
+    created_at = time.time() - 3_600
     eng.store.conn.execute(
-        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
-        (time.time() - 86_400, stale),
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        (time.time() - 86_400, created_at, stale),
     )
     eng.store.conn.commit()
 
-    archived_at = time.time()
+    archived_at = time.time() + 3_600
+
     report = consolidate(eng, workspace_id=wid, now=archived_at)
 
     assert [row["id"] for row in report["archived"]] == [stale]
@@ -1971,6 +1985,53 @@ def test_archive_preserves_vector_for_historical_recall():
     )
     assert [chunk["id"] for chunk in historical.chunks] == [stale]
 
+
+
+def test_archive_tied_to_ingest_stays_historically_visible():
+    """Consolidation one clock tick after ingest must not erase the fact.
+
+    Coarse host clocks can hand ``consolidate`` a ``now`` equal to the
+    memory's ``valid_from``. Closing there would be invisible to every read
+    (zero-width [t, t)), and fabricating window width would briefly resurrect
+    the row into the live view — so the sweep defers the archive instead. A
+    strictly later sweep closes it with ordinary half-open semantics: hidden
+    from current reads immediately, still reproducible by an as_of query.
+    """
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale = eng.remember(
+        "Fleeting note captured moments before the sweep.",
+        workspace_id=wid,
+        mtype=MemoryType.WORKING,
+        resolve_conflicts=False,
+    )
+    tied_at = time.time()
+    eng.store.conn.execute(
+        "UPDATE memories SET stability=0.01, last_access=?, valid_from=? WHERE id=?",
+        (tied_at - 86_400, tied_at, stale),
+    )
+    eng.store.conn.commit()
+
+    deferred = consolidate(eng, workspace_id=wid, now=tied_at)
+
+    # The tied sweep neither archives nor closes anything: the memory stays
+    # live, honestly, because this clock cannot yet separate ingest from now.
+    assert [row["id"] for row in deferred["archived"]] == []
+    assert deferred.get("archive_deferred") == 1
+    assert eng.store.get_memory(stale).valid_to is None
+
+    later = tied_at + 1.0
+    report = consolidate(eng, workspace_id=wid, now=later)
+
+    assert [row["id"] for row in report["archived"]] == [stale]
+    archived = eng.store.get_memory(stale)
+    assert archived.valid_to is not None and archived.valid_to > archived.valid_from
+    historical = eng.recall_engine.recall(
+        "What fleeting note was captured before the sweep?",
+        SearchFilter(workspace_id=wid, as_of=(archived.valid_from + later) / 2),
+        reinforce=False,
+    )
+    assert [chunk["id"] for chunk in historical.chunks] == [stale]
 
 # ── explicit local consolidation command ─────────────────────────────────────
 
@@ -2384,10 +2445,11 @@ def test_stale_unaccessed_episodic_is_archived_at_default_threshold():
         workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
         resolve_conflicts=False,
     )
-    # Backdate both ingestion and last_access to 60 days ago.
+    # Back-date creation too: a same-tick sweep would defer the archive
+    # instead of closing it, and this test asserts the closed path.
     eng.store.conn.execute(
-        "UPDATE memories SET ingested_at=?, last_access=? WHERE id=?",
-        (ancient, ancient, mid),
+        "UPDATE memories SET ingested_at=?, last_access=?, valid_from=? WHERE id=?",
+        (ancient, ancient, ancient, mid),
     )
     eng.store.conn.commit()
     report = consolidate(eng, workspace_id=wid, repo_id=rid, archive_below=0.05)

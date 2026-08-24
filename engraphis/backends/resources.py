@@ -29,7 +29,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from engraphis.core.interfaces import ResourceDocument, ResourceExtractor
-from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
+from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".rst", ".log", ".json", ".jsonl", ".csv", ".tsv",
@@ -134,7 +134,7 @@ def _read_path_snapshot(source: Path) -> bytes:
     if (
         not stat.S_ISREG(before.st_mode)
         or stat.S_ISLNK(before.st_mode)
-        or _is_reparse_point(before)
+        or _is_link_indirection(before)
     ):
         raise ResourceExtractionError("resource path is not a regular file")
     flags = (
@@ -148,7 +148,7 @@ def _read_path_snapshot(source: Path) -> bytes:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or _is_reparse_point(opened)
+            or _is_link_indirection(opened)
             or _snapshot_identity(opened) != _snapshot_identity(before)
         ):
             raise ResourceExtractionError("resource path changed before it was opened")

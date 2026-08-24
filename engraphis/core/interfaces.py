@@ -383,6 +383,32 @@ class ExtractedFact:
 
 
 @dataclass
+class FactSpec:
+    """One fact in a batch submitted to ``MemoryEngine.remember_many``.
+
+    Mirrors ``ExtractedFact`` plus the durable claim identity fields
+    (``subject_key``/``claim_kind``) and an optional per-fact ``provenance``
+    dict. Batch siblings that share a non-empty ``subject_key`` or a
+    ``provenance.source`` are wired together with evidence-labeled edges after
+    insertion ("no shared source, no edge").
+    """
+    content: str
+    title: str = ""
+    mtype: Optional[MemoryType] = None
+    importance: float = 0.0
+    keywords: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    subject_key: str = ""
+    claim_kind: str = ""
+    valid_from: Optional[float] = None
+    provenance: Optional[dict[str, Any]] = None
+    # Citeable sibling-evidence origin declared by the caller (e.g. "subagent-7").
+    # Only an explicitly declared source participates in batch edge wiring; the
+    # engine's default provenance never counts as shared evidence.
+    evidence_source: Optional[str] = None
+
+
+@dataclass
 class RetentionDecision:
     """Optional host/LLM supervision signal for a new memory.
 

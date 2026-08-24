@@ -45,7 +45,10 @@ def _service(db_path: str) -> MemoryService:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Run one Engraphis consolidation sweep.")
-    ap.add_argument("--db", required=True, help="Path to the v2 database file.")
+    ap.add_argument("--db", default=None,
+                    help="Path to the v2 database file "
+                         "(default: the configured database, i.e. ENGRAPHIS_DB_PATH "
+                         "or settings.db_path, same as engraphis-cli).")
     ap.add_argument("--workspace", required=True, help="Workspace name to consolidate.")
     ap.add_argument("--repo", default=None, help="Restrict to one repo name.")
     ap.add_argument("--dry-run", action="store_true", help="Report only; change nothing.")
@@ -67,7 +70,7 @@ def main(argv=None) -> int:
                          "(default 3; only used with --profiles).")
     args = ap.parse_args(argv)
 
-    service = _service(args.db)
+    service = _service(str(args.db if args.db is not None else settings.db_path))
     try:
         return _consolidate(args, service.engine)
     finally:
