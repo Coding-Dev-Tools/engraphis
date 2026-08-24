@@ -2,7 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 test('All-node controls filter, collapse, reflow, freeze, and expose directional flow', async ({ page }) => {
   await page.goto('/');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-2' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.style.cssText = 'position:fixed;inset:20px;width:900px;height:600px';
@@ -78,7 +78,7 @@ test('20k-node all profile paints progressively and stays responsive after hando
     return { supported: true, renderer: debug ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) || '') : '' };
   });
   test.skip(!gpu.supported || /swiftshader|llvmpipe|software renderer/i.test(gpu.renderer), 'All-node performance target requires hardware-accelerated WebGL2');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-2' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.className = 'graph-network';
