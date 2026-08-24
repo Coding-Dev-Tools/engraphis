@@ -358,11 +358,15 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
         purl = metadata_component.get("purl")
         name = metadata_component.get("name")
         version = metadata_component.get("version")
+        # cyclonedx-py --pyproject emits the application as root-component
+        # without a PURL; environment_lock_artifact validates the name/version.
         if (
-            isinstance(purl, str)
-            and purl.startswith("pkg:pypi/")
-            and isinstance(name, str)
+            isinstance(name, str)
             and isinstance(version, str)
+            and (
+                purl is None
+                or (isinstance(purl, str) and purl.startswith("pkg:pypi/"))
+            )
         ):
             packages.add((_canonical_package_name(name), version))
     for component in document.get("components", []):
@@ -555,8 +559,13 @@ def environment_lock_artifact(
         or _canonical_package_name(root_name) != PACKAGE
         or not isinstance(root_version, str)
         or root_version != version
-        or not isinstance(root_purl, str)
-        or not _purl_matches(root_purl, PACKAGE, version)
+        or (
+            root_purl is not None
+            and (
+                not isinstance(root_purl, str)
+                or not _purl_matches(root_purl, PACKAGE, version)
+            )
+        )
     ):
         raise EvidenceError(
             "SBOM metadata.component does not identify the " + PACKAGE

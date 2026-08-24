@@ -401,6 +401,33 @@ def test_release_evidence_rejects_lock_packages_missing_from_sbom(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_accepts_cyclonedx_root_component_without_purl(tmp_path):
+    """cyclonedx-py uses root-component without a root PyPI PURL."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["bom-ref"] = "root-component"
+    sbom_doc["metadata"]["component"].pop("purl")
+    sbom_doc["dependencies"][0]["ref"] = "root-component"
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_mismatched_root_purl(tmp_path):
+    """An optional root PURL, when present, must still identify Engraphis."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["purl"] = "pkg:pypi/other-project@1.2.3"
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_sbom_omitting_transitive_packages(tmp_path):
     """A truncated SBOM keeping root + direct deps but dropping a transitive
     package must fail even without any dependency graph present."""
