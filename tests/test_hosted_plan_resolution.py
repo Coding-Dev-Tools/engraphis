@@ -1134,6 +1134,32 @@ def test_denial_guard_precedes_a_blocked_persistence_write(monkeypatch) -> None:
     assert not worker.is_alive()
 
 
+def test_denial_guard_publishes_before_blocked_digest_probe(monkeypatch) -> None:
+    """Readers fail closed while the pre-persistence denial baseline is captured."""
+
+    _connect(monkeypatch, pinned_token=False)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_digest(_source):
+        entered.set()
+        assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+        assert v2_api._denied_state_digests == {}
+        assert release.wait(timeout=5.0)
+        return "before-denial"
+
+    monkeypatch.setattr(v2_api, "_persisted_state_digest", _blocked_digest)
+    worker = threading.Thread(target=v2_api._mark_authoritative_denial)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    try:
+        assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
 def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -> None:
     """Only an authoritative 401/402/403 clears access; an outage must not."""
 

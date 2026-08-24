@@ -7,7 +7,7 @@ import time
 import pytest
 
 from engraphis.service import MemoryService, ValidationError
-from engraphis.obsidian_import import scan_obsidian_upload
+from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
 
 
 _TERMINAL_STATES = {"completed", "partial", "failed", "cancelled"}
@@ -86,6 +86,40 @@ def test_preview_pages_the_full_manifest_like_execution():
         assert statuses["A.md"] != "missing"
         assert "B.md" in statuses
         assert "C.md" in statuses
+    finally:
+        service.close()
+
+
+def test_preview_defers_missing_rows_when_manifest_is_truncated(monkeypatch):
+    service = _service()
+    try:
+        started, imported = _import(service, [("A.md", b"# A\n")])
+        assert imported["state"] == "completed"
+        vault_id = started["vault_id"]
+        service.store.upsert_source_import_item(
+            vault_id=vault_id,
+            source_key=hashlib.sha256(b"gone").hexdigest(),
+            relative_path="gone.md",
+        )
+        items = service.store.list_source_import_items(vault_id=vault_id)
+
+        def _truncated(_self, *, vault_id, states=None):
+            del vault_id, states
+            return items, False
+
+        monkeypatch.setattr(ObsidianImporter, "_all_source_items", _truncated)
+        preview = service.preview_obsidian_upload(
+            files=[("A.md", b"# A\n")], attachment_manifest=[],
+            workspace="alpha", vault_label="Team notes", vault_id=vault_id,
+        )
+
+        statuses = {
+            row["relative_path"]: row["status"] for row in preview["files"]
+        }
+        assert preview["manifest_complete"] is False
+        assert preview["counts"].get("missing", 0) == 0
+        assert preview["counts"]["pending"] == 1
+        assert statuses["gone.md"] == "pending"
     finally:
         service.close()
 

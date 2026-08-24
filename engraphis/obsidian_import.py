@@ -277,7 +277,7 @@ class ObsidianImporter:
         attachment_manifest: Optional[list[dict]] = None,
     ) -> dict:
         policy = self._policy(on_conflict)
-        vault, items = self._preview_manifest(
+        vault, items, manifest_complete = self._preview_manifest(
             scan, workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id, vault_id=vault_id, manifest=manifest,
             scope=scope, memory_type=memory_type, strict_root=strict_root,
@@ -286,11 +286,18 @@ class ObsidianImporter:
         plans, missing = self._plan(
             scan, identity, items, inspect_memories=manifest is None,
         )
+        # A bounded manifest is enough to plan visible notes, but not enough to claim
+        # that an unseen historical row was deleted. Match confirmed execution by
+        # surfacing those rows as deferred rather than actionable ``missing`` items.
+        pending_missing = missing if not manifest_complete else []
+        if pending_missing:
+            missing = []
         return self._report(
             plans, missing, scan, state="preview", vault_id=(vault or {}).get("id"),
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            pending_missing=pending_missing, manifest_complete=manifest_complete,
         )
 
     def import_scan(
@@ -426,6 +433,7 @@ class ObsidianImporter:
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
         if terminal_state == "completed" and report["counts"].get("conflict", 0):
             terminal_state = "partial"
@@ -476,7 +484,7 @@ class ObsidianImporter:
         repo_id: Optional[str], session_id: Optional[str], vault_id: Optional[str],
         scope: Scope, memory_type: MemoryType, manifest: Optional[dict],
         strict_root: bool,
-    ) -> tuple[Optional[dict], list[dict]]:
+    ) -> tuple[Optional[dict], list[dict], bool]:
         vaults = (
             list((manifest or {}).get("vaults") or [])
             if manifest is not None else self.store.list_source_vaults(kind=self.SOURCE_KIND)
@@ -486,6 +494,7 @@ class ObsidianImporter:
             if manifest is not None else []
         )
         vault: Optional[dict] = None
+        manifest_complete = True
         if vault_id:
             vault = (
                 self.store.get_source_vault(vault_id)
@@ -513,12 +522,12 @@ class ObsidianImporter:
             if manifest is None:
                 # Page the manifest like import_scan does so previews on manifests
                 # larger than one list page plan against the full item set.
-                items, _ = self._all_source_items(vault_id=str(vault["id"]))
+                items, manifest_complete = self._all_source_items(vault_id=str(vault["id"]))
             else:
                 items = [row for row in items if row.get("vault_id") == vault.get("id")]
         else:
             items = []
-        return vault, items
+        return vault, items, manifest_complete
 
     def _resolve_or_register_vault(
         self, scan: _ImportScan, *, workspace_id: str,
@@ -1332,6 +1341,8 @@ class ObsidianImporter:
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, policy: str, vault_label: str,
         attachment_manifest: Optional[list[dict]],
+        pending_missing: Optional[list[dict]] = None,
+        manifest_complete: bool = True,
     ) -> dict:
         files = [self._preview_row(plan) for plan in plans]
         files.extend({
@@ -1346,11 +1357,16 @@ class ObsidianImporter:
             "relative_path": str(item.get("relative_path") or ""), "status": "missing",
             "action": "missing", "reason": "source_not_seen", "warnings": [],
         } for item in missing)
+        files.extend({
+            "relative_path": str(item.get("relative_path") or ""), "status": "pending",
+            "action": "pending", "reason": "missing_check_deferred", "warnings": [],
+        } for item in pending_missing or [])
         return self._report_payload(
             files, scan, state=state, vault_id=vault_id,
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
 
     def _final_report(
@@ -1360,6 +1376,7 @@ class ObsidianImporter:
         import_id: str, workspace_id: str, repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
+        manifest_complete: bool = True,
     ) -> dict:
         files = list(outcomes)
         processed_paths = {
@@ -1396,6 +1413,7 @@ class ObsidianImporter:
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
         report.update({"job_id": job_id, "import_id": import_id})
         return report
@@ -1423,6 +1441,7 @@ class ObsidianImporter:
         vault_id: Optional[str], workspace_id: Optional[str], repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
+        manifest_complete: bool = True,
     ) -> dict:
         counts: dict[str, int] = {}
         for row in files:
@@ -1440,6 +1459,7 @@ class ObsidianImporter:
             formats[name] = formats.get(name, 0) + 1
         return {
             "state": state, "status": state, "vault_id": vault_id,
+            "manifest_complete": bool(manifest_complete),
             "vault_label": str(vault_label or "")[:200],
             "source_id": vault_id,
             "source_label": str(vault_label or "")[:200],
