@@ -229,6 +229,23 @@ def test_renderer_focus_decorations_use_incident_edges_not_full_link_scan() -> N
     assert "state.incidentEdges = state.ids.map(() => []);" in renderer
 
 
+def test_renderer_preserves_zero_community_for_untagged_nodes() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    assert "String(state.communities[index] ?? index)" in renderer
+    assert "result[id] = state.communities[index] ?? index" in renderer
+    assert "String(state.communities[index] || index)" not in renderer
+
+
+def test_renderer_adopts_seeded_preview_positions_and_clears_reload_metadata() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    adopt_body = renderer[renderer.index("function adoptCommon") : renderer.index("function handleWorkerMessage")]
+    set_data_body = renderer[renderer.index("setData(data)") : renderer.index("setRenderMode")]
+    assert "state.positions = message.positions || state.positions;" in adopt_body
+    assert "state.edgeSources = new Uint32Array(0);" in set_data_body
+    assert "state.totalLinks = 0;" in set_data_body
+    assert "state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;" in set_data_body
+
+
 def test_renderer_exposes_capacity_and_every_preset() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     worker = WORKER.read_text(encoding="utf-8")
@@ -267,6 +284,19 @@ send({ type: 'prepare', payload: { nodes, links: [] } });
     )
     report = json.loads(result.stdout)
     assert report["firstPassMs"] < 4000
+
+
+def test_worker_capacity_replacement_clears_previous_model() -> None:
+    """An over-capacity reload must not let reheat revive the prior graph model."""
+    script = """
+send({ type: 'prepare', payload: { nodes: [{ id: 'old' }], links: [] } });
+send({ type: 'prepare', payload: { nodes: Array.from({ length: 20001 }, (_, i) => ({ id: `n${i}` })), links: [] } });
+send({ type: 'reheat' });
+setTimeout(() => console.log(JSON.stringify({ layouts: all('layout').length, capacity: all('capacity').length })), 40);
+"""
+    report = _run_worker(script)
+    assert report["capacity"] == 1
+    assert report["layouts"] == 0
 
 
 def test_renderer_create_runs_without_throwing_in_a_minimal_dom() -> None:
