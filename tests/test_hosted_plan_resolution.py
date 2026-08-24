@@ -1065,6 +1065,42 @@ def test_newer_active_session_clears_the_process_denial_guard(monkeypatch) -> No
     assert not v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
 
 
+def test_byte_identical_post_denial_session_never_supersedes(
+    monkeypatch, tmp_path,
+) -> None:
+    """Replaying the exact pre-denial session bytes cannot resurrect grants.
+
+    Supersession is decided by a content digest, never by timestamps: under
+    coarse clocks a restored active-looking record ties the denial stamp, and
+    only *different* bytes parsed after the denial prove a genuine reconnect.
+    """
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    _connect(monkeypatch, pinned_token=False)
+    response = {
+        "refresh_credential": "engr_rt_stale_active",
+        "organization_id": ORGANIZATION,
+        "token_subject": "member",
+    }
+    response.update(_registration_entitlement("team"))
+    cloud_session.save_bootstrap(response, control_url=CONTROL_URL)
+    session_file = tmp_path / "cloud_session.json"
+    stale_active_bytes = session_file.read_bytes()
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    v2_api._mark_authoritative_denial()
+    # A stale writer restores the pre-denial record verbatim -- indistinguishable
+    # from the original by every clock-based signal, and therefore by none.
+    session_file.write_bytes(stale_active_bytes)
+
+    payload = v2_api.get_license()
+
+    assert payload["plan"] == "team"
+    assert payload["cloud_access_active"] is False
+    assert payload["features"] == []
+    assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+
+
 def test_denial_guard_precedes_a_blocked_persistence_write(monkeypatch) -> None:
     """Readers fail closed while the durable denial write is still blocked."""
 
@@ -1085,6 +1121,65 @@ def test_denial_guard_precedes_a_blocked_persistence_write(monkeypatch) -> None:
 
     monkeypatch.setattr(cloud_session, "record_billing_denial", _blocked_write)
     monkeypatch.setattr(v2_api, "_deny_entitlement_cache", lambda: True)
+    worker = threading.Thread(target=v2_api._record_authoritative_denial)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    try:
+        payload = v2_api.get_license()
+        assert payload["cloud_access_active"] is False
+        assert payload["features"] == []
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
+def test_denial_guard_publishes_before_blocked_digest_probe(monkeypatch) -> None:
+    """Readers fail closed while the pre-persistence denial baseline is captured."""
+
+    _connect(monkeypatch, pinned_token=False)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_digest(_source):
+        entered.set()
+        assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+        assert v2_api._denied_state_digests == {"session": None, "cloud": None}
+        assert release.wait(timeout=5.0)
+        return "before-denial"
+
+    monkeypatch.setattr(v2_api, "_persisted_state_digest", _blocked_digest)
+    worker = threading.Thread(target=v2_api._mark_authoritative_denial)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    try:
+        assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
+def test_denial_guard_reads_do_not_wait_for_digest_probe(monkeypatch) -> None:
+    """A slow baseline probe cannot block a fail-closed license response."""
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("team"),
+        registration=_registration_entitlement("team"),
+    ))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    entered = threading.Event()
+    release = threading.Event()
+    original = v2_api._persisted_state_digest
+
+    def _blocked_digest(source):
+        entered.set()
+        assert release.wait(timeout=5.0)
+        return original(source)
+
+    monkeypatch.setattr(v2_api, "_persisted_state_digest", _blocked_digest)
     worker = threading.Thread(target=v2_api._record_authoritative_denial)
     worker.start()
     assert entered.wait(timeout=5.0)
