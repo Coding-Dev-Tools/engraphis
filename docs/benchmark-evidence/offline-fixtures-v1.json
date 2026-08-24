@@ -9,13 +9,13 @@
     "contains_per_record_fingerprints": false
   },
   "suite": {
-    "digest": "4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537",
+    "digest": "4bfdfd6ccdf34ff7daa7441b8e788371c31985efe031b6520a265ef11f71ed1b",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "eval/chunking_eval.py": "a16544353940c0a8c40cea3b9932d3399b35ea5994b809b78f5dbe4a952c467f",
       "eval/datasets/codemem.jsonl": "341313023c22850a2e14f02742b571ad1deca824f886a1654a59541304c01f3c",
       "eval/datasets/longdoc.jsonl": "7f5ade95e1f283d0db8cf78e53ed8995d3534f847e616d2c0005fd8da37ac790",
-      "eval/grounded.py": "a5dd62d10c079b0098917a4640315254c65a4f1d7d71d8c3a669f290a29277e5",
+      "eval/grounded.py": "75ba96a4427508f2718323d283f7889fc90901a6176f12c4b3518f1ede5d96dd",
       "eval/performance.py": "e17ea78095e4e592717bc5d9d8e34d55fd98c3fd28d1a8104a20c227d4d619c9"
     }
   },

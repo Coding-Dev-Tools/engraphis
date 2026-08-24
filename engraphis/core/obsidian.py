@@ -16,14 +16,16 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import unicodedata
 
 from engraphis.core.secrets import secret_kind
-from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
+from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 
 IMPORTER_VERSION = "1"
 MAX_NOTE_CHARS = 100_000
 MAX_NOTE_BYTES = 2_000_000
 MAX_VAULT_FILES = 10_000
-MAX_VAULT_BYTES = 250_000_000
+# Lockstep with service.MAX_IMPORT_TOTAL_BYTES (750 MB): the wizard scanner must never
+# silently undercut the upload transport ceiling.
+MAX_VAULT_BYTES = 750_000_000
 MAX_SOURCE_PATH_CHARS = 4_096
 ATTACHMENT_SUFFIXES = {
     ".aac", ".avif", ".bmp", ".csv", ".epub", ".gif", ".jpeg", ".jpg",
@@ -201,7 +203,7 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
     selected_root = Path(vault_path)
     try:
         selected_info = os.lstat(selected_root)
-        if selected_root.is_symlink() or _is_reparse_point(selected_info):
+        if selected_root.is_symlink() or _is_link_indirection(selected_info):
             raise ValueError("vault root cannot be a symlink")
         root = selected_root.resolve(strict=True)
     except OSError as exc:
@@ -284,7 +286,7 @@ def _read_vault_note(root: Path, path: Path) -> Tuple[bytes, int]:
     unavailable (notably Windows) and discard bytes if the directory entry changed.
     """
     before = os.lstat(path)
-    if stat.S_ISLNK(before.st_mode) or _is_reparse_point(before) or not stat.S_ISREG(before.st_mode):
+    if stat.S_ISLNK(before.st_mode) or _is_link_indirection(before) or not stat.S_ISREG(before.st_mode):
         raise ValueError("unsafe file type")
     if not _is_within(root, path.resolve(strict=True)):
         raise ValueError("path escapes vault")
@@ -295,7 +297,7 @@ def _read_vault_note(root: Path, path: Path) -> Tuple[bytes, int]:
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or _is_reparse_point(opened) or not _same_file_identity(before, opened):
+        if not stat.S_ISREG(opened.st_mode) or _is_link_indirection(opened) or not _same_file_identity(before, opened):
             raise ValueError("file changed during scan")
         if opened.st_size > MAX_NOTE_BYTES:
             raise ValueError("note exceeds 2000000 byte safety limit")
@@ -316,7 +318,7 @@ def _read_vault_note(root: Path, path: Path) -> Tuple[bytes, int]:
             or opened.st_size != finished.st_size
             or opened.st_mtime_ns != finished.st_mtime_ns
             or stat.S_ISLNK(after.st_mode)
-            or _is_reparse_point(after)
+            or _is_link_indirection(after)
             or not _same_file_identity(finished, after)
             or not _is_within(root, path.resolve(strict=True))
         ):
@@ -350,7 +352,7 @@ def _walk_vault(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[st
         try:
             relative = entry.relative_to(root)
             info = entry.lstat()
-            if entry.is_symlink() or _is_reparse_point(info):
+            if entry.is_symlink() or _is_link_indirection(info):
                 yield entry, "symlink skipped"
                 continue
             if not _is_within(root, entry.resolve()):

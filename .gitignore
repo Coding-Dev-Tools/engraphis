@@ -114,3 +114,16 @@ cookies.txt
 
 # uv lockfile (generated tooling, not a project dependency)
 uv.lock
+
+# Schema-migration flock lives next to the DB (engraphis/config.py _migration_lock);
+# regenerable runtime state like *.db itself. Held live while the server runs.
+.*.migration.lock
+
+# One-off diagnostic/report dumps that keep landing at the repo root — regenerable
+# command output, never package content (same policy as /_*.mjs above).
+/404_paths.txt
+/disk_report.txt
+/large_files.txt
+/stats_pm2.txt
+/venv_status.txt
+/r3.txt

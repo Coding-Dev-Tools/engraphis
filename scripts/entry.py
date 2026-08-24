@@ -34,6 +34,7 @@ COMMANDS = {
     "graph-server": "scripts.graph_server:main",
     "import": "scripts.importer:main",
     "update": "scripts.update:main",
+    "sync": "scripts.sync:main",
 }
 
 _USAGE = """usage: engraphis <command> [options]
@@ -53,6 +54,7 @@ commands:
   graph-server   run the graph server
   import         import local Markdown, text, and document collections
   update         check for and install a newer Engraphis release
+  sync           sync a workspace across devices, or show local sync state
 
 Run `engraphis <command> --help` for a command's options.
 Every command is also installed as `engraphis-<command>`."""

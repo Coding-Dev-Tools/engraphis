@@ -1155,6 +1155,17 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         r = scoring.retention(m.stability, m.last_access, now)
         if r >= archive_below:
             continue
+        # A coarse host clock (~15.6 ms ticks on Windows) can tie the sweep's
+        # ``now`` to a memory's ingest instant. Closing [t, t) there would be
+        # invisible to every as_of read, and fabricating width (valid_from +
+        # 1us) would leave the row live-visible until the next tick sample —
+        # both wrong. Defer instead: leave the memory live for this sweep and
+        # let a strictly later sweep close it with ordinary half-open
+        # semantics. Production sweeps are minutes apart, so deferral is
+        # unobservable there; only same-tick test fixtures can hit it.
+        if m.valid_from is not None and now <= m.valid_from:
+            report["archive_deferred"] = report.get("archive_deferred", 0) + 1
+            continue
         archived_tokens += _mem_tokens(m)
         report["archived"].append({"id": m.id, "retention": round(r, 4),
                                    "tokens_freed": _mem_tokens(m)})
@@ -1349,6 +1360,11 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
     metadata["provenance"] = provenance
     try:
         engine.store.advance_memory_modified_hlc(memory_id, commit=False)
+        engine.store.audit(
+            "consolidation", "safety_inherit", memory_id,
+            f"sensitivity={sensitivity}; trusted={trusted}",
+            commit=False,
+        )
         engine.store.conn.execute(
             "UPDATE memories SET sensitivity=?, metadata=?, provenance=? WHERE id=?",
             (sensitivity,
