@@ -7628,11 +7628,17 @@
       }
     }
 
+    function nodePaintRadius(node) {
+      const radius = Number(node && node.radius);
+      if (!Number.isFinite(radius)) return 0;
+      return radius * (state.settings.mode === 'galaxy' && node.anchor_role === 'global'
+        ? GALAXY_BLACK_HOLE_PAINT_SCALE : 1);
+    }
+
     function styleNode(node, ctx, scale) {
       if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id), dim = focus && !neighbor;
-      let r = node.radius * (state.settings.mode === 'galaxy' && node.anchor_role === 'global'
-        ? GALAXY_BLACK_HOLE_PAINT_SCALE : 1);
+      let r = nodePaintRadius(node);
       const col = node.color;
       const spacetimeFade = state.settings.mode === 'galaxy' && node.anchor_role !== 'global'
         ? 1 - 0.55 * Math.max(0, Math.min(1, Number(node.__galaxySpacetimeWarp) || 0))
@@ -8965,7 +8971,7 @@
         if (!Number.isFinite(node.x) || !Number.isFinite(node.y)
           || !Number.isFinite(node.radius)) return;
         ctx.fillStyle = color; ctx.beginPath();
-        ctx.arc(node.x, node.y, node.radius + 2, 0, 6.2832); ctx.fill();
+        ctx.arc(node.x, node.y, nodePaintRadius(node) + 2, 0, 6.2832); ctx.fill();
       })
       .linkColor(l => {
         const focus = hoverSet && hoverSet.size > 1;

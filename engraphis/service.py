@@ -8890,17 +8890,34 @@ class MemoryService:
             ))
         else:
             entity_sql += (
-                "LEFT JOIN edge_supports public_support "
-                "ON public_support.edge_id=public_edge.id "
-                "LEFT JOIN memories public_memory "
-                "ON public_memory.id=public_support.memory_id "
                 "WHERE public_edge.workspace_id=? "
                 "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
-                "AND (public_support.edge_id IS NULL OR ("
-                "public_memory.workspace_id=? "
+                "AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) "
+                "AND (public_edge.ingested_at IS NULL OR public_edge.ingested_at<=?) "
+                "AND (public_edge.expired_at IS NULL OR ?<public_edge.expired_at) "
+                "AND (NOT EXISTS (SELECT 1 FROM edge_supports public_any_support "
+                "WHERE public_any_support.edge_id=public_edge.id) "
+                "OR EXISTS (SELECT 1 FROM edge_supports public_support "
+                "JOIN memories public_memory "
+                "ON public_memory.id=public_support.memory_id "
+                "WHERE public_support.edge_id=public_edge.id "
+                "AND (public_support.valid_from IS NULL "
+                "OR public_support.valid_from<=?) "
+                "AND (public_support.ingested_at IS NULL "
+                "OR public_support.ingested_at<=?) "
+                "AND (public_support.expired_at IS NULL "
+                "OR ?<public_support.expired_at) "
+                "AND public_memory.workspace_id=? "
+                "AND (public_memory.valid_from IS NULL "
+                "OR public_memory.valid_from<=?) "
+                "AND (public_memory.ingested_at IS NULL "
+                "OR public_memory.ingested_at<=?) "
+                "AND (public_memory.expired_at IS NULL "
+                "OR ?<public_memory.expired_at) "
                 "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
             )
-            entity_params.extend((wid, wid))
+            entity_params.extend((wid, t, known_t, known_t, t, known_t, known_t,
+                                  wid, t, known_t, known_t))
         entity_sql += ")"
         # Page until the cap is reached after session-scope pruning so private
         # evidence cannot crowd out public entities in the candidate set.
