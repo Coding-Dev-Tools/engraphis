@@ -421,14 +421,6 @@ def test_release_version_surfaces_are_synchronized():
     )
     assert commercial["version"] == version
 
-    hermes = (ROOT / "integrations" / "hermes" / "engraphis" / "plugin.yaml").read_text(
-        encoding="utf-8"
-    )
-    hermes_version = re.search(r"^version:\s*(\S+)\s*$", hermes, re.M)
-    assert hermes_version, "Hermes version declaration moved — update this test"
-    expected_hermes = version if version.count(".") >= 2 else f"{version}.0"
-    assert hermes_version.group(1) == expected_hermes
-
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
         encoding="utf-8"
     )
@@ -445,6 +437,18 @@ def test_release_version_surfaces_are_synchronized():
     # so no hardcoded literal must drift from pyproject either.
     assert "p.set('release_version',RELEASE_VERSION)" in static_text
     assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == []
+
+
+def test_withdrawn_hermes_provider_is_not_distributed():
+    """The withdrawn provider must not be resurrected by a stale feature branch."""
+    for relative in (
+        "integrations/hermes/README.md",
+        "integrations/hermes/engraphis/__init__.py",
+        "integrations/hermes/engraphis/plugin.yaml",
+        "tests/test_hermes_integration.py",
+    ):
+        assert not (ROOT / relative).exists(), relative
+    assert "### Hermes provider" not in (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def test_release_version_has_a_dated_changelog_section():
