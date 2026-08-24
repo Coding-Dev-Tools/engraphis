@@ -54,13 +54,13 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
     scene = _scene()
     nodes = {node["id"]: node for node in scene["nodes"]}
     communities = {community["id"]: community for community in scene["communities"]}
-    assert scene["meta"]["algorithm_version"] == "galaxy-v6"
+    assert scene["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
     for node in scene["nodes"]:
         expected_mass = 1.0 + 15.0 * node["mass_score"] ** 2
         assert math.isclose(node["gravity_mass"], expected_mass, abs_tol=1e-6)
         assert math.isclose(
             node["visual_radius"],
-            1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0),
+            1.2 * (1.5 + 2.0 * node["gravity_mass"] ** (2.0 / 3.0)),
             abs_tol=1e-6,
         )
     for community in scene["communities"]:
@@ -84,9 +84,9 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
         system = communities[node["community_id"]]
         assert node["galactic_radius"] == system["galactic_radius"]
         assert node["galactic_target_radius"] == system["galactic_target_radius"]
-        assert node["galactic_radius_scale"] == system["galactic_radius_scale"] == 0.4
+        assert node["galactic_radius_scale"] == system["galactic_radius_scale"] == 0.192
         assert (node["galactic_initial_compactness"]
-                == system["galactic_initial_compactness"] == 0.8)
+                == system["galactic_initial_compactness"] == 0.384)
         assert (node["galactic_clearance_adjusted"]
                 == system["galactic_clearance_adjusted"])
         assert node["galactic_overlap"] == system["galactic_overlap"]

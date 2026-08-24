@@ -291,6 +291,7 @@ def test_ledger_routes_every_shared_sidebar_control_to_the_dedicated_all_rendere
     markup = MARKUP.read_text(encoding="utf-8")
     assert "if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();" in ledger
     assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in ledger
+    assert "const galaxyQuality = fullGraph && graphIsGalaxy()" in ledger
     assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in ledger
     assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in ledger
     assert "minDegree: number(byId('graph-min-degree').value)" in ledger
