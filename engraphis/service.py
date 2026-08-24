@@ -8512,7 +8512,7 @@ class MemoryService:
                 visibility_sql += f"AND selected_entity.etype IN ({marks}) "
                 visibility_params.extend(clean_types)
         visibility_sql += (
-            ") "
+            "), visibility_groups AS ("
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
             "WHEN visibility_support.edge_id IS NULL THEN 1 "
@@ -8536,7 +8536,9 @@ class MemoryService:
             visibility_params.append(repo_id)
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
-            "visibility_edge.src, visibility_edge.dst LIMIT ?"
+            "visibility_edge.src, visibility_edge.dst) "
+            "SELECT repo_id, src, dst, public_edge FROM visibility_groups "
+            "WHERE public_edge=1 LIMIT ?"
         )
         visibility_params.append(MAX_GRAPH_ANALYSIS_EDGES + 1)
         visibility_rows = self.store.conn.execute(

@@ -3871,6 +3871,52 @@ def test_visibility_classification_caps_edge_scan_without_giant_allocation(monke
         service.graph_scene(workspace="acme", level="complete", include_memory_nodes=False)
 
 
+def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
+    """Private-only groups are filtered before the public visibility cap."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    private_source = service.store.upsert_entity(Node(
+        id="private-source", name="Private Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    private_target = service.store.upsert_entity(Node(
+        id="private-target", name="Private Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    public_source = service.store.upsert_entity(Node(
+        id="public-source", name="Public Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    public_target = service.store.upsert_entity(Node(
+        id="public-target", name="Public Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="edge_private", src=private_source, dst=private_target, relation="private",
+        workspace_id=workspace_id,
+    ))
+    private_memory = service.store.add_memory(MemoryRecord(
+        id="memory_private", content="session-only evidence", workspace_id=workspace_id,
+        scope=Scope.SESSION, session_id="private-session",
+    ))
+    service.store.add_edge_support(
+        "edge_private", {"source": "manual", "memory_id": private_memory},
+    )
+    service.store.upsert_edge(Edge(
+        id="edge_public", src=public_source, dst=public_target, relation="public",
+        workspace_id=workspace_id,
+    ))
+    service.store.conn.commit()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+    )
+
+    assert "edge_public" in {edge["id"] for edge in scene["edges"]}
+    assert "edge_private" not in {edge["id"] for edge in scene["edges"]}
+
+
 def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
     service, _alpha, _beta, gamma = _seed_service()
     monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
