@@ -3198,6 +3198,41 @@ def test_graph_analysis_candidate_limit_fails_bounded(monkeypatch):
         service.graph_scene(workspace="acme")
 
 
+def test_private_only_edges_do_not_consume_graph_candidate_cap(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_ENTITIES", 3)
+
+    for index in range(2):
+        private_a = service.store.upsert_entity(Node(
+            id="", name=f"Private A {index}", ntype="concept",
+            workspace_id=workspace_id,
+        ))
+        private_b = service.store.upsert_entity(Node(
+            id="", name=f"Private B {index}", ntype="concept",
+            workspace_id=workspace_id,
+        ))
+        edge_id = f"private-edge-{index}"
+        service.store.upsert_edge(Edge(
+            id=edge_id, src=private_a, dst=private_b, relation="uses",
+            workspace_id=workspace_id,
+        ))
+        memory_id = service.store.add_memory(MemoryRecord(
+            id="", content="session-private graph evidence",
+            workspace_id=workspace_id, scope=Scope.SESSION,
+            session_id="private-session",
+        ))
+        service.store.add_edge_support(
+            edge_id, {"source": "manual", "memory_id": memory_id},
+        )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(workspace="acme")
+
+    assert {node["label"] for node in scene["nodes"]} == {"Alpha", "Beta", "Gamma"}
+    assert not any(node["label"].startswith("Private ") for node in scene["nodes"])
+
+
 def test_graph_scene_all_profile_filters_entity_types_before_candidate_cap(monkeypatch):
     service, _alpha, _beta, _gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")

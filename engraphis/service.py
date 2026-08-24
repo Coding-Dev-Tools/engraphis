@@ -8241,10 +8241,19 @@ class MemoryService:
         # unrelated relation in the workspace.
         touching_entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
         touching_sql = (
-            "SELECT selected_entity.id FROM entities selected_entity "
+            "SELECT selected_entity.id, COUNT(touching_edge.id) AS touching_count "
+            "FROM entities selected_entity "
+            "LEFT JOIN edges touching_edge "
+            "ON touching_edge.workspace_id=? "
+            "AND (touching_edge.src=selected_entity.id "
+            "OR touching_edge.dst=selected_entity.id) "
+            "LEFT JOIN edge_supports touching_support "
+            "ON touching_support.edge_id=touching_edge.id "
+            "LEFT JOIN memories touching_memory "
+            "ON touching_memory.id=touching_support.memory_id "
             "WHERE selected_entity.workspace_id=? "
         )
-        touching_params: list[Any] = [wid]
+        touching_params: list[Any] = [wid, wid]
         if repo_id:
             touching_sql += (
                 "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
@@ -8260,16 +8269,22 @@ class MemoryService:
                 marks = ",".join("?" for _ in clean_types)
                 touching_sql += f"AND selected_entity.etype IN ({marks}) "
                 touching_params.extend(clean_types)
+        # Private-only relation histories must not consume the public candidate cap.
+        # Keep the workspace-wide scan so a shared entity touched by an unrelated
+        # session-private edge remains hidden, but return only entities with no edge
+        # history or at least one non-session, same-workspace support. The grouped
+        # public-edge test also handles mixed public/private evidence correctly.
         touching_sql += (
-            "AND (EXISTS (SELECT 1 FROM edges touching_edge "
-            "WHERE touching_edge.workspace_id=? "
-            "AND touching_edge.src=selected_entity.id) "
-            "OR EXISTS (SELECT 1 FROM edges touching_edge "
-            "WHERE touching_edge.workspace_id=? "
-            "AND touching_edge.dst=selected_entity.id)) "
+            "GROUP BY selected_entity.id "
+            "HAVING COUNT(touching_edge.id)=0 OR MAX(CASE "
+            "WHEN touching_support.edge_id IS NULL THEN 1 "
+            "WHEN touching_memory.id IS NOT NULL "
+            "AND touching_memory.workspace_id=? "
+            "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
+            "THEN 1 ELSE 0 END)=1 "
             "ORDER BY selected_entity.id LIMIT ?"
         )
-        touching_params.extend((wid, wid, touching_entity_cap + 1))
+        touching_params.extend((wid, touching_entity_cap + 1))
         touching_rows = self.store.conn.execute(
             touching_sql, touching_params,
         ).fetchall()
@@ -8300,8 +8315,13 @@ class MemoryService:
             raise ValidationError(
                 "graph analysis exceeds the entity candidate limit; filter by repository"
             )
+        # The cap query also returns unlinked entities so they participate in the
+        # bounded candidate count, but only entities with an actual relation history
+        # belong in this set; otherwise an isolated public node would be filtered out
+        # by the later privacy projection.
         historical_touching_ids = {
-            str(row["id"]) for row in touching_rows if row["id"]
+            str(row["id"]) for row in touching_rows
+            if row["id"] and int(row["touching_count"] or 0) > 0
         }
         historically_public_ids = {
             str(row[key])
@@ -8328,6 +8348,26 @@ class MemoryService:
                 marks = ",".join("?" for _ in clean_types)
                 entity_sql += f" AND etype IN ({marks})"
                 entity_params.extend(clean_types)
+        # Match the privacy classification above in the entity query itself. A private-only
+        # touched entity must not look like an unlinked public node simply because the
+        # bounded candidate scan intentionally omits private rows from its result set.
+        entity_sql += (
+            " AND (NOT EXISTS (SELECT 1 FROM edges hidden_edge "
+            "WHERE hidden_edge.workspace_id=? "
+            "AND (hidden_edge.src=entity.id OR hidden_edge.dst=entity.id)) "
+            "OR EXISTS (SELECT 1 FROM edges public_edge "
+            "LEFT JOIN edge_supports public_support "
+            "ON public_support.edge_id=public_edge.id "
+            "LEFT JOIN memories public_memory "
+            "ON public_memory.id=public_support.memory_id "
+            "WHERE public_edge.workspace_id=? "
+            "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
+            "AND (public_support.edge_id IS NULL OR ("
+            "public_memory.workspace_id=? "
+            "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
+            ")"
+        )
+        entity_params.extend((wid, wid, wid))
         # Page until the cap is reached after session-scope pruning so private
         # evidence cannot crowd out public entities in the candidate set.
         entity_rows = []
