@@ -408,13 +408,14 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
 
 
 def _python_component_refs(component: Any) -> set[str]:
-    """Return the identity refs (bom-ref / purl) a CycloneDX component carries."""
+    """Return the component's preferred CycloneDX dependency-graph ref."""
     if not isinstance(component, dict):
         return set()
-    return {
-        value for value in (component.get("bom-ref"), component.get("purl"))
-        if isinstance(value, str) and value
-    }
+    bom_ref = component.get("bom-ref")
+    if isinstance(bom_ref, str) and bom_ref:
+        return {bom_ref}
+    purl = component.get("purl")
+    return {purl} if isinstance(purl, str) and purl else set()
 
 
 def _validate_python_sbom_dependency_closure(

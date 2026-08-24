@@ -409,7 +409,10 @@ def test_release_evidence_accepts_cyclonedx_root_component_without_purl(tmp_path
     sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
     sbom_doc["metadata"]["component"]["bom-ref"] = "root-component"
     sbom_doc["metadata"]["component"].pop("purl")
+    sbom_doc["components"][0]["bom-ref"] = "alpha-component"
     sbom_doc["dependencies"][0]["ref"] = "root-component"
+    sbom_doc["dependencies"][0]["dependsOn"] = ["alpha-component"]
+    sbom_doc["dependencies"][1]["ref"] = "alpha-component"
     inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
 
     _build(root, dist, inputs=inputs)
@@ -536,6 +539,27 @@ def test_release_evidence_rejects_component_ref_colliding_with_root(tmp_path):
     inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
 
     with pytest.raises(EvidenceError, match="collides with root"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_purl_graph_ref_when_bom_ref_is_present(tmp_path):
+    """Dependency refs must use bom-ref when a component declares one."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["bom-ref"] = "root-component"
+    sbom_doc["components"][0]["bom-ref"] = "alpha-component"
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "root-component",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {"ref": "alpha-component", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="unknown component ref"):
         _build(root, dist, inputs=inputs)
 
 
