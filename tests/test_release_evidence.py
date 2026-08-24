@@ -30,7 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def _root(tmp_path):
     (tmp_path / "eval" / "datasets").mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "engraphis"\nversion = "1.2.3"\n', encoding="utf-8"
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\ndependencies = ["alpha-package>=1.0"]\n',
+        encoding="utf-8",
     )
     (tmp_path / "LICENSE").write_text("Apache-2.0\n", encoding="utf-8")
     (tmp_path / "NOTICE").write_text("Engraphis\n", encoding="utf-8")
@@ -59,18 +60,27 @@ def _release_inputs(root, dist):
             {
                 "bomFormat": "CycloneDX",
                 "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "dependencies": [
+                    {
+                        "ref": "pkg:pypi/engraphis@1.2.3",
+                        "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+                    },
+                    {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+                ],
                 "components": [
                     {
                         "type": "library",
                         "name": "alpha-package",
                         "version": "1.0",
                         "purl": "pkg:pypi/alpha-package@1.0",
-                    },
-                    {
-                        "type": "application",
-                        "name": "engraphis",
-                        "version": "1.2.3",
-                        "purl": "pkg:pypi/engraphis@1.2.3",
                     },
                 ],
             }
@@ -355,6 +365,684 @@ def test_release_evidence_rejects_build_freeze_that_differs_from_python_sbom(tmp
     inputs["environment_lock"].write_text("alpha-package==2.0\n", encoding="utf-8")
 
     with pytest.raises(EvidenceError, match="package closure differ"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_lock_with_conflicting_versions(tmp_path):
+    """A lock with the same package at two versions must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nalpha-package==9.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="conflicting versions"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_lock_packages_missing_from_sbom(tmp_path):
+    """A locked package absent from the SBOM means a truncated capture.
+
+    cyclonedx-bom 7.3.0 (``cyclonedx-py environment``) inventories the whole
+    build environment, including workflow-installed tooling such as pip and
+    setuptools, so a captured lock and SBOM name-set must match after
+    canonicalization; a lock-only entry is how a transitive-only package
+    could vanish while every direct name check still succeeds.
+    """
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nengraphis==1.2.3\npip==26.2\nsetuptools==83.0.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="truncated closure"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_accepts_cyclonedx_root_component_without_purl(tmp_path):
+    """cyclonedx-py uses root-component without a root PyPI PURL."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["bom-ref"] = "root-component"
+    sbom_doc["metadata"]["component"].pop("purl")
+    sbom_doc["components"][0]["bom-ref"] = "alpha-component"
+    sbom_doc["dependencies"][0]["ref"] = "root-component"
+    sbom_doc["dependencies"][0]["dependsOn"] = ["alpha-component"]
+    sbom_doc["dependencies"][1]["ref"] = "alpha-component"
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_mismatched_root_purl(tmp_path):
+    """An optional root PURL, when present, must still identify Engraphis."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["purl"] = "pkg:pypi/other-project@1.2.3"
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_omitting_transitive_packages(tmp_path):
+    """A truncated SBOM keeping root + direct deps but dropping a transitive
+    package must fail even without any dependency graph present."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # beta-package reaches the environment only transitively through
+    # alpha-package; the lock still lists it while the SBOM omits it.
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nbeta-package==0.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="truncated closure"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_dangling_dependency_graph_ref(tmp_path):
+    """A dependsOn ref resolving to nothing must fail the dependency-graph check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["components"].append(
+        {
+            "type": "library",
+            "name": "beta-package",
+            "version": "0.9",
+            "purl": "pkg:pypi/beta-package@0.9",
+        }
+    )
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {
+            "ref": "pkg:pypi/alpha-package@1.0",
+            "dependsOn": ["pkg:pypi/ghost-package@9.9"],
+        },
+        {"ref": "pkg:pypi/beta-package@0.9", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nbeta-package==0.9\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="unknown component ref"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_dependency_graph_entry_without_component(tmp_path):
+    """A graph entry must identify the root or a listed SBOM component."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["ghost-ref"],
+        },
+        {"ref": "ghost-ref", "dependsOn": ["pkg:pypi/alpha-package@1.0"]},
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="unknown component ref"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_duplicate_dependency_graph_ref(tmp_path):
+    """Repeated graph refs must not overwrite an earlier contradictory edge."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/ghost-package@9.9"],
+        },
+        {
+            "ref": "pkg:pypi/engraphis@1.2.3",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="duplicate ref"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_component_ref_colliding_with_root(tmp_path):
+    """A component ref must not alias a root ref and fabricate reachability."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["bom-ref"] = "shared-root-ref"
+    sbom_doc["components"][0]["bom-ref"] = "shared-root-ref"
+    sbom_doc["dependencies"] = [
+        {"ref": "pkg:pypi/engraphis@1.2.3", "dependsOn": []},
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="collides with root"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_purl_graph_ref_when_bom_ref_is_present(tmp_path):
+    """Dependency refs must use bom-ref when a component declares one."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["metadata"]["component"]["bom-ref"] = "root-component"
+    sbom_doc["components"][0]["bom-ref"] = "alpha-component"
+    sbom_doc["dependencies"] = [
+        {
+            "ref": "root-component",
+            "dependsOn": ["pkg:pypi/alpha-package@1.0"],
+        },
+        {"ref": "alpha-component", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="unknown component ref"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_unreachable_declared_dependency(tmp_path):
+    """A declared dependency present in the SBOM but not reachable from the
+    project root through the dependency graph must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["dependencies"] = [
+        {"ref": "pkg:pypi/engraphis@1.2.3", "dependsOn": []},
+        {"ref": "pkg:pypi/alpha-package@1.0", "dependsOn": []},
+    ]
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    with pytest.raises(EvidenceError, match="unreachable from the SBOM root"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_empty_sbom_package_set(tmp_path):
+    """An SBOM with no Python components must not pass the subset check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # Replace SBOM with one that has no pypi components
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "components": [
+                    {"type": "library", "name": "libssl", "version": "3.0",
+                     "purl": "pkg:deb/debian/libssl@3.0"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="(no Python package components|lacks a valid PyPI PURL)"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_missing_root_component(tmp_path):
+    """A truncated SBOM that retains one matching dep but omits the root
+    engraphis component must fail the lock comparison."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM has only alpha-package (which IS in the lock) but no engraphis root.
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_with_wrong_version_root_component(tmp_path):
+    """An SBOM whose metadata.component names a different project version must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "other-project",
+                        "version": "9.9.9",
+                        "purl": "pkg:pypi/other-project@9.9.9",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_with_only_root_component(tmp_path):
+    """An SBOM with valid metadata.component but no dependency components must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="(no dependency components|missing declared dependencies)"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_missing_declared_dependencies(tmp_path):
+    """An SBOM missing a declared dependency must fail the closure check."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM has root + pip (not declared) but omits alpha-package (declared)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {"type": "library", "name": "pip", "version": "26.2",
+                     "purl": "pkg:pypi/pip@26.2"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="missing declared dependencies"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_version_violating_declared_constraint(tmp_path):
+    """An SBOM whose version violates a declared specifier must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # pyproject.toml declares alpha-package>=1.0, but SBOM has 0.5
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {"type": "library", "name": "alpha-package", "version": "0.5",
+                     "purl": "pkg:pypi/alpha-package@0.5"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_combines_duplicate_declared_constraints(tmp_path):
+    """Repeated requirements must enforce the intersection of their specifiers."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        'all = ["alpha-package>=2.0"]\n'
+        'test = ["alpha-package<3.0"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.5\nengraphis==1.2.3\n", encoding="utf-8"
+    )
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.5",
+                        "purl": "pkg:pypi/alpha-package@1.5",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_prerelease_versions_against_pep440_floors(tmp_path):
+    """A prerelease below the declared floor must not satisfy the constraint."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0", "numpy>=1.24"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nengraphis==1.2.3\nnumpy==1.24rc1\n",
+        encoding="utf-8",
+    )
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                    {
+                        "type": "library",
+                        "name": "numpy",
+                        "version": "1.24rc1",
+                        "purl": "pkg:pypi/numpy@1.24rc1",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_requires_selected_extra_dependencies(tmp_path):
+    """The closure must include requirements from the extras the workflow installs."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        "all = [\"extra-dep>=1.0; python_version >= '3.9'\"]\n"
+        "test = [\"test-dep>=0.1\"]\n",
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    # SBOM and lock carry only the core dependency; extra-dep/test-dep are missing.
+    with pytest.raises(EvidenceError, match="missing declared dependencies"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_allows_unreachable_selected_extra_dependencies(tmp_path):
+    """Selected extras must be captured, but need not be root-reachable in CycloneDX."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        'all = ["extra-dep>=1.0"]\n'
+        'test = ["test-dep>=0.1"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    for name, version in (("extra-dep", "1.0"), ("test-dep", "0.1")):
+        ref = f"pkg:pypi/{name}@{version}"
+        sbom_doc["components"].append(
+            {"type": "library", "name": name, "version": version, "purl": ref}
+        )
+        # The capture contains the selected extras, but the installed metadata
+        # does not promise that those nodes are linked from the project root.
+        sbom_doc["dependencies"].append({"ref": ref, "dependsOn": []})
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nextra-dep==1.0\ntest-dep==0.1\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+
+    evidence = _build(root, dist, inputs=inputs)
+
+    assert evidence["environment_lock"]["package_count"] == 4
+
+
+def test_release_evidence_ignores_extra_dependencies_with_inapplicable_markers(tmp_path):
+    """Extras requirements whose environment marker excludes this interpreter are
+    not required, mirroring what pip installs in the capture environment."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        "all = [\"future-dep>=1.0; python_version < '3.9'\"]\n"
+        "test = [\"legacy-dep>=0.1; python_version < '3.9'\"]\n",
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    evidence = _build(root, dist)
+    assert evidence["environment_lock"]["package_count"] == 2
+
+
+def test_release_evidence_rejects_sbom_with_mismatched_root_purl(tmp_path):
+    """An SBOM whose metadata.component PURL names a different package must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/other-project@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="metadata.component does not identify"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_with_malformed_dependency_purl(tmp_path):
+    """An SBOM component whose PURL names a different package than its name/version must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/other-project@1.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="PURL does not match"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_with_non_pypi_component_purl(tmp_path):
+    """An SBOM component with a non-PyPI PURL (e.g. pkg:deb) must fail."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/alpha-package@1.0",
+                    },
+                    {
+                        "type": "library",
+                        "name": "libssl",
+                        "version": "3.0",
+                        "purl": "pkg:deb/debian/libssl@3.0",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceError, match="lacks a valid PyPI PURL"):
+        _build(root, dist, inputs=inputs)
+
+
+def test_release_evidence_rejects_sbom_component_missing_identity(tmp_path):
+    """A component missing name/version must not disappear from the closure."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["components"].append(
+        {"type": "library", "purl": "pkg:pypi/ghost-package@9.9"}
+    )
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="must identify name and version"):
         _build(root, dist, inputs=inputs)
 
 
