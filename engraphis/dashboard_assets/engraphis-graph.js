@@ -156,7 +156,8 @@
      inverse-square sample consume this same constant: the result is a faster bound central
      orbit, not a per-frame carousel or an unbalanced tangential kick. Direct global children
      use the black-hole clock because their carrier seed and live well are the same field. */
-  const GALAXY_STELLAR_ORBIT_CLOCK = 2.5;
+  const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;
+  const GALAXY_FALLBACK_STELLAR_ORBIT_CLOCK = 2.5;
   /* The dashboard's Gravity control owns the black-hole well. A saved zero value must not
      erase either level of the hierarchy: eligible community stars retain the calibrated
      default stellar well, while the explicit global anchor uses the smaller floor above. */
@@ -181,6 +182,29 @@
   }
   function galaxyLocalGravitySetting(setting, localSetting) {
     return localSetting === undefined ? setting : localSetting;
+  }
+  function galaxyHasAuthoredParent(node, parent) {
+    return !!(node && parent && node.system_anchor_id !== undefined
+      && node.system_anchor_id !== null && String(node.system_anchor_id) !== ''
+      && String(node.system_anchor_id) === String(parent.id));
+  }
+  function orderedGalaxyLocalOrbitMembers(members, carrier, byId) {
+    const lookup = byId || new Map((members || []).map(item => [String(item.id), item]));
+    const depths = new Map();
+    const visiting = new Set();
+    const depthOf = node => {
+      if (!node || node === carrier) return 0;
+      if (depths.has(node)) return depths.get(node);
+      if (visiting.has(node)) return 1;
+      visiting.add(node);
+      const parent = galaxyLocalOrbitParent(node, members, carrier, lookup);
+      const depth = parent && parent !== node ? depthOf(parent) + 1 : 1;
+      visiting.delete(node);
+      depths.set(node, depth);
+      return depth;
+    };
+    return (members || []).slice().sort((left, right) => depthOf(left) - depthOf(right)
+      || String(left.id).localeCompare(String(right.id)));
   }
   function galaxySystemGravityConstant(anchor, setting, localSetting, authoredHierarchy) {
     const effectiveLocalSetting = galaxyLocalGravitySetting(setting, localSetting);
@@ -1862,7 +1886,7 @@
           galaxyHasAuthoredParent(satellite, parent));
         const parentGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
         const parentGravity = galaxySystemGravityConstant(parent, opts.gravity,
-          localGravitySetting) * parentGravityMultiplier;
+          localGravitySetting, authoredHierarchy) * parentGravityMultiplier;
         satellites.sort((left, right) => Number(left.orbit_tier || 0)
           - Number(right.orbit_tier || 0) || String(left.id).localeCompare(String(right.id)));
         satellites.forEach(satellite => {

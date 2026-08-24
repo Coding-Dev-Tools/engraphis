@@ -842,7 +842,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert 'id="graph-retry"' in page.text
         assert 'id="graph-full"' not in page.text
         assert 'id="graph-show-all"' in page.text
-        assert "Show all nodes" in page.text
+        assert "All nodes" in page.text
         assert 'id="graph-show-unlinked"' in page.text
         assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
