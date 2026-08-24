@@ -1302,8 +1302,12 @@ body[data-theme="paper"] .graph-header {
   .metrics { grid-template-columns: 1fr 1fr; }
   .graph-actions { flex-wrap: wrap; }
 }
-/* Focus visibility for the style chips is handled by the shared focus-visible rules
-   here (static CSS, CSP-safe) rather than mutating element.style at runtime. */
+/* Avoid a pointer-focus ring around the canvas while retaining a visible keyboard
+   indicator for the tab-focusable graph host (static CSS, CSP-safe). */
 div[data-graph-style]:focus {
   outline: none;
+}
+div[data-graph-style]:focus-visible {
+  outline: 2px solid var(--c-acc);
+  outline-offset: -2px;
 }

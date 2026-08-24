@@ -228,6 +228,7 @@ def test_renderer_layers_the_retina_safe_underlay_without_capturing_input() -> N
     css = CSS.read_text(encoding="utf-8")
     assert ".graph-canvas .engraphis-all-underlay" in css
     assert ".graph-canvas .engraphis-all-underlay { pointer-events: none; }" in css
+    assert "div[data-graph-style]:focus-visible" in css
 
 
 def test_ledger_preserves_falsy_graph_endpoints() -> None:
