@@ -3884,6 +3884,78 @@ def test_live_visibility_cap_ignores_closed_relations(monkeypatch):
     assert {edge["id"] for edge in scene["edges"]} == {"edge_bg"}
 
 
+def test_history_visibility_cap_ignores_edges_learned_after_known_at(monkeypatch):
+    """Future system-time rows must not consume a time-travel visibility budget."""
+    service, alpha, beta, _gamma = _seed_service()
+    workspace_id = service.store.get_or_create_workspace("acme")
+    old_target = service.store.upsert_entity(Node(
+        id="history-old-target", name="History Old Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    future_target = service.store.upsert_entity(Node(
+        id="history-future-target", name="History Future Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="history-old-edge", src=alpha, dst=old_target, relation="old",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="history-future-edge", src=beta, dst=future_target, relation="future",
+        workspace_id=workspace_id,
+    ))
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='history-old-edge'"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=200 WHERE id='history-future-edge'"
+    )
+    service.store.conn.commit()
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+        include_history=True, valid_at=100, known_at=100,
+    )
+
+    edge_ids = {edge["id"] for edge in scene["edges"]}
+    assert "history-old-edge" in edge_ids
+    assert "history-future-edge" not in edge_ids
+
+
+def test_live_scene_keeps_entities_before_future_edge_known_at():
+    """An edge learned after known_at must not hide its otherwise unlinked nodes."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    source = service.store.upsert_entity(Node(
+        id="known-source", name="Known Source", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    target = service.store.upsert_entity(Node(
+        id="known-target", name="Known Target", ntype="concept",
+        workspace_id=workspace_id,
+    ))
+    service.store.upsert_edge(Edge(
+        id="future-edge", src=source, dst=target, relation="future",
+        workspace_id=workspace_id,
+    ))
+    service.store.conn.execute("UPDATE entities SET created_at=0")
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=0, ingested_at=200 WHERE id='future-edge'"
+    )
+    service.store.conn.commit()
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+        valid_at=100, known_at=100,
+    )
+
+    node_ids = {node["id"] for node in scene["nodes"]}
+    assert {source, target} <= node_ids
+    assert "future-edge" not in {edge["id"] for edge in scene["edges"]}
+
+
 def test_live_entity_cap_ignores_closed_edge_only_entities(monkeypatch):
     """Closed-only endpoints must not consume the live entity candidate cap."""
     service, _alpha, _beta, _gamma = _seed_service()
