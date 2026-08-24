@@ -279,7 +279,7 @@ def _version_satisfies(version: str, specifier: str) -> bool:
 def _declared_dependencies(
         root: Path, *, include_extras: bool = True,
 ) -> dict[str, str | None]:
-    """Return {canonical_name: specifier} required in the captured SBOM closure.
+    """Return {canonical_name: combined specifier} required in the SBOM closure.
 
     Covers [project].dependencies plus, when ``include_extras`` is true, every
     requirement declared by the extras the release workflow installs
@@ -352,6 +352,11 @@ def _declared_dependencies(
                 continue
         if canonical not in deps or deps[canonical] is None:
             deps[canonical] = specifier
+        elif specifier and specifier != deps[canonical]:
+            # Multiple selected extras can constrain the same distribution.
+            # Preserve every applicable constraint so validation enforces their
+            # intersection instead of silently accepting the first one seen.
+            deps[canonical] = f"{deps[canonical]},{specifier}"
     return deps
 
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:

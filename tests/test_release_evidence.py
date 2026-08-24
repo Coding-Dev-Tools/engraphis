@@ -735,6 +735,52 @@ def test_release_evidence_rejects_sbom_version_violating_declared_constraint(tmp
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_combines_duplicate_declared_constraints(tmp_path):
+    """Repeated requirements must enforce the intersection of their specifiers."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        'all = ["alpha-package>=2.0"]\n'
+        'test = ["alpha-package<3.0"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.5\nengraphis==1.2.3\n", encoding="utf-8"
+    )
+    inputs["sbom"].write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "metadata": {
+                    "component": {
+                        "type": "application",
+                        "name": "engraphis",
+                        "version": "1.2.3",
+                        "purl": "pkg:pypi/engraphis@1.2.3",
+                    },
+                },
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "alpha-package",
+                        "version": "1.5",
+                        "purl": "pkg:pypi/alpha-package@1.5",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvidenceError, match="does not satisfy declared constraint"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_prerelease_versions_against_pep440_floors(tmp_path):
     """A prerelease below the declared floor must not satisfy the constraint."""
     root = _root(tmp_path)
