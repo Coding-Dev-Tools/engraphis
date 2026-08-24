@@ -626,6 +626,47 @@ def test_rename_planner_indexes_hashes_once_for_large_sources():
     assert items.iterations <= 3
 
 
+def test_manifest_cursor_deduplicates_a_row_renamed_forward_between_pages():
+    class MovingItems:
+        def __init__(self):
+            self.rows = [
+                {
+                    "id": f"src_{index:05d}",
+                    "source_key": f"{index + 1:064x}",
+                    "relative_path": f"p{index:05d}.md",
+                }
+                for index in range(20_001)
+            ]
+            self.calls = 0
+
+        def list_source_import_items(self, *, vault_id, states=None, limit=10_000,
+                                     after_path="", after_id=""):
+            del vault_id, states
+            self.calls += 1
+            if self.calls == 2:
+                # A non-snapshot reader can observe this row again after it moves
+                # beyond the first page's cursor. The planner must keep one identity.
+                self.rows[0]["relative_path"] = "z00000.md"
+            rows = sorted(self.rows, key=lambda row: (row["relative_path"], row["id"]))
+            if after_path:
+                rows = [
+                    row for row in rows
+                    if row["relative_path"] > after_path
+                    or (row["relative_path"] == after_path and row["id"] > after_id)
+                ]
+            return [dict(row) for row in rows[:limit]]
+
+    moving = MovingItems()
+    importer = ObsidianImporter()
+    importer.store = moving
+    items, complete = importer._all_source_items(vault_id="vault")
+
+    assert complete is True
+    assert len(items) == len({row["id"] for row in items}) == 20_001
+    moved = next(row for row in items if row["id"] == "src_00000")
+    assert moved["relative_path"] == "z00000.md"
+
+
 def test_conflict_new_branch_and_atomic_note_failure(tmp_path: Path, monkeypatch):
     vault = tmp_path / "Vault"
     vault.mkdir()

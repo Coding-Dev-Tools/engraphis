@@ -1,12 +1,13 @@
 """Real-service coverage for the owner-only Obsidian import facade."""
 from __future__ import annotations
 
+import hashlib
 import time
 
 import pytest
 
 from engraphis.service import MemoryService, ValidationError
-from engraphis.obsidian_import import scan_obsidian_upload
+from engraphis.obsidian_import import ObsidianImporter, scan_obsidian_upload
 
 
 _TERMINAL_STATES = {"completed", "partial", "failed", "cancelled"}
@@ -41,6 +42,110 @@ def _import(service: MemoryService, files: list[tuple[str, bytes]], **kwargs) ->
         vault_label="Team notes", confirmed=True, **kwargs,
     )
     return started, _await_job(service, started)
+
+
+def test_preview_pages_the_full_manifest_like_execution():
+    service = _service()
+    try:
+        started, imported = _import(
+            service,
+            [
+                ("A.md", b"# A\n"),
+                ("B.md", b"# B\n"),
+                ("C.md", b"# C\n"),
+            ],
+        )
+        vault_id = started["vault_id"]
+        assert imported["state"] == "completed"
+
+        # Push the vault manifest past the default 10k list-page boundary with
+        # filler identity rows that sort before the scan set, so an unpaged
+        # preview loses exactly the rows a real oversized vault would lose.
+        for i in range(10_001):
+            service.store.upsert_source_import_item(
+                vault_id=vault_id,
+                source_key=hashlib.sha256(f"seed-{i}".encode()).hexdigest(),
+                relative_path=f"0000-seed-{i:05d}.md",
+            )
+
+        preview = service.preview_obsidian_upload(
+            files=[("A.md", b"# A\n"), ("D.md", b"# D\n")],
+            attachment_manifest=[],
+            workspace="alpha",
+            vault_label="Team notes",
+            vault_id=vault_id,
+        )
+
+        # An unpaged preview reads only the first list page, so manifest rows
+        # beyond the boundary vanish from the report entirely. The paged reader
+        # must surface every manifest row: A plans as unchanged and B/C — not
+        # part of this preview's scan — are reported as missing, not dropped.
+        statuses = {
+            row["relative_path"]: row["status"] for row in preview["files"]
+        }
+        assert statuses["A.md"] != "missing"
+        assert "B.md" in statuses
+        assert "C.md" in statuses
+    finally:
+        service.close()
+
+
+def test_preview_defers_missing_rows_when_manifest_is_truncated(monkeypatch):
+    service = _service()
+    try:
+        started, imported = _import(service, [("A.md", b"# A\n")])
+        assert imported["state"] == "completed"
+        vault_id = started["vault_id"]
+        service.store.upsert_source_import_item(
+            vault_id=vault_id,
+            source_key=hashlib.sha256(b"gone").hexdigest(),
+            relative_path="gone.md",
+        )
+        items = service.store.list_source_import_items(vault_id=vault_id)
+
+        def _truncated(_self, *, vault_id, states=None):
+            del vault_id, states
+            return items, False
+
+        monkeypatch.setattr(ObsidianImporter, "_all_source_items", _truncated)
+        preview = service.preview_obsidian_upload(
+            files=[("A.md", b"# A\n")], attachment_manifest=[],
+            workspace="alpha", vault_label="Team notes", vault_id=vault_id,
+        )
+
+        statuses = {
+            row["relative_path"]: row["status"] for row in preview["files"]
+        }
+        assert preview["manifest_complete"] is False
+        assert preview["counts"].get("missing", 0) == 0
+        assert preview["counts"]["pending"] == 1
+        assert statuses["gone.md"] == "pending"
+    finally:
+        service.close()
+
+
+def test_late_manifest_truncation_marks_import_partial(monkeypatch):
+    service = _service()
+    try:
+        original = ObsidianImporter._all_source_items
+        calls = 0
+
+        def _late_truncation(self, *, vault_id, states=None):
+            nonlocal calls
+            calls += 1
+            items, complete = original(self, vault_id=vault_id, states=states)
+            return items, complete if calls == 1 else False
+
+        monkeypatch.setattr(ObsidianImporter, "_all_source_items", _late_truncation)
+        _, report = _import(
+            service,
+            [("A.md", b"# A\nSee [[B]].\n"), ("B.md", b"# B\n")],
+        )
+
+        assert calls >= 2
+        assert report["state"] == "partial"
+    finally:
+        service.close()
 
 
 def test_preview_is_write_free_and_service_enforces_confirmation_and_upload_guards(monkeypatch):

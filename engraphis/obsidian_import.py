@@ -277,7 +277,7 @@ class ObsidianImporter:
         attachment_manifest: Optional[list[dict]] = None,
     ) -> dict:
         policy = self._policy(on_conflict)
-        vault, items = self._preview_manifest(
+        vault, items, manifest_complete = self._preview_manifest(
             scan, workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id, vault_id=vault_id, manifest=manifest,
             scope=scope, memory_type=memory_type, strict_root=strict_root,
@@ -286,11 +286,18 @@ class ObsidianImporter:
         plans, missing = self._plan(
             scan, identity, items, inspect_memories=manifest is None,
         )
+        # A bounded manifest is enough to plan visible notes, but not enough to claim
+        # that an unseen historical row was deleted. Match confirmed execution by
+        # surfacing those rows as deferred rather than actionable ``missing`` items.
+        pending_missing = missing if not manifest_complete else []
+        if pending_missing:
+            missing = []
         return self._report(
             plans, missing, scan, state="preview", vault_id=(vault or {}).get("id"),
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            pending_missing=pending_missing, manifest_complete=manifest_complete,
         )
 
     def import_scan(
@@ -317,7 +324,7 @@ class ObsidianImporter:
         run_started = time.time()
         job_id = str(prepared["job_id"])
         import_id = str(prepared["import_id"])
-        items = self.store.list_source_import_items(vault_id=vault_id)
+        items, manifest_complete = self._all_source_items(vault_id=vault_id)
         plans, missing = self._plan(scan, vault_id, items, inspect_memories=True)
         for plan in plans:
             self.store.record_source_import_job_item(
@@ -348,7 +355,9 @@ class ObsidianImporter:
         finalized_missing: list[dict] = []
         pending_missing = list(missing)
         unreadable_directories = self._unreadable_directories(scan)
-        can_finalize_missing = scan.complete and not unreadable_directories
+        can_finalize_missing = (
+            scan.complete and not unreadable_directories and manifest_complete
+        )
         terminal_state = "completed"
         try:
             for index, plan in enumerate(plans, 1):
@@ -365,30 +374,54 @@ class ObsidianImporter:
                     progress(dict(outcome))
             self._check_cancel(job_id, cancel_check)
             if can_finalize_missing:
-                self.store.mark_source_import_items_missing(
+                # Set membership: O(1) average per lookup, replacing the previous
+                # quadratic list scan over up to 200k items — a complexity fix,
+                # not a timing-sensitive comparison.
+                marked_keys = set(self.store.mark_source_import_items_missing(
                     vault_id=vault_id, seen_before=run_started,
                     preserve_paths=self._rejected_paths(scan),
-                )
-                for item in missing:
+                    missing_items=missing,
+                ))
+                finalized = [
+                    item for item in missing
+                    if str(item.get("source_key") or "") in marked_keys
+                ]
+                for item in finalized:
                     self.store.record_source_import_job_item(
                         job_id=job_id, source_id=item.get("id"),
                         relative_path=str(item.get("relative_path") or "(missing)"),
                         planned_action="missing", result_state="missing",
                     )
-                finalized_missing = missing
+                for item in missing:
+                    if str(item.get("source_key") or "") in marked_keys:
+                        continue
+                    # The generation guard left this row live: a concurrent import
+                    # refreshed it after this run planned it missing. The job history
+                    # must not claim a live source was removed.
+                    self.store.record_source_import_job_item(
+                        job_id=job_id, source_id=item.get("id"),
+                        relative_path=str(item.get("relative_path") or "(missing)"),
+                        planned_action="missing", result_state="skipped",
+                    )
+                finalized_missing = finalized
                 pending_missing = []
             # Link reconciliation is safe only for a complete view of the source.
             # An incomplete scan must not retire a valid edge merely because its target
             # was hidden by a transient filesystem or scan-budget failure.
             link_warnings: list[dict] = []
+            links_manifest_complete = True
             if can_finalize_missing:
-                link_warnings = self._reconcile_links(
+                link_warnings, links_manifest_complete = self._reconcile_links(
                     scan, vault_id=vault_id, job_id=job_id, cancel_check=cancel_check,
                 )
                 self._persist_link_warnings(job_id, link_warnings)
+                manifest_complete = manifest_complete and links_manifest_complete
             outcomes.extend(link_warnings)
-            if scan.rejected or not scan.complete or unreadable_directories or any(
-                row["status"] in {"error", "conflict", "rejected"} for row in outcomes
+            if (
+                scan.rejected or not scan.complete or unreadable_directories
+                or not manifest_complete
+                or any(row["status"] in {"error", "conflict", "rejected"}
+                       for row in outcomes)
             ):
                 terminal_state = "partial"
         except (KeyboardInterrupt, ObsidianImportCancelled):
@@ -402,6 +435,7 @@ class ObsidianImporter:
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
         if terminal_state == "completed" and report["counts"].get("conflict", 0):
             terminal_state = "partial"
@@ -452,7 +486,7 @@ class ObsidianImporter:
         repo_id: Optional[str], session_id: Optional[str], vault_id: Optional[str],
         scope: Scope, memory_type: MemoryType, manifest: Optional[dict],
         strict_root: bool,
-    ) -> tuple[Optional[dict], list[dict]]:
+    ) -> tuple[Optional[dict], list[dict], bool]:
         vaults = (
             list((manifest or {}).get("vaults") or [])
             if manifest is not None else self.store.list_source_vaults(kind=self.SOURCE_KIND)
@@ -462,6 +496,7 @@ class ObsidianImporter:
             if manifest is not None else []
         )
         vault: Optional[dict] = None
+        manifest_complete = True
         if vault_id:
             vault = (
                 self.store.get_source_vault(vault_id)
@@ -487,12 +522,14 @@ class ObsidianImporter:
                 scope=scope, memory_type=memory_type, strict_root=strict_root,
             )
             if manifest is None:
-                items = self.store.list_source_import_items(vault_id=str(vault["id"]))
+                # Page the manifest like import_scan does so previews on manifests
+                # larger than one list page plan against the full item set.
+                items, manifest_complete = self._all_source_items(vault_id=str(vault["id"]))
             else:
                 items = [row for row in items if row.get("vault_id") == vault.get("id")]
         else:
             items = []
-        return vault, items
+        return vault, items, manifest_complete
 
     def _resolve_or_register_vault(
         self, scan: _ImportScan, *, workspace_id: str,
@@ -947,15 +984,85 @@ class ObsidianImporter:
             },
         }
 
+    def _all_source_items(self, *, vault_id: str,
+                          states: Optional[list[str]] = None) -> tuple[list[dict], bool]:
+        """Page the full manifest by keyset cursor so nothing is skipped or miscounted.
+
+        ``list_source_import_items`` caps each page (default 10k rows); a manifest that
+        outgrew one page through repeated deletions and additions must still be planned
+        and reconciled in full. The ``(relative_path, id)`` cursor avoids the OFFSET
+        failure mode, where a concurrent rename shifts an unread row across the page
+        boundary so it is silently skipped while the pager believes it saw everything.
+        Store-backed reads hold one SQLite snapshot for all pages; identity de-duplication
+        is also defensive for injected readers that expose a row after a forward rename.
+        Returns the rows and whether the whole manifest was read: the 200k-row bound is a
+        memory cap, and one extra row is probed past it so a manifest of exactly that size
+        is not misreported as truncated.
+        """
+        items: list[dict] = []
+        positions: dict[str, int] = {}
+        page_size = 10_000
+        cursor_path = cursor_id = ""
+        conn = getattr(self.store, "conn", None)
+        snapshot_started = bool(
+            conn is not None
+            and hasattr(conn, "transaction_owned_by_current_thread")
+            and not conn.transaction_owned_by_current_thread()
+        )
+        try:
+            if snapshot_started:
+                conn.execute("BEGIN")
+            result: Optional[tuple[list[dict], bool]] = None
+            for _ in range(20):  # bounded: at most 200k manifest rows per import run
+                page = self.store.list_source_import_items(
+                    vault_id=vault_id, states=states, limit=page_size,
+                    after_path=cursor_path, after_id=cursor_id,
+                )
+                for row in page:
+                    identity = str(row.get("id") or row.get("source_key") or "")
+                    position = positions.get(identity) if identity else None
+                    if position is None:
+                        if identity:
+                            positions[identity] = len(items)
+                        items.append(row)
+                    else:
+                        # A reader that cannot hold a snapshot may observe one source
+                        # row again after a concurrent rename moves it forward. Keep the
+                        # newest observation rather than planning that identity twice.
+                        items[position] = row
+                if len(page) < page_size:
+                    result = (items, True)
+                    break
+                cursor_path = str(page[-1].get("relative_path") or "")
+                cursor_id = str(page[-1].get("id") or "")
+            if result is None:
+                extra = self.store.list_source_import_items(
+                    vault_id=vault_id, states=states, limit=1,
+                    after_path=cursor_path, after_id=cursor_id,
+                )
+                result = (items, not extra)
+            if snapshot_started and conn.transaction_owned_by_current_thread():
+                conn.commit()
+            return result
+        except BaseException:
+            if snapshot_started and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
+
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Resolve derived links in bounded, cancellable, replay-safe batches."""
-        items = self.store.list_source_import_items(
+        items, manifest_complete = self._all_source_items(
             vault_id=vault_id,
             states=["imported", "unchanged", "renamed", "skipped", "missing"],
         )
+        if not manifest_complete:
+            # A manifest beyond the paging bound is an incomplete view of the source;
+            # retiring derived edges against it could kill links whose targets were
+            # simply invisible. The run is already headed to partial upstream.
+            return [], False
         memory_by_path = {
             str(item["relative_path"]): str(item["memory_id"])
             for item in items if item.get("memory_id")
@@ -1123,7 +1230,7 @@ class ObsidianImporter:
                 self.store.conn.rollback()
             raise
         flush()
-        return warnings
+        return warnings, True
 
     def _persist_link_warnings(self, job_id: str, warnings: list[dict]) -> None:
         """Attach reconciliation warnings to the durable polling rows."""
@@ -1236,6 +1343,8 @@ class ObsidianImporter:
         repo_id: Optional[str], session_id: Optional[str], scope: Scope,
         memory_type: MemoryType, policy: str, vault_label: str,
         attachment_manifest: Optional[list[dict]],
+        pending_missing: Optional[list[dict]] = None,
+        manifest_complete: bool = True,
     ) -> dict:
         files = [self._preview_row(plan) for plan in plans]
         files.extend({
@@ -1250,11 +1359,16 @@ class ObsidianImporter:
             "relative_path": str(item.get("relative_path") or ""), "status": "missing",
             "action": "missing", "reason": "source_not_seen", "warnings": [],
         } for item in missing)
+        files.extend({
+            "relative_path": str(item.get("relative_path") or ""), "status": "pending",
+            "action": "pending", "reason": "missing_check_deferred", "warnings": [],
+        } for item in pending_missing or [])
         return self._report_payload(
             files, scan, state=state, vault_id=vault_id,
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
 
     def _final_report(
@@ -1264,6 +1378,7 @@ class ObsidianImporter:
         import_id: str, workspace_id: str, repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
+        manifest_complete: bool = True,
     ) -> dict:
         files = list(outcomes)
         processed_paths = {
@@ -1300,6 +1415,7 @@ class ObsidianImporter:
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scope=scope, memory_type=memory_type, policy=policy,
             vault_label=vault_label, attachment_manifest=attachment_manifest,
+            manifest_complete=manifest_complete,
         )
         report.update({"job_id": job_id, "import_id": import_id})
         return report
@@ -1327,6 +1443,7 @@ class ObsidianImporter:
         vault_id: Optional[str], workspace_id: Optional[str], repo_id: Optional[str],
         session_id: Optional[str], scope: Scope, memory_type: MemoryType,
         policy: str, vault_label: str, attachment_manifest: Optional[list[dict]],
+        manifest_complete: bool = True,
     ) -> dict:
         counts: dict[str, int] = {}
         for row in files:
@@ -1344,6 +1461,7 @@ class ObsidianImporter:
             formats[name] = formats.get(name, 0) + 1
         return {
             "state": state, "status": state, "vault_id": vault_id,
+            "manifest_complete": bool(manifest_complete),
             "vault_label": str(vault_label or "")[:200],
             "source_id": vault_id,
             "source_label": str(vault_label or "")[:200],
