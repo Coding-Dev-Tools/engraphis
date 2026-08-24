@@ -14,6 +14,7 @@ WORKER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every-worker
 RENDERER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
 LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 MARKUP = ROOT / "engraphis" / "dashboard_assets" / "index.html"
+CSS = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
 
 WORKER_HARNESS = """
 const vm = require('vm'); const fs = require('fs'); const messages = [];
@@ -106,6 +107,8 @@ setTimeout(() => {
     nodes: ready.ids.length,
     layout_count: layouts.length,
     final_fit: layouts.at(-1).fit,
+    first_pass: layouts[0].pass,
+    final_pass: layouts.at(-1).pass,
     settled: layouts.length > 1 && layouts.at(-1).positions.some((v, i) => v !== layouts[0].positions[i]),
     bounds_present: typeof ready.bounds.minX === 'number',
     top_nodes: ready.topNodes.length,
@@ -116,6 +119,8 @@ setTimeout(() => {
     assert report["order_ok"] is True
     assert report["counts"]["progress"] == 26  # REFINE_PASSES fully accounted for
     assert report["counts"]["layout"] == 7     # every 4th pass plus the final one
+    assert report["first_pass"] == 4
+    assert report["final_pass"] == 26
     assert report["nodes"] == 120
     assert report["final_fit"] is True
     assert report["settled"] is True
@@ -198,6 +203,26 @@ def test_renderer_uploads_change_driven_and_reports_honest_edge_counts() -> None
     assert "state.bridges && state.edgeBridges[index]" in renderer  # toggle re-upload
 
 
+def test_renderer_scales_picking_and_highlight_points_in_world_units() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    assert "pointSize(best) + 7 / Math.max(0.005, state.camera.scale)" in renderer
+    assert "state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];" in renderer
+
+
+def test_renderer_layers_the_retina_safe_underlay_without_capturing_input() -> None:
+    css = CSS.read_text(encoding="utf-8")
+    assert ".graph-canvas .engraphis-all-underlay" in css
+    assert ".graph-canvas .engraphis-all-underlay { pointer-events: none; }" in css
+
+
+def test_ledger_preserves_falsy_graph_endpoints() -> None:
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "function graphEndpoint(value)" in ledger
+    assert "source: item.from ?? graphEndpoint(item.source)" in ledger
+    assert "target: item.to ?? graphEndpoint(item.target)" in ledger
+    assert "item.source !== undefined && item.source !== null" in ledger
+
+
 def test_renderer_export_is_synchronous_and_composites_every_layer() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     body = renderer[renderer.index("function exportImageCanvas"):renderer.index("function destroyGraph")]
@@ -227,6 +252,23 @@ def test_renderer_focus_decorations_use_incident_edges_not_full_link_scan() -> N
     assert "connectionHighlights" in renderer
     assert "LABEL_CANDIDATE_MAX" in renderer
     assert "state.incidentEdges = state.ids.map(() => []);" in renderer
+
+
+def test_renderer_preserves_zero_community_for_untagged_nodes() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    assert "String(state.communities[index] ?? index)" in renderer
+    assert "result[id] = state.communities[index] ?? index" in renderer
+    assert "String(state.communities[index] || index)" not in renderer
+
+
+def test_renderer_adopts_seeded_preview_positions_and_clears_reload_metadata() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    adopt_body = renderer[renderer.index("function adoptCommon") : renderer.index("function handleWorkerMessage")]
+    set_data_body = renderer[renderer.index("setData(data)") : renderer.index("setRenderMode")]
+    assert "state.positions = message.positions || state.positions;" in adopt_body
+    assert "state.edgeSources = new Uint32Array(0);" in set_data_body
+    assert "state.totalLinks = 0;" in set_data_body
+    assert "state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;" in set_data_body
 
 
 def test_renderer_exposes_capacity_and_every_preset() -> None:
@@ -267,6 +309,19 @@ send({ type: 'prepare', payload: { nodes, links: [] } });
     )
     report = json.loads(result.stdout)
     assert report["firstPassMs"] < 4000
+
+
+def test_worker_capacity_replacement_clears_previous_model() -> None:
+    """An over-capacity reload must not let reheat revive the prior graph model."""
+    script = """
+send({ type: 'prepare', payload: { nodes: [{ id: 'old' }], links: [] } });
+send({ type: 'prepare', payload: { nodes: Array.from({ length: 20001 }, (_, i) => ({ id: `n${i}` })), links: [] } });
+send({ type: 'reheat' });
+setTimeout(() => console.log(JSON.stringify({ layouts: all('layout').length, capacity: all('capacity').length })), 40);
+"""
+    report = _run_worker(script)
+    assert report["capacity"] == 1
+    assert report["layouts"] == 0
 
 
 def test_renderer_create_runs_without_throwing_in_a_minimal_dom() -> None:

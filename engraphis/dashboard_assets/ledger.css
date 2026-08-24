@@ -601,8 +601,12 @@ body[data-theme="paper"] .graph-header {
 .graph-actions { display: flex; gap: 6px; }
 .graph-canvas { position: absolute; inset: 0; }
 .graph-canvas .engraphis-all-canvas,
-.graph-canvas .engraphis-all-labels { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.graph-canvas .engraphis-all-labels { pointer-events: none; }
+.graph-canvas .engraphis-all-labels,
+.graph-canvas .engraphis-all-underlay {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+.graph-canvas .engraphis-all-labels,
+.graph-canvas .engraphis-all-underlay { pointer-events: none; }
 .graph-canvas.engraphis-all-node-hover { cursor: pointer; }
 .force-graph-container canvas {
   display: block;

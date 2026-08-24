@@ -201,7 +201,7 @@
       if (state.colorBy === 'type' || state.palette === 'custom') return color(themed || item.color);
       const palette = activePalette();
       if (state.colorBy === 'connections') return palette[Math.min(5, Math.floor(Math.log1p(state.degrees[index] || 0) * 1.5))];
-      const group = String(state.communities[index] || index);
+      const group = String(state.communities[index] ?? index);
       const hash = Array.from(group).reduce((sum, char) => ((sum * 31) + char.charCodeAt(0)) >>> 0, 7);
       return palette[hash % palette.length];
     }
@@ -523,7 +523,10 @@
         }
       }
       if (best < 0) return -1;
-      const reach = pointSize(best) * state.camera.scale + 7;
+      /* bestDist is measured in world units while pointSize and the extra touch slop are
+         screen pixels. Convert the hit radius back into world units so picking remains
+         usable at both fit-to-view and close-reading zoom levels. */
+      const reach = pointSize(best) + 7 / Math.max(0.005, state.camera.scale);
       return bestDist <= reach * reach ? best : -1;
     }
 
@@ -901,6 +904,11 @@
     function applyLayout(positions, bounds, doFit) {
       state.positions = positions || state.positions;
       state.bounds = bounds || state.bounds;
+      [[state.hover, 'hoverPoint'], [state.focus, 'focusPoint']].forEach(([index, key]) => {
+        if (index >= 0 && index * 2 + 1 < state.positions.length) {
+          state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];
+        }
+      });
       uploadNodePositions();
       uploadEdges();
       state.pickDirty = true;
@@ -925,6 +933,9 @@
       state.types = message.types || state.types;
       state.communities = message.communities || [];
       state.nodeGhosts = message.nodeGhosts || new Uint8Array(state.ids.length);
+      /* Preview and ready both carry a seeded layout. Adopt it immediately so a reload never
+         uploads the previous graph's coordinates while the worker settles the next one. */
+      state.positions = message.positions || state.positions;
       state.bounds = message.bounds || null;
       const count = state.ids.length;
       if (state.nodeFlags.length !== count) state.nodeFlags = new Float32Array(count);
@@ -999,10 +1010,12 @@
         return;
       }
       if (message.type === 'layout') {
-        state.layoutPending = false;
+        const pass = Number(message.pass), total = Number(message.total);
+        state.layoutPending = Number.isFinite(pass) && Number.isFinite(total)
+          ? pass < total : message.fit !== true;
         if (!state.ready) return;
         applyLayout(message.positions, message.bounds, message.fit === true);
-        stats({ layoutPending: false });
+        stats({ layoutPending: state.layoutPending });
         return;
       }
     }
@@ -1278,7 +1291,17 @@
         if (state.destroyed || !worker) return api;
         const nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
         const links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [];
-        state.ready = false; state.error = null; state.lastLabelKey = '';
+        state.ready = false; state.error = null; state.lastLabelKey = ''; state.layoutPending = true;
+        state.hover = -1; state.focus = -1; state.hoverPoint = [0, 0]; state.focusPoint = [0, 0];
+        state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
+        state.edgeSources = new Uint32Array(0); state.edgeTargets = new Uint32Array(0);
+        state.edgeBridges = new Uint8Array(0); state.edgeWeights = new Float32Array(0);
+        state.edgeRelations = []; state.topNodes = new Uint32Array(0);
+        state.totalLinks = 0; state.edgeVertexCount = 0; state.bridgeCount = 0;
+        state.weightFloorSorted = new Float32Array(0); state.communityRegions = [];
+        state.degrees = new Float32Array(0); state.betweenness = new Float32Array(0);
+        state.evidenceMass = new Float32Array(0); state.visibleCount = 0;
+        state.pickGrid = null; state.pickDirty = true;
         worker.postMessage({ type: 'prepare', payload: { nodes, links } });
         return api;
       },
@@ -1363,7 +1386,7 @@
       zoomToNode(id) { return api.reveal(id); },
       communityMap() {
         const result = {};
-        state.ids.forEach((id, index) => { result[id] = state.communities[index] || index; });
+        state.ids.forEach((id, index) => { result[id] = state.communities[index] ?? index; });
         return result;
       },
       resize, fit,
