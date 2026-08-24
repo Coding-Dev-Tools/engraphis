@@ -20,6 +20,15 @@ try:  # Python 3.11+
 except ImportError:  # pragma: no cover - supported Python 3.9/3.10
     tomllib = None
 
+try:  # Prefer the installed packaging module when available.
+    from packaging.markers import InvalidMarker, Marker
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import InvalidVersion, Version
+except ImportError:  # pragma: no cover - fallback for environments without top-level packaging
+    from pip._vendor.packaging.markers import InvalidMarker, Marker
+    from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from pip._vendor.packaging.version import InvalidVersion, Version
+
 
 FORMAT = "engraphis-release-evidence/3"
 PACKAGE = "engraphis"
@@ -30,12 +39,27 @@ _SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _PACKAGE_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s]+)\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _BUILDER_IMAGE = "github-hosted:ubuntu-latest/python-3.11"
+# Extras installed by the release workflow (`.github/workflows/release.yml` runs
+# `pip install ... ".[all,test]"` before capturing the SBOM), so the captured
+# closure must include every marker-applicable requirement they declare.
+_RELEASE_EXTRAS = ("all", "test")
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",
     "pip": "26.2",
     "setuptools": "83.0.0",
     "wheel": "0.47.0",
 }
+
+
+def _purl_matches(purl: str, name: str, version: str) -> bool:
+    """Return True when a pkg:pypi PURL names *name* at *version*."""
+    if not purl.startswith("pkg:pypi/"):
+        return False
+    remainder = purl[len("pkg:pypi/"):].split("?", 1)[0]
+    if "@" not in remainder:
+        return False
+    purl_name, purl_version = remainder.split("@", 1)
+    return _canonical_package_name(purl_name) == name and purl_version == version
 _GRYPE_VERSION = "0.110.0"
 _SECRET_NAME = re.compile(
     r"(?:secret|token|password|credential|api[-_]?key|private[-_]?key)", re.IGNORECASE
@@ -119,6 +143,8 @@ def project_version(root: Path) -> str:
     if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
         raise EvidenceError("project.version must use stable semantic version syntax")
     return version
+
+
 
 
 def git_commit(root: Path) -> str:
@@ -218,6 +244,121 @@ def _canonical_package_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def _parse_requirement(requirement: str) -> tuple[str, str | None]:
+    """Extract (name, specifier) from a PEP 508 requirement string."""
+    requirement = requirement.strip()
+    if not requirement:
+        return ("", None)
+    match = re.match(
+        r'^([A-Za-z0-9][A-Za-z0-9._-]*)'
+        r'(?:\[.*?\])?'
+        r'\s*'
+        r'((?:[<>=!~]=?[^;,\s]+(?:\s*,\s*[<>=!~]=?[^;,\s]+)*)?)',
+        requirement,
+    )
+    if not match:
+        name = re.split(r"[\s;<(>=!~\[]", requirement, maxsplit=1)[0]
+        return (name, None)
+    name = match.group(1)
+    specifier = match.group(2) if match.group(2) else None
+    return (name, specifier)
+
+
+def _version_satisfies(version: str, specifier: str) -> bool:
+    """Check if *version* satisfies a PEP 440 specifier."""
+    if not specifier:
+        return True
+    try:
+        candidate = Version(version)
+        spec = SpecifierSet(specifier)
+    except (InvalidVersion, InvalidSpecifier):
+        return False
+    return candidate in spec
+
+
+def _declared_dependencies(
+        root: Path, *, include_extras: bool = True,
+) -> dict[str, str | None]:
+    """Return {canonical_name: combined specifier} required in the SBOM closure.
+
+    Covers [project].dependencies plus, when ``include_extras`` is true, every
+    requirement declared by the extras the release workflow installs
+    (``_RELEASE_EXTRAS``). PEP 508 environment markers are evaluated against the
+    running interpreter, which in the release workflow is the same environment
+    that captures the SBOM; requirements whose markers do not apply are not
+    required.
+    """
+    pyproject = root / "pyproject.toml"
+    try:
+        raw = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    requirements: list[str] = []
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(raw)
+        except (KeyError, ValueError):
+            parsed = {}
+        project = parsed.get("project", {}) if isinstance(parsed, dict) else {}
+        if isinstance(project, dict):
+            core = project.get("dependencies", [])
+            if isinstance(core, list):
+                requirements.extend(item for item in core if isinstance(item, str))
+            extras = project.get("optional-dependencies", {})
+            if include_extras and isinstance(extras, dict):
+                for extra in _RELEASE_EXTRAS:
+                    group = extras.get(extra)
+                    if isinstance(group, list):
+                        requirements.extend(
+                            item for item in group if isinstance(item, str)
+                        )
+    else:
+        project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", raw)
+        if project is not None:
+            deps_block = re.search(
+                r'(?m)^dependencies\s*=\s*\[(.*?)\]', project.group(1), re.DOTALL,
+            )
+            if deps_block is not None:
+                requirements.extend(re.findall(r'"([^"]+)"', deps_block.group(1)))
+        extras_table = re.search(
+            r"(?ms)^\[project\.optional-dependencies\]\s*(.*?)(?=^\[|\Z)", raw,
+        )
+        if include_extras and extras_table is not None:
+            for extra in _RELEASE_EXTRAS:
+                group = re.search(
+                    r"(?m)^" + re.escape(extra) + r"\s*=\s*\[(.*?)\]",
+                    extras_table.group(1), re.DOTALL,
+                )
+                if group is not None:
+                    requirements.extend(re.findall(r'"([^"]+)"', group.group(1)))
+    deps: dict[str, str | None] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, str) or not requirement.strip():
+            continue
+        name, specifier = _parse_requirement(requirement)
+        canonical = _canonical_package_name(name)
+        if not canonical or canonical == PACKAGE:
+            continue
+        marker_text = requirement.split(";", 1)[1].strip() if ";" in requirement else ""
+        if marker_text:
+            try:
+                applies = Marker(marker_text).evaluate()
+            except InvalidMarker as exc:
+                raise EvidenceError(
+                    "pyproject.toml declares an unparsable environment marker: "
+                    + marker_text
+                ) from exc
+            if not applies:
+                continue
+        if canonical not in deps or deps[canonical] is None:
+            deps[canonical] = specifier
+        elif specifier and specifier != deps[canonical]:
+            # Multiple selected extras can constrain the same distribution.
+            # Preserve every applicable constraint so validation enforces their
+            # intersection instead of silently accepting the first one seen.
+            deps[canonical] = f"{deps[canonical]},{specifier}"
+    return deps
+
 def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
     packages = set()
     metadata_component = document.get("metadata", {}).get("component")
@@ -225,27 +366,149 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
         purl = metadata_component.get("purl")
         name = metadata_component.get("name")
         version = metadata_component.get("version")
+        # cyclonedx-py --pyproject emits the application as root-component
+        # without a PURL; environment_lock_artifact validates the name/version.
         if (
-            isinstance(purl, str)
-            and purl.startswith("pkg:pypi/")
-            and isinstance(name, str)
+            isinstance(name, str)
             and isinstance(version, str)
+            and (
+                purl is None
+                or (isinstance(purl, str) and purl.startswith("pkg:pypi/"))
+            )
         ):
             packages.add((_canonical_package_name(name), version))
-    for component in document.get("components", []):
+    components = document.get("components", [])
+    if not isinstance(components, list):
+        raise EvidenceError("SBOM components must be a JSON array")
+    for component in components:
         if not isinstance(component, dict):
-            continue
+            raise EvidenceError("SBOM components must be JSON objects")
         purl = component.get("purl")
         name = component.get("name")
         version = component.get("version")
         if (
-            isinstance(purl, str)
-            and purl.startswith("pkg:pypi/")
-            and isinstance(name, str)
-            and isinstance(version, str)
+            not isinstance(name, str)
+            or not name
+            or not isinstance(version, str)
+            or not version
         ):
-            packages.add((_canonical_package_name(name), version))
+            raise EvidenceError("SBOM component must identify name and version")
+        if not isinstance(purl, str) or not purl.startswith("pkg:pypi/"):
+            raise EvidenceError(
+                "SBOM component lacks a valid PyPI PURL: "
+                + name + "@" + version
+            )
+        if not _purl_matches(purl, _canonical_package_name(name), version):
+            raise EvidenceError(
+                "SBOM component PURL does not match its name/version: "
+                + name + "@" + version + " vs " + purl
+            )
+        packages.add((_canonical_package_name(name), version))
     return packages
+
+
+def _python_component_refs(component: Any) -> set[str]:
+    """Return the component's preferred CycloneDX dependency-graph ref."""
+    if not isinstance(component, dict):
+        return set()
+    bom_ref = component.get("bom-ref")
+    if isinstance(bom_ref, str) and bom_ref:
+        return {bom_ref}
+    purl = component.get("purl")
+    return {purl} if isinstance(purl, str) and purl else set()
+
+
+def _validate_python_sbom_dependency_closure(
+    document: dict[str, Any], declared_names: set[str],
+) -> None:
+    """Validate the CycloneDX dependency graph of the captured Python SBOM.
+
+    The pinned capture generator (cyclonedx-bom 7.3.0) emits one
+    ``dependencies`` entry per component plus the project root, with
+    ``dependsOn`` resolved against installed distribution metadata. The graph
+    is optional here because lock-to-SBOM closure coverage in
+    ``environment_lock_artifact`` already rejects truncated captures
+    deterministically; when present it must be coherent: every ``dependsOn``
+    ref must resolve to the root or a listed component, and every declared
+    requirement must be transitively reachable from the project root.
+    Workflow-installed build tooling (pip, build, twine, ...) is legitimately
+    captured yet unreachable from the root, so full-graph reachability from
+    the root alone is intentionally not required.
+    """
+    entries = document.get("dependencies")
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise EvidenceError("SBOM dependency graph must be a JSON array")
+    edges: dict[str, list[str]] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("ref"), str)
+            or not entry["ref"]
+        ):
+            raise EvidenceError("SBOM dependency graph entries must carry string refs")
+        children = entry.get("dependsOn", [])
+        if not isinstance(children, list) or any(
+            not isinstance(child, str) or not child for child in children
+        ):
+            raise EvidenceError("SBOM dependency graph dependsOn must list string refs")
+        ref = entry["ref"]
+        if ref in edges:
+            raise EvidenceError(
+                "SBOM dependency graph contains duplicate ref: " + ref
+            )
+        edges[ref] = children
+    metadata_component = document.get("metadata", {}).get("component")
+    root_refs = _python_component_refs(metadata_component)
+    known_refs = set(root_refs)
+    ref_names: dict[str, str] = {}
+    for component in document.get("components", []):
+        name = component.get("name") if isinstance(component, dict) else None
+        refs = _python_component_refs(component)
+        if not isinstance(name, str) or not refs:
+            continue
+        canonical = _canonical_package_name(name)
+        for ref in refs:
+            if ref in known_refs:
+                raise EvidenceError(
+                    "SBOM dependency graph ref collides with root or another "
+                    "component: " + ref
+                )
+            known_refs.add(ref)
+            ref_names[ref] = canonical
+        if not any(ref in edges for ref in refs):
+            raise EvidenceError(
+                "SBOM dependency graph is missing an entry for component " + name
+            )
+    for ref in edges:
+        if ref not in known_refs:
+            raise EvidenceError(
+                "SBOM dependency graph references unknown component ref: " + ref
+            )
+    for children in edges.values():
+        for child in children:
+            if child not in known_refs:
+                raise EvidenceError(
+                    "SBOM dependency graph references unknown component ref: " + child
+                )
+    frontier = list(root_refs)
+    reachable_refs = set(root_refs)
+    while frontier:
+        ref = frontier.pop()
+        for child in edges.get(ref, ()):
+            if child not in reachable_refs:
+                reachable_refs.add(child)
+                frontier.append(child)
+    reachable_names = {
+        ref_names[ref] for ref in reachable_refs if ref in ref_names
+    }
+    unreachable = declared_names - reachable_names
+    if unreachable:
+        raise EvidenceError(
+            "declared dependencies are unreachable from the SBOM root "
+            "in the dependency graph: " + ", ".join(sorted(unreachable))
+        )
 
 
 def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
@@ -272,12 +535,25 @@ def sbom_artifact(root: Path, path: Path) -> dict[str, Any]:
     }
 
 
-def environment_lock_artifact(root: Path, path: Path, sbom: Path) -> dict[str, Any]:
-    """Require the exact build freeze to equal the Python SBOM package closure."""
+def environment_lock_artifact(
+        root: Path, path: Path, sbom: Path, version: str) -> dict[str, Any]:
+    """Require the captured freeze and the Python SBOM to describe one closure.
+
+    The comparison is two-sided after name canonicalization: every SBOM
+    package must appear in the lock at the same version (version skew fails),
+    and every locked package must be inventoried by the SBOM. The pinned
+    generator (cyclonedx-bom 7.3.0, ``cyclonedx-py environment``) inventories
+    the whole build environment including workflow-installed tooling, so a
+    lock entry missing from the SBOM means a truncated capture, not expected
+    tooling overhead. A truncated SBOM that keeps the root and every direct
+    requirement but drops transitive packages would otherwise pass a
+    one-directional subset check and let incomplete release evidence publish.
+    """
     if not path.is_file() or path.is_symlink():
         raise EvidenceError("build environment lock is missing")
     relative = _relative_path(root, path)
     packages: set[tuple[str, str]] = set()
+    seen_names: set[str] = set()
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -288,13 +564,92 @@ def environment_lock_artifact(root: Path, path: Path, sbom: Path) -> dict[str, A
         match = _PACKAGE_LOCK_LINE.fullmatch(line)
         if match is None:
             raise EvidenceError("build environment lock must contain exact name==version lines")
-        package = (_canonical_package_name(match.group(1)), match.group(2))
+        canonical = _canonical_package_name(match.group(1))
+        package = (canonical, match.group(2))
         if package in packages:
             raise EvidenceError("build environment lock contains a duplicate package")
+        if canonical in seen_names:
+            raise EvidenceError(
+                "build environment lock contains conflicting versions of " + canonical
+            )
+        seen_names.add(canonical)
         packages.add(package)
-    sbom_packages = _python_sbom_packages(_json_object(sbom, "SBOM"))
-    if packages != sbom_packages:
+    document = _json_object(sbom, "SBOM")
+    sbom_packages = _python_sbom_packages(document)
+    if not sbom_packages:
+        raise EvidenceError("SBOM contains no Python package components")
+    metadata_component = document.get("metadata", {}).get("component")
+    if not isinstance(metadata_component, dict):
+        raise EvidenceError(
+            "SBOM metadata.component does not identify the " + PACKAGE + " root"
+        )
+    root_name = metadata_component.get("name")
+    root_version = metadata_component.get("version")
+    root_purl = metadata_component.get("purl")
+    if (
+        not isinstance(root_name, str)
+        or _canonical_package_name(root_name) != PACKAGE
+        or not isinstance(root_version, str)
+        or root_version != version
+        or (
+            root_purl is not None
+            and (
+                not isinstance(root_purl, str)
+                or not _purl_matches(root_purl, PACKAGE, version)
+            )
+        )
+    ):
+        raise EvidenceError(
+            "SBOM metadata.component does not identify the " + PACKAGE
+            + " root at version " + version
+        )
+    declared = _declared_dependencies(root)
+    core_declared = _declared_dependencies(root, include_extras=False)
+    dependency_packages = {
+        pkg for pkg in sbom_packages
+        if pkg != (_canonical_package_name(PACKAGE), version)
+    }
+    declared_names = {name for name in declared if name != PACKAGE}
+    core_declared_names = {name for name in core_declared if name != PACKAGE}
+    sbom_dependency_names = {
+        name for name, _ in dependency_packages
+    }
+    missing_declared = declared_names - sbom_dependency_names
+    if missing_declared:
+        raise EvidenceError(
+            "SBOM is missing declared dependencies: "
+            + ", ".join(sorted(missing_declared))
+        )
+    # Validate version constraints for declared dependencies
+    sbom_versions = {name: ver for name, ver in dependency_packages}
+    for name, specifier in declared.items():
+        if name == PACKAGE or not specifier or name not in sbom_versions:
+            continue
+        sbom_ver = sbom_versions[name]
+        if not _version_satisfies(sbom_ver, specifier):
+            raise EvidenceError(
+                f"SBOM version {name}=={sbom_ver} does not satisfy "
+                f"declared constraint {specifier}"
+            )
+    if not dependency_packages:
+        raise EvidenceError(
+            "SBOM contains no dependency components beyond the " + PACKAGE + " root"
+        )
+    # Extras are required to be present in the captured SBOM/lock above, but
+    # pip's installed-distribution metadata does not preserve which extras were
+    # selected. Their CycloneDX nodes therefore need not be reachable from the
+    # project root, unlike core project dependencies.
+    _validate_python_sbom_dependency_closure(document, core_declared_names)
+    if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
+    missing_from_sbom = sorted(
+        {name for name, _ in packages} - {name for name, _ in sbom_packages}
+    )
+    if missing_from_sbom:
+        raise EvidenceError(
+            "Python SBOM omits captured environment packages "
+            "(truncated closure): " + ", ".join(missing_from_sbom)
+        )
     return {
         "filename": path.name,
         "path": relative,
@@ -675,7 +1030,7 @@ def build_evidence(
     artifacts = distribution_artifacts(distribution_directory, version)
     artifact_digests = {item["filename"]: item["sha256"] for item in artifacts}
     python_sbom = sbom_artifact(root, sbom)
-    environment = environment_lock_artifact(root, environment_lock, sbom)
+    environment = environment_lock_artifact(root, environment_lock, sbom, version)
     container_sbom = container_sbom_artifact(root, image_sbom, image_digest)
     container_scan = container_scan_artifact(root, image_scan)
     reproducibility_record = reproducibility_artifact(
