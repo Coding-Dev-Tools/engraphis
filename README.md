@@ -157,7 +157,7 @@ selection, set `ENGRAPHIS_UPDATE_EXTRAS` to a comma-separated list (for example
 `server,mcp`), or set it to `none` for the base package only.
 
 > **Upgrading to 1.4:** `engraphis-mcp` now exposes the nine-tool Smart gateway. Integrations that
-> require the former 34 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
+> require the former 35 direct tool names should run `engraphis-mcp-classic`. The SQLite schema
 > in the 1.4.0 release was version 9. Existing v7-to-v8 databases already contain `confidence`
 > and `pinned_at`/`unpinned_at`; v9 adds the `memory_tombstones` repository-scope column/table
 > and performs a one-time entity-canonicalization repair, then migrates automatically on first
@@ -387,7 +387,7 @@ the indicated read or action executor; no profile selection is required. The gat
 the discovered capability again before it runs it, and clients remain responsible for their
 normal destructive-action approval boundary.
 
-Existing clients that pin the historical 34 named tools can use
+Existing clients that pin the historical 35 named tools can use
 `engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
 including `engraphis_check_update`, is in the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md).
 
@@ -562,7 +562,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + Smart MCP (Classic 34-tool compatibility) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 35-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
@@ -580,7 +580,7 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes a zero-configuration Smart MCP gateway plus a 34-tool Classic compatibility
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 35-tool Classic compatibility
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
 The focused [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
@@ -758,7 +758,7 @@ engraphis/
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── factory.py           # outer v2 composition root; selects and injects concrete backends
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # Smart MCP gateway + 34-tool Classic compatibility server
+│   ├── mcp_server.py        # Smart MCP gateway + 35-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
