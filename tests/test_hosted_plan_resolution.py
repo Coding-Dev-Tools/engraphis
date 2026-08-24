@@ -1144,7 +1144,7 @@ def test_denial_guard_publishes_before_blocked_digest_probe(monkeypatch) -> None
     def _blocked_digest(_source):
         entered.set()
         assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
-        assert v2_api._denied_state_digests == {}
+        assert v2_api._denied_state_digests == {"session": None, "cloud": None}
         assert release.wait(timeout=5.0)
         return "before-denial"
 
@@ -1154,6 +1154,39 @@ def test_denial_guard_publishes_before_blocked_digest_probe(monkeypatch) -> None
     assert entered.wait(timeout=5.0)
     try:
         assert v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
+def test_denial_guard_reads_do_not_wait_for_digest_probe(monkeypatch) -> None:
+    """A slow baseline probe cannot block a fail-closed license response."""
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("team"),
+        registration=_registration_entitlement("team"),
+    ))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    entered = threading.Event()
+    release = threading.Event()
+    original = v2_api._persisted_state_digest
+
+    def _blocked_digest(source):
+        entered.set()
+        assert release.wait(timeout=5.0)
+        return original(source)
+
+    monkeypatch.setattr(v2_api, "_persisted_state_digest", _blocked_digest)
+    worker = threading.Thread(target=v2_api._record_authoritative_denial)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    try:
+        payload = v2_api.get_license()
+        assert payload["cloud_access_active"] is False
+        assert payload["features"] == []
     finally:
         release.set()
         worker.join(timeout=5.0)
