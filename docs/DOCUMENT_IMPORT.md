@@ -99,7 +99,7 @@ collection. Reports never echo secret-like source content.
 
 Default filename exclusions include `.env` variants, credentials, secrets, tokens, recovery
 codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. A collection is
-bounded to 10,000 encountered files and 250 MB of read bytes; an individual adapter input is
+bounded to 10,000 encountered files and 750 MB of read bytes; an individual adapter input is
 bounded to 100 MB, while canonical memory text is capped at 100,000 characters and is rejected
 rather than silently split. Containers are additionally capped at 2,000 members and 20 MB of
 declared decompressed content. Invalid UTF-8/UTF-16 in permitted text is replaced explicitly and

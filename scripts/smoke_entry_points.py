@@ -48,6 +48,7 @@ EXPECTED_ENTRY_POINTS = {
     "engraphis-import": "scripts.importer:main",
     "engraphis-init": "scripts.init:main",
     "engraphis-update": "scripts.update:main",
+    "engraphis-sync": "scripts.sync:main",
 }
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
