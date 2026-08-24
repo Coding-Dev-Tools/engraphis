@@ -1939,7 +1939,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
       linkw: 1.28, labelDensity: 56,
     });
-    expect(rangeResponse.scope).toEqual({ minDegree: 3, depth: 4 });
+    expect(rangeResponse.scope).toEqual({ minDegree: 2, depth: 3 });
     expect(rangeResponse.importanceAria).toBe('1.00 importance');
     /* The fixture has no high-degree metadata; restore a visible scope before exercising
        pause/resume so the physics clock is tested with live bodies rather than an empty filter. */

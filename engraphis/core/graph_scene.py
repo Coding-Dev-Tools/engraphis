@@ -1459,8 +1459,12 @@ def _selected_edges(graph: dict, selected: set[str], level: str, cap: int) -> li
     return chosen[:cap]
 
 
-def _community_summaries(graph: dict, community_ids: set[str],
-                         selected: set[str]) -> list[dict]:
+def _community_summaries(
+    graph: dict,
+    community_ids: set[str],
+    selected: set[str],
+    system_radii: Optional[Mapping[str, float]] = None,
+) -> list[dict]:
     edges = graph["edges"]
     # Pre-compute per-node community and per-community edge lists in one pass.
     # Original code scanned ALL edges for EACH community (O(edges * communities)).
@@ -1498,8 +1502,16 @@ def _community_summaries(graph: dict, community_ids: set[str],
             + max(0.0, _finite_float(
                 graph["nodes"][node_id].get("visual_radius"), 0.0
             ))
-            for node_id in active_member_ids
+        for node_id in active_member_ids
         ), default=0.0) + 6.0
+        # orbit_radius is relative to each node's parent.  A nested moon can therefore
+        # extend beyond the largest local orbit radius plus its own body, even though
+        # _assign_orbit_hierarchy already computed the complete parent-relative envelope.
+        # Keep the summary and layout carrier on that authoritative subtree radius.
+        hierarchy_radius = max(
+            hierarchy_radius,
+            _finite_float((system_radii or {}).get(community_id), 0.0),
+        )
         representatives = sorted(active_member_ids, key=lambda node_id: (
             -graph["nodes"][node_id]["scene_rank"], node_id
         ))[:8]
@@ -2793,7 +2805,9 @@ def build_graph_scene(
             if edge["source"] in selected and edge["target"] in selected
         ]
     total_scene_edges = len(graph["edges"]) + len(ghost_relations)
-    communities = _community_summaries(graph, chosen_communities, selected)
+    communities = _community_summaries(
+        graph, chosen_communities, selected, _system_radii
+    )
     bridges = _bridges(graph, chosen_communities, 80)
 
     hash_payload = {
@@ -2873,7 +2887,7 @@ def build_graph_scene(
     # in this presentation. Otherwise a focused/system view changes arm population and
     # carrier radius, which makes returning to the overview move the same solar system.
     layout_communities = _community_summaries(
-        graph, set(graph["community_members"]), set(graph["nodes"])
+        graph, set(graph["community_members"]), set(graph["nodes"]), _system_radii
     )
     layout_positions, layout_hints = _community_positions(
         layout_communities, global_community_id, layout_seed, spacing=98.0
