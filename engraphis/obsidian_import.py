@@ -979,33 +979,64 @@ class ObsidianImporter:
 
         ``list_source_import_items`` caps each page (default 10k rows); a manifest that
         outgrew one page through repeated deletions and additions must still be planned
-        and reconciled in full. The ``(relative_path, id)`` cursor is immune to the
-        OFFSET failure mode, where a concurrent rename shifts an unread row across the
-        page boundary so it is silently skipped while the pager believes it saw
-        everything; a row renamed below the already-read range degrades into the
-        content-hash rename detection instead. Returns the rows and whether the whole
-        manifest was read: the 200k-row bound is a memory cap, and one extra row is
-        probed past it so a manifest of exactly that size is not misreported as
-        truncated.
+        and reconciled in full. The ``(relative_path, id)`` cursor avoids the OFFSET
+        failure mode, where a concurrent rename shifts an unread row across the page
+        boundary so it is silently skipped while the pager believes it saw everything.
+        Store-backed reads hold one SQLite snapshot for all pages; identity de-duplication
+        is also defensive for injected readers that expose a row after a forward rename.
+        Returns the rows and whether the whole manifest was read: the 200k-row bound is a
+        memory cap, and one extra row is probed past it so a manifest of exactly that size
+        is not misreported as truncated.
         """
         items: list[dict] = []
+        positions: dict[str, int] = {}
         page_size = 10_000
         cursor_path = cursor_id = ""
-        for _ in range(20):  # bounded: at most 200k manifest rows per import run
-            page = self.store.list_source_import_items(
-                vault_id=vault_id, states=states, limit=page_size,
-                after_path=cursor_path, after_id=cursor_id,
-            )
-            items.extend(page)
-            if len(page) < page_size:
-                return items, True
-            cursor_path = str(page[-1].get("relative_path") or "")
-            cursor_id = str(page[-1].get("id") or "")
-        extra = self.store.list_source_import_items(
-            vault_id=vault_id, states=states, limit=1,
-            after_path=cursor_path, after_id=cursor_id,
+        conn = getattr(self.store, "conn", None)
+        snapshot_started = bool(
+            conn is not None
+            and hasattr(conn, "transaction_owned_by_current_thread")
+            and not conn.transaction_owned_by_current_thread()
         )
-        return items, not extra
+        try:
+            if snapshot_started:
+                conn.execute("BEGIN")
+            result: Optional[tuple[list[dict], bool]] = None
+            for _ in range(20):  # bounded: at most 200k manifest rows per import run
+                page = self.store.list_source_import_items(
+                    vault_id=vault_id, states=states, limit=page_size,
+                    after_path=cursor_path, after_id=cursor_id,
+                )
+                for row in page:
+                    identity = str(row.get("id") or row.get("source_key") or "")
+                    position = positions.get(identity) if identity else None
+                    if position is None:
+                        if identity:
+                            positions[identity] = len(items)
+                        items.append(row)
+                    else:
+                        # A reader that cannot hold a snapshot may observe one source
+                        # row again after a concurrent rename moves it forward. Keep the
+                        # newest observation rather than planning that identity twice.
+                        items[position] = row
+                if len(page) < page_size:
+                    result = (items, True)
+                    break
+                cursor_path = str(page[-1].get("relative_path") or "")
+                cursor_id = str(page[-1].get("id") or "")
+            if result is None:
+                extra = self.store.list_source_import_items(
+                    vault_id=vault_id, states=states, limit=1,
+                    after_path=cursor_path, after_id=cursor_id,
+                )
+                result = (items, not extra)
+            if snapshot_started and conn.transaction_owned_by_current_thread():
+                conn.commit()
+            return result
+        except BaseException:
+            if snapshot_started and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
 
     def _reconcile_links(
         self, scan: _ImportScan, *, vault_id: str, job_id: Optional[str] = None,
