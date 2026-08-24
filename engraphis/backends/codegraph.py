@@ -658,7 +658,50 @@ class RegexSymbolIndexer:
                             src=name, dst=base, relation=relation,
                             file=file_path, line=lineno,
                         ))
+        self._extract_call_edges(out, lines, lang, file_path)
         return out
+
+    def _extract_call_edges(self, out: FileIndex, lines: list, lang: str,
+                            file_path: str) -> None:
+        """Best-effort ``calls`` edges for the flat regex model.
+        The AST backend emits caller→callee edges from real call nodes; without
+        it the code-arm bridge cannot hop a caller to its callee, so retrieval
+        silently degrades to definitions-only on the numpy-only floor. Here any
+        reference to another symbol defined in the same file, inside a detected
+        function's body, becomes a calls edge. Bounded by construction: one pass
+        over already-split lines, callees restricted to indexed symbol names,
+        one edge per (caller, callee) pair. Best-effort by design — strings and
+        comments can fool it, and the AST backend remains authoritative where
+        a grammar exists.
+        """
+        if lang in {"sql", "terraform"}:
+            return
+        func_kinds = {"function", "method"}
+        callers = sorted(
+            ((int(str(s.span).split("-", 1)[0]), s.name)
+             for s in out.symbols if s.kind in func_kinds),
+        )
+        if not callers:
+            return
+        known = {s.name for s in out.symbols}
+        emitted: set = set()
+        call_re = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+        total = len(lines)
+        for idx, (fn_line, fn_name) in enumerate(callers):
+            body_end = callers[idx + 1][0] - 1 if idx + 1 < len(callers) else total
+            for lineno in range(fn_line + 1, min(body_end, total) + 1):
+                line = lines[lineno - 1]
+                if len(line) > self._MAX_LINE_LEN:
+                    continue
+                for m in call_re.finditer(line):
+                    callee = m.group(1)
+                    pair = (fn_name, callee)
+                    if callee in known and callee != fn_name and pair not in emitted:
+                        emitted.add(pair)
+                        out.edges.append(CodeEdge(
+                            src=fn_name, dst=callee, relation="calls",
+                            file=file_path, line=lineno,
+                        ))
 
 
 class CompositeSymbolIndexer:

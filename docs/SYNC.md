@@ -110,6 +110,17 @@ has no hosted identity, seat, availability, support, or managed-storage guarante
 Folder caps, oversize omissions, and snapshot races are observable incomplete failures rather than
 successful partial backups.
 
+Anyone who can write to the shared folder can also choose the target `workspace_name`, so
+content arriving from a peer you do not control should be treated as untrusted: it is
+quarantined under local `trusted: false` provenance until you review and approve it.
+
+Operator note: the `operation_receipts`, `events`, and `audit` tables in the local SQLite
+database grow append-only by design - rows are hash-chained, and pruning them would break
+chain verification. Watch their size in the database file (for example with
+`sqlite3 engraphis.db "SELECT count(*) FROM operation_receipts"`) when planning capacity;
+the supported path for long-lived installations is archiving or rotating the whole database,
+not deleting rows.
+
 ## Merge semantics
 
 Sync exchanges bounded workspace snapshots and merges them deterministically. Existing

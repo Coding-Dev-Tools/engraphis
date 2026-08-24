@@ -661,6 +661,23 @@ def dict_to_record(d: Any) -> Optional[MemoryRecord]:
     content = d.get("content")
     if not isinstance(mid, str) or not mid or not isinstance(content, str) or not content:
         return None
+    # Scope pointers are overwritten during apply (re-homed into local scope), but
+    # ``dict_to_record`` is itself a trust boundary (dry-run, hashing): a non-string
+    # or empty pointer is malformed exactly like a bad id/content row.
+    ws_id = d.get("workspace_id")
+    repo_id = d.get("repo_id")
+    for scope_ptr in (ws_id, repo_id):
+        if scope_ptr is not None and (
+                not isinstance(scope_ptr, str) or not scope_ptr):
+            return None
+    if ws_id is not None:
+        ws_id = _clamp_str(ws_id, 128)
+        if not ws_id:
+            return None
+    if repo_id is not None:
+        repo_id = _clamp_str(repo_id, 128)
+        if not repo_id:
+            return None
     # Sync is an external memory write path. Reject the row before it can reach the
     # raw Store upsert, FTS, or a locally rebuilt vector; a secret-bearing peer row is
     # simply counted as rejected like any other malformed bundle entry.
@@ -718,7 +735,7 @@ def dict_to_record(d: Any) -> Optional[MemoryRecord]:
     return MemoryRecord(
         id=_clamp_str(mid, 128), content=_clamp_str(content, MAX_CONTENT_CHARS),
         mtype=_mtype(d.get("mtype")), scope=_scope(d.get("scope")),
-        workspace_id=d.get("workspace_id"), repo_id=d.get("repo_id"),
+        workspace_id=ws_id, repo_id=repo_id,
         session_id=_clamp_str(d.get("session_id"), MAX_SESSION_ID_CHARS)
         if isinstance(d.get("session_id"), str) else None,
         title=_clamp_str(d.get("title"), MAX_TITLE_CHARS),

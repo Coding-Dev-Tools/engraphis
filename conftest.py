@@ -12,6 +12,13 @@ if str(ROOT) not in sys.path:
 # explicitly via monkeypatch (see tests/test_update_check.py).
 os.environ.setdefault("ENGRAPHIS_UPDATE_CHECK", "0")
 
+# Owner machines may configure ENGRAPHIS_EXTRACTOR=llm (via ~/.engraphis/config.env),
+# which would make every ingest-path test block on live LLM extraction calls. The unit
+# suite is offline-inert by contract (AGENTS.md §1 "primary offline gate"); tests that
+# exercise extraction opt back in explicitly via monkeypatch.setenv. setdefault keeps a
+# real shell override working, matching how config.env itself defers to the environment.
+os.environ.setdefault("ENGRAPHIS_EXTRACTOR", "none")
+
 # The legacy scripts/test_*.py files are HTTP smoke tests (need a running server +
 # httpx), not unit tests. Keep pytest focused on the tests/ suite.
 collect_ignore_glob = ["scripts/*"]

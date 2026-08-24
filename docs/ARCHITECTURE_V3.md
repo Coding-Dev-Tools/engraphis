@@ -1,13 +1,14 @@
 # Engraphis v3 architecture
 
 This document is the design outline for the repo-graph, intent-native memory, resource-ingestion,
-retention-supervision, and privacy-receipt additions introduced with schema version 3.
+retention-supervision, and privacy-receipt additions introduced in the schema-3 era (the
+current schema version is 16).
 
 ```mermaid
 flowchart LR
     Agent["Agent / host LLM"] --> Intent["remember · link · recall_context (compact) · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["Smart MCP (9 tools) / Classic MCP (34 tools)"] --> Service
+    MCP["Smart MCP (9 tools) / Classic MCP (35 tools)"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service

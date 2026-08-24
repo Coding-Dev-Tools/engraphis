@@ -1168,6 +1168,27 @@ class RecallEngine:
             )
         ]
 
+    def _query_entity_seeds(self, query: str, flt: SearchFilter) -> list[str]:
+        """Return scoped entity ids whose names occur in ``query``.
+
+        Shared seeding step for both graph arms (PPR and 1-hop): the bounded
+        scoped entity map from :meth:`_seed_entity_map`, filtered to the entities
+        whose folded name is a substring of the folded query and whose word-boundary
+        pattern matches the raw query.
+        """
+        entity_map = self._seed_entity_map(query, flt)
+        patterns = {
+            eid: (name.casefold(), _entity_pattern(name))
+            for eid, name in entity_map.items()
+            if name
+        }
+        query_folded = query.casefold()
+        return [
+            eid
+            for eid, (needle, pattern) in patterns.items()
+            if needle in query_folded and pattern.search(query)
+        ]
+
     def _graph_arm_ppr(
         self,
         query: str,
@@ -1184,18 +1205,7 @@ class RecallEngine:
         memories by walk probability. Multi-hop associations surface without
         expanding an explicit hop count; entity nodes are prefixed so names can
         never collide with memory ids."""
-        entity_map = self._seed_entity_map(query, flt)
-        patterns = {
-            eid: (name.casefold(), _entity_pattern(name))
-            for eid, name in entity_map.items()
-            if name
-        }
-        query_folded = query.casefold()
-        seeds = [
-            eid
-            for eid, (needle, pattern) in patterns.items()
-            if needle in query_folded and pattern.search(query)
-        ]
+        seeds = self._query_entity_seeds(query, flt)
         if not seeds:
             return {}
 
@@ -1354,18 +1364,7 @@ class RecallEngine:
         candidate_k: int = 50,
         prompt_only: bool = False,
     ) -> dict[str, float]:
-        entity_map = self._seed_entity_map(query, flt)
-        patterns = {
-            eid: (name.casefold(), _entity_pattern(name))
-            for eid, name in entity_map.items()
-            if name
-        }
-        query_folded = query.casefold()
-        seed_ids = [
-            eid
-            for eid, (needle, pattern) in patterns.items()
-            if needle in query_folded and pattern.search(query)
-        ]
+        seed_ids = self._query_entity_seeds(query, flt)
         if not seed_ids:
             return {}
         related_ids = set(seed_ids)
@@ -1579,11 +1578,6 @@ class RecallEngine:
             row["id"]: row["name"]
             for row in self.store.conn.execute(sql, params).fetchall()
         }
-
-    def _pack(self, cands: list[Candidate]) -> str:
-        """Compatibility helper for callers that exercised the old private method."""
-        context, _, _ = self.context_packer.pack("", cands, self.token_budget)
-        return context
 
 
 def _sanitize_plan(
@@ -2017,7 +2011,11 @@ def _consolidation_evidence(
         if store is not None and flt is not None:
             try:
                 source = store.get_memory(memory_id)
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "consolidation evidence source lookup failed (%s)",
+                    type(exc).__name__,
+                )
                 return
             if source is None or not memory_matches_filter(source, flt):
                 return
@@ -2049,11 +2047,20 @@ def _consolidation_evidence(
                 relation = str(link.get("relation") or "")
                 if relation not in ("consolidates", "profiles"):
                     continue
-                other = link.get("b") if link.get("a") == record.id else link.get("a")
+                endpoint_a = str(link.get("a") or "").strip()
+                endpoint_b = str(link.get("b") or "").strip()
+                # The digest is one endpoint of the link; the other is the
+                # summarized source memory it must expose as evidence.
+                other = endpoint_b if endpoint_a == record.id else endpoint_a
+                if not other or other == record.id:
+                    continue
                 append_visible(other)
-        except Exception:
+        except Exception as exc:
             # Link lookup is best-effort evidence enrichment, never a recall failure.
-            pass
+            logger.warning(
+                "consolidation evidence link lookup failed (%s)",
+                type(exc).__name__,
+            )
     return evidence
 
 
