@@ -44,7 +44,7 @@ dependencies = [
 # Hosted productivity experiments only.  The Codex SDK requires Python 3.10+;
 # this extra never becomes a dependency of the Python 3.9-compatible core.
 hosted-eval = [
-    "openai-codex==0.144.4; python_version >= '3.10'",
+    "openai-codex==0.147.0; python_version >= '3.10'",
 ]
 # Managed Cloud Sync encrypts every bundle client-side with ChaCha20-Poly1305.  Keep this
 # outside the NumPy-only core so local/offline users do not acquire a crypto runtime.
