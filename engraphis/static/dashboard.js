@@ -1227,7 +1227,7 @@ function loadAllGraphEngine(){
  if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260822-every-18';
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260823-every-19';
    script.onload=()=>{typeof EngraphisAllGraph==='undefined'?reject(new Error('All-node graph asset loaded without registering EngraphisAllGraph')):resolve()};
    script.onerror=()=>reject(new Error('All-node graph asset could not load'));
    document.head.appendChild(script);

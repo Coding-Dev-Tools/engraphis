@@ -1298,6 +1298,7 @@ body[data-theme="paper"] .graph-header {
   .metrics { grid-template-columns: 1fr 1fr; }
   .graph-actions { flex-wrap: wrap; }
 }
+/* Focus visibility for the style chips is handled by the shared focus-visible rules
    here (static CSS, CSP-safe) rather than mutating element.style at runtime. */
 div[data-graph-style]:focus {
   outline: none;

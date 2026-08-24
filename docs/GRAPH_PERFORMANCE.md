@@ -31,7 +31,8 @@ independent of node count - nothing on the GPU moves when you pan.
   regions paint as tinted district hulls with hub-derived labels.
 - **Interaction**: pointer drag/wheel zoom, two-pointer pinch, keyboard (arrows pan,
   +/- zoom, F fit, Escape clears selection). A screen-reader live region announces scene
-  totals and hovered entities; canvases are labelled decorative layers.
+  totals and hovered entities; the WebGL scene canvas is labelled while the underlay/label
+  canvases remain decorative.
 
 Measured worker settle times (deterministic fixture, see `python -m eval.graph_every_bench`,
 run inside the dev distrobox where node is available):
