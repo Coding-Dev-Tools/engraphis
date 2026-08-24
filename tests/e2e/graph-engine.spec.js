@@ -576,7 +576,9 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
     const byId = new Map(nodes.map(node => [String(node.id), node]));
     const star = byId.get(`${id}-star`) || null;
     const planet = byId.get(`${id}-planet`) || null;
-    const anchor = nodes.find(node => node.anchor_role === 'global') || star || null;
+    const globalAnchors = nodes.filter(node => node.anchor_role === 'global');
+    const anchor = globalAnchors.length === 1 ? globalAnchors[0] : null;
+    const anchorValid = Boolean(anchor && anchor.anchor_role === 'global');
     const members = nodes.filter(node => String(node.community_id ?? node.community ?? 'ungrouped') === id);
     const memberWeight = node => Math.max(0.01, Number(node.gravity_mass) || 1);
     const mass = members.reduce((sum, node) => sum + memberWeight(node), 0);
@@ -654,7 +656,7 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
       starPoint.x, starPoint.y, planetPoint.x, planetPoint.y,
       center.x, center.y, center.vx, center.vy,
       local.x, local.y, screenLocal.x, screenLocal.y,
-    ].every(Number.isFinite) && Boolean(star && planet);
+    ].every(Number.isFinite) && Boolean(star && planet) && anchorValid;
     return {
       star: star ? { id: star.id, x: Number(star.x) || 0, y: Number(star.y) || 0,
         vx: Number(star.vx) || 0, vy: Number(star.vy) || 0,
@@ -680,10 +682,13 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
       phase: Math.atan2(local.y, local.x),
       screenPhase: Math.atan2(screenLocal.y, screenLocal.x),
       center,
-      anchor: anchor ? { id: anchor.id, x: Number(anchor.x) || 0, y: Number(anchor.y) || 0,
+      anchor: anchor ? { id: anchor.id, anchorRole: anchor.anchor_role,
+        x: Number(anchor.x) || 0, y: Number(anchor.y) || 0,
         vx: Number(anchor.vx) || 0, vy: Number(anchor.vy) || 0,
         radius: nodeRadius(anchor), warp: Number(anchor.__galaxySpacetimeWarp) || 0 }
-        : { id: null, x: 0, y: 0, vx: 0, vy: 0, radius: 0, warp: 0 },
+        : null,
+      anchorValid,
+      globalAnchorCount: globalAnchors.length,
       coreFollower: (() => {
         const node = byId.get('core-star');
         return node ? { x: Number(node.x) || 0, y: Number(node.y) || 0,
@@ -1749,6 +1754,9 @@ for (const reducedMotion of [false, true]) {
 
       expect(samples.every(sample => sample.finite && sample.visible), JSON.stringify(evidence))
         .toBe(true);
+      expect(samples.every(sample => sample.anchorValid
+        && sample.anchor.anchorRole === 'global'
+        && sample.globalAnchorCount === 1), JSON.stringify(evidence)).toBe(true);
       expect(samples.every(sample => Number.isFinite(sample.safety.envelope)
         && sample.safety.envelope > 0), JSON.stringify(evidence)).toBe(true);
       expect(Math.min(...samples.map(sample => sample.safety.minimumBlackHoleClearance)),
@@ -3273,7 +3281,9 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(immediate.after.velocities).toEqual(immediate.before.velocities);
   expect(baseline.steps).toBeGreaterThanOrEqual(8);
   expect(strong.steps).toBeGreaterThanOrEqual(8);
-  expect(Math.abs(strong.steps - baseline.steps)).toBeLessThanOrEqual(4);
+  // Keep both comparisons on the established two-step budget. A four-step mismatch lets one
+  // trial run 50% longer and can make its radius/travel assertions pass by extra integration.
+  expect(Math.abs(strong.steps - baseline.steps)).toBeLessThanOrEqual(2);
   for (const [id, ratio] of Object.entries(physicalField.ratios)) {
     expect(physicalField.baseline[id], id).toBeGreaterThan(0);
     expect(physicalField.maximum[id], id).toBeGreaterThan(0);
@@ -3756,5 +3766,36 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
     expect(updated.visible).toBe(true);
     expect(updated.phase).not.toBe(initial.phase);
     expect(Math.abs(signedAngleDelta(initial.phase, updated.phase))).toBeGreaterThan(0.01);
+  });
+
+  test('rejects a rendered stellar snapshot without its global anchor', async ({ page }) => {
+    await openDashboard(page, {
+      query: '?graph-engine=next',
+      graphScene: blackHoleGalaxyScene,
+    });
+    await openGraphView(page);
+    await page.evaluate(scene => {
+      const api = window.__engraphisGraph;
+      api.freeze(true);
+      api.setPreset('galaxy');
+      api.setSettings({ gravity: 48 });
+      api.setData(scene);
+      api.setScope({ showUnlinked: true, minDegree: 0 });
+    }, blackHoleGalaxyScene);
+    await page.waitForFunction(() => window.__fg.graphData().nodes.length === 8
+      && window.__engraphisGraph.physicsDiagnostics().frozen);
+
+    await page.evaluate(() => {
+      const globalAnchor = window.__fg.graphData().nodes.find(
+        node => node.anchor_role === 'global',
+      );
+      globalAnchor.anchor_role = 'none';
+    });
+    const snapshot = await renderedStellarSnapshot(page, 'aurora');
+
+    expect(snapshot.globalAnchorCount).toBe(0);
+    expect(snapshot.anchorValid).toBe(false);
+    expect(snapshot.anchor).toBeNull();
+    expect(snapshot.finite).toBe(false);
   });
 });
