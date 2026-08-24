@@ -276,14 +276,17 @@ def _version_satisfies(version: str, specifier: str) -> bool:
     return candidate in spec
 
 
-def _declared_dependencies(root: Path) -> dict[str, str | None]:
+def _declared_dependencies(
+        root: Path, *, include_extras: bool = True,
+) -> dict[str, str | None]:
     """Return {canonical_name: specifier} required in the captured SBOM closure.
 
-    Covers [project].dependencies plus every requirement declared by the extras
-    the release workflow installs (``_RELEASE_EXTRAS``).  PEP 508 environment
-    markers are evaluated against the running interpreter, which in the release
-    workflow is the same environment that captures the SBOM; requirements whose
-    markers do not apply are not required.
+    Covers [project].dependencies plus, when ``include_extras`` is true, every
+    requirement declared by the extras the release workflow installs
+    (``_RELEASE_EXTRAS``). PEP 508 environment markers are evaluated against the
+    running interpreter, which in the release workflow is the same environment
+    that captures the SBOM; requirements whose markers do not apply are not
+    required.
     """
     pyproject = root / "pyproject.toml"
     try:
@@ -302,7 +305,7 @@ def _declared_dependencies(root: Path) -> dict[str, str | None]:
             if isinstance(core, list):
                 requirements.extend(item for item in core if isinstance(item, str))
             extras = project.get("optional-dependencies", {})
-            if isinstance(extras, dict):
+            if include_extras and isinstance(extras, dict):
                 for extra in _RELEASE_EXTRAS:
                     group = extras.get(extra)
                     if isinstance(group, list):
@@ -320,7 +323,7 @@ def _declared_dependencies(root: Path) -> dict[str, str | None]:
         extras_table = re.search(
             r"(?ms)^\[project\.optional-dependencies\]\s*(.*?)(?=^\[|\Z)", raw,
         )
-        if extras_table is not None:
+        if include_extras and extras_table is not None:
             for extra in _RELEASE_EXTRAS:
                 group = re.search(
                     r"(?m)^" + re.escape(extra) + r"\s*=\s*\[(.*?)\]",
@@ -595,11 +598,13 @@ def environment_lock_artifact(
             + " root at version " + version
         )
     declared = _declared_dependencies(root)
+    core_declared = _declared_dependencies(root, include_extras=False)
     dependency_packages = {
         pkg for pkg in sbom_packages
         if pkg != (_canonical_package_name(PACKAGE), version)
     }
     declared_names = {name for name in declared if name != PACKAGE}
+    core_declared_names = {name for name in core_declared if name != PACKAGE}
     sbom_dependency_names = {
         name for name, _ in dependency_packages
     }
@@ -624,7 +629,11 @@ def environment_lock_artifact(
         raise EvidenceError(
             "SBOM contains no dependency components beyond the " + PACKAGE + " root"
         )
-    _validate_python_sbom_dependency_closure(document, declared_names)
+    # Extras are required to be present in the captured SBOM/lock above, but
+    # pip's installed-distribution metadata does not preserve which extras were
+    # selected. Their CycloneDX nodes therefore need not be reachable from the
+    # project root, unlike core project dependencies.
+    _validate_python_sbom_dependency_closure(document, core_declared_names)
     if not sbom_packages.issubset(packages):
         raise EvidenceError("build environment lock and Python SBOM package closure differ")
     missing_from_sbom = sorted(

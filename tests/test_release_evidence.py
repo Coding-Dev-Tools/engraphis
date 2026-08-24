@@ -803,6 +803,39 @@ def test_release_evidence_requires_selected_extra_dependencies(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_allows_unreachable_selected_extra_dependencies(tmp_path):
+    """Selected extras must be captured, but need not be root-reachable in CycloneDX."""
+    root = _root(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "engraphis"\nversion = "1.2.3"\n'
+        'dependencies = ["alpha-package>=1.0"]\n'
+        "[project.optional-dependencies]\n"
+        'all = ["extra-dep>=1.0"]\n'
+        'test = ["test-dep>=0.1"]\n',
+        encoding="utf-8",
+    )
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    for name, version in (("extra-dep", "1.0"), ("test-dep", "0.1")):
+        ref = f"pkg:pypi/{name}@{version}"
+        sbom_doc["components"].append(
+            {"type": "library", "name": name, "version": version, "purl": ref}
+        )
+        # The capture contains the selected extras, but the installed metadata
+        # does not promise that those nodes are linked from the project root.
+        sbom_doc["dependencies"].append({"ref": ref, "dependsOn": []})
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+    inputs["environment_lock"].write_text(
+        "alpha-package==1.0\nextra-dep==1.0\ntest-dep==0.1\nengraphis==1.2.3\n",
+        encoding="utf-8",
+    )
+
+    evidence = _build(root, dist, inputs=inputs)
+
+    assert evidence["environment_lock"]["package_count"] == 4
+
+
 def test_release_evidence_ignores_extra_dependencies_with_inapplicable_markers(tmp_path):
     """Extras requirements whose environment marker excludes this interpreter are
     not required, mirroring what pip installs in the capture environment."""
