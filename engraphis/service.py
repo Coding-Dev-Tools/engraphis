@@ -8530,8 +8530,8 @@ class MemoryService:
             "ON visibility_support.edge_id=visibility_edge.id "
         )
         # A live scene must count only the same temporal edge/support/memory rows
-        # that the later edge query can render. History intentionally keeps the
-        # broader public relation set so closed rows remain available as ghosts.
+        # that the later edge query can render. History keeps closed rows available
+        # as ghosts, but still applies the selected world/system-time anchors.
         if not include_history:
             visibility_sql += (
                 "AND (visibility_support.valid_from IS NULL "
@@ -8546,6 +8546,16 @@ class MemoryService:
                 "OR ?<visibility_support.expired_at) "
             )
             visibility_params.extend((t, t, t, known_t, known_t))
+        else:
+            visibility_sql += (
+                "AND (visibility_support.valid_from IS NULL "
+                "OR visibility_support.valid_from<=?) "
+                "AND (visibility_support.ingested_at IS NULL "
+                "OR visibility_support.ingested_at<=?) "
+                "AND (visibility_support.expired_at IS NULL "
+                "OR ?<visibility_support.expired_at) "
+            )
+            visibility_params.extend((t, known_t, known_t))
         visibility_sql += (
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
@@ -8565,6 +8575,17 @@ class MemoryService:
                 "OR ?<visibility_memory.expired_at) "
             )
             visibility_params.extend((wid, t, t, t, known_t, known_t))
+        else:
+            visibility_sql += (
+                "AND visibility_memory.workspace_id=? "
+                "AND (visibility_memory.valid_from IS NULL "
+                "OR visibility_memory.valid_from<=?) "
+                "AND (visibility_memory.ingested_at IS NULL "
+                "OR visibility_memory.ingested_at<=?) "
+                "AND (visibility_memory.expired_at IS NULL "
+                "OR ?<visibility_memory.expired_at) "
+            )
+            visibility_params.extend((wid, t, known_t, known_t))
         visibility_sql += "WHERE visibility_edge.workspace_id=? "
         visibility_params.append(wid)
         if repo_id:
@@ -8584,6 +8605,16 @@ class MemoryService:
                 "OR ?<visibility_edge.expired_at) "
             )
             visibility_params.extend((t, t, t, known_t, known_t))
+        else:
+            visibility_sql += (
+                "AND (visibility_edge.valid_from IS NULL "
+                "OR visibility_edge.valid_from<=?) "
+                "AND (visibility_edge.ingested_at IS NULL "
+                "OR visibility_edge.ingested_at<=?) "
+                "AND (visibility_edge.expired_at IS NULL "
+                "OR ?<visibility_edge.expired_at) "
+            )
+            visibility_params.extend((t, known_t, known_t))
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
             "visibility_edge.src, visibility_edge.dst) "
@@ -8779,10 +8810,11 @@ class MemoryService:
         entity_sql += " AND (NOT EXISTS (SELECT 1 FROM edges hidden_edge "
         entity_sql += (
             "WHERE hidden_edge.workspace_id=? "
-            "AND (hidden_edge.src=entity.id OR hidden_edge.dst=entity.id)) "
+            "AND (hidden_edge.src=entity.id OR hidden_edge.dst=entity.id) "
+            "AND (hidden_edge.ingested_at IS NULL OR hidden_edge.ingested_at<=?)) "
             "OR EXISTS (SELECT 1 FROM edges public_edge "
         )
-        entity_params.extend((wid,))
+        entity_params.extend((wid, known_t))
         if not include_history:
             entity_sql += (
                 "WHERE public_edge.workspace_id=? "
