@@ -454,9 +454,14 @@ def _validate_python_sbom_dependency_closure(
             raise EvidenceError(
                 "SBOM dependency graph is missing an entry for component " + name
             )
+    for ref in edges:
+        if ref not in known_refs:
+            raise EvidenceError(
+                "SBOM dependency graph references unknown component ref: " + ref
+            )
     for children in edges.values():
         for child in children:
-            if child not in edges and child not in known_refs:
+            if child not in known_refs:
                 raise EvidenceError(
                     "SBOM dependency graph references unknown component ref: " + child
                 )
