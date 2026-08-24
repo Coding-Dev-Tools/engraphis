@@ -12,6 +12,7 @@ from engraphis.core.interfaces import (
     GraphLayer,
     GraphReader,
     GraphWriter,
+    LexicalIndex,
     MemoryRecord,
     MemoryType,
     Node,
@@ -2431,6 +2432,20 @@ def test_entity_and_code_graph_reads_honor_keyset_and_sentinel_limits(store):
 def test_store_satisfies_narrow_graph_protocols(store):
     assert isinstance(store, GraphReader)
     assert isinstance(store, GraphWriter)
+    assert isinstance(store, LexicalIndex)
+
+
+def test_lexical_index_protocol_surface_returns_scored_hits(store):
+    wid = store.get_or_create_workspace("lexical-protocol")
+    rid = store.get_or_create_repo(wid, "repo")
+    store.add_memory(MemoryRecord(
+        id="", content="The staging database runs PostgreSQL 16.",
+        workspace_id=wid, repo_id=rid,
+    ))
+    hits = store.search("PostgreSQL", 5, filter=SearchFilter(workspace_id=wid, repo_id=rid))
+    assert hits and hits[0][0] in {m.id for m in store.list_memories(
+        SearchFilter(workspace_id=wid, repo_id=rid)
+    )}
 
 
 def test_concurrent_identity_initializers_and_reinforcement_converge(tmp_path):

@@ -24,7 +24,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
-
 - Direct black-hole children now receive compact, deterministic orbital lanes near the black
   hole instead of inheriting the farthest authored radius. Each lane keeps phase and painted
   clearance, while community-child planets remain in their local moving frame; oversized Galaxy
@@ -114,9 +113,28 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Added `docs/GRAPH_PERFORMANCE.md` documenting the two graph presentation profiles,
   worker layout, progressive rendering, and the 20,000-node / 200,000-relation safety
   ceilings.
+- Source-import manifest paging now uses keyset (cursor) pagination instead of OFFSET,
+  so concurrent writes during a source re-import can no longer skip or duplicate rows
+  mid-scan (PR #154).
+- Local file/folder imports now accept up to 1,500 files per batch (was 500), with the total
+  batch ceiling scaled to 750 MB so the average per-file allowance is unchanged; document-wizard
+  scanner ceilings move in lockstep.
+- Folder imports report truncation explicitly: a folder with more matching files than the
+  ceiling now warns and returns `truncated`/`matched_total`/`unreadable` fields instead of
+  silently importing an alphabetically-first slice that looks complete.
 
 ### Fixed
 
+- Importing more than 1,000 files through the dashboard no longer fails with "Internal Server
+  Error": wizard upload routes parse multipart forms under the advertised 1,500-file ceiling
+  instead of Starlette's hidden 1,000-part parser default, oversized batches return a clear 413,
+  and large vault uploads no longer trip the dashboard's 8 MB default body limit.
+- One unreadable or pathological file (locked, deep-nested JSON, concurrent writer) now degrades
+  to a per-file error instead of rolling back the entire import batch with a 500.
+- Document/Obsidian import jobs whose worker died with the process are marked failed on the next
+  status poll (`worker_lease_expired`) instead of reporting `running` forever.
+- Cloud-placeholder files (OneDrive Files-On-Demand) on Windows are hydrated and imported rather
+  than rejected as non-regular files; symlinks and junctions remain blocked.
 - Galaxy layout now packs each complete solar-system envelope before orbital seeding and keeps
   those envelopes separated with rigid carrier translations during live motion. Compact server
   targets can no longer stack large systems near the black hole, while local planet positions,
@@ -148,8 +166,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
   to register, instead of replaying the same broken asset response.
 - Existing Galaxy preferences migrate only the retired `48` orbital-separation default to `60`;
   deliberate custom values, including Gravity `0`, remain unchanged.
+- Source-import hardening lands via separate PR #154: deterministic missing-item detection
+  now guards an unknown baseline instead of reporting spurious misses, denial-guard
+  supersession binds digests computed from the parsed record rather than raw input,
+  import-job finalization is generation-guarded so a stale worker cannot finalize over a
+  newer attempt, and the finalized-state check completes in constant time.
 
 ### Security
+
 
 - HTTP error responses in `vault.py` and `service.py` no longer echo user-controlled paths back
   to the client, preventing filesystem structure leakage (SEC-001).
@@ -157,6 +181,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
   interpolation, eliminating a fragile SQL construction pattern (SEC-002).
 - The `pypdf` dependency floor is raised to `>=6.15.0` to address PYSEC-2026-3655 and
   PYSEC-2026-3656 (arbitrary code execution via crafted PDF objects).
+
+### Removed
+
+- The Hermes memory-provider plugin integration (`integrations/hermes/`, its
+  `ENGRAPHIS_HERMES_*` environment surface, and its integration test) is withdrawn from
+  the repository ahead of the v1.6 tag. The provider remains available in the v1.5
+  release history for anyone who already copied it.
 ## [1.6] - 2026-08-15
 
 Minor release advancing the v2 engine through schema 16 with deterministic sync state, trusted

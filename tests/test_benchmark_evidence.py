@@ -128,7 +128,7 @@ def test_readme_distinguishes_every_registered_token_context_measurement(
         "offline-fixtures-v1.json",
         "offline-chunking",
         "offline-performance",
-        "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2",
+        "0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800",
         "There is no universal memory-count",
         "python -m eval.vector_scale",
         'vector_backend="sqlite-vec"',
@@ -262,7 +262,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     }
     assert "5/5 answerable questions" in visual
     assert "5/5 off-topic questions" in visual
-    assert "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2" in visual
+    assert "0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800" in visual
 
 
 def test_context_savings_visual_uses_only_registered_measurements(
@@ -352,7 +352,7 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     sidecar_path = artifact_path.with_suffix(".json.sha256")
     artifact_bytes = artifact_path.read_bytes()
     artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
-    expected_sha = "c3a74f1770ad3f868f55261ba11680e2dadca30167082ac2cb6669f9e3bdfad2"
+    expected_sha = "0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800"
 
     assert artifact_sha == expected_sha
     assert sidecar_path.read_text(encoding="ascii") == (
