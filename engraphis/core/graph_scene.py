@@ -1475,10 +1475,11 @@ def _community_summaries(graph: dict, community_ids: set[str],
         tc = node_community.get(edge["target"])
         if sc and sc == tc:
             edge_by_community[sc].append(edge)
-        elif sc:
-            cross_by_community[sc].append(edge)
-        elif tc:
-            cross_by_community[tc].append(edge)
+        else:
+            if sc:
+                cross_by_community[sc].append(edge)
+            if tc:
+                cross_by_community[tc].append(edge)
     result = []
     for community_id in community_ids:
         member_ids = set(graph["community_members"][community_id])
