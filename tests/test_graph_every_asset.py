@@ -47,8 +47,8 @@ def test_worker_compacts_to_typed_arrays_and_preserves_falsy_ids() -> None:
 send({ type: 'prepare', payload: {
   nodes: [{ id: 0, name: 'Zero', community_id: 'a' }, { id: false, name: 'Falsey', ghost: true, community_id: 'a' }, { id: 'leaf' }],
   links: [
-    { source: 0, target: false, weight: 3, relation: 'mentions' },
-    { source: { id: false }, target: 'leaf' },
+    { source: 0, target: false, weight: 3, relation: 'mentions', layer: 'temporal' },
+    { source: { id: false }, target: 'leaf', layer: 'code', ghost: true },
     { source: 'ghost-node', target: 'leaf' },
   ],
 }});
@@ -58,6 +58,7 @@ setTimeout(() => {
     ids: ready.ids, links: ready.totalLinks,
     sources: Array.from(ready.edgeSources), targets: Array.from(ready.edgeTargets),
     weights: Array.from(ready.edgeWeights), relations: ready.edgeRelations,
+    layers: ready.edgeLayers, edgeGhosts: Array.from(ready.edgeGhosts),
     ghosts: Array.from(ready.nodeGhosts), positionsType: ready.positions.constructor.name,
     bridges: Array.from(ready.edgeBridges),
   }));
@@ -70,6 +71,8 @@ setTimeout(() => {
     assert report["targets"] == [1, 2]
     assert report["weights"] == [3.0, 1.0]  # missing weight defaults to 1
     assert report["relations"] == ["mentions", ""]
+    assert report["layers"] == ["temporal", "code"]
+    assert report["edgeGhosts"] == [0, 1]
     assert report["ghosts"] == [0, 1, 0]
     assert report["positionsType"] == "Float32Array"
     # Edge 0 joins two members of community 'a' (no bridge); edge 1 crosses communities.
@@ -201,12 +204,24 @@ def test_renderer_uploads_change_driven_and_reports_honest_edge_counts() -> None
     assert "drawnLinks: drawn" in renderer
     assert "hiddenLinks: Math.max(0, state.totalLinks - drawn)" in renderer
     assert "state.bridges && state.edgeBridges[index]" in renderer  # toggle re-upload
+    assert "function edgePassesFilters(index)" in renderer
+    assert "edgeBuffers.visible" in renderer
+    assert "state.layers[layer] !== false" in renderer
+    assert "state.edgeGhosts[index]" in renderer
 
 
 def test_renderer_scales_picking_and_highlight_points_in_world_units() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
-    assert "pointSize(best) + 7 / Math.max(0.005, state.camera.scale)" in renderer
+    assert "(pointSize(best) + 7) / Math.max(0.005, state.camera.scale)" in renderer
     assert "state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];" in renderer
+
+
+def test_renderer_repaints_cached_labels_after_overlay_clear() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    labels = renderer[renderer.index("function drawDeclutteredLabels") : renderer.index("function flowAnimating")]
+    assert "state.labelLayout.forEach(item => labelContext.fillText(item.text, item.x, item.y));" in labels
+    assert "state.labelLayout.push({ text, x: point[0] + 6, y: point[1] - 6 });" in labels
+    assert "if (cacheKey === state.lastLabelKey) return;" not in labels
 
 
 def test_renderer_layers_the_retina_safe_underlay_without_capturing_input() -> None:

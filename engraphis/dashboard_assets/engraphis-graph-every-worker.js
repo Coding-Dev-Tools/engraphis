@@ -98,6 +98,8 @@
     const targets = [];
     const weights = [];
     const relations = [];
+    const edgeLayers = [];
+    const edgeGhosts = [];
     for (let index = 0; index < rawLinks.length; index += 1) {
       const link = rawLinks[index] || {};
       const source = indexById.get(stableKey(link.source));
@@ -108,6 +110,8 @@
       const weight = Number(link.weight);
       weights.push(Number.isFinite(weight) && weight > 0 ? weight : 1);
       relations.push(String(link.relation || link.label || ""));
+      edgeLayers.push(String(link.layer || 'semantic'));
+      edgeGhosts.push(link.ghost === true ? 1 : 0);
       degreeCounts[source] += 1;
       degreeCounts[target] += 1;
     }
@@ -146,6 +150,8 @@
       targets: Uint32Array.from(targets),
       weights: Float32Array.from(weights),
       relations,
+      edgeLayers,
+      edgeGhosts: Uint8Array.from(edgeGhosts),
       edgeBridges,
       totalLinks: linkCount,
       positions: null, bounds: null, dx: null, dy: null,
@@ -387,9 +393,10 @@
         edgeSources: model.sources,
         edgeTargets: model.targets,
         edgeBridges: model.edgeBridges,
+        edgeGhosts: model.edgeGhosts,
         edgeWeights: model.weights,
         edgeRelations: model.relations,
-        edgeLayers: [],
+        edgeLayers: model.edgeLayers,
         topNodes: model.topNodes,
         totalLinks: model.totalLinks,
       });
