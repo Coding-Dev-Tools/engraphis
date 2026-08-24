@@ -2023,7 +2023,7 @@ test('all→quality readiness failure preserves the committed all-node renderer 
   await page.evaluate(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
     window.setTimeout = (callback, delay, ...args) => {
-      if (delay === 12_000) return nativeSetTimeout(callback, 120, ...args);
+      if (delay === 60_000) return nativeSetTimeout(callback, 120, ...args);
       return nativeSetTimeout(callback, delay, ...args);
     };
   });

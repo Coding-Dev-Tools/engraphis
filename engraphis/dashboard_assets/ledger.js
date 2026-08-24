@@ -3153,13 +3153,16 @@
       && request.repo === (byId('graph-repo-filter').value || '').trim());
   }
 
-  function setGraphLoadControlsBusy(busy) {
-    ['graph-show-all', 'graph-retry'].forEach(id => {
+  function setGraphLoadControlsBusy(busy, disableRetry = true) {
+    const controls = disableRetry ? ['graph-show-all', 'graph-retry'] : ['graph-show-all'];
+    controls.forEach(id => {
       const control = byId(id);
       if (control) control.disabled = busy;
     });
     const retry = byId('graph-retry');
-    if (retry) retry.textContent = busy ? 'Reloading graph…' : 'Reload data';
+    if (retry && ((busy && disableRetry) || !busy)) {
+      retry.textContent = busy ? 'Reloading graph…' : 'Reload data';
+    }
   }
 
   function retryGraphLoad() {
@@ -3221,7 +3224,9 @@
     state.graphLoadRepo = targetRepo;
     state.graphLoadController = controller;
     if (previousController && !previousController.signal.aborted) previousController.abort();
-    setGraphLoadControlsBusy(true);
+    // The initial load remains retryable; once a user explicitly starts a replacement, lock
+    // the retry control until that transaction settles so repeated clicks cannot churn it.
+    setGraphLoadControlsBusy(true, force);
     const oldEngine = state.graphEngine;
     const oldOverlay = state.graphSpacetimeOverlay;
     /* Loading is a transaction: freeze the committed renderer before fetching its replacement.

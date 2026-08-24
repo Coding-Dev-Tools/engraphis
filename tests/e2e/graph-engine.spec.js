@@ -3367,6 +3367,12 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
+  // Gravity changes have an immediate reversible radial response; the response preserves each
+  // system's internal geometry and velocity while keeping the control visibly effective.
+  const immediateResponse = immediate.after.diagnostics.immediateGravityResponse;
+  expect(immediateResponse.moved).toBeGreaterThan(0);
+  expect(immediateResponse.ratio).toBeGreaterThan(0);
+  expect(immediateResponse.ratio).toBeLessThan(1);
   // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
   // the central field grows with the Galaxy setting; forced inward convergence is disabled so
   // stable orbits are not collapsed into the black hole.
