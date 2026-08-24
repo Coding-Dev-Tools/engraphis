@@ -2457,6 +2457,17 @@
       Math.max(Number.isFinite(min) ? min : compressed, compressed));
   }
 
+  function graphScopeValue(id, value, fallback) {
+    const control = byId(id);
+    const raw = Number(value);
+    const safe = Number.isFinite(raw) ? raw : fallback;
+    if (!control) return Math.round(safe);
+    const min = Number(control.min);
+    const max = Number(control.max);
+    return Math.round(Math.min(Number.isFinite(max) ? max : safe,
+      Math.max(Number.isFinite(min) ? min : safe, safe)));
+  }
+
 
   function graphTuningEngineSettings() {
     return GRAPH_TUNING.reduce((settings, item) => {
@@ -2490,13 +2501,9 @@
 
   function graphScopeEngine() {
     return {
-      minDegree: graphSliderResponseValue(
-        'graph-min-degree', number(byId('graph-min-degree').value), 1,
-      ),
+      minDegree: graphScopeValue('graph-min-degree', byId('graph-min-degree').value, 1),
       showUnlinked: state.graphShowUnlinked,
-      depth: graphSliderResponseValue(
-        'graph-depth', number(byId('graph-depth').value), 2,
-      ),
+      depth: graphScopeValue('graph-depth', byId('graph-depth').value, 2),
     };
   }
 
@@ -2595,7 +2602,7 @@
   }
 
   function setGraphMinDegree(value, apply = true) {
-    const next = graphValueInRange('graph-min-degree', value, 1);
+    const next = graphScopeValue('graph-min-degree', value, 1);
     byId('graph-min-degree').value = String(next);
     byId('graph-min-degree-output').value = String(Math.round(next));
     byId('graph-min-degree-output').textContent = String(Math.round(next));
@@ -2606,7 +2613,7 @@
   }
 
   function setGraphDepth(value, apply = true) {
-    const next = graphValueInRange('graph-depth', value, 2);
+    const next = graphScopeValue('graph-depth', value, 2);
     byId('graph-depth').value = String(next);
     byId('graph-depth-output').value = String(Math.round(next));
     byId('graph-depth-output').textContent = String(Math.round(next));

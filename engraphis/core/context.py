@@ -136,6 +136,7 @@ class DeterministicContextPacker:
                     compact = self._excerpt(query, candidate, compact_available)
                     if compact[0] and _starts_with_title(compact[0], record.title):
                         base = compact_base
+                        available = compact_available
                         excerpt, truncated, reason = compact
             if not excerpt:
                 continue
