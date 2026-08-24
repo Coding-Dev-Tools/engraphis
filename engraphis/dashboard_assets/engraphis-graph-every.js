@@ -311,6 +311,9 @@
       state.pickDirty = true;
       state.lastLabelKey = '';
       state.labelLayout = [];
+      /* Region hulls follow the same visibility contract as nodes and edges. Rebuild them
+         here so scope/ghost changes cannot leave a stale district overlay on the underlay. */
+      computeCommunityRegions();
       uploadNodeMeta();
       uploadEdges();
       applyHoverToFlags();
@@ -456,7 +459,12 @@
       state.communityRegions = regions.sort((a, b) => b.count - a.count).slice(0, REGION_LIMIT);
     }
     function drawRegions() {
-      if (!underlayContext || !state.ready || !state.communityRegions.length) return;
+      if (!underlayContext || !state.ready) return;
+      if (!state.communityRegions.length) {
+        underlayContext.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+        underlayContext.clearRect(0, 0, state.width, state.height);
+        return;
+      }
       const ratio = zoomRatio();
       /* Regions aid orientation at browsing distance; they vanish into the glow when far
          out and get out of the way of close reading. Strong enough to survive the edge

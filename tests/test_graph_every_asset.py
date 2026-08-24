@@ -231,6 +231,15 @@ def test_renderer_layers_the_retina_safe_underlay_without_capturing_input() -> N
     assert "div[data-graph-style]:focus-visible" in css
 
 
+def test_renderer_rebuilds_and_clears_stale_community_regions() -> None:
+    renderer = RENDERER.read_text(encoding="utf-8")
+    refresh = renderer[renderer.index("function refreshVisibility") : renderer.index("function applyHoverToFlags")]
+    regions = renderer[renderer.index("function drawRegions") : renderer.index("function buildPickGrid")]
+    assert "computeCommunityRegions();" in refresh
+    assert "if (!state.communityRegions.length)" in regions
+    assert "underlayContext.clearRect(0, 0, state.width, state.height);" in regions
+
+
 def test_ledger_preserves_falsy_graph_endpoints() -> None:
     ledger = LEDGER.read_text(encoding="utf-8")
     assert "function graphEndpoint(value)" in ledger
