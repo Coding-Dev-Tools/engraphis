@@ -3124,18 +3124,21 @@ def _mark_authoritative_denial() -> None:
     """Make an authoritative cloud denial visible before persistence starts."""
 
     global _authoritative_denial_at, _denied_state_digests
+    denial_at = time.time()
     with _ENTITLEMENT_REFRESH_LOCK:
-        _authoritative_denial_at = time.time()
-        # Publish the fail-closed state before probing either persisted source. Those
-        # reads can block on a slow state directory; a concurrent license/bootstrap
-        # request must not keep serving the pre-denial grants while they are in flight.
-        # Keep the baseline empty until both probes complete so an active-looking record
-        # cannot be mistaken for a post-denial reconnect during the capture window.
+        _authoritative_denial_at = denial_at
+        # Publish the fail-closed state before probing either potentially slow or
+        # unavailable persisted source. Readers must not observe paid access while a
+        # network-mounted state directory is blocking the digest capture below.
+        _denied_state_digests = {"session": None, "cloud": None}
         _AUTHORITATIVE_DENIAL_PENDING.set()
-        _denied_state_digests = {}
-        _denied_state_digests = {
-            source: _persisted_state_digest(source) for source in ("session", "cloud")
-        }
+    digests = {
+        source: _persisted_state_digest(source) for source in ("session", "cloud")
+    }
+    with _ENTITLEMENT_REFRESH_LOCK:
+        # A later denial owns the newer baseline; never let an older slow probe replace it.
+        if _authoritative_denial_at == denial_at:
+            _denied_state_digests = digests
 
 
 def _clear_superseded_denial(known_source: str, observed_digest: Optional[str]) -> bool:
