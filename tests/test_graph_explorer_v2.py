@@ -532,6 +532,26 @@ def test_complete_scene_keeps_every_memory_and_raw_connector_deterministically()
         assert community["external_strength"] == pytest.approx(expected_external)
 
 
+def test_community_summaries_count_cross_edges_for_both_endpoint_systems():
+    graph = {
+        "edges": [{"source": "a", "target": "b", "strength": 2.5}],
+        "community_members": {"A": ["a"], "B": ["b"]},
+        "community_anchors": {"A": "a", "B": "b"},
+        "nodes": {
+            "a": {"label": "A", "gravity_mass": 1.0, "scene_rank": 1.0},
+            "b": {"label": "B", "gravity_mass": 1.0, "scene_rank": 1.0},
+        },
+    }
+
+    summaries = graph_scene_module._community_summaries(
+        graph, {"A", "B"}, {"a", "b"}
+    )
+
+    assert {item["id"]: item["external_strength"] for item in summaries} == {
+        "A": 2.5, "B": 2.5,
+    }
+
+
 def test_complete_scene_keeps_every_enabled_code_memory_connector():
     entities = [{
         "id": "code:symbol", "canonical_id": "code:symbol",
