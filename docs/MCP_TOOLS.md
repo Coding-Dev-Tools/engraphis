@@ -27,7 +27,7 @@ discovery and the validated executors.
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 34 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 35 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
@@ -78,6 +78,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |
+| Write | `engraphis_remember_many` | Stores a fan-out batch of facts in one transaction: within-batch dedup/supersession, plus evidence-labeled edges between siblings sharing a `subject_key` or declared `evidence_source`. |
 | Write | `engraphis_record_event` | Appends one raw occurrence to the event ledger; event rows are not recalled, deduplicated, reinforced, or consolidated as memories. |
 | Write | `engraphis_link` | Connects two related memories. |
 | Write | `engraphis_ingest` | Applies the configured extractor (`chunk`, `llm`, or `llm_structured`). With `none`, it stores one verbatim memory. |
@@ -109,7 +110,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
 | Session | `engraphis_start_session` / `engraphis_end_session` | Starts or closes a work session. Exact retries are safe; `force_new=true` creates another session. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
-| Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. |
+| Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,

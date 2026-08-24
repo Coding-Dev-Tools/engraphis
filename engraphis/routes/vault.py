@@ -35,7 +35,7 @@ from engraphis.engines.reweight import retention_score
 from engraphis.stores import blob_to_vector, get_conn, now_ts
 from engraphis.stores import vaults as vault_store
 from engraphis.stores import vectors as mem_store
-from engraphis.core.fsutil import is_reparse_point as _is_reparse_point
+from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 logger = logging.getLogger("engraphis.routes.vault")
 # Multipart boundaries and per-part headers count toward the HTTP request size even
@@ -78,7 +78,7 @@ def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
     enumeration phase and this read cannot escape the import root.
     """
     before = os.lstat(path)
-    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_reparse_point(before):
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_link_indirection(before):
         raise OSError("unsafe file type")
     if not _is_within(folder, path.resolve(strict=True)):
         raise OSError("path escapes import root")
@@ -86,7 +86,7 @@ def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or _is_reparse_point(opened) or not _same_identity(before, opened):
+        if not stat.S_ISREG(opened.st_mode) or _is_link_indirection(opened) or not _same_identity(before, opened):
             raise OSError("file changed during import")
         if opened.st_size > limit:
             raise OSError("import resource exceeds its byte limit")
@@ -106,7 +106,7 @@ def _read_import_file(folder: Path, path: Path, limit: int) -> bytes:
             or opened.st_size != finished.st_size
             or opened.st_mtime_ns != finished.st_mtime_ns
             or stat.S_ISLNK(after.st_mode)
-            or _is_reparse_point(after)
+            or _is_link_indirection(after)
             or not _same_identity(finished, after)
             or not _is_within(folder, path.resolve(strict=True))
         ):

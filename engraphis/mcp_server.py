@@ -130,8 +130,10 @@ def _err(exc: Exception) -> str:
         return f"Error: {exc}"
     exc_type = type(exc).__name__
     # Redact exception messages to prevent credential/path/memory leakage.
-    # Log only a safe class marker and never attach exc_info/tracebacks.
-    logger.error("MCP tool operation failed", extra={"error_class": exc_type})
+    # Log only a safe class marker and never attach exc_info/tracebacks. The
+    # class goes INTO the message: `extra=` fields are dropped by most
+    # formatters, which made every failure log identically unattributable.
+    logger.error("MCP tool operation failed (%s)", exc_type)
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
@@ -478,6 +480,76 @@ def engraphis_remember(
             # MCP-over-HTTP mount is protected by its loopback/token/role gate before
             # FastMCP dispatches this binding. The service still checks the narrow
             # local-agent source allow-list, so imported/external labels stay pending.
+            _local_agent_operator=bool(trusted),
+            _ingress="mcp",
+        ))
+    except Exception as exc:  # noqa: BLE001 - surface a safe, actionable message
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_remember_many",
+    annotations={"title": "Remember a batch of facts", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def engraphis_remember_many(
+    facts: Annotated[List[dict], Field(description="The facts collected from a fan-out "
+                                     "(parallel sub-agents, research, a review council), "
+                                     "as a list of objects: each needs 'content' and "
+                                     "optionally 'title', 'importance' (0..1), "
+                                     "'keywords', 'subject_key' (stable claim subject "
+                                     "like 'api.rate_limit'), 'claim_kind', "
+                                     "'evidence_source' (per-fact origin label; facts "
+                                     "sharing one get evidence-labeled links), and "
+                                     "'valid_from' (Unix timestamp). All facts are "
+                                     "stored in one transaction; each is deduplicated "
+                                     "against the others, and facts that share a "
+                                     "subject_key or evidence_source are linked with "
+                                     "evidence-labeled edges.", min_length=1,
+                                     max_length=500)],
+    workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product "
+                                    "name ('acme'). Defaults to 'default' if omitted.",
+                                    min_length=1, max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace "
+                                         "('backend'). Omit for workspace-wide memories.",
+                                         max_length=200)] = None,
+    session_id: Annotated[Optional[str], Field(description="Session id from "
+                          "engraphis_start_session, if this batch belongs to one.")] = None,
+    mtype: Annotated[str, Field(description="Default memory type for facts without their "
+                      "own: 'semantic' (facts/conventions), 'episodic' (events/decisions), "
+                      "'procedural' (how-tos), or 'working' (transient).")] = "semantic",
+    scope: Annotated[Optional[str], Field(
+        description="Visibility: session, repo, workspace, or user. Omit to infer the "
+                    "compatible default: repo when repo or a repo-backed session_id is "
+                    "present, otherwise workspace. Session visibility must be explicit.")] = None,
+    source: Annotated[str, Field(description="Origin of the content. Web, import, sync, and "
+                       "other external origins are always untrusted even if trusted=true; "
+                       "use the default agent only for facts the connected local agent "
+                       "authored or independently verified.", max_length=200)] = "agent",
+    trusted: Annotated[bool, Field(description="Local-agent confidence label. External origins "
+                        "cannot elevate themselves with this field.")] = True,
+) -> str:
+    """Store a batch of facts from parallel agents in one atomic, deduplicated write.
+
+    Use this instead of many ``engraphis_remember`` calls when one turn produced a
+    set of findings (fan-out sub-agents, a research sweep, a review council): the
+    whole batch lands in a single transaction, each fact is resolved against the
+    others (duplicates reinforce, keyed claims supersede), and facts sharing a
+    ``subject_key`` or an explicit per-fact ``evidence_source`` get
+    evidence-labeled graph edges so the merge is a growing graph rather than a
+    pile of prose.
+
+    Returns:
+        str: JSON ``{"workspace","repo","scope","stored":true,"total","ops",
+        "results":[{"id","op",...}]}`` with one entry per input fact, in order.
+        Returns ``"Error: <reason>"`` if validation fails or any fact cannot be
+        stored (the whole batch rolls back in that case).
+    """
+    try:
+        return _ok(service().remember_many(
+            facts, workspace=workspace, repo=repo, session_id=session_id,
+            mtype=mtype, scope=scope,
+            source=source, trusted=trusted,
             _local_agent_operator=bool(trusted),
             _ingress="mcp",
         ))

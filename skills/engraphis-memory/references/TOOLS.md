@@ -1,7 +1,7 @@
 # Engraphis MCP tools: reference
 
-The Classic server registers 34 direct tools and the Smart gateway registers nine; two names
-overlap, for 41 distinct public tool names. Parameters are `name (type, default)`: no default
+The Classic server registers 35 direct tools and the Smart gateway registers nine; two names
+overlap, for 42 distinct public tool names. Parameters are `name (type, default)`: no default
 means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
 instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
@@ -55,6 +55,27 @@ Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `ad
 
 > Prefer `dedupe=True` (default). It is what keeps the store contradiction-free without an LLM.
 
+### `engraphis_remember_many`
+Store a batch of facts from parallel agents (fan-out sub-agents, a research sweep, a review
+council) in one atomic, deduplicated write, instead of many separate `remember` calls.
+
+- `facts (list[dict])`: each item needs `content` and optionally `title`, `mtype`,
+  `importance` (0..1), `keywords`, `metadata`, `subject_key`, `claim_kind`,
+  `valid_from` (Unix timestamp), and `evidence_source` (a declared citeable origin for the
+  fact, e.g. `"subagent-7"`; defaults to none).
+- `workspace (str, "default")`, `repo (str, None)`, `session_id (str, None)`.
+- `mtype (str, "semantic")`: default type for items without their own.
+- `scope (str, None)`: same visibility rules as `engraphis_remember`.
+- `source (str, "agent")`, `trusted (bool, true)`: one provenance for the whole batch.
+
+The whole batch lands in one transaction (all-or-nothing); each fact is also resolved against
+the siblings already resolved earlier in the batch, so duplicates reinforce and keyed claims
+supersede within the batch. Afterwards, siblings that share a non-empty `subject_key` or the
+same declared `evidence_source` get `related` graph edges labeled with that evidence: facts
+with no declared evidence stay unwired ("no shared source, no edge"). Returns
+`{workspace, repo, scope, stored:true, total, ops:[…], results:[{id, op}, …]}` with one entry
+per input fact, in order.
+
 ### `engraphis_record_event`
 Append one raw occurrence to the append-only event ledger. Event rows are not memories: they are
 not recalled, deduplicated, reinforced, or consolidated as memories.
@@ -78,9 +99,12 @@ bodies already represented in `context`.
   `mtypes (list[str], None)`; `k (int, 8)`.
 - `token_budget (int, 1024)`: hard packed-context budget, `0..32768`.
 - `retrieval_profile (str, "balanced")`: `balanced` is the default legacy hybrid; `auto` is
-  explicit opt-in, with `lexical`, `graph`, and `code` available for deliberate routing. The
+  explicit opt-in, with `fast`, `lexical`, `graph`, and `code` available for deliberate routing. The
   specialized graph/code profiles prioritize their named evidence while retaining supporting
   arms; diagnostics preserves both normalized and profile-adjusted scores.
+- `fast` keeps vector and lexical recall while skipping graph traversal: an explicit
+  small-vault profile. The full valid set is `balanced`, `auto`, `fast`, `lexical`, `graph`,
+  `code` (`core/retrieval_policy.py`).
 - `candidate_depth (str, "fixed")`: `fixed` preserves the historical 50-candidate pool;
   opt-in `adaptive` uses a deterministic profile-aware smaller pool for routine lexical/balanced
   queries while retaining wider graph/code pools. Responses report the requested and used depth.
@@ -113,7 +137,8 @@ It is the full-response compatibility surface; prefer `engraphis_recall_context`
 - `k (int, 8)`: max results, `1..50`.
 - `token_budget (int, None)`: hard packed-context budget; omitted uses the engine default.
 - `retrieval_profile (str, "balanced")`: `balanced` default; `auto` only when explicitly set;
-  `lexical`, `graph`, and `code` are deliberate alternatives whose named arm is prioritized.
+  `fast`, `lexical`, `graph`, and `code` are deliberate alternatives whose named arm is
+  prioritized (`fast` keeps vector + lexical and skips graph traversal).
 - `candidate_depth (str, "fixed")`: `fixed` preserves the historical candidate pool; opt-in
   `adaptive` is a deterministic profile-aware depth experiment. The response records the
   requested mode, actual depth, and reason.
@@ -167,8 +192,11 @@ references it.
 
 - `query (str)`; `workspace (str, "default")`; `repo (str, None)`; `k (int, 8)`;
   `min_support (float, 0.25)`; `synthesize (bool, false)`.
-- `as_of (float, None)`; `valid_at (float, None)`; `known_at (float, None)`;
-  `token_budget (int, None)`; `retrieval_profile (str, "balanced")`;
+- `as_of (float, None)`: compatibility `valid_at` alias for a point-in-time answer;
+  `valid_at (float, None)` is the world-time anchor; the two must match if both are
+  supplied. `known_at (float, None)` anchors system time.
+- `token_budget (int, None)`; `retrieval_profile (str, "balanced")`: `balanced`, `auto`,
+  `fast`, `lexical`, `graph`, or `code`;
   `candidate_depth (str, "fixed")`; `response_mode (str, "full")`;
   `diagnostics (bool, false)`; `planning (str, "off")`;
   `mtype_limits (dict[str,int], None)`; `max_response_tokens (int, None)`.
@@ -560,8 +588,9 @@ superseded history.
 ### `engraphis_check_update`
 Report whether a newer Engraphis release is available, so an agent can proactively remind the
 user to upgrade. Cached for 24 hours by default and fail-silent; `ENGRAPHIS_UPDATE_CACHE`
-accepts a TTL in seconds and falls back to 24 hours for invalid values. `ENGRAPHIS_UPDATE_CHECK=0`
-disables the check (`enabled` is false). The default GitHub source is overridable via
+accepts a TTL in seconds and falls back to 24 hours for invalid values. Update checks are
+OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. The
+default GitHub source is overridable via
 `ENGRAPHIS_UPDATE_URL`; the outbound client accepts HTTPS and rejects private/reserved destinations.
 
 - `force (bool, false)`: bypass the 24-hour cache and re-check the release source now.
