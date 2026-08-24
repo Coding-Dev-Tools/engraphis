@@ -531,6 +531,66 @@ def saved_entitlement() -> dict:
         return {}
 
 
+def saved_entitlement_snapshot() -> tuple[dict, Optional[str]]:
+    """Read the session once; return its entitlement plus a digest of those exact bytes.
+
+    Binding the parse to the bytes it came from lets a caller prove where an answer
+    predates a denial without re-reading: a license read that parsed the pre-denial
+    session must never mistake the denial-persistence write landing mid-read for a
+    superseding reconnect. ``None`` means "could not determine" (unreadable state);
+    ``""`` means the file is absent.
+    """
+
+    try:
+        raw = read_private_text(
+            _session_path(), max_bytes=64 * 1024, allow_missing=True
+        )
+    except Exception:  # noqa: BLE001 — an unreadable session is simply "nothing known"
+        return {}, None
+    if not raw:
+        return {}, ""
+    digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    try:
+        value = json.loads(raw)
+    except (ValueError, RecursionError):
+        return {}, digest
+    if not isinstance(value, dict):
+        return {}, digest
+    declared = _declared_entitlement(value)
+    if not declared:
+        return {}, digest
+    try:
+        checked_at = float(value.get("entitlement_checked_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        checked_at = 0.0
+    declared["entitlement_checked_at"] = checked_at
+    declared["organization_id"] = str(value.get("organization_id") or "")
+    return declared, digest
+
+
+def saved_session_digest() -> Optional[str]:
+    """Return a ``sha256`` digest over the raw saved session bytes, or ``""`` if absent.
+
+    ``None`` means "could not determine" (unreadable or unsafe state file), which callers
+    must treat as "no evidence of change". This lets a caller detect that the session was
+    *rewritten* — a genuine reconnect always rotates the refresh credential, so the bytes
+    differ — without parsing the record or exposing any credential material. Wall-clock
+    timestamps cannot serve this role: two writes inside one coarse clock tick stamp equal
+    ``entitlement_checked_at`` values, so only content distinguishes a post-denial
+    reconnect from a pre-denial record.
+    """
+
+    try:
+        raw = read_private_text(
+            _session_path(), max_bytes=64 * 1024, allow_missing=True
+        )
+    except Exception:  # noqa: BLE001 — unreadable state must not crash a digest probe
+        return None
+    if raw is None:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def record_billing_denial() -> bool:
     """Mark the saved entitlement inactive after an authoritative billing denial.
 

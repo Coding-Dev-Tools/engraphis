@@ -1715,6 +1715,10 @@ def test_safety_repair_cursor_eventually_reaches_rows_beyond_limit(monkeypatch):
             mtype=MemoryType.SEMANTIC,
             resolve_conflicts=False,
         )
+    # ULIDs sort by creation millisecond; rows created within the same millisecond
+    # order randomly inside it. Force the derived row to sort strictly after every
+    # noise row so the paging limit genuinely defers it to a later repair sweep.
+    time.sleep(0.005)
     derived_id = eng.remember(
         "Derived summary.",
         workspace_id=workspace_id,
@@ -1969,8 +1973,11 @@ def test_archive_preserves_vector_for_historical_recall():
     )
     eng.store.conn.commit()
 
+    # valid_from defaults to creation time; a same-tick archived_at would make the
+    # historical as_of midpoint land exactly on valid_to and the half-open temporal
+    # predicate would exclude the row. Nudge the archive stamp well into the future
+    # so the midpoint sits strictly inside [valid_from, valid_to) even on coarse clocks.
     archived_at = time.time() + 3_600
-
     report = consolidate(eng, workspace_id=wid, now=archived_at)
 
     assert [row["id"] for row in report["archived"]] == [stale]
