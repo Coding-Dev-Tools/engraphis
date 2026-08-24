@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260819-v24-physics-final';
+const stellarOrbitAssetVersion = '20260815-merge-ready-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1257,9 +1257,10 @@ test('Classic releases a dragged node without reheating with reduced visual moti
 });
 
 test('a dashboard page that never opens the graph fetches neither graph script', async ({ page }) => {
-  // The reason both scripts are lazy is not weight, it is CSP: force-graph applies inline
-  // styles at runtime, so an eager <script> reported a violation on every page view — including
-  // the views that have no graph.  This asserts the deferral in the only place it is real.
+  // Both graph scripts are lazy-loaded so that a page view which never opens the graph does
+  // not pay the cost of fetching vendor bundles, and so the strict CSP (which already
+  // refuses inline styles via same-origin extracted CSS) is never exercised by graph
+  // code on non-graph views.  This asserts the deferral in the only place it is real.
   const session = await openDashboard(page);
   await page.click('.nav-item[data-view="memories"]');
   await page.waitForTimeout(500);
@@ -3366,12 +3367,20 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   );
   expect(baseline.before.diagnostics.linkSetting).toBe(8);
   expect(baseline.before.diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-  // Gravity changes have an immediate reversible radial response so the control has a visible
-  // density effect; the response preserves each system's internal geometry and velocity.
+  // Gravity changes have an immediate reversible radial response; the response preserves each
+  // system's internal geometry and velocity while keeping the control visibly effective.
   const immediateResponse = immediate.after.diagnostics.immediateGravityResponse;
   expect(immediateResponse.moved).toBeGreaterThan(0);
   expect(immediateResponse.ratio).toBeGreaterThan(0);
   expect(immediateResponse.ratio).toBeLessThan(1);
+  // Zero is the weakest galaxy-wide field. Local stellar support remains independent, while
+  // the central field grows with the Galaxy setting; forced inward convergence is disabled so
+  // stable orbits are not collapsed into the black hole.
+  expect(physicalField.densityFactors[0]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[1]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[2]).toBeCloseTo(1, 12);
+  expect(physicalField.densityFactors[3]).toBeCloseTo(1, 12);
+  expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
     expect(immediate.after.radii[id] / radius, id)
       .toBeCloseTo(immediateResponse.ratio, 2);
@@ -3457,12 +3466,12 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   });
   expect(anchorGeometry.nodeSize).toBe(1);
   expect(Number.isFinite(anchorGeometry.radius)).toBe(true);
-  expect(anchorGeometry.radius).toBeGreaterThanOrEqual(anchorGeometry.ordinary * 2);
+  expect(anchorGeometry.radius).toBeCloseTo(anchorGeometry.ordinary, 10);
   expect(anchorGeometry.x).toBe(0);
   expect(anchorGeometry.y).toBe(0);
 
   // Force-graph's shadow canvas is the real hit-test path. Waiting through its throttle and
-  // clicking the graph-space origin proves the doubled star is interaction geometry, not paint.
+  // clicking the graph-space origin proves the central anchor remains interactive.
   await page.waitForTimeout(900);
   const clickPoint = await page.evaluate(() => {
     window.__lastGraphNodeClick = null;
@@ -3776,21 +3785,18 @@ test('reduced visual motion does not start the opt-in graph frozen', async ({ pa
   expect(greatestMovement).toBeGreaterThan(0.5);
 });
 
-test('the canonical engine limits CSP violations to vendor stylesheets', async ({ page }) => {
-  /* Opening the graph is *not* CSP-clean and this PR does not make it so: force-graph injects
-     a handful of `<style>` elements when it attaches, which `style-src 'self'` blocks.  The
-     scripts are lazy so that cost is confined to the graph view instead of every dashboard
-     load.  What must stay true is that the canonical renderer adds nothing on top: it owns
-     only canvas paint, and any inline style of its own would show up here.
-     `style-src-attr 'none'` in particular admits no escape hatch at all. */
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+test('Classic graph view produces zero CSP violations', async ({ page }) => {
+  /* The Classic renderer extracts all styles to same-origin CSS files loaded via <link> tags,
+     so no inline <style> elements or style attributes are injected at runtime. Combined with
+     a strict CSP that includes `style-src 'self'` and `style-src-attr 'none'`, this ensures
+     the graph view is fully CSP-clean. Any violation would indicate a regression to inline
+     style injection. */
+  const session = await openDashboard(page);
   await openGraphView(page);
   await page.waitForTimeout(2_000);
   const violations = await session.violations();
 
-  // Every one is an injected vendor stylesheet, not an inline style attribute: the renderer
-  // itself must never reach for `element.style`, which is what this drift gate enforces.
-  expect(violations.every(v => v.directive === 'style-src-elem')).toBe(true);
+  expect(violations).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -3798,9 +3804,9 @@ test('Classic does not expose a complete graph control', async ({ page }) => {
   const session = await openDashboard(page);
   await openGraphView(page);
 
-  await expect(page.locator('#graph-show-all')).toBeVisible();
+  await expect(page.locator('#graph-show-all')).toHaveCount(0);
   await expect(page.locator('#graph-show-iso')).toBeEnabled();
-  expect(await page.evaluate(() => GRAPH_FULL)).toBe(false);
+  expect(await page.evaluate(() => typeof GRAPH_FULL)).toBe('undefined');
   expect(session.pageErrors).toEqual([]);
 });
 

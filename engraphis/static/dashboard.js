@@ -569,7 +569,7 @@ async function exportWorkspace(){try{const d=await api('/export?workspace='+enco
 async function loadTeam(){const el=document.getElementById('team-body'),teamCta=hostedCta('team','team_tab');try{const st=await api('/auth/state');if(teamCta.href==='#'&&st&&st.cloud_url)teamCta.href=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.</div><div data-csp-style="s150">${ctaLinkHtml(teamCta,'btn btn-primary btn-sm','team_tab')}</div></div>`}
 /* health + settings */
 function connectionContext(){const host=(location.hostname||'').toLowerCase();return host==='localhost'||host==='127.0.0.1'||host==='::1'||host.endsWith('.localhost')?'Local engine':'Remote customer node'}
-async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}try{const auth=await api('/auth/state');const m=document.getElementById('deployment-mode-indicator');if(m){const isLocal=auth.deployment_mode==='local';m.textContent=isLocal?'LOCAL':'HOSTED';m.title=isLocal?'Local mode: no hosted cloud configured':'Hosted mode: connected to Engraphis Cloud';m.className='deployment-mode '+(isLocal?'mode-local':'mode-hosted');m.hidden=false}}catch(e){}}
+async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}try{const auth=await api('/auth/state');const m=document.getElementById('deployment-mode-indicator');if(m){const isLocal=auth.deployment_mode==='local';m.textContent=isLocal?'LOCAL':'HOSTED';m.title=isLocal?(auth.enabled?'Local API token required':'Local mode: no hosted cloud configured'):'Hosted mode: connected to Engraphis Cloud';m.className='deployment-mode '+(isLocal?'mode-local':'mode-hosted');m.hidden=false}}catch(e){}}
 function loadSettings(){loadLicense();loadSyncStatus();loadHostedAgentAccess();loadLlmStatus();const s=document.getElementById('cfg-store');if(s)s.textContent=location.host;api('/info').then(function(d){var v=document.getElementById('cfg-version');if(v&&d&&d.version)v.textContent=d.version}).catch(function(){})}
 
 async function loadLlmStatus(){const el=document.getElementById('llm-body');if(!el)return;try{const st=await api('/llm/status');const ok=st.configured;const badge=ok?'<span class="pill pill-green" data-csp-style="s9">configured</span>':'<span class="pill pill-amber" data-csp-style="s9">not configured</span>';const keyLine=st.key_set?'API key set ✓':'<span data-csp-style="s160">No API key set</span>';let modelSel='<select class="select" id="llm-model" data-csp-style="s49" data-onchange="h128">';const models=(st.default_models||{});if(!Object.values(models).includes(st.model)){modelSel+='<option value="'+esc(st.model)+'" selected>'+esc(st.model)+' (current)</option>'}Object.entries(models).forEach(([p,m])=>{modelSel+='<option value="'+esc(m)+'"'+(m===st.model?' selected':'')+'>'+esc(m)+'</option>'});modelSel+='</select>';let provSel='<select class="select" id="llm-prov" data-csp-style="s49" data-onchange="h129">';['openai','anthropic','google','openrouter'].forEach(p=>{provSel+='<option value="'+p+'"'+(p===st.provider?' selected':'')+'>'+p+'</option>'});provSel+='</select>';el.innerHTML=`<div class="cfg-row" data-csp-style="s110"><span>Provider · Model</span><span>${badge}</span></div><div data-csp-style="s161">${provSel}${modelSel}</div><div class="cfg-row" data-csp-style="s162">${keyLine} · extractor: <code data-csp-style="s159">${esc(st.extractor)}</code></div><div data-csp-style="s163">Add this to your <code data-csp-style="s159">.env</code> and restart Engraphis:</div><div data-csp-style="s164"><textarea id="llm-snippet" class="input" readonly data-csp-style="s165">${esc(st.env_snippet)}</textarea><button class="btn btn-ghost btn-sm" data-csp-style="s166" data-onclick="h130">Copy</button></div><div class="cfg-row" data-csp-style="s110"><span>LLM extraction</span><span class="pill ${st.extractor_enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${st.extractor_enabled?'ON':'OFF'}</span></div><div class="field-hint" data-csp-style="s97">While ON, ingested memory content is sent to your LLM provider for schema-validated extraction. OFF disables extraction transfers only; retention supervision is configured separately.</div><div data-csp-style="s167"><button class="btn ${st.extractor_enabled?'btn-ghost':'btn-primary'} btn-sm" data-onclick="h150"${(st.extractor_enabled||!st.configured)?' disabled':''}>Turn on</button><button class="btn ${st.extractor_enabled?'btn-danger':'btn-ghost'} btn-sm" data-onclick="h151"${st.extractor_enabled?'':' disabled'}>Turn off</button></div><div data-csp-style="s167"><button class="btn btn-primary btn-sm" data-onclick="h131">Test connection</button><span id="llm-test-result" data-csp-style="s168"></span></div>`}catch(e){el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>'}}
@@ -597,7 +597,7 @@ const syncNowBase=syncNow;
 syncNow=async function(){if(!await confirmCloudTransfer('Sync shared workspaces','Cloud Sync sends eligible changes from your shared workspaces to Engraphis Cloud and receives authorized changes from your other installations; secret and session-scoped rows stay local.','Sync now',CLOUD_SYNC_PRIVACY_COPY))return;return syncNowBase()}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_FULL=false, GRAPH_SCOPE_BEFORE_FULL=null, GRAPH_LOAD_REQUEST=0, GRAPH_LOAD_CONTROLLER=null;
+let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_LOAD_REQUEST=0, GRAPH_LOAD_CONTROLLER=null;
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -716,13 +716,16 @@ function graphEngineFallback(error){
  GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null;
  if(window.console&&console.warn)console.warn('graph-engine=next failed; falling back to the classic renderer',error);
 }
+/* Explicit user-initiated Reload (boot()) must not be haunted by a prior failed attempt:
+   drop the quality-engine failure latch and any cached failed promises so the next render
+   retries with a fresh URL. Mirrors the per-loader cleanup that runs on each rejection. */
+function graphResetEngineFailure(){GRAPH_ENGINE_FAILED=false;FORCE_GRAPH_LOADING=null;FORCE_GRAPH_RETRY=0;GRAPH_ENGINE_LOADING=null;GRAPH_ENGINE_RETRY=0;try{if(GRAPH_ENGINE)GRAPH_ENGINE.destroy()}catch(e){}GRAPH_ENGINE=null;GACTIVE_DATA=null;}
 function graphEngineEmptyMessage(){
  const total=(GRAPH&&GRAPH.nodes&&GRAPH.nodes.length)||0;
  return total?('No connected entities — tick "Show unlinked" to see all '+total+'.'):'No entities in this workspace yet.';
 }
 function graphRenderEngine(data,fit,reheat){
  const element=document.getElementById('graph-net'),empty=document.getElementById('graph-empty');
- const fullGraph=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  if(!element||typeof EngraphisGraph==='undefined')return false;
  try{
   if(!data.nodes.length){
@@ -735,7 +738,7 @@ function graphRenderEngine(data,fit,reheat){
   const created=!GRAPH_ENGINE;
   if(created){
    GRAPH_ENGINE=EngraphisGraph.create(element,{
-    renderMode:fullGraph?'all':'overview',
+    renderMode:'overview',
     reducedMotion:prefersReducedMotion,
     onNodeClick:node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.name||node.id)},
     onBackgroundClick:()=>graphSetHighlight(null),
@@ -750,10 +753,10 @@ function graphRenderEngine(data,fit,reheat){
      engine re-filters by degree on its own state. Leaving the engine on its defaults
      (showUnlinked:false, minDegree:1) drops every degree-zero entity graphData() just supplied,
      so the checkbox appeared to do nothing under ?graph-engine=next. */
-  const isolated=document.getElementById('graph-show-iso'),showUnlinked=fullGraph||!!(isolated&&isolated.checked);
+  const isolated=document.getElementById('graph-show-iso'),showUnlinked=!!(isolated&&isolated.checked);
   GRAPH_ENGINE.apply(engine=>{
     engine.setSettings({...window.GSET});
-   if(typeof engine.setRenderMode==='function')engine.setRenderMode(fullGraph?'all':'overview');
+   if(typeof engine.setRenderMode==='function')engine.setRenderMode('overview');
    engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
    engine.setColorBy(typeof GCOLORBY!=='undefined'?GCOLORBY:'community');
    engine.setThemeColors(graphThemeTypeColors());
@@ -775,7 +778,7 @@ function graphRenderEngine(data,fit,reheat){
      null. Re-apply the parked state here so a renderer created against a hidden pane never
      starts a rAF that nothing will stop. */
   if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
-  graphSetSimulationStatus(fullGraph?'All nodes · settled LOD':(window.GSET.frozen?'Layout frozen':'Adaptive layout'),false);
+  graphSetSimulationStatus(window.GSET.frozen?'Layout frozen':'Adaptive layout',false);
   return true;
  }catch(error){
   graphEngineFallback(error);
@@ -796,14 +799,17 @@ function graphInvalidateData(){
  GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null
 }
 async function loadLegacyGraph(){
- const request=++GRAPH_LOAD_REQUEST,targetFull=GRAPH_FULL;
+ const request=++GRAPH_LOAD_REQUEST;
  const previousController=GRAPH_LOAD_CONTROLLER,controller=new AbortController();GRAPH_LOAD_CONTROLLER=controller;
  if(previousController&&!previousController.signal.aborted)previousController.abort();
- graphInjectCss();graphInvalidateData();GRAPH=null;
+ /* Transactional reload: keep the existing graph visible until the replacement payload
+    succeeds. Only invalidate caches (not the rendered graph) so a network failure leaves
+    the user looking at the previous data rather than an error screen. */
+ const previousGraph=GRAPH,previousEngine=GRAPH_ENGINE,previousActive=GACTIVE_DATA;
+ GDATA_CACHE=null;
  const empty=document.getElementById('graph-empty'),net=document.getElementById('graph-net'),nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');
  showAs(empty,true,'flex');empty.textContent='Loading graph…';graphSetLayoutStatus('Loading data',true);
  if(net)net.setAttribute('aria-busy','true');
- renderGraphExplorer();
  if(!GRESIZE){
   GRESIZE=true;
   window.addEventListener('resize',()=>{
@@ -811,29 +817,28 @@ async function loadLegacyGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=targetFull||!!document.getElementById('graph-show-iso').checked;
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=!!document.getElementById('graph-show-iso').checked;
  try{
    const query=encodeURIComponent(WS||'')+(repo?'&repo='+encodeURIComponent(repo):'')+layerFilter;
-   let nextGraph;
-   if(targetFull){
-    /* The complete scene and its dedicated renderer are independent requests. Starting them
-       together avoids adding an asset round-trip after a potentially large scene response, and
-       awaiting both guarantees that complete data can never fall into the legacy ForceGraph. */
-    const [response]=await Promise.all([
-     api('/graph/scene?workspace='+query+'&level=complete&presentation=all&include_memory_nodes=false',{signal:controller.signal}),
-     loadGraphEngine(true)
-    ]);
-    const scene=response.scene||response;
-    nextGraph={nodes:(scene.nodes||[]).map(node=>({...node,id:node.id,label:node.label||node.name||node.id,degree:node.degree??node.weighted_degree??0,etype:node.etype||'entity'})),edges:(scene.edges||[]).map(edge=>({...edge,from:edge.from??edge.source??edge.src,to:edge.to??edge.target??edge.dst,label:edge.label||edge.relation||'related',layer:edge.layer||'semantic'})),meta:scene.meta||{}};
-   }else{
-    nextGraph=await api('/graph?workspace='+query+'&include_code='+(includeCode?'true':'false')+'&limit=1000&node_limit=1000&edge_limit=2000'+(showUnlinked?'':'&connected_only=true'),{signal:controller.signal});
-   }
-  if(request!==GRAPH_LOAD_REQUEST||targetFull!==GRAPH_FULL)return;
+   const nextGraph=await api('/graph?workspace='+query+'&include_code='+(includeCode?'true':'false')+'&limit=1000&node_limit=1000&edge_limit=2000'+(showUnlinked?'':'&connected_only=true'),{signal:controller.signal});
+  if(request!==GRAPH_LOAD_REQUEST)return;
+  /* Commit: the new payload arrived successfully. Now tear down the old renderer and
+     install the replacement graph. */
+  if(previousEngine){try{previousEngine.destroy()}catch(e){}}
+  GRAPH_ENGINE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null;
   GRAPH=nextGraph;
-  renderGraphSide();graphRender();
+  renderGraphSide();renderGraphExplorer();graphRender();
  }catch(error){
   if(request!==GRAPH_LOAD_REQUEST||error.name==='AbortError')return;
-  showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
+  /* Rollback: restore the previous graph so the user is not left staring at an error.
+     If there was no previous graph (first load), show the error message. */
+  if(previousGraph){
+   GRAPH=previousGraph;GRAPH_ENGINE=previousEngine;GACTIVE_DATA=previousActive;
+   showAs(empty,false);graphSetLayoutStatus('Reload failed — showing previous data',false);
+   toast('Reload data failed: '+error.message,'err');
+  }else{
+   showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
+  }
  }finally{
   if(request!==GRAPH_LOAD_REQUEST)return;
   if(GRAPH_LOAD_CONTROLLER===controller)GRAPH_LOAD_CONTROLLER=null;
@@ -846,26 +851,9 @@ async function loadLegacyGraph(){
   }
  }
 }
-function graphUpdateAllNodesControl(){
- const full=GRAPH_FULL,button=document.getElementById('graph-show-all'),isolated=document.getElementById('graph-show-iso'),includeCode=document.getElementById('graph-include-code');
- if(button){button.textContent=full?'High quality':'Show all nodes';button.setAttribute('aria-pressed',String(full));button.title=full?'Return to the high-quality graph view':'Load every node, including unconnected entities, for this graph view'}
- if(isolated){isolated.disabled=full;isolated.title=full?'All nodes are already visible.':'Show entities that have no relations (unlinked nodes). Hidden by default to keep the graph readable.'}
- if(includeCode){includeCode.disabled=full;includeCode.title=full?'Code overlay is available in High quality mode.':''}
-}
-function graphToggleAllNodes(){
- const isolated=document.getElementById('graph-show-iso');
- if(!GRAPH_FULL){GRAPH_SCOPE_BEFORE_FULL={showUnlinked:!!(isolated&&isolated.checked)};GRAPH_FULL=true;if(isolated)isolated.checked=true}
- else{GRAPH_FULL=false;if(isolated&&GRAPH_SCOPE_BEFORE_FULL)isolated.checked=GRAPH_SCOPE_BEFORE_FULL.showUnlinked;GRAPH_SCOPE_BEFORE_FULL=null}
- graphUpdateAllNodesControl();loadLegacyGraph();
-}
 function graphData(){
  const _si=document.getElementById('graph-show-iso');const hideIso=!(_si&&_si.checked);
  if(GDATA_CACHE&&GDATA_CACHE.graph===GRAPH&&GDATA_CACHE.hideIso===hideIso)return GDATA_CACHE.data;
- if(GRAPH_FULL){
-  /* The flat all-node worker accepts the scene's node and from/to edge shapes directly.
-     Avoid cloning and decorating up to 20k nodes and 200k relations for quality-only paint. */
-  const data={nodes:GRAPH.nodes||[],links:GRAPH.edges||[]};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
- }
  let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
  const names=new Set(sourceNodes.map(node=>node.id));
  const nodes=sourceNodes.map(node=>({id:node.id,label:node.label||node.id,displayLabel:(node.label||node.id).length>30?(node.label||node.id).slice(0,29)+'…':(node.label||node.id),etype:node.etype,degree:node.degree||0,val:1+(node.degree||0)}));
@@ -1207,47 +1195,42 @@ function graphRedraw(){
    loading it on a page that never opens the graph turns a plain dashboard view into a wall of
    console errors. Both loaders are memoized, so a re-entrant graphRender() reuses the in-flight
    fetch rather than appending a second <script>. */
-let FORCE_GRAPH_LOADING=null;
+let FORCE_GRAPH_LOADING=null,FORCE_GRAPH_RETRY=0;
+/* Bounded retry: on a failed fetch or a 200 that never registers the global, drop the
+   poisoned <script>, clear the memoized promise, and append a cache-busting `&r=N` on the
+   next attempt so a captive portal / truncated response does not pin the failure forever.
+   The bound (2) keeps a genuinely missing asset from loop-fetching. */
 function loadForceGraph(){
- if(typeof ForceGraph!=='undefined')return Promise.resolve();
+ if(typeof ForceGraph!=='undefined'){FORCE_GRAPH_RETRY=0;return Promise.resolve();}
  if(FORCE_GRAPH_LOADING)return FORCE_GRAPH_LOADING;
  FORCE_GRAPH_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/static/vendor/force-graph.min.js?v=20260809-csp';
-  /* A successful fetch is not a usable renderer unless the vendor asset registered its
-     global. Treat a truncated/captive-portal 200 exactly like any other load failure. */
-  script.onload=()=>{typeof ForceGraph==='undefined'?reject(new Error('Force graph asset loaded without registering ForceGraph')):resolve()};
-  script.onerror=()=>reject(new Error('Graph engine could not load'));
+  const bust=FORCE_GRAPH_RETRY>0?'&r='+FORCE_GRAPH_RETRY:'';
+  script.src='/static/vendor/force-graph.min.js?v=20260809-csp'+bust;
+  const cleanup=(failed)=>{if(script.parentNode)script.parentNode.removeChild(script);if(failed){FORCE_GRAPH_LOADING=null;FORCE_GRAPH_RETRY=Math.min(FORCE_GRAPH_RETRY+1,2)}else{FORCE_GRAPH_RETRY=0}};
+  script.onload=()=>{if(typeof ForceGraph==='undefined'){cleanup(true);reject(new Error('Force graph asset loaded without registering ForceGraph'))}else{cleanup(false);resolve()}};
+  script.onerror=()=>{cleanup(true);reject(new Error('Graph engine could not load'))};
   document.head.appendChild(script);
  });
  return FORCE_GRAPH_LOADING;
 }
-let GRAPH_ENGINE_LOADING=null,ALL_GRAPH_ENGINE_LOADING=null;
-function loadAllGraphEngine(){
- if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
- if(!ALL_GRAPH_ENGINE_LOADING){
-  ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-all.js?v=20260817-all-nodes-lod-3';
-   script.onload=()=>{typeof EngraphisAllGraph==='undefined'?reject(new Error('All-node graph asset loaded without registering EngraphisAllGraph')):resolve()};
-   script.onerror=()=>reject(new Error('All-node graph asset could not load'));
-   document.head.appendChild(script);
-  });
-  ALL_GRAPH_ENGINE_LOADING.catch(()=>{});
- }
- return ALL_GRAPH_ENGINE_LOADING;
-}
-function loadGraphEngine(loadAll=false){
- let engineReady;
- if(typeof EngraphisGraph!=='undefined')engineReady=Promise.resolve();
+let GRAPH_ENGINE_LOADING=null,GRAPH_ENGINE_RETRY=0;
+function loadGraphEngine(){
+  let engineReady;
+  if(typeof EngraphisGraph!=='undefined'){GRAPH_ENGINE_RETRY=0;engineReady=Promise.resolve();}
  else{
   if(!GRAPH_ENGINE_LOADING){
    GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
     const script=document.createElement('script');
-   script.src='/v2-assets/engraphis-graph.js?v=20260819-v24-physics-final';
+    const bust=GRAPH_ENGINE_RETRY>0?'&r='+GRAPH_ENGINE_RETRY:'';
+    script.src='/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'+bust;
     /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
-       resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
-    script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
-    script.onerror=()=>reject(new Error('Graph engine could not load'));
+       resolving there would hand graphRenderEngine() an undefined EngraphisGraph. Failed
+       attempts drop the script node and clear the memo so the next call retries with a
+       cache-buster rather than returning the same rejected promise forever. */
+    const cleanup=(failed)=>{if(script.parentNode)script.parentNode.removeChild(script);if(failed){GRAPH_ENGINE_LOADING=null;GRAPH_ENGINE_RETRY=Math.min(GRAPH_ENGINE_RETRY+1,2)}else{GRAPH_ENGINE_RETRY=0}};
+    script.onload=()=>{if(typeof EngraphisGraph==='undefined'){cleanup(true);reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))}else{cleanup(false);resolve()}};
+    script.onerror=()=>{cleanup(true);reject(new Error('Graph engine could not load'))};
     document.head.appendChild(script);
    });
    GRAPH_ENGINE_LOADING.catch(()=>{});
@@ -1257,18 +1240,15 @@ function loadGraphEngine(loadAll=false){
  /* Mark the memoized promise handled. graphRender() can start this fetch on a pass that
     returns before attaching its own handler, and an unhandled rejection would print the exact
     console error this lazy-loading exists to remove. Callers still receive the rejection. */
- return loadAll?engineReady.then(()=>loadAllGraphEngine()):engineReady;
+ return engineReady;
 }
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
- const graphFull=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
     `?graph-engine=next` deep link costs one round trip rather than two. */
- const engineMissing=typeof EngraphisGraph==='undefined'||(graphFull&&typeof EngraphisAllGraph==='undefined');
- /* All mode owns a dedicated bounded renderer and must remain available after a quality-renderer
-    runtime failure. The quality failure latch only authorizes the small legacy overview. */
- const enginePending=(graphFull||(!GRAPH_ENGINE_FAILED&&graphEngineEnabled()))&&engineMissing?loadGraphEngine(graphFull):null;
- if(!graphFull&&typeof ForceGraph==='undefined'){
+ const engineMissing=typeof EngraphisGraph==='undefined';
+ const enginePending=(!GRAPH_ENGINE_FAILED&&graphEngineEnabled())&&engineMissing?loadGraphEngine():null;
+ if(typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   loadForceGraph().then(()=>graphRender(fit,reheat)).catch(error=>{
@@ -1286,11 +1266,6 @@ function graphRender(fit=true,reheat=true){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   enginePending.then(()=>graphRender(fit,reheat)).catch(error=>{
-   if(graphFull){
-    empty.textContent=error.message+'; return to High quality or reload the dashboard assets.';
-    graphSetLayoutStatus('All-node engine unavailable',false);
-    return;
-   }
    /* Latches GRAPH_ENGINE_FAILED, so the re-entry below takes the classic path and this
       cannot loop. */
    graphEngineFallback(error);
@@ -1299,13 +1274,6 @@ function graphRender(fit=true,reheat=true){
   return;
  }
  const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData();
- if(graphFull){
-  if(graphRenderEngine(data,fit,reheat))return;
-  showAs(empty,true,'flex');
-  empty.textContent='All-node renderer unavailable; return to High quality or reload the dashboard assets.';
-  graphSetLayoutStatus('All-node engine unavailable',false);
-  return;
- }
  if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;
  /* Read AFTER the opt-in attempt: a failing engine resets GACTIVE_DATA precisely so the
     classic renderer below rebuilds from scratch instead of assuming the canvas is current. */
@@ -1536,7 +1504,7 @@ function graphKeyboard(event){
  const node=nodes[GKEYINDEX],net=document.getElementById('graph-net');graphFocus(node.id);net.setAttribute('aria-label','Selected entity '+(node.label||node.id)+', '+(node.degree||0)+' relations. Press Enter to open. Use arrow keys to move.');
 }
 function syncGraphExplorerSelection(id){document.querySelectorAll('#graph-entity-list [data-entity]').forEach(button=>{const active=button.dataset.entity===id;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','true');else button.removeAttribute('aria-current')})}
-function graphQueueExplorer(query){clearTimeout(GEXPLORER_TIMER);GEXPLORER_TIMER=setTimeout(()=>renderGraphExplorer(query,true),GRAPH_FULL?280:120)}
+function graphQueueExplorer(query){clearTimeout(GEXPLORER_TIMER);GEXPLORER_TIMER=setTimeout(()=>renderGraphExplorer(query,true),120)}
 function graphExplorerMore(kind){
  if(kind==='nodes')GEXPLORER.nodeLimit+=GRAPH_EXPLORER_PAGE.nodes;else GEXPLORER.edgeLimit+=GRAPH_EXPLORER_PAGE.edges;
  renderGraphExplorer(GEXPLORER.query,false);
@@ -1690,7 +1658,9 @@ function renderUpdateBanner(u){
  const btn=el.querySelector('.ub-dismiss');
  if(btn)btn.addEventListener('click',function(){try{localStorage.setItem('engraphis-update-dismissed',u.latest)}catch(e){}el.hidden=true;el.textContent=''});
 }
-async function boot(){try{const b=await api('/bootstrap');LIC=b.license;RELEASE_VERSION=typeof b.version==='string'?b.version.trim():'';renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===401?'Local API token required.':'Boot failed: '+e.message;document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Dashboard data could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Dashboard data could not be loaded.</div>';toast(msg,'err')}}
+function clearBootstrapError(){const overlay=document.getElementById('bootstrap-error-overlay');if(overlay){overlay.classList.remove('show');dialogChanged(overlay);overlay.remove()}}
+function showBootstrapError(msg){clearBootstrapError();const overlay=document.createElement('div');overlay.id='bootstrap-error-overlay';overlay.className='mm-overlay show';overlay.setAttribute('aria-hidden','false');overlay.innerHTML='<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="bootstrap-error-title" aria-describedby="bootstrap-error-message"><div class="mm-head"><div class="mm-title" id="bootstrap-error-title">Engraphis is unavailable</div></div><div class="mm-body"><p class="muted" id="bootstrap-error-message">'+esc(msg)+'</p><button class="btn btn-primary" data-onclick="h154">Retry</button></div></div>';document.body.appendChild(overlay);dialogChanged(overlay)}
+async function boot(){clearBootstrapError();if(CURRENT_VIEW!=='graph')graphResetEngineFailure();try{const b=await api('/bootstrap');LIC=b.license;RELEASE_VERSION=typeof b.version==='string'?b.version.trim():'';renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===404?'Dashboard APIs are unavailable. This usually means the legacy v1 server is running. Stop it, then launch scripts.start_dashboard.':'Dashboard initialization failed. Run engraphis-init --check for diagnostics.';showBootstrapError(msg)}}
 initTheme();
 initDashboard();
 boot();
@@ -1810,8 +1780,8 @@ h130:function(event){copyLlmSnippet()},
 h131:function(event){testLlm()},
 h150:function(event){setLlmExtractor(true)},
 h151:function(event){setLlmExtractor(false)},
-h152:function(event){graphToggleAllNodes()},
 h153:function(event){loadHealthView()},
+h154:function(event){boot()},
 h136:function(event){syncNow()},
 h138:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,false)},
 h139:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,true)},
