@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 
+from engraphis.core.graph_scene import project_all_presentation
 
 FIXTURE = Path(__file__).with_name("graph_scene_fixture.json")
 
@@ -113,3 +114,57 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
             assert edge["tier"] in {"context", "ambient"}
 
     assert scene["community_bridges"]
+
+
+def test_all_presentation_projects_only_renderer_fields_without_mutating_scene():
+    scene = _scene()
+    scene["nodes"][0]["private_evidence"] = [{"memory": "must stay server-side"}]
+    scene["nodes"][0]["ghost"] = True
+    scene["nodes"][0]["member_ids"] = ["member-primary", "member-extra"]
+    scene["edges"][0]["support_ids"] = ["mem_private"]
+    projected = project_all_presentation(scene)
+
+    assert projected["meta"]["all_projected"] is True
+    assert "private_evidence" not in projected["nodes"][0]
+    assert "support_ids" not in projected["edges"][0]
+    assert scene["nodes"][0]["private_evidence"]
+    assert scene["edges"][0]["support_ids"] == ["mem_private"]
+    assert projected["nodes"][0]["member_ids"] == ["member-primary"]
+    assert {
+        "id", "label", "type", "community_id", "x", "y",
+        "anchor_role", "system_anchor_id", "gravity_mass", "visual_radius",
+    } <= projected["nodes"][0].keys()
+    assert {
+        "id", "source", "target", "relation", "layer", "strength", "rest_length",
+        "spring_strength", "bridge",
+    } <= projected["edges"][0].keys()
+    assert projected["edges"][0]["relation"] == scene["edges"][0]["relation"]
+    assert set(projected) == {"meta", "nodes", "edges"}
+    assert "facets" not in projected
+    assert "community_bridges" not in projected
+
+
+def test_all_presentation_allowlist_is_closed_to_unknown_fields():
+    """The all-presentation projection must use an explicit allowlist and never
+    pass through unknown keys. This guards against accidental leakage of new
+    server-only fields added to the analytical scene."""
+    from engraphis.core.graph_scene import (
+        _ALL_PRESENTATION_EDGE_FIELDS,
+        _ALL_PRESENTATION_META_FIELDS,
+        _ALL_PRESENTATION_NODE_FIELDS,
+    )
+    scene = _scene()
+    scene["nodes"][0]["unknown_future_field"] = "should be stripped"
+    scene["edges"][0]["unknown_future_edge"] = "should be stripped"
+    scene["meta"]["unknown_future_meta"] = "should be stripped"
+    projected = project_all_presentation(scene)
+    allowed_node_keys = set(_ALL_PRESENTATION_NODE_FIELDS)
+    allowed_edge_keys = set(_ALL_PRESENTATION_EDGE_FIELDS) | {"bridge"}
+    allowed_meta_keys = set(_ALL_PRESENTATION_META_FIELDS) | {"all_projected"}
+    assert "unknown_future_field" not in projected["nodes"][0]
+    assert "member_ids" not in projected["nodes"][0]
+    assert "unknown_future_edge" not in projected["edges"][0]
+    assert "unknown_future_meta" not in projected["meta"]
+    assert set(projected["nodes"][0].keys()) <= allowed_node_keys
+    assert set(projected["edges"][0].keys()) <= allowed_edge_keys
+    assert set(projected["meta"].keys()) <= allowed_meta_keys
