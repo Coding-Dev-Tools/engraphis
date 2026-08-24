@@ -2,7 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 test('All-node controls filter, collapse, reflow, freeze, and expose directional flow', async ({ page }) => {
   await page.goto('/');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260815-merge-ready-1' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.style.cssText = 'position:fixed;inset:20px;width:900px;height:600px';
@@ -47,7 +47,8 @@ test('All-node controls filter, collapse, reflow, freeze, and expose directional
     await waitFor(() => engine.state().collapsed === true);
     const collapsed = engine.state();
     engine.setCollapse(false);
-    await waitFor(() => engine.state().collapsed === false);
+    await waitFor(() => engine.state().collapsed === false
+      && engine.state().visibleNodeCount === nodes.length);
     engine.freeze(true);
     const frozenBefore = engine.getPhysicsSnapshot().nodes.map(node => [node.x, node.y]);
     engine.reheat();
@@ -62,6 +63,7 @@ test('All-node controls filter, collapse, reflow, freeze, and expose directional
   expect(result.filtered.flowSpeed).toBe(73);
   expect(result.collapsed.visibleNodeCount).toBe(3);
   expect(result.final.collapsed).toBe(false);
+  expect(result.final.visibleNodeCount).toBe(6);
   expect(result.final.frozen).toBe(true);
   expect(result.frozenAfter).toEqual(result.frozenBefore);
 });
@@ -78,7 +80,7 @@ test('20k-node all profile paints progressively and stays responsive after hando
     return { supported: true, renderer: debug ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) || '') : '' };
   });
   test.skip(!gpu.supported || /swiftshader|llvmpipe|software renderer/i.test(gpu.renderer), 'All-node performance target requires hardware-accelerated WebGL2');
-  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260814-all-controls-2' });
+  await page.addScriptTag({ url: '/v2-assets/engraphis-graph-all.js?v=20260815-merge-ready-1' });
   const result = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.className = 'graph-network';
