@@ -369,14 +369,22 @@ def _python_sbom_packages(document: dict[str, Any]) -> set[tuple[str, str]]:
             )
         ):
             packages.add((_canonical_package_name(name), version))
-    for component in document.get("components", []):
+    components = document.get("components", [])
+    if not isinstance(components, list):
+        raise EvidenceError("SBOM components must be a JSON array")
+    for component in components:
         if not isinstance(component, dict):
-            continue
+            raise EvidenceError("SBOM components must be JSON objects")
         purl = component.get("purl")
         name = component.get("name")
         version = component.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
-            continue
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(version, str)
+            or not version
+        ):
+            raise EvidenceError("SBOM component must identify name and version")
         if not isinstance(purl, str) or not purl.startswith("pkg:pypi/"):
             raise EvidenceError(
                 "SBOM component lacks a valid PyPI PURL: "

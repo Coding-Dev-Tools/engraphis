@@ -928,6 +928,21 @@ def test_release_evidence_rejects_sbom_with_non_pypi_component_purl(tmp_path):
         _build(root, dist, inputs=inputs)
 
 
+def test_release_evidence_rejects_sbom_component_missing_identity(tmp_path):
+    """A component missing name/version must not disappear from the closure."""
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    sbom_doc = json.loads(inputs["sbom"].read_text(encoding="utf-8"))
+    sbom_doc["components"].append(
+        {"type": "library", "purl": "pkg:pypi/ghost-package@9.9"}
+    )
+    inputs["sbom"].write_text(json.dumps(sbom_doc), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="must identify name and version"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_release_evidence_rejects_partial_or_unbound_container_evidence(tmp_path):
     root = _root(tmp_path)
     dist = _dist(root)
