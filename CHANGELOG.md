@@ -128,6 +128,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - The Every node dashboard view no longer crashes on open: a declaration-order bug in the
   renderer threw during construction before anything painted. The scene canvas also keeps its
   accessible role/label now instead of being hidden from assistive technology.
+- Import previews now page the source manifest exactly like execution, so vaults whose manifest
+  outgrew one list page (10k identities) no longer show manifest-only files as silently absent
+  from the preview plan; beyond-boundary rows are reported as `missing` instead of dropped.
+  Manifest pages now use one read snapshot and de-duplicate identities that move across a
+  cursor while a concurrent import updates their path.
 - Importing more than 1,000 files through the dashboard no longer fails with "Internal Server
   Error": wizard upload routes parse multipart forms under the advertised 1,500-file ceiling
   instead of Starlette's hidden 1,000-part parser default, oversized batches return a clear 413,
