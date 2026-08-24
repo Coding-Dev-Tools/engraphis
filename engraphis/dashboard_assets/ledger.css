@@ -121,6 +121,10 @@ body[data-theme="matrix"] {
 
 button, input, select, textarea { font: inherit; }
 button, select { cursor: pointer; }
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
 a { color: var(--c-acc); }
 :where(button, a, input, select, textarea, summary):focus-visible {
   outline: 2px solid var(--c-acc);
@@ -600,6 +604,11 @@ body[data-theme="paper"] .graph-header {
 .graph-header h1 { font-size: 20px; }
 .graph-actions { display: flex; gap: 6px; }
 .graph-canvas { position: absolute; inset: 0; }
+.graph-canvas[data-graph-style="classic"] { background: var(--c-inset); }
+.graph-canvas-candidate {
+  visibility: hidden;
+  pointer-events: none;
+}
 .graph-canvas .engraphis-all-canvas,
 .graph-canvas .engraphis-all-labels,
 .graph-canvas .engraphis-all-underlay {

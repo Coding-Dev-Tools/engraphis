@@ -58,6 +58,7 @@ _REQUIRED_PLAN = {
     "consolidation": "pro",
     "dreaming": "pro",
     "export": "pro",
+    "compliance_export": "team",
     "sync": "pro",
     "team": "team",
     # Team-only capabilities named in commercial_manifest.json.  Without explicit entries

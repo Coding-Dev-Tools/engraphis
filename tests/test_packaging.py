@@ -439,6 +439,18 @@ def test_release_version_surfaces_are_synchronized():
     assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == []
 
 
+def test_withdrawn_hermes_provider_is_not_distributed():
+    """The withdrawn provider must not be resurrected by a stale feature branch."""
+    for relative in (
+        "integrations/hermes/README.md",
+        "integrations/hermes/engraphis/__init__.py",
+        "integrations/hermes/engraphis/plugin.yaml",
+        "tests/test_hermes_integration.py",
+    ):
+        assert not (ROOT / relative).exists(), relative
+    assert "### Hermes provider" not in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
 def test_release_version_has_a_dated_changelog_section():
     """A tagged package must not ship its release notes only as ``Unreleased``."""
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

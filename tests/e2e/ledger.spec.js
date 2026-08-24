@@ -147,6 +147,8 @@ async function mockApi(page, options = {}) {
         await options.deferGraphRequest(requestUrl);
       }
       if (options.graphScene) return ok(options.graphScene);
+      const degradedCodeOverlay = options.degradeCodeOverlay
+        && requestUrl.searchParams.get('include_code') === 'true';
       const asOf = Number(requestUrl.searchParams.get('as_of'));
       const includeUnlinked = requestUrl.searchParams.get('connected_only') !== 'true';
       // Make the historical payload depend on the server's selected-day anchor. A client
@@ -163,7 +165,16 @@ async function mockApi(page, options = {}) {
         edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo, rest_length: 18, spring_strength: 0.25 }],
         communities: [{ id: 'memory', mass: 9 }, { id: 'storage', mass: 2 }],
         community_bridges: [{ source_community: 'memory', target_community: 'storage', physics_strength: 0.8 }],
-        meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
+        meta: degradedCodeOverlay
+          ? {
+            algorithm_version: 'galaxy-v6',
+            layout_seed: 7,
+            degraded: true,
+            degraded_reason: 'code_overlay_requires_repository_filter',
+            requested_include_code: true,
+            include_code: false,
+          }
+          : { algorithm_version: 'galaxy-v6', layout_seed: 7 },
         layers: [
           { layer: 'temporal', count: 15 }, { layer: 'entity', count: 26 },
           { layer: 'causal', count: 22 }, { layer: 'semantic', count: 21 }, { layer: 'code', count: 0 },
@@ -472,7 +483,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAssetRequests).toHaveLength(1);
 });
 
-test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', async ({ page }) => {
+test('Ledger keeps authored Galaxy coordinates in the All-node renderer', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
@@ -507,8 +518,43 @@ test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', 
 
   await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
-  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+});
+
+test('Ledger keeps the committed All-node renderer visible when a superseded load resolves', async ({ page }) => {
+  let releaseFirstScene;
+  let deferredAllScenes = 0;
+  await mockApi(page, {
+    deferGraphRequest: async requestUrl => {
+      if (requestUrl.searchParams.get('presentation') !== 'all') return;
+      deferredAllScenes += 1;
+      if (deferredAllScenes !== 1) return;
+      await new Promise(resolve => {
+        releaseFirstScene = resolve;
+      });
+    },
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'true');
+  await expect.poll(() => deferredAllScenes).toBe(1);
+
+  const supersedingLoad = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('presentation') === 'all'
+      && url.searchParams.get('repo') === 'agent-memory';
+  });
+  await page.locator('#graph-repo-filter').fill('agent-memory');
+  await supersedingLoad;
+  releaseFirstScene();
+
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('#graph-count')).toContainText('All nodes · LOD');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  await expect(page.locator('#graph-empty')).toBeHidden();
 });
 
 test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
@@ -532,14 +578,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(first.searchParams.get('v')).toBe('20260815-merge-ready-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(second.searchParams.get('v')).toBe('20260815-merge-ready-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -555,9 +601,9 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
 
   await mockApi(page);
   await page.goto('/');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -570,22 +616,22 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
       });
     document.getElementById('graph-reset-tuning').click();
   });
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
     layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
   });
   await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.physicsVersion).toBe(4);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
-  expect(migrated.tuning.repel).toBe(60);
+  expect(migrated.tuning.repel).toBe(100);
   expect(migrated.tuning.link).toBe(8);
   expect(migrated.tuning.gravity).toBe(0);
   expect(migrated.layers).toEqual({
@@ -600,14 +646,14 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(2);
+  expect(custom.physicsVersion).toBe(4);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
   // Once versioned, 48 is a deliberate user selection rather than the retired default.
   await writePreferences({
-    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    physicsVersion: 4, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
@@ -619,7 +665,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
     const nativeSetTimeout = window.setTimeout.bind(window);
     let shortenedGraphDeadline = false;
     window.setTimeout = (callback, delay, ...args) => {
-      const firstGraphDeadline = delay === 12_000 && !shortenedGraphDeadline;
+      const firstGraphDeadline = delay === 60_000 && !shortenedGraphDeadline;
       if (firstGraphDeadline) shortenedGraphDeadline = true;
       return nativeSetTimeout(callback, firstGraphDeadline ? 80 : delay, ...args);
     };
@@ -1229,8 +1275,8 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('level') === 'overview'
-      && url.searchParams.get('node_limit') === '1000'
-      && url.searchParams.get('edge_limit') === '2000'
+      && url.searchParams.get('node_limit') === '1500'
+      && url.searchParams.get('edge_limit') === '3000'
       && !url.searchParams.has('connected_only');
   });
   await page.locator('.nav-item[data-view="relations"]').click();
@@ -1245,11 +1291,11 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
   await expect(page.getByLabel('Size by')).toBeDisabled();
   await expect(page.locator('#graph-repel-label')).toHaveText('Orbital speed');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
@@ -1268,17 +1314,17 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && url.searchParams.get('connected_only') === 'true';
   });
-  await page.getByRole('button', { name: 'Hide unlinked nodes' }).click();
+  await page.getByRole('button', { name: 'Unlinked nodes' }).click();
   await hideUnlinkedRequest;
-  await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
   const showUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && !url.searchParams.has('connected_only');
   });
-  await page.getByRole('button', { name: 'Show unlinked nodes' }).click();
+  await page.getByRole('button', { name: 'Unlinked nodes' }).click();
   await showUnlinkedRequest;
-  await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
   const codeRequest = page.waitForRequest(request => {
@@ -1337,7 +1383,14 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   expect(json.nodes.map(node => node.id).sort()).toEqual(['engraphis', 'unlinked']);
   expect(json.links).toEqual([]);
 
-  await page.getByRole('button', { name: 'Reload data' }).click();
+  const reload = page.getByRole('button', { name: 'Reload data' });
+  const filteredReloadResponse = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/graph/scene';
+  });
+  await reload.click();
+  await filteredReloadResponse;
+  await expect(reload).toBeEnabled();
   await expect(repoFilter).toHaveValue('agent-memory');
   await expect(page.locator('#graph-count')).toContainText('2 of 3 entities · 0 relations');
   await repoFilter.fill('');
@@ -1382,6 +1435,33 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'false');
+});
+
+test('degraded code overlay clears its control and subsequent reload request', async ({ page }) => {
+  await mockApi(page, { degradeCodeOverlay: true });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  const codeControl = page.getByRole('button', { name: 'Code ↔ memory' });
+  const degradedResponse = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/graph/scene'
+      && url.searchParams.get('include_code') === 'true';
+  });
+
+  await codeControl.click();
+  await degradedResponse;
+
+  await expect(codeControl).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#notice-banner')).toHaveText(
+    'Code overlay needs a repository filter; showing entity relationships only.',
+  );
+
+  const noCodeReload = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph/scene' && !url.searchParams.has('include_code');
+  });
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await noCodeReload;
 });
 
 test('graph node connections expose linked memory evidence without leaving the graph', async ({ page }) => {
@@ -1528,8 +1608,10 @@ test('Reload data replaces an identical pending graph request once', async ({ pa
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await waitForRetry;
-  // A second click while the forced retry is pending must not churn another identical request.
-  await page.getByRole('button', { name: 'Reload data' }).click();
+  // Busy controls reject a second user action; even a synthetic click cannot churn the request.
+  const reload = page.getByRole('button', { name: 'Reloading graph…' });
+  await expect(reload).toBeDisabled();
+  await reload.evaluate(button => button.click());
   await expect.poll(() => graphAttempts).toBe(2);
 
   releaseFirst();
@@ -1887,4 +1969,142 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
     'href',
     'https://cloud.engraphis.test/account?plan=team&interval=annual&trial=team&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
+});
+
+test('overview→all readiness failure preserves the committed overview renderer and re-enables controls', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(String(error)));
+  await page.addInitScript(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  await mockApi(page);
+  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/javascript',
+      body: 'window.__brokenAllAsset = true;',
+    });
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
+
+  // Committed mode reverted to overview: aria-pressed survives
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+  // Controls re-enabled
+  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  // Candidate alone is destroyed — no orphan host in the DOM
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  // Old renderer data survives: count still reflects the overview dataset
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  expect(pageErrors).toEqual([]);
+});
+
+test('all→quality readiness failure preserves the committed all-node renderer and re-enables controls', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // Enter all mode successfully first
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // Shorten the quality timeout after page load, before the failing transition
+  await page.evaluate(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 60_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  // Block quality API responses so the timeout fires before data arrives
+  await page.route('**/api/graph/scene**', async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('presentation') === 'quality') {
+      await new Promise(() => {});
+      return;
+    }
+    return route.fallback();
+  });
+
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('timed out', { timeout: 10_000 });
+
+  // Committed mode stays at full (all-node): aria-pressed survives
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  // Controls re-enabled
+  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  // Candidate alone is destroyed
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  // Old renderer data survives
+  await expect(page.locator('#graph-count')).toContainText('entities');
+});
+
+test('successful retry after readiness failure commits exactly one new renderer', async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+  });
+  await mockApi(page);
+  let allAssetAttempts = 0;
+  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+    allAssetAttempts += 1;
+    if (allAssetAttempts === 1) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/javascript',
+        body: 'window.__brokenAllAsset = true;',
+      });
+    }
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  // First attempt fails; mode reverts to overview
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+
+  // Retry by toggling again — second asset load succeeds and commits
+  await page.locator('#graph-show-all').click();
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  await expect(page.locator('#graph-count')).toContainText('entities');
+  expect(allAssetAttempts).toBe(2);
+});
+
+test('renderer construction failure removes its candidate host', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-count')).toContainText('entities');
+
+  await page.waitForFunction(() => typeof (window.EngraphisGraph || {}).create === 'function');
+  await page.evaluate(() => {
+    window.EngraphisGraph.create = () => {
+      throw new Error('renderer construction failed');
+    };
+  });
+  await page.getByRole('button', { name: 'Reload data' }).click();
+  await expect(page.locator('#graph-empty')).toContainText('renderer construction failed', { timeout: 10_000 });
+  await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
+  await expect(page.locator('#graph-count')).toContainText('entities');
 });
