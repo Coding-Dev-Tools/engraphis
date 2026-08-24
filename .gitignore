@@ -117,9 +117,8 @@ uv.lock
 
 # Every-node stress fixtures (local only)
 .scratch-*.db*
-.seed20k.py
-.seed-graph.py
-..scratch-*.db*
+.seed20k*.py
+.seed-graph*.py
 
 # Schema-migration flock lives next to the DB (engraphis/config.py _migration_lock);
 # regenerable runtime state like *.db itself. Held live while the server runs.
