@@ -453,6 +453,11 @@ def _validate_python_sbom_dependency_closure(
             continue
         canonical = _canonical_package_name(name)
         for ref in refs:
+            if ref in known_refs:
+                raise EvidenceError(
+                    "SBOM dependency graph ref collides with root or another "
+                    "component: " + ref
+                )
             known_refs.add(ref)
             ref_names[ref] = canonical
         if not any(ref in edges for ref in refs):
