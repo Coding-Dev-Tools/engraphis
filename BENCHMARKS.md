@@ -106,6 +106,14 @@ frontier-model QA score.
   answer, and is identified in every report; inject a real agent callable for model-specific
   results. Optional provider telemetry is reported separately from the deterministic token
   counter and is not a provider billing estimate.
+- **Dashboard graph layout settle**: `eval/graph_every_bench.py` drives the Every-node
+  dashboard engine's real worker (`engraphis-graph-every-worker.js`) through a
+  `prepare → settled` round-trip over synthetic node/link loads and reports wall-clock settle
+  time plus the scaling ratio across sizes. It measures initial layout cost only: camera pans
+  and zooms never touch the worker (they are GPU-uniform updates), so no per-frame number can
+  come out of this harness and none should be quoted. Results are host- and Node-version
+  dependent local diagnostics, not registered public evidence; run the harness on the target
+  class of machine before quoting a figure.
 
 The context-economy and productivity tools intentionally report when a small workload does not
 benefit from memory, and the external loaders expose retrieval-quality tradeoffs rather than

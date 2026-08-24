@@ -404,11 +404,11 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
-test('Ledger enters All nodes from a loaded overview without losing its scope', async ({ page }) => {
+test('Ledger enters Every node from a loaded overview without losing its scope', async ({ page }) => {
   const allAssetRequests = [];
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith('/v2-assets/engraphis-graph-all.js')) allAssetRequests.push(request.url());
+    if (pathname.endsWith('/v2-assets/engraphis-graph-every.js')) allAssetRequests.push(request.url());
   });
   const requests = await mockApi(page);
   await page.goto('/');
@@ -424,13 +424,14 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   await page.locator('#graph-as-of').fill('2026-08-14');
   await page.getByRole('tab', { name: 'Explore' }).click();
   await page.locator('[data-graph-layer="code"]').click();
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
 
-  await expect(page.locator('#graph-show-all')).toHaveText('All nodes');
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter by exact repository name…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
-  await expect(page.locator('#graph-depth')).toBeEnabled();
+  await expect(page.locator('#graph-depth')).toBeDisabled();
+  await expect(page.locator('#graph-depth')).toHaveAttribute('title', 'Not yet available in the Every-node view.');
   await expect(page.locator('#graph-flow')).toBeEnabled();
   await expect(page.locator('[data-graph-layer="code"]')).toBeEnabled();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
@@ -441,7 +442,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allQuery.repo).toBe('agent-memory');
   expect(allQuery.include_code).toBe('true');
   expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
-  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
   await page.locator('[data-graph-preset-choice="compact"]').click();
   await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
   await page.locator('[data-graph-color-choice="type"]').click();
@@ -463,15 +464,15 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   const persistedInAllMode = await page.evaluate(() => JSON.parse(
     localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
   ));
-  expect(persistedInAllMode.showUnlinked).toBe(false);
+  expect(persistedInAllMode.showUnlinked).toBe(true);
   expect(persistedInAllMode.layers.code).toBe(true);
   expect(persistedInAllMode.includeCode).toBe(true);
   expect(persistedInAllMode.flow).toBe(true);
   const allAccessibility = await new AxeBuilder({ page }).analyze();
   expect(allAccessibility.violations).toEqual([]);
 
-  await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveText('All nodes');
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
   await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
@@ -482,7 +483,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAssetRequests).toHaveLength(1);
 });
 
-test('Ledger keeps authored Galaxy coordinates in the All-node renderer', async ({ page }) => {
+test('Ledger keeps authored Galaxy coordinates on the orbit renderer in Every-node view', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
@@ -515,13 +516,15 @@ test('Ledger keeps authored Galaxy coordinates in the All-node renderer', async 
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('3 entities');
 
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
-  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
+  // Authored Galaxy scenes intentionally stay on the quality/orbit renderer; the dedicated
+  // Every-node WebGL canvas is reserved for non-Galaxy complete scenes.
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
 });
 
-test('Ledger keeps the committed All-node renderer visible when a superseded load resolves', async ({ page }) => {
+test('Ledger keeps the committed Every-node renderer visible when a superseded load resolves', async ({ page }) => {
   let releaseFirstScene;
   let deferredAllScenes = 0;
   await mockApi(page, {
@@ -536,7 +539,7 @@ test('Ledger keeps the committed All-node renderer visible when a superseded loa
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'true');
   await expect.poll(() => deferredAllScenes).toBe(1);
 
@@ -1302,7 +1305,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'All nodes' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Every node' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   const paletteNotice = page.locator('#notice-banner');
@@ -1970,7 +1973,7 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
   );
 });
 
-test('overview→all readiness failure preserves the committed overview renderer and re-enables controls', async ({ page }) => {
+test('overview→Every-node readiness failure preserves the committed overview renderer and re-enables controls', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(String(error)));
   await page.addInitScript(() => {
@@ -1981,7 +1984,7 @@ test('overview→all readiness failure preserves the committed overview renderer
     };
   });
   await mockApi(page);
-  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+  await page.route('**/v2-assets/engraphis-graph-every.js*', async route => {
     return route.fulfill({
       status: 200,
       contentType: 'application/javascript',
@@ -1991,15 +1994,15 @@ test('overview→all readiness failure preserves the committed overview renderer
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('entities');
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
 
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
 
   // Committed mode reverted to overview: aria-pressed survives
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
   // Controls re-enabled
-  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toBeEnabled();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
   // Candidate alone is destroyed — no orphan host in the DOM
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
@@ -2008,15 +2011,15 @@ test('overview→all readiness failure preserves the committed overview renderer
   expect(pageErrors).toEqual([]);
 });
 
-test('all→quality readiness failure preserves the committed all-node renderer and re-enables controls', async ({ page }) => {
+test('Every-node→quality readiness failure preserves the committed renderer and re-enables controls', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   // Enter all mode successfully first
-  await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   // Shorten the quality timeout after page load, before the failing transition
@@ -2037,13 +2040,13 @@ test('all→quality readiness failure preserves the committed all-node renderer 
     return route.fallback();
   });
 
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-empty')).toContainText('timed out', { timeout: 10_000 });
 
   // Committed mode stays at full (all-node): aria-pressed survives
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'true');
   // Controls re-enabled
-  await expect(page.locator('#graph-show-all')).toBeEnabled();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toBeEnabled();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
   // Candidate alone is destroyed
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
@@ -2061,7 +2064,7 @@ test('successful retry after readiness failure commits exactly one new renderer'
   });
   await mockApi(page);
   let allAssetAttempts = 0;
-  await page.route('**/v2-assets/engraphis-graph-all.js*', async route => {
+  await page.route('**/v2-assets/engraphis-graph-every.js*', async route => {
     allAssetAttempts += 1;
     if (allAssetAttempts === 1) {
       return route.fulfill({
@@ -2077,13 +2080,13 @@ test('successful retry after readiness failure commits exactly one new renderer'
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   // First attempt fails; mode reverts to overview
-  await page.locator('#graph-show-all').click();
+  await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-empty')).toContainText('did not register', { timeout: 10_000 });
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
 
   // Retry by toggling again — second asset load succeeds and commits
-  await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
   await expect(page.locator('#graph-count')).toContainText('entities');

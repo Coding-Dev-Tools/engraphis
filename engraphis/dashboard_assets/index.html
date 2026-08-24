@@ -273,8 +273,7 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-all" class="graph-action" type="button" aria-pressed="false" title="Load all entity nodes with progressive level-of-detail rendering">All nodes</button>
-                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Unlinked nodes</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
@@ -306,6 +305,7 @@
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="original" aria-pressed="false"><span class="layout-preview spacious"><i></i><i></i><i></i><i></i></span><span>Spacious</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="radial" aria-pressed="false"><span class="layout-preview radial"><i></i><i></i><i></i><i></i></span><span>Radial</span></button>
                   <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="constellation" aria-pressed="false"><span class="layout-preview constellation"><i></i><i></i><i></i><i></i></span><span>Constellation</span></button>
+                <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="every" aria-pressed="false" title="Load every entity with progressive level-of-detail rendering"><span class="layout-preview every"><i></i><i></i><i></i><i></i><i></i></span><span>Every node</span></button>
                 </div>
               </section>
 
@@ -664,6 +664,7 @@
           <p class="eyebrow">Graph connections</p>
           <h2 id="graph-connections-title">Connected nodes</h2>
         </div>
+        <button id="graph-connections-focus" class="text-button" type="button" hidden>Focus graph</button>
         <button id="graph-connections-close" class="text-button" type="button">Close</button>
       </header>
       <p id="graph-connections-meta" class="graph-connections-meta" role="status" aria-live="polite"></p>

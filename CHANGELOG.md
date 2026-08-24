@@ -5,6 +5,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- The graph's "Show all nodes" toggle is replaced by a dedicated **Every node** layout built
+  on a new ultra-performance engine (`engraphis-graph-every.js` +
+  `engraphis-graph-every-worker.js`, WebGL2-only): all geometry is uploaded once and camera
+  moves touch only uniforms, so pan/zoom frame cost is independent of node count up to the
+  20,000-node / 200,000-relation ceilings. Zoomed-out scenes read as an additive glow
+  density map; edges reveal progressively by weight with gold bridges; community districts
+  paint as tinted region hulls with hub-derived labels; hovering or highlighting a node dims
+  everything outside its neighbourhood, marks its relations with directional arrows and
+  relation names, and shows a callout card with category, connection count, and strongest
+  connections. Includes two-pointer pinch zoom, keyboard browsing (arrows/+/-/F/Escape),
+  a screen-reader live region for scene and hover announcements, and deterministic worker
+  layouts that stream settling passes (measured: ~320 ms settle at 2k nodes, ~1.2 s at 20k).
+  Entering Every-node shows every entity regardless of overview filters; leaving restores
+  the person's filters.
+
 ### Changed
 
 - Direct black-hole children now receive compact, deterministic orbital lanes near the black
@@ -108,6 +125,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- The Every node dashboard view no longer crashes on open: a declaration-order bug in the
+  renderer threw during construction before anything painted. The scene canvas also keeps its
+  accessible role/label now instead of being hidden from assistive technology.
 - Import previews now page the source manifest exactly like execution, so vaults whose manifest
   outgrew one list page (10k identities) no longer show manifest-only files as silently absent
   from the preview plan; beyond-boundary rows are reported as `missing` instead of dropped.

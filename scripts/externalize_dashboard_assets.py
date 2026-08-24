@@ -27,8 +27,8 @@ JS = STATIC / "dashboard.js"
 V2_ASSETS = ROOT / "engraphis" / "dashboard_assets"
 EXTRA_SCRIPTS = (
     V2_ASSETS / "engraphis-graph.js",
-    V2_ASSETS / "engraphis-graph-all.js",
-    V2_ASSETS / "engraphis-graph-worker.js",
+    V2_ASSETS / "engraphis-graph-every.js",
+    V2_ASSETS / "engraphis-graph-every-worker.js",
     V2_ASSETS / "engraphis-spacetime.js",
 )
 LAZY_LOADER_SCRIPTS = (V2_ASSETS / "ledger.js",)
@@ -42,7 +42,7 @@ LAZY_LOADER_SCRIPTS = (V2_ASSETS / "ledger.js",)
 DEFERRED_SCRIPTS = (
     "/static/vendor/force-graph.min.js",
     "/v2-assets/engraphis-graph.js",
-    "/v2-assets/engraphis-graph-all.js",
+    "/v2-assets/engraphis-graph-every.js",
     "/v2-assets/engraphis-spacetime.js",
 )
 

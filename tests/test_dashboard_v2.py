@@ -97,7 +97,9 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
             r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
         )
         assert "presentation=all" not in classic_js.text
-        assert "GRAPH_FULL" not in classic_js.text
+        assert "GRAPH_FULL" in classic_js.text
+        assert "EngraphisEveryGraph" in classic_js.text
+        assert "engraphis-graph-all.js" not in classic_js.text
         assert "EngraphisAllGraph" not in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
@@ -841,8 +843,8 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         script = client.get("/v2-assets/ledger.js")
         assert 'id="graph-retry"' in page.text
         assert 'id="graph-full"' not in page.text
-        assert 'id="graph-show-all"' in page.text
-        assert "All nodes" in page.text
+        assert 'id="graph-show-all"' not in page.text
+        assert 'data-graph-preset-choice="every"' in page.text
         assert 'id="graph-show-unlinked"' in page.text
         assert 'id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true"' in page.text
         assert 'id="graph-unlinked"' not in page.text
@@ -883,7 +885,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "style: 'cyber'" in script.text
         assert "renderMode: fullGraph ? 'all' : 'overview'" in script.text
         assert "loadGraph({ force: true })" in script.text
-        assert "if (!fullGraph && window.EngraphisSpacetime" in script.text
+        assert "if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime" in script.text
         assert "setAttribute('aria-busy', 'true')" in script.text
         assert "setAttribute('aria-busy', 'false')" in script.text
 
@@ -935,8 +937,9 @@ def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkey
         assert "showUnlinked: state.graphShowUnlinked" in script.text
         assert "includeCode: state.graphIncludeCode" in script.text
         assert "minDegree: number(byId('graph-min-degree').value)" in script.text
-        assert "if (loadAll) return ensureGraphAllAsset();" in script.text
-        assert "const graphFactory = fullGraph ? window.EngraphisAllGraph" in script.text
+        assert "if (loadAll) {" in script.text
+        assert "return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);" in script.text
+        assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in script.text
         assert "scopeControl.disabled = full" not in script.text
         assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text
         assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in script.text
@@ -1997,14 +2000,15 @@ def test_every_managed_cloud_error_message_is_fixed_local_copy():
     )
 
 def test_graph_toggle_labels_are_fixed_and_use_aria_pressed(monkeypatch, tmp_path):
-    """Toggle labels must stay fixed (not swap) and reflect state via aria-pressed."""
+    """Every-node is a fixed graph preset and remaining toggles use aria state."""
     with _client(monkeypatch, tmp_path) as client:
         page = client.get("/")
         script = client.get("/v2-assets/ledger.js")
-        # The All-nodes toggle keeps a fixed label; aria-pressed carries the state.
-        assert 'id="graph-show-all"' in page.text
-        assert 'toggle.textContent = \'All nodes\'' in script.text
-        assert "toggle.setAttribute('aria-pressed', String(full))" in script.text
+        # Every-node is selected as a preset, rather than a second All-nodes toggle.
+        assert 'data-graph-preset-choice="every"' in page.text
+        assert "Every node" in page.text
+        assert 'id="graph-show-all"' not in page.text
+        assert "toggle.textContent = 'All nodes'" not in script.text
         # Unlinked toggle also uses a fixed label + aria-pressed, not swapped text.
         assert "control.textContent = 'Unlinked nodes'" in script.text
         assert "control.setAttribute('aria-pressed', String(next))" in script.text
@@ -2031,9 +2035,11 @@ def test_graph_load_busy_disables_controls_and_updates_recovery_copy(monkeypatch
     """During load, retry/show-all are disabled and recovery copy names Reload data."""
     with _client(monkeypatch, tmp_path) as client:
         script = client.get("/v2-assets/ledger.js")
-        # Busy state disables the two primary load controls.
+        # Busy state disables reload and the Every-node preset.
         assert "function setGraphLoadControlsBusy(busy, disableRetry = true)" in script.text
-        assert "'graph-show-all', 'graph-retry'" in script.text
+        assert "const controls = disableRetry ? ['graph-retry'] : []" in script.text
+        assert "[data-graph-preset-choice=\"every\"]" in script.text
+        assert "every.disabled = busy" in script.text
         assert "control.disabled = busy" in script.text
         # Recovery copy uses actionable "Reload data", not vague retry language.
         assert "retry.textContent = busy ? 'Reloading graph…' : 'Reload data'" in script.text

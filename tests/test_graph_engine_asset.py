@@ -31,7 +31,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
-ALL_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-all.js"
+EVERY_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
 SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
 LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
@@ -179,19 +179,21 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     assert "/static/engraphis-graph.js" not in eager
 
 
-def test_all_node_visibility_response_refreshes_webgl_node_buffers() -> None:
+def test_every_node_visibility_response_refreshes_webgl_node_buffers() -> None:
     """Worker LOD responses must repaint nodes, not only their edge buffers.
 
-    The all-node renderer keeps one GPU position buffer per node and represents hidden nodes
-    with NaN positions. This contract test protects the ordering in the worker-message handler
-    without requiring a WebGL context in the offline test floor.
+    The Every-node renderer keeps one GPU position buffer per node and represents hidden nodes
+    in the node metadata buffer. This contract test protects the ordering in the ready-message
+    handler without requiring a WebGL context in the offline test floor.
     """
-    source = ALL_ASSET.read_text(encoding="utf-8")
-    start = source.index("if (message.type === 'visible')")
-    end = source.index("if (message.type === 'collapse')", start)
+    source = EVERY_ASSET.read_text(encoding="utf-8")
+    start = source.index("if (message.type === 'preview' || message.type === 'ready')")
+    end = source.index("if (message.type === 'progress')", start)
     handler = source[start:end]
-    assert "updateNodes(); updateEdges(); stats(); schedule();" in handler
-    assert handler.index("updateNodes()") < handler.index("updateEdges()")
+    assert "refreshVisibility(false);" in handler
+    assert "uploadNodePositions();" in handler
+    assert "uploadEdges();" in handler
+    assert handler.index("uploadNodePositions()") < handler.index("uploadEdges()")
 
 
 def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
@@ -282,6 +284,7 @@ globalThis.graphData = () => ({ nodes: [], links: [] });
    into a silent Classic fallback. Asserted against the real source below. */
 globalThis.graphRenderEngine = () => {
   if (typeof EngraphisGraph === 'undefined') return false;
+  if (scenario === 'all-runtime-failed') return false;
   log.engine += 1;
   return true;
 };
@@ -289,7 +292,11 @@ globalThis.CLASSIC = () => { log.classic += 1; };
 globalThis.GRAPH_PRESETS = { compact: {} };
 globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT = null;
 globalThis.GHILITE = globalThis.GHOVERSET = null;
-globalThis.ForceGraph = function () {};
+globalThis.GRAPH_FULL = scenario === 'all-loaded' || scenario === 'all-runtime-failed';
+if (globalThis.GRAPH_FULL) globalThis.EngraphisGraph = { create() {} };
+if (scenario === 'all-runtime-failed') globalThis.EngraphisEveryGraph = { create() {} };
+/* All mode intentionally has no vendor global: its renderer must remain self-contained. */
+if (!globalThis.GRAPH_FULL) globalThis.ForceGraph = function () {};
 
 new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
 const settled = { engine: log.engine, classic: log.classic };
@@ -297,11 +304,21 @@ const finish = () => setTimeout(() => process.stdout.write(JSON.stringify({
   beforeSettle: settled, engine: log.engine, classic: log.classic,
   appended: log.appended, warned: log.warned,
 })), 0);
-if (scenario === 'loads' || scenario === 'classic') {
-  globalThis.EngraphisGraph = { create() {} }; pending.onload();
+if (scenario === 'all-runtime-failed') {
+  finish();
+} else if (scenario === 'all-loaded') {
+  /* loadGraphEngine(true) chains the already-ready core through one microtask before it
+     requests the optional all-node asset. */
+  Promise.resolve().then(() => {
+    globalThis.EngraphisEveryGraph = { create() {} }; pending.onload(); finish();
+  });
+} else {
+  if (scenario === 'loads' || scenario === 'classic') {
+    globalThis.EngraphisGraph = { create() {} }; pending.onload();
+  }
+  else { pending.onerror(); }
+  finish();
 }
-else { pending.onerror(); }
-finish();
 """
 
 
@@ -358,6 +375,28 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     assert report["warned"] == []
 
 
+@requires_node
+def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> None:
+    """The overview's memoized engine promise must not bypass the later all-node asset."""
+    report = _run_routing("all-loaded")
+
+    assert report["appended"] == [
+        "/v2-assets/engraphis-graph-every.js?v=20260823-every-19"
+    ]
+    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
+    assert report["engine"] == 1
+    assert report["classic"] == 0
+    assert report["warned"] == []
+
+
+@requires_node
+def test_show_all_never_reaches_legacy_force_graph_after_a_quality_failure() -> None:
+    """The complete scene is unsafe for the main-thread fallback, even after a failure latch."""
+    report = _run_routing("all-runtime-failed")
+
+    assert report["appended"] == []
+    assert report["engine"] == 0
+    assert report["classic"] == 0
 
 @requires_node
 def test_graph_engine_deep_link_degrades_loudly_when_the_asset_cannot_load() -> None:
@@ -378,11 +417,13 @@ def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
     before it attaches its own handler, so the memoized promise carries its own.
     """
     source = DASHBOARD.read_text(encoding="utf-8")
-    loader = source[source.index("function loadGraphEngine()"):]
+    loader = source[source.index("function loadGraphEngine(loadAll=false)"):]
     loader = loader[: loader.index("\nfunction ")]
     assert "GRAPH_ENGINE_LOADING.catch(()=>{})" in loader
     # A 200 that never registers the global is a corrupt asset, not a success.
     assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
+    assert "ALL_GRAPH_ENGINE_LOADING.catch(()=>{})" in source
+    assert "graphFull&&typeof EngraphisEveryGraph==='undefined'" in source
 
 
 def test_force_graph_loader_rejects_a_success_without_the_vendor_global() -> None:
@@ -10310,8 +10351,8 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
                         source.index("function ensureGraphAssets(")]
-    assert "engraphis-graph-all.js?v=20260815-merge-ready-1" in all_loader
-    assert "engraphis-graph-all.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
+    assert "engraphis-graph-every.js?" in all_loader  # cache-buster version intentionally unpinned
+    assert "engraphis-graph-every.js" not in loader.split("function releaseGraphAssetsAttempt", 1)[0]
     assert not re.search(r'document\.createElement\(["\']style["\']\)', vendor)
     assert ".force-graph-container canvas {" in styles
     assert ".force-graph-container .grabbable:active {" in styles
@@ -11191,20 +11232,15 @@ def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
 
 
 
-def test_classic_dashboard_never_loads_or_exposes_all_nodes_mode() -> None:
-    """Classic is high-quality-only; Ledger owns All-nodes via EngraphisAllGraph.
-
-    A Classic call into the all-node asset would bypass the quality renderer and
-    violate the ownership boundary established in PR #138.
-    """
+def test_classic_dashboard_uses_the_every_node_asset_not_the_removed_all_asset() -> None:
+    """Classic may opt into Every-node, but must not reference the removed asset."""
     source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    assert "loadAllGraphEngine" not in source
-    assert "ALL_GRAPH_ENGINE_LOADING" not in source
+    assert "loadAllGraphEngine" in source
+    assert "ALL_GRAPH_ENGINE_LOADING" in source
+    assert "EngraphisEveryGraph" in source
+    assert "engraphis-graph-every.js" in source
     assert "EngraphisAllGraph" not in source
     assert "engraphis-graph-all.js" not in source
-    assert "GRAPH_FULL" not in source
-    assert "graphToggleAllNodes" not in source
-    assert "graph-show-all" not in source
 
 
 def test_classic_graph_controls_have_no_freeze_or_orbit_pause_in_full_mode() -> None:

@@ -231,7 +231,7 @@ delegates configuration, startup health, browser opening, and process lifecycle 
 Inspect memories, supersession diffs, recall scores, timelines, links, consolidation, and audit
 records in the dashboard. The offline graph renderer is vendored, and the interface is keyboard-
 navigable with light and dark themes. Graph exploration offers a focused **High quality** view and
-an explicit worker-backed **Show all nodes** view for complete entity projections up to 20,000
+an explicit worker-backed **Every node** view for complete entity projections up to 20,000
 nodes and 200,000 relationships; see the [graph performance profiles](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/GRAPH_PERFORMANCE.md).
 
 ---
