@@ -466,7 +466,7 @@
         state.drawnLinks = Number(message.drawnLinks || 0);
         state.lodTier = message.lodTier || state.lodTier;
         state.collapsed = state.collapse === false ? false : message.collapsed === true;
-        updateEdges(); stats(); schedule();
+        updateNodes(); updateEdges(); stats(); schedule();
         return;
       }
       if (message.type === 'collapse') {

@@ -31,6 +31,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
+ALL_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-all.js"
 SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
 LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
@@ -176,6 +177,21 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     )
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
+
+
+def test_all_node_visibility_response_refreshes_webgl_node_buffers() -> None:
+    """Worker LOD responses must repaint nodes, not only their edge buffers.
+
+    The all-node renderer keeps one GPU position buffer per node and represents hidden nodes
+    with NaN positions. This contract test protects the ordering in the worker-message handler
+    without requiring a WebGL context in the offline test floor.
+    """
+    source = ALL_ASSET.read_text(encoding="utf-8")
+    start = source.index("if (message.type === 'visible')")
+    end = source.index("if (message.type === 'collapse')", start)
+    handler = source[start:end]
+    assert "updateNodes(); updateEdges(); stats(); schedule();" in handler
+    assert handler.index("updateNodes()") < handler.index("updateEdges()")
 
 
 def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
@@ -2988,6 +3004,27 @@ def test_black_hole_adornment_is_bounded_and_does_not_change_hit_geometry() -> N
                         source.index("function applyChrome", source.index("function styleNode(node, ctx, scale)"))]
     assert "state.settings.mode === 'galaxy'" in style_node
     assert style_node.count("paintGalaxyAnchorAdornment(") == 2
+
+    pointer = _run_engine(
+        """
+        const pointerCalls = [];
+        const ctx = {
+          beginPath() {}, fill() {},
+          arc(_x, _y, radius) { pointerCalls.push(radius); },
+          set fillStyle(_value) {},
+        };
+        const api = G.create(el, {});
+        api.setPreset('galaxy');
+        store.nodePointerAreaPaint(
+          { id: 'bh', x: 0, y: 0, radius: 9, anchor_role: 'global' }, '#fff', ctx
+        );
+        store.nodePointerAreaPaint(
+          { id: 'planet', x: 0, y: 0, radius: 3, anchor_role: 'none' }, '#fff', ctx
+        );
+        emit({ pointerCalls });
+        """
+    )
+    assert pointer["pointerCalls"] == [20, 5]
 
 
 @requires_node
