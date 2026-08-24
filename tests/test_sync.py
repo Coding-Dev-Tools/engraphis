@@ -158,6 +158,37 @@ def test_sync_rejects_malformed_modified_hlc_without_aborting_parser():
     }) is None
 
 
+def test_sync_rejects_malformed_scope_pointers_like_other_malformed_rows():
+    """workspace_id/repo_id arrive from untrusted bundles. Even though apply re-homes
+    them, dict_to_record is itself a trust boundary (dry-run, hashing): a present-but-
+    not-non-empty-string pointer is a malformed row, rejected exactly like a bad id."""
+    for bad in (123, True, ["ws"], {"ws": 1}, "", "\x00"):
+        assert dict_to_record({
+            "id": "mem_bad_ws", "content": "c", "workspace_id": bad,
+        }) is None, repr(bad)
+        assert dict_to_record({
+            "id": "mem_bad_repo", "content": "c", "repo_id": bad,
+        }) is None, repr(bad)
+    # Absent pointers stay absent; valid pointers survive (clamped) unchanged.
+    absent = dict_to_record({"id": "mem_no_ptrs", "content": "c"})
+    assert absent is not None
+    assert absent.workspace_id is None and absent.repo_id is None
+    good = dict_to_record({
+        "id": "mem_good_ptrs", "content": "c",
+        "workspace_id": "ws_01", "repo_id": "repo_01",
+    })
+    assert good is not None
+    assert good.workspace_id == "ws_01" and good.repo_id == "repo_01"
+    # Over-long pointers are clamped like every sibling string field, not rejected.
+    long_ptr = "x" * 300
+    clamped = dict_to_record({
+        "id": "mem_long_ptrs", "content": "c",
+        "workspace_id": long_ptr, "repo_id": long_ptr,
+    })
+    assert clamped is not None
+    assert clamped.workspace_id == "x" * 128 and clamped.repo_id == "x" * 128
+
+
 def test_sync_rejects_future_hlc_without_aborting_other_rows():
     now = time.time()
     poisoned_hlc = format_modified_hlc(
@@ -3512,3 +3543,87 @@ def test_relay_push_exhausts_retries_and_raises(monkeypatch):
     with pytest.raises(RelayError, match="HTTP 503"):
         transport.push("bundle-dev_a.json", b"payload")
     assert calls["count"] == 1 + MAX_PUSH_RETRIES
+
+
+def _status_db(tmp_path):
+    """Build a two-repo local database with distinct memory/tombstone counts."""
+    from scripts.sync import _checkpoint_key
+
+    path = str(tmp_path / "status.db")
+    store = Store(path)
+    workspace = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    for repo_id, count in ((repo_a, 2), (repo_b, 3)):
+        for n in range(count):
+            store.add_memory(MemoryRecord(
+                id="mem_%s_%d" % (repo_id[-4:], n),
+                content="repo scoped row",
+                scope=Scope.REPO,
+                workspace_id=workspace,
+                repo_id=repo_id,
+            ))
+        store.add_memory_tombstone(
+            "tombstone_%s" % repo_id[-4:],
+            workspace_id=workspace,
+            repo_id=repo_id,
+        )
+    # add_memory_tombstone leaves the commit to the caller.
+    store.conn.commit()
+    device = store.device_id()
+    store.close()
+    return path, "w", repo_a, _checkpoint_key(workspace, repo_a, device)
+
+
+def _run_status(db, workspace, repo=None):
+    import argparse
+
+    from scripts import sync as sync_cli
+
+    sync_cli._status(argparse.Namespace(
+        db=db, workspace=workspace, repo=repo, remote="", relay="",
+    ))
+
+
+def test_status_counts_are_scoped_to_the_requested_repo(tmp_path, capsys):
+    """``--status --repo X`` must report only X's rows, never the workspace total."""
+    db, workspace, _, checkpoint_key = _status_db(tmp_path)
+    import sqlite3
+
+    # A repo-scoped checkpoint must exist so the status path reaches the counters.
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state(key, value) VALUES (?, ?)",
+            (checkpoint_key, json.dumps({"generation": 3, "state_hash": "a" * 64})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _run_status(db, workspace, repo="repo-a")
+    out = capsys.readouterr().out
+    assert "memories: 2" in out
+    assert "tombstones: 1" in out
+
+
+def test_status_without_repo_still_reports_workspace_totals(tmp_path, capsys):
+    db, workspace, _, _ = _status_db(tmp_path)
+    _run_status(db, workspace, repo=None)
+    out = capsys.readouterr().out
+    assert "memories: 5" in out
+    assert "tombstones: 2" in out
+
+
+def test_status_for_an_absent_repo_reports_an_empty_scope(tmp_path, capsys):
+    """A missing --repo name must not fall back to the workspace-wide total —
+    neither in the counts nor by presenting the workspace checkpoint."""
+    db, workspace, _, _ = _status_db(tmp_path)
+    _run_status(db, workspace, repo="does-not-exist")
+    out = capsys.readouterr().out
+    assert "memories: 0" in out
+    assert "tombstones: 0" in out
+    # The workspace checkpoint must not stand in for the requested scope.
+    assert "last_generation" not in out
+    assert "last_state_hash" not in out
+    assert "(not found locally)" in out

@@ -21,12 +21,16 @@ import secrets
 import threading
 import time
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from engraphis import licensing
 from engraphis.config import settings
@@ -63,6 +67,13 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    # Wizard multipart routes carry the same upload ceilings as the classic import:
+    # without these entries they fall back to the 8 MB JSON default and large vaults
+    # are rejected by the body middleware before the bounded parser is ever reached.
+    "/api/workspaces/import-documents/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-documents/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-obsidian/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
+    "/api/workspaces/import-obsidian/run": _DASHBOARD_UPLOAD_REQUEST_BYTES,
 }
 
 
@@ -139,6 +150,69 @@ class _RequestBodyLimitMiddleware:
             {"error": "request body too large", "max_bytes": max_bytes},
             status_code=413,
         )(scope, receive, send)
+
+
+class _BoundedUploadRoute(APIRoute):
+    """Parse import uploads with their strict multipart limits before FastAPI binds files.
+
+    FastAPI otherwise resolves ``UploadFile`` parameters with Starlette's default
+    1,000-file ceiling before the route can inspect ``len(files)`` — an unhandled
+    MultiPartException that surfaces as a bare 500 "Internal Server Error" for any
+    folder above 1,000 files. Mirrors routes/vault.py's _bounded_upload_form.
+    """
+
+    # Non-file form fields on the widest wizard route (documents preview): workspace,
+    # repo, session_id, scope, memory_type, source_id, source_label, on_conflict,
+    # source_mode, confirmed, attachment_manifest — headroom above the current
+    # 12-field maximum so adding one field does not 400 legitimate uploads.
+    _MAX_FORM_FIELDS = 14
+
+    def get_route_handler(self):
+        route_handler = super().get_route_handler()
+
+        async def bounded_route_handler(request: Request):
+            try:
+                await request.form(
+                    max_files=MAX_IMPORT_FILES,
+                    max_fields=self._MAX_FORM_FIELDS,
+                )
+            except StarletteHTTPException as exc:
+                detail = str(getattr(exc, "detail", ""))
+                lowered = detail.lower()
+                if exc.status_code == 400 and lowered.startswith("too many files"):
+                    raise HTTPException(
+                        status_code=413,
+                        detail={"error": f"too many files (max {MAX_IMPORT_FILES})"},
+                    ) from exc
+                if exc.status_code == 400 and lowered.startswith("too many fields"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": "invalid upload form"},
+                    ) from exc
+                raise
+            return await route_handler(request)
+
+        return bounded_route_handler
+
+
+# Document/Obsidian wizard multipart routes on this app. (The classic quick import
+# /api/workspaces/import-files lives in routes/v2_api.py and already bounds its own
+# parser with request.form(max_files=...).)
+_BOUNDED_UPLOAD_PATHS = frozenset({
+    "/api/workspaces/import-documents/preview",
+    "/api/workspaces/import-documents/run",
+    "/api/workspaces/import-obsidian/preview",
+    "/api/workspaces/import-obsidian/run",
+})
+
+
+class _BoundedUploadRouter(APIRouter):
+    """Install the bounded parser only on the multipart import routes."""
+
+    def add_api_route(self, path: str, endpoint, **kwargs):
+        if path in _BOUNDED_UPLOAD_PATHS:
+            kwargs["route_class_override"] = _BoundedUploadRoute
+        return super().add_api_route(path, endpoint, **kwargs)
 
 
 async def _dashboard_consolidation_loop(service: MemoryService) -> None:
@@ -454,6 +528,11 @@ def create_app() -> FastAPI:
         _discard_unbound_service()
         raise
     app.include_router(v2_api.router)
+
+    # Wizard multipart routes register through the bounded router (included further
+    # below, after those routes are defined) so uploads are parsed with MAX_IMPORT_FILES
+    # ceilings instead of Starlette's 1,000-file default.
+    bounded_router = _BoundedUploadRouter()
 
     app.state.auth_store = None
     app.state.team_enabled = False
@@ -902,7 +981,7 @@ def create_app() -> FastAPI:
         _require_document_browser_owner(request)
         return {"extensions": sorted(_DOCUMENT_SUFFIXES)}
 
-    @app.post("/api/workspaces/import-documents/preview", include_in_schema=False)
+    @bounded_router.post("/api/workspaces/import-documents/preview", include_in_schema=False)
     async def document_preview(
         request: Request,
         workspace: str = Form(...), repo: str = Form(""), session_id: str = Form(""),
@@ -965,7 +1044,7 @@ def create_app() -> FastAPI:
             report, owner_binding=owner_binding, digest=digest,
         )
 
-    @app.post("/api/workspaces/import-documents/run", include_in_schema=False)
+    @bounded_router.post("/api/workspaces/import-documents/run", include_in_schema=False)
     async def document_run(
         request: Request,
         workspace: str = Form(...), repo: str = Form(""), session_id: str = Form(""),
@@ -1061,7 +1140,7 @@ def create_app() -> FastAPI:
         except (ValueError, KeyError):
             raise HTTPException(status_code=400, detail={"error": "invalid request"}) from None
 
-    @app.post("/api/workspaces/import-obsidian/preview", include_in_schema=False)
+    @bounded_router.post("/api/workspaces/import-obsidian/preview", include_in_schema=False)
     async def obsidian_preview_alias(
         request: Request, workspace: str = Form(...), repo: str = Form(""),
         session_id: str = Form(""), scope: str = Form("workspace"),
@@ -1096,7 +1175,7 @@ def create_app() -> FastAPI:
             report, owner_binding=owner_binding, digest=digest,
         )
 
-    @app.post("/api/workspaces/import-obsidian/run", include_in_schema=False)
+    @bounded_router.post("/api/workspaces/import-obsidian/run", include_in_schema=False)
     async def obsidian_run_alias(
         request: Request, workspace: str = Form(...), repo: str = Form(""),
         session_id: str = Form(""), scope: str = Form("workspace"),
@@ -1148,6 +1227,10 @@ def create_app() -> FastAPI:
             return svc.cancel_obsidian_import_job(job_id, workspace=workspace)
         except (ValueError, KeyError):
             raise HTTPException(status_code=404, detail={"error": "import job not found"}) from None
+
+    # Include AFTER the wizard routes are registered: include_router snapshots routes
+    # at call time, so including earlier would mount an empty router.
+    app.include_router(bounded_router)
 
     from engraphis.netutil import is_local_request
 

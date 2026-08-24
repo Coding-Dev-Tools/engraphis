@@ -18,3 +18,30 @@ def is_reparse_point(info: object) -> bool:
     """
     marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+# Cloud-files placeholders (OneDrive Files-On-Demand et al.) are reparse points, but
+# unlike symlinks/junctions they name a real tree item that hydrates transparently on
+# open — reading one never redirects outside its path. Both attribute constants are
+# only ever set together with the reparse attribute on placeholder entries.
+_PLACEHOLDER_ATTRS = (
+    getattr(stat, "FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS", 0x400000)
+    | getattr(stat, "FILE_ATTRIBUTE_RECALL_ON_OPEN", 0x40000)
+)
+
+
+def is_cloud_placeholder(info: object) -> bool:
+    """Return whether *info* is a cloud-files placeholder rather than a link.
+
+    Such entries must be allowed through link guards: rejecting them makes every
+    not-locally-cached OneDrive file unimportable on Windows even though opening
+    the file is safe and simply downloads it.
+    """
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & _PLACEHOLDER_ATTRS)
+
+
+def is_link_indirection(info: object) -> bool:
+    """Return whether *info* is a reparse point that must stay rejected: any symlink
+    or junction — i.e. a reparse point that is not a benign cloud placeholder."""
+    return is_reparse_point(info) and not is_cloud_placeholder(info)

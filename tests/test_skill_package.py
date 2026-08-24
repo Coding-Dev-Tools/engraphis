@@ -35,14 +35,14 @@ def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
     overlap = set(classic) & set(smart)
     headings = set(re.findall(r"^### `(engraphis_[^`]+)`", reference, flags=re.MULTILINE))
 
-    assert len(classic) == 34
+    assert len(classic) == 35
     assert len(smart) == 9
     assert overlap == {"engraphis_remember", "engraphis_recall_context"}
-    assert len(distinct) == 41
+    assert len(distinct) == 42
     assert headings == distinct
-    assert "34 direct tools" in reference
+    assert "35 direct tools" in reference
     assert "nine" in reference
-    assert "41 distinct public tool names" in reference
+    assert "42 distinct public tool names" in reference
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "ARCHITECTURE_V3.md").read_text(encoding="utf-8")
@@ -50,8 +50,8 @@ def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
     assert "former 34 direct tool names" in readme
     assert "Classic 34-tool compatibility" in readme
     assert "34-tool Classic compatibility server" in readme
-    assert "Smart MCP (9 tools) / Classic MCP (34 tools)" in architecture
-    assert "Classic 34-tool inventory" in kilo
+    assert "Smart MCP (9 tools) / Classic MCP (35 tools)" in architecture
+    assert "Classic 35-tool inventory" in kilo
 
     for name, tool in classic.items():
         section = _section(reference, name)

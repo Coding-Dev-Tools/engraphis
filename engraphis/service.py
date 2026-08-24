@@ -24,6 +24,7 @@ import contextvars
 import logging
 import math
 import copy
+import sqlite3
 import time
 import threading
 import unicodedata
@@ -52,7 +53,7 @@ from engraphis.core.context import RegexTokenCounter
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -202,6 +203,30 @@ def _recall_score_semantics(capabilities: dict) -> dict:
         )
     return semantics
 
+
+def _vector_index_backend_label(index: Any) -> str:
+    """Label the active vector index backend for the recall envelope (additive)."""
+    if index is None:
+        return "numpy"
+    name = type(index).__name__
+    if "SqliteVec" in name:
+        return "sqlite-vec"
+    if name == "NumpyVectorIndex":
+        return "numpy"
+    return name
+
+
+def _reranker_mode_label(reranker: Any) -> str:
+    """Label the active reranker mode for the recall envelope (additive)."""
+    if reranker is None:
+        return "identity"
+    name = type(reranker).__name__
+    if "CrossEncoder" in name:
+        return "cross-encoder"
+    if name == "IdentityReranker":
+        return "identity"
+    return name
+
 def _finite_float(value: Any, default: float = 0.0) -> float:
     """Coerce persisted numeric fields without exposing NaN/Infinity downstream."""
     try:
@@ -235,11 +260,17 @@ MAX_CONTEXT_TASK_CHARS = 10_000
 MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
 # upload; these bound resource use, not access scope, same framing as index_repo's
-# max_files/max_file_bytes).
-MAX_IMPORT_FILES = 500
+# max_files/max_file_bytes). Count raised 500→1,500 with total scaled 250 MB→750 MB so
+# the average per-file allowance (0.5 MB) is unchanged; per-file caps stay fixed.
+# Upload transports buffer accepted parts in RAM up to this total before dispatch —
+# acceptable for the local-first single-user posture; network deployments should keep
+# tighter reverse-proxy body caps (SECURITY.md §2). Keep MAX_VAULT_BYTES (core/
+# obsidian.py) and MAX_DOCUMENT_TREE_BYTES (core/documents.py) in lockstep so wizard
+# scanners never silently undercut the transport ceiling.
+MAX_IMPORT_FILES = 1_500
 MAX_IMPORT_FILE_BYTES = 2_000_000
 MAX_IMPORT_RESOURCE_BYTES = 100_000_000
-MAX_IMPORT_TOTAL_BYTES = 250_000_000
+MAX_IMPORT_TOTAL_BYTES = 750_000_000
 # Analytical graph scenes rank the candidate graph before applying the much smaller
 # browser scene budget. Keep that server-side candidate set finite as well: graph rows
 # are user/sync writable, and an unbounded Louvain/PageRank request would otherwise be a
@@ -264,6 +295,7 @@ MAX_GRAPH_INDEX_MEMORIES = 20_000
 MAX_GRAPH_INDEX_WORKERS = 2
 GRAPH_INDEX_BATCH_SIZE = 100
 GRAPH_INDEX_LEASE_SECONDS = 60.0
+IMPORT_JOB_LEASE_SECONDS = 900.0
 GRAPH_INDEX_JOB_HISTORY = 100
 GRAPH_INDEX_SHUTDOWN_SECONDS = 10.0
 DEFAULT_CODE_QUERY_CAPACITY = 10_000
@@ -914,10 +946,18 @@ def _resolve_import_root(raw_path: str) -> Path:
     return folder
 
 
-def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
+def _iter_import_files(
+    folder: Path, pattern: str, max_files: int,
+) -> tuple[list, int, int]:
     """Files under ``folder`` matching the glob ``pattern`` (default ``*.md``), skipping
     VCS/dependency directories and capped at ``max_files`` — a resource bound, not a
     security boundary (the boundary is ``_resolve_import_root``).
+
+    Returns ``(files, matched_total, unreadable)`` so callers can surface silent
+    truncation instead of importing an alphabetically-first slice that looks complete.
+    ``matched_total`` counts every regular-file match seen before the cap; ``unreadable``
+    counts candidates whose stat/resolve failed (e.g. paths beyond the Windows MAX_PATH
+    limit without LongPathsEnabled) — previously these vanished from all counts.
 
     Symlink escape guard: ``rglob`` follows symlinked directories, so a symlink placed
     somewhere under an allowed root (by anything that ever had write access there) could
@@ -925,9 +965,9 @@ def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
     candidate is re-resolved and re-contained here, the same check the root itself got."""
     import fnmatch
     files: list = []
+    matched_total = 0
+    unreadable = 0
     for f in sorted(folder.rglob("*")):
-        if len(files) >= max_files:
-            break
         if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
             continue
         try:
@@ -936,12 +976,16 @@ def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
             real = f.resolve(strict=True)
             rel = real.relative_to(folder)
         except (OSError, ValueError):
+            unreadable += 1
             continue
         parts = rel.parts
         if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
             continue
+        matched_total += 1
+        if len(files) >= max_files:
+            continue
         files.append(real)
-    return files
+    return files, matched_total, unreadable
 
 
 def _title_from_content(content: str, fallback: str) -> str:
@@ -1894,6 +1938,159 @@ class MemoryService:
             "results": results,
         }
 
+    def remember_many(self, facts: list[dict], *, workspace: str,
+                      repo: Optional[str] = None, session_id: Optional[str] = None,
+                      mtype: str = "semantic", scope: Optional[str] = None,
+                      source: str = "agent", trusted: bool = False,
+                      _local_agent_operator: bool = False,
+                      _ingress: str = "service") -> dict:
+        """Store a fan-out batch with within-batch resolution and evidence edges.
+
+        Unlike :meth:`remember_batch` (which loops ordinary single writes and can
+        leave duplicates across items), this runs the engine's batch assembly:
+        one shared transaction, each fact also resolved against its already-resolved
+        siblings, and afterwards batch siblings sharing a non-empty ``subject_key``
+        or ``provenance.source`` are wired with evidence-labeled ``related`` edges.
+        All-or-nothing: any engine failure rolls back every fact in the batch.
+
+        Each item accepts ``content`` (required) plus optional ``title``, ``mtype``,
+        ``importance``, ``keywords``, ``metadata``, ``subject_key``, ``claim_kind``,
+        and ``valid_from``. Provenance/trust is decided once for the whole batch —
+        a sub-agent fleet shares one origin.
+        """
+        if not isinstance(facts, list):
+            raise ValidationError("facts must be a list")
+        if not facts:
+            raise ValidationError("facts list must not be empty")
+        if len(facts) > 500:
+            raise ValidationError("facts list must not exceed 500 items")
+
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        default_mt = _enum(mtype, MemoryType, "mtype")
+        scope_was_omitted = scope is None
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
+        local_agent_provenance = (
+            _local_agent_provenance(source, ingress=_ingress)
+            if _local_agent_operator else None
+        )
+        provenance = (
+            _local_cli_provenance()
+            if _local_agent_operator and source == "cli" else
+            local_agent_provenance
+            if local_agent_provenance is not None else
+            _canonical_write_provenance(
+                source, trusted, raw_ingest=False, ingress=_ingress
+            )
+        )
+        wid = self._get_or_create_workspace(ws)
+        rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        session = self._session_for_write(session_id, wid, rid)
+        if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
+            rid = session.get("repo_id")
+            if rid:
+                row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (rid,)
+                ).fetchone()
+                rp = row["name"] if row else None
+        if sc == Scope.REPO and rid is None:
+            if scope_was_omitted:
+                sc = Scope.WORKSPACE
+            else:
+                raise ValidationError("repo scope requires a repo-backed session_id")
+
+        specs: list[FactSpec] = []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                raise ValidationError("each fact must be a dict")
+            content = _clean_text(
+                fact.get("content"), field="content", max_chars=MAX_CONTENT_CHARS
+            )
+            title = _clean_text(
+                fact.get("title", ""), field="title", max_chars=MAX_TITLE_CHARS,
+                required=False,
+            )
+            _reject_secret_capture((
+                ("content", content), ("title", title),
+                ("keywords", fact.get("keywords")),
+                ("metadata", fact.get("metadata")),
+                ("subject_key", fact.get("subject_key", "")),
+                ("claim_kind", fact.get("claim_kind", "")),
+            ))
+            mt = (
+                _enum(fact["mtype"], MemoryType, "mtype")
+                if fact.get("mtype") else default_mt
+            )
+            try:
+                importance = float(fact.get("importance", 0.0))
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError("importance must be a number")
+            if not math.isfinite(importance):
+                raise ValidationError("importance must be finite")
+            importance = max(0.0, min(1.0, importance))
+            valid_from = _optional_timestamp(
+                fact.get("valid_from"), field="valid_from"
+            )
+            evidence_source = _clean_text(
+                fact.get("evidence_source", ""), field="evidence_source",
+                max_chars=MAX_NAME_CHARS, required=False,
+            )
+            specs.append(FactSpec(
+                content=content,
+                title=title,
+                mtype=mt,
+                importance=importance,
+                keywords=_clean_keywords(fact.get("keywords")),
+                metadata={
+                    **_clean_metadata(fact.get("metadata")),
+                    "provenance": provenance,
+                },
+                subject_key=_clean_text(
+                    fact.get("subject_key", ""), field="subject_key",
+                    max_chars=MAX_TITLE_CHARS, required=False,
+                ),
+                claim_kind=_clean_text(
+                    fact.get("claim_kind", ""), field="claim_kind",
+                    max_chars=MAX_NAME_CHARS, required=False,
+                ),
+                valid_from=valid_from,
+                evidence_source=evidence_source or None,
+            ))
+
+        try:
+            results = self.engine.remember_many(
+                specs, workspace_id=wid, repo_id=rid, session_id=session_id,
+                scope=sc,
+            )
+        except ValueError as exc:
+            if str(exc).startswith("valid_from "):
+                raise ValidationError(str(exc)) from exc
+            if session_id and str(exc) in {
+                f"no session with id '{session_id}'",
+                "session_id does not belong to that workspace/repo",
+                "session_id is not active",
+            }:
+                raise ValidationError(str(exc)) from exc
+            raise
+        ops = [r.get("op", "") for r in results]
+        out = {
+            "workspace": ws, "repo": rp, "scope": sc.value, "stored": True,
+            "total": len(results), "ops": ops,
+            "results": [
+                {"id": r.get("id"), "op": r.get("op"),
+                 **({"reason": r["reason"]} if r.get("reason") else {}),
+                 **({"superseded": r["superseded"]}
+                    if r.get("superseded") is not None else {})}
+                for r in results
+            ],
+        }
+        self.store.record_receipt(
+            "remember_many", workspace_id=wid, repo_id=rid or "",
+            actor=provenance["source"], target_count=len(results),
+            status="batch", metadata={"scope": sc.value, "ops": ops},
+        )
+        return out
+
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",
                scope: Optional[str] = None, metadata: Optional[dict] = None,
@@ -2118,7 +2315,12 @@ class MemoryService:
                 metadata={**(extra_provenance or {}), "import_file": name},
             )
             return {"file": name, "id": r["id"], "op": r["op"]}
-        except ValidationError as exc:
+        except (ValidationError, ValueError, sqlite3.Error, RecursionError,
+                MemoryError) as exc:
+            # One bad file must degrade to a per-file error, not void the whole batch
+            # (e.g. sqlite3.OperationalError "database is locked" from a concurrent
+            # CLI/MCP writer, embedder ValueError, or a crafted deep-nested JSON upload
+            # blowing json.loads recursion).
             logger.info("uploaded resource import rejected (%s)", type(exc).__name__)
             return {"file": name, "error": "resource could not be imported"}
 
@@ -2179,7 +2381,9 @@ class MemoryService:
 
         folder = _resolve_import_root(raw_path)
         wid = self._get_or_create_workspace(ws)
-        files = _iter_import_files(folder, pattern, MAX_IMPORT_FILES)
+        files, matched_total, unreadable = _iter_import_files(
+            folder, pattern, MAX_IMPORT_FILES,
+        )
         total_bytes = 0
         for file in files:
             try:
@@ -2190,7 +2394,10 @@ class MemoryService:
             raise ValidationError(
                 f"import batch is too large (max {MAX_IMPORT_TOTAL_BYTES} bytes)"
             )
-        from engraphis.backends.resources import get_resource_extractor
+        from engraphis.backends.resources import (
+            ResourceExtractionError,
+            get_resource_extractor,
+        )
         resource_extractor = get_resource_extractor()
 
         imported, skipped, errors, derived_facts = 0, 0, 0, 0
@@ -2202,13 +2409,24 @@ class MemoryService:
                     details.append({"file": f.name, "error": "file too large"})
                     continue
                 resource = resource_extractor.extract_path(str(f))
-            except (OSError, ValueError) as exc:
+            except ResourceExtractionError as exc:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
+                logger.warning("folder import failed for one file (%s): %s",
+                               type(exc).__name__, exc)
+                errors += 1
+                from engraphis.core.documents import _safe_reason
+                details.append({"file": f.name, "error": _safe_reason(exc)})
+                continue
+            except (OSError, ValueError, RecursionError, MemoryError) as exc:
+                # One unreadable/oversized/pathological file must degrade to a per-file
+                # error, not void the whole batch with an unhandled 500.
                 logger.warning("folder import failed for one file (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": f.name, "error": "file could not be imported"})
+                reason = "file is locked or unreadable" if isinstance(exc, OSError) \
+                    else "file content could not be processed"
+                details.append({"file": f.name, "error": reason})
                 continue
             rel = f.relative_to(folder).as_posix()
             resource_meta = {
@@ -2251,10 +2469,27 @@ class MemoryService:
         self.store.audit(actor, "import_folder", wid,
                          f"{raw_path} ({imported} imported)")
         self.store.conn.commit()
-        return {"workspace": ws, "path": str(folder), "scanned": len(files),
+        truncated = matched_total > len(files)
+        if truncated:
+            warnings.insert(0, {
+                "file": "", "warnings": [
+                    f"folder contains {matched_total} matching files; imported the "
+                    f"first {len(files)} (max {MAX_IMPORT_FILES}). Narrow the path or "
+                    f"file pattern to reach the rest.",
+                ],
+            })
+        if unreadable:
+            warnings.append({
+                "file": "", "warnings": [
+                    f"{unreadable} file(s) could not be read (locked, or path too long)",
+                ],
+            })
+        return {"workspace": ws, "path": str(folder),
+                "scanned": len(files), "matched_total": matched_total,
+                "truncated": truncated, "unreadable": unreadable,
                 "imported": imported, "skipped": skipped, "errors": errors,
-                "derived_facts": derived_facts, "details": details[:50],
-                "warnings": warnings[:50]}
+                "derived_facts": derived_facts, "details": details[:200],
+                "warnings": warnings[:200]}
 
     @_rollback_service_transaction
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
@@ -2288,7 +2523,10 @@ class MemoryService:
             )
 
         wid = self._get_or_create_workspace(ws)
-        from engraphis.backends.resources import get_resource_extractor
+        from engraphis.backends.resources import (
+            ResourceExtractionError,
+            get_resource_extractor,
+        )
         resource_extractor = get_resource_extractor()
         imported, skipped, errors, derived_facts = 0, 0, 0, 0
         details, warnings = [], []
@@ -2312,13 +2550,24 @@ class MemoryService:
                 continue
             try:
                 resource = resource_extractor.extract_bytes(name, bytes(raw))
-            except ValueError as exc:
+            except ResourceExtractionError as exc:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
+                logger.info("uploaded resource extraction failed (%s): %s",
+                            type(exc).__name__, exc)
+                errors += 1
+                from engraphis.core.documents import _safe_reason
+                details.append({"file": name, "error": _safe_reason(exc)})
+                continue
+            except (OSError, ValueError, RecursionError, MemoryError) as exc:
+                # One unreadable/pathological upload must degrade to a per-file error,
+                # not void the whole batch with an unhandled 500.
                 logger.info("uploaded resource extraction failed (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": name, "error": "resource could not be imported"})
+                reason = "upload is locked or unreadable" if isinstance(exc, OSError) \
+                    else "upload content could not be processed"
+                details.append({"file": name, "error": reason})
                 continue
             resource_meta = {
                 **resource.metadata,
@@ -2360,7 +2609,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"workspace": ws, "scanned": len(files), "imported": imported,
                 "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
-                "details": details[:50], "warnings": warnings[:50]}
+                "details": details[:200], "warnings": warnings[:200]}
 
     # ── Universal local document import (v2 source manifest) ────────────────
     def _document_registered_target(
@@ -2770,6 +3019,7 @@ class MemoryService:
         clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
         if wid is None:
             raise KeyError(clean_id)
+        self._recover_stale_import_jobs()
         row = self.store.conn.execute(
             "SELECT * FROM jobs WHERE id=? AND workspace_id=? "
             "AND kind IN ('document_import','obsidian_import')",
@@ -3237,6 +3487,7 @@ class MemoryService:
         clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
         if wid is None:
             raise KeyError(clean_id)
+        self._recover_stale_import_jobs()
         row = self.store.conn.execute(
             "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='obsidian_import'",
             (clean_id, wid),
@@ -3677,6 +3928,8 @@ class MemoryService:
             "embedding_mode": result.embedding_mode,
             "degraded_reason": result.degraded_reason,
             "vector_search_ready": result.vector_search_ready,
+            "vector_index_backend": _vector_index_backend_label(self.engine.index),
+            "reranker_mode": _reranker_mode_label(self.engine.reranker),
         }
         out = {
             "query": query, "count": result.count,
@@ -7442,6 +7695,60 @@ class MemoryService:
             raise
         return len(rows)
 
+    def _recover_stale_import_jobs(self) -> int:
+        """Fail document/obsidian import jobs whose worker died with its process.
+
+        Import workers heartbeat per document batch (obsidian_import._update_job_progress),
+        so a stale heartbeat means the process died — daemon threads never survive a
+        restart. Mirrors _recover_stale_graph_jobs' lease semantics so a crashed wizard
+        import reports 'failed: worker_lease_expired' instead of polling as 'running'
+        forever.
+
+        Import jobs use a substantially longer lease (IMPORT_JOB_LEASE_SECONDS) than
+        graph-index workers: the per-batch heartbeat only advances between documents,
+        and a single large file (big PDF, OCR image, transcription) can legitimately
+        spend longer than the graph lease inside one parse/ingest. The heartbeat is
+        the progress-aware expiry marker — it resets the lease age whenever the job's
+        processed-files count advances, so a live mid-file worker is never failed.
+        """
+        now = time.time()
+        cutoff = now - IMPORT_JOB_LEASE_SECONDS
+        where = ("kind IN ('document_import','obsidian_import') "
+                 "AND state IN ('queued','running') "
+                 "AND COALESCE(heartbeat_at, created_at)<?")
+        rows = self.store.conn.execute(
+            f"SELECT id FROM jobs WHERE {where}", (cutoff,),
+        ).fetchall()
+        if not rows:
+            return 0
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
+        if owns_transaction:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The staleness predicate is repeated in the UPDATE so a worker that
+            # heartbeats or finishes between the SELECT above and the lock below
+            # is never falsely failed (mirrors _recover_stale_graph_jobs'
+            # in-transaction re-selection).
+            errors = json.dumps(
+                [{"code": "worker_lease_expired"}],
+                sort_keys=True, separators=(",", ":"),
+            )
+            recovered = 0
+            for row in rows:
+                cursor = self.store.conn.execute(
+                    "UPDATE jobs SET state='failed', errors=?, finished_at=?, "
+                    f"heartbeat_at=? WHERE id=? AND {where}",
+                    (errors, now, now, row["id"], cutoff),
+                )
+                recovered += max(0, int(cursor.rowcount))
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.commit()
+        except BaseException:
+            if owns_transaction and self.store.conn.transaction_owned_by_current_thread():
+                self.store.conn.rollback()
+            raise
+        return recovered
+
     def _assert_no_active_graph_job(self, *workspace_ids: str) -> None:
         for workspace_id in dict.fromkeys(value for value in workspace_ids if value):
             self._recover_stale_graph_jobs(workspace_id)
@@ -11052,6 +11359,22 @@ class MemoryService:
             scopes=[Scope.WORKSPACE, Scope.REPO, Scope.USER],
         )
         eligibility = self.store.prompt_eligibility_counts(eligibility_filter)
+
+        def _table_count(table: str) -> Optional[int]:
+            """Best-effort row count for an internal ledger table (None if unreadable)."""
+            try:
+                return int(
+                    conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                )
+            except Exception:
+                return None
+
+        # Additive health/observability counts; never part of the memory totals.
+        ledger_counts = {
+            "operation_receipts": _table_count("operation_receipts"),
+            "events": _table_count("events"),
+            "audit": _table_count("audit"),
+        }
         embedding = self.store.embedding_space_health(
             embedding_space_fingerprint(self.engine.embedder)
         )
@@ -11062,6 +11385,7 @@ class MemoryService:
             "schema_version": self.store.schema_version,
             "prompt_eligibility": eligibility,
             "embedding": embedding,
+            **ledger_counts,
         }
 
     def memory_health(self, *, workspace: str) -> dict:
