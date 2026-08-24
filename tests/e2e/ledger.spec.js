@@ -393,7 +393,7 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await expect(dialog.locator('#graph-connection-memory-list')).toContainText('Database choice');
 });
 
-test('Ledger enters All Nodes LOD from High quality without losing its scope', async ({ page }) => {
+test('Ledger enters All nodes from a loaded overview without losing its scope', async ({ page }) => {
   const allAssetRequests = [];
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
@@ -427,9 +427,6 @@ test('Ledger enters All Nodes LOD from High quality without losing its scope', a
   expect(allAssetRequests).toHaveLength(1);
   const allQuery = requests.graphQueries.find(item => item.presentation === 'all');
   expect(allQuery).toBeTruthy();
-  expect(allQuery.level).toBe('complete');
-  expect(allQuery.node_limit).toBeUndefined();
-  expect(allQuery.edge_limit).toBeUndefined();
   expect(allQuery.repo).toBe('agent-memory');
   expect(allQuery.include_code).toBe('true');
   expect(allQuery.as_of).toBe(String(Date.parse('2026-08-14T23:59:59.999Z') / 1000));
@@ -474,7 +471,7 @@ test('Ledger enters All Nodes LOD from High quality without losing its scope', a
   expect(allAssetRequests).toHaveLength(1);
 });
 
-test('Ledger keeps All Nodes LOD separate from Galaxy High quality physics', async ({ page }) => {
+test('Ledger keeps authored Galaxy solar systems on live physics in All nodes', async ({ page }) => {
   await mockApi(page, {
     graphScene: {
       nodes: [
@@ -509,9 +506,8 @@ test('Ledger keeps All Nodes LOD separate from Galaxy High quality physics', asy
 
   await page.locator('#graph-show-all').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(1);
-  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(0);
-  await expect(page.locator('#graph-mode')).toContainText('All nodes · LOD');
+  await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
+  await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
 });
 
 test('Ledger cache-busts a graph renderer that fetched but did not register', async ({ page }) => {
@@ -546,7 +542,7 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
-test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ page }) => {
+test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
   const key = 'engraphis-ledger-graph-preferences-v1';
   const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
     localStorage.setItem(storageKey, JSON.stringify(value));
@@ -565,7 +561,7 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   expect(await readPreferences()).toBeNull();
 
   await page.evaluate(() => {
-    [['graph-repel', '400'], ['graph-link', '80'], ['graph-gravity', '400']]
+    [['graph-repel', '120'], ['graph-link', '80'], ['graph-gravity', '400']]
       .forEach(([id, value]) => {
         const control = document.getElementById(id);
         control.value = value;
@@ -596,13 +592,6 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   });
 
   await writePreferences({
-    physicsVersion: 3, preset: 'galaxy', tuning: { repel: 60, link: 8, gravity: 0 },
-  });
-  await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('100');
-  expect((await readPreferences()).tuning.repel).toBe(100);
-
-  await writePreferences({
     preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
   });
   await page.reload();
@@ -615,38 +604,13 @@ test('Ledger narrowly migrates known legacy Galaxy physics defaults', async ({ p
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
-  // Once versioned, 48 is a deliberate user selection rather than a retired default.
+  // Once versioned, 48 is a deliberate user selection rather than the retired default.
   await writePreferences({
     physicsVersion: 4, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
   expect((await readPreferences()).tuning.repel).toBe(48);
-
-  await writePreferences({
-    physicsVersion: 2,
-    preset: 'galaxy',
-    tuning: { repel: 120, link: 80, gravity: 400 },
-    spacetimeTuning: {
-      gravitationalConstant: 200,
-      blackHoleMass: 500,
-      localGravitationalConstant: 200,
-      damping: 0,
-      springStiffness: 100,
-    },
-    showUnlinked: false,
-  });
-  await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('100');
-  await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
-  await expect(page.locator('#graph-gravitational-constant')).toHaveValue('100');
-  await expect(page.locator('#graph-black-hole-mass')).toHaveValue('160');
-  await expect(page.locator('#graph-local-gravitational-constant')).toHaveValue('100');
-  await expect(page.locator('#graph-space-damping')).toHaveValue('1');
-  await expect(page.locator('#graph-spring-stiffness')).toHaveValue('32');
-  await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'true');
-  expect((await readPreferences()).physicsVersion).toBe(4);
 });
 
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {

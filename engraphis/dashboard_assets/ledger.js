@@ -435,10 +435,17 @@
   }
 
   function ensureGraphAssets(loadAll = false) {
-    /* The complete All Nodes profile is an independent worker/WebGL renderer in every visual
-       preset, including Galaxy. Keeping this boundary strict prevents a complete 20k/200k
-       payload from entering the live High quality physics engine. */
-    if (loadAll) return ensureGraphAllAsset();
+    /* The complete profile is an independent worker/WebGL renderer. Galaxy is the exception:
+       its solar-system view needs the authoritative hierarchical orbit integrator, so a full
+       Galaxy request uses the quality engine with the complete payload instead of the static
+       all-node worker. Other full presets retain the worker/WebGL path and its 20k-node cap. */
+    if (loadAll && !graphIsGalaxy()) return ensureGraphAllAsset();
+    if (loadAll && graphIsGalaxy()) {
+      /* Load both candidates before the complete scene arrives. The factory decision below is
+         data-sensitive: an ordinary graph that merely uses the Galaxy preset keeps the worker,
+         while an authored star/planet scene gets the live hierarchical engine. */
+      return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
+    }
     const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
     if (!coreReady && !graphAssetsPromise) {
       const controller = new AbortController();
@@ -3277,14 +3284,20 @@
           state.graphSpacetimeOverlay = null;
         }
         if (state.graphEngine) state.graphEngine.destroy();
-        const graphFactory = fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
+        const galaxyQuality = fullGraph && graphIsGalaxy()
+          && data.nodes.some(node => node.anchor_role === 'community'
+            && (node.system_anchor_id !== undefined
+              || Number.isFinite(Number(node.galactic_radius))));
+        const graphFactory = galaxyQuality ? window.EngraphisGraph
+          : fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
         if (!graphFactory || typeof graphFactory.create !== 'function') {
           throw new Error(fullGraph
-            ? 'All Nodes LOD graph engine asset is unavailable'
+            ? galaxyQuality ? 'Galaxy graph engine is unavailable'
+              : 'all-node graph engine asset is unavailable'
             : 'graph engine asset is unavailable');
         }
         state.graphEngine = graphFactory.create(byId('graph-canvas'), {
-          renderMode: fullGraph ? 'all' : 'overview',
+          renderMode: galaxyQuality ? 'full' : fullGraph ? 'all' : 'overview',
           onNodeClick: item => openGraphConnections(item),
           onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
           onStats: stats => {
@@ -3341,7 +3354,7 @@
           graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
-        if (!fullGraph && window.EngraphisSpacetime
+        if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime
           && window.EngraphisSpacetime.create) {
           state.graphSpacetimeOverlay = window.EngraphisSpacetime.create(
             byId('graph-canvas'), state.graphEngine
