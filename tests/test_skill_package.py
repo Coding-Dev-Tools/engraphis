@@ -47,9 +47,9 @@ def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "ARCHITECTURE_V3.md").read_text(encoding="utf-8")
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    assert "former 34 direct tool names" in readme
-    assert "Classic 34-tool compatibility" in readme
-    assert "34-tool Classic compatibility server" in readme
+    assert "former 35 direct tool names" in readme
+    assert "Classic 35-tool compatibility" in readme
+    assert "35-tool Classic compatibility server" in readme
     assert "Smart MCP (9 tools) / Classic MCP (35 tools)" in architecture
     assert "Classic 35-tool inventory" in kilo
 

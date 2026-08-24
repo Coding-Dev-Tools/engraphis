@@ -403,6 +403,9 @@ class _FakeCloud(CloudFeatureClient):
         object.__setattr__(self, "uploaded", (workspace_id, snapshot))
         return {"generation": snapshot["generation"]}
 
+    def get_policy(self, workspace_id: str) -> dict:
+        return {"workspace_id": workspace_id, "enabled": True}
+
     def run_job(self, workspace_id: str, kind: str, generation: int, *,
                 wait_seconds: float = 20.0) -> dict:
         return {
@@ -421,6 +424,25 @@ def test_run_managed_job_only_sends_the_protocol_snapshot(monkeypatch) -> None:
     assert cloud.uploaded is not None
     assert cloud.uploaded[1]["excluded_secret_count"] == 1
     assert result["result"]["kind"] == "analytics"
+
+
+def test_run_managed_job_checks_entitlement_before_reserving_generation(monkeypatch) -> None:
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
+
+    class _LapsedCloud(_FakeCloud):
+        def get_policy(self, workspace_id: str) -> dict:
+            raise CloudFeatureError("Subscription is not active.", status=402)
+
+    service = _service()
+    cloud = _LapsedCloud()
+    with pytest.raises(CloudFeatureError, match="Subscription is not active"):
+        run_managed_job(service, "acme", "analytics", client=cloud, wait_seconds=0)
+
+    assert cloud.uploaded is None
+    reserved = service.store.conn.execute(
+        "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'managed_snapshot_generation:%'"
+    ).fetchone()[0]
+    assert reserved == 0
 
 
 def test_response_loss_retry_reuses_one_cost_bearing_job() -> None:

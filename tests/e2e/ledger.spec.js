@@ -460,7 +460,7 @@ test('Ledger enters All nodes from a loaded overview without losing its scope', 
   expect(allAccessibility.violations).toEqual([]);
 
   await page.locator('#graph-show-all').click();
-  await expect(page.locator('#graph-show-all')).toHaveText('Show all nodes');
+  await expect(page.locator('#graph-show-all')).toHaveText('See all nodes · LOD');
   await expect(page.locator('#graph-repo-filter')).toHaveAttribute('placeholder', 'Filter to a repository or topic…');
   await expect(page.locator('#graph-show-unlinked')).toBeEnabled();
   await expect(page.locator('#graph-show-unlinked')).toHaveAttribute('aria-pressed', 'false');
@@ -531,14 +531,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(first.searchParams.get('v')).toBe('20260819-v24-physics-final');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260814-galaxy-gravity-3');
+  expect(second.searchParams.get('v')).toBe('20260819-v24-physics-final');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -554,9 +554,9 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
 
   await mockApi(page);
   await page.goto('/');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -569,22 +569,22 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
       });
     document.getElementById('graph-reset-tuning').click();
   });
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
     layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
   });
   await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(2);
+  expect(migrated.physicsVersion).toBe(4);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
-  expect(migrated.tuning.repel).toBe(60);
+  expect(migrated.tuning.repel).toBe(100);
   expect(migrated.tuning.link).toBe(8);
   expect(migrated.tuning.gravity).toBe(0);
   expect(migrated.layers).toEqual({
@@ -599,14 +599,14 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(2);
+  expect(custom.physicsVersion).toBe(4);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
   // Once versioned, 48 is a deliberate user selection rather than the retired default.
   await writePreferences({
-    physicsVersion: 2, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    physicsVersion: 4, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
@@ -618,7 +618,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
     const nativeSetTimeout = window.setTimeout.bind(window);
     let shortenedGraphDeadline = false;
     window.setTimeout = (callback, delay, ...args) => {
-      const firstGraphDeadline = delay === 12_000 && !shortenedGraphDeadline;
+      const firstGraphDeadline = delay === 60_000 && !shortenedGraphDeadline;
       if (firstGraphDeadline) shortenedGraphDeadline = true;
       return nativeSetTimeout(callback, firstGraphDeadline ? 80 : delay, ...args);
     };
@@ -1228,8 +1228,8 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene'
       && url.searchParams.get('level') === 'overview'
-      && url.searchParams.get('node_limit') === '1000'
-      && url.searchParams.get('edge_limit') === '2000'
+      && url.searchParams.get('node_limit') === '1500'
+      && url.searchParams.get('edge_limit') === '3000'
       && !url.searchParams.has('connected_only');
   });
   await page.locator('.nav-item[data-view="relations"]').click();
@@ -1244,11 +1244,11 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.getByLabel('Size by')).toHaveValue('evidence_mass');
   await expect(page.getByLabel('Size by')).toBeDisabled();
   await expect(page.locator('#graph-repel-label')).toHaveText('Orbital speed');
-  await expect(page.locator('#graph-repel')).toHaveValue('60');
+  await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('48');
+  await expect(page.locator('#graph-gravity')).toHaveValue('96');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
@@ -1256,7 +1256,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'See all nodes · LOD' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   const paletteNotice = page.locator('#notice-banner');
