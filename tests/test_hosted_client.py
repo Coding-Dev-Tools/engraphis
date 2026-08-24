@@ -36,6 +36,7 @@ def test_upgrade_urls_are_hosted_metadata_only(monkeypatch):
     )
     assert hosted_client.required_plan("sync") == "pro"
     assert hosted_client.required_plan("team") == "team"
+    assert hosted_client.required_plan("compliance_export") == "team"
 
 
 @pytest.mark.parametrize("value", [

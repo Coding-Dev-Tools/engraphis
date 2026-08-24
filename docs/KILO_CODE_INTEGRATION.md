@@ -223,7 +223,7 @@ class, and the appropriate executor revalidates all of it before running.
 | `engraphis_conflict_review` | List pending/quarantined/conflicted records for review (read-only inbox). |
 
 `engraphis-mcp-classic` is only for an existing configuration that pins direct tool names. It
-preserves the former 34-tool surface below; new Kilo Code installations should keep the zero-config
+preserves the former 35-tool surface below; new Kilo Code installations should keep the zero-config
 Smart command shown above.
 
 ### Classic 35-tool inventory
