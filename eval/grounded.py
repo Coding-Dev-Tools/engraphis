@@ -10,6 +10,8 @@ rather than by vibes. Runs offline with the deterministic embedder.
 """
 from __future__ import annotations
 
+import sys
+
 from engraphis.core.engine import MemoryEngine
 
 FACTS = [
@@ -74,6 +76,15 @@ def main() -> None:
           f"({r['abstain_hits']}/{r['n_unanswerable']})")
     print(f"  decision accuracy      : {r['accuracy']:.3f}  "
           f"({r['grounded_hits'] + r['abstain_hits']}/{r['n_answerable'] + r['n_unanswerable']})\n")
+    # The fixture is deterministic: every answerable query must ground and every
+    # off-topic query must abstain, so accuracy is expected to be exactly 1.0.
+    if r["accuracy"] < 1.0:
+        print(
+            f"FLOOR VIOLATION: grounded-recall accuracy {r['accuracy']:.3f} "
+            f"< required 1.00 on the deterministic fixture",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

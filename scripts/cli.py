@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -38,18 +39,35 @@ def _emit_update_notice() -> None:
         pass
 
 
+class _ServiceStartupError(Exception):
+    """Marks a failure raised while constructing the MemoryService itself.
+
+    Command-phase failures of the same builtin types (a bad input path, a
+    locked database mid-operation) must not be mislabeled as startup problems,
+    so construction is wrapped in this dedicated marker and main() maps only
+    this type through _startup_error.
+    """
+
+    def __init__(self, original: BaseException) -> None:
+        self.original = original
+        super().__init__(str(original))
+
+
 def _service() -> MemoryService:
-    return MemoryService.create(
-        settings.db_path,
-        embed_model=settings.embed_model or None,
-        embed_revision=getattr(settings, "embed_revision", "") or None,
-        require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-        embed_dim=settings.embed_dim or 384,
-        vector_backend=settings.vector_backend,
-        rerank_model=getattr(settings, "rerank_model", "") or None,
-        rerank_revision=getattr(settings, "rerank_revision", "") or None,
-        extractor=settings.extractor,
-    )
+    try:
+        return MemoryService.create(
+            settings.db_path,
+            embed_model=settings.embed_model or None,
+            embed_revision=getattr(settings, "embed_revision", "") or None,
+            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+            embed_dim=settings.embed_dim or 384,
+            vector_backend=settings.vector_backend,
+            rerank_model=getattr(settings, "rerank_model", "") or None,
+            rerank_revision=getattr(settings, "rerank_revision", "") or None,
+            extractor=settings.extractor,
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised as the startup marker
+        raise _ServiceStartupError(exc) from exc
 
 
 def _metadata_object(value: str) -> dict:
@@ -325,6 +343,30 @@ def cmd_review_approve(args: argparse.Namespace) -> None:
     finally:
         service.store.close()
 
+def _startup_error(exc: BaseException) -> str:
+    """Map a service-startup failure to one redacted, actionable CLI line.
+
+    Mirrors scripts/start_dashboard.py:_startup_error. Messages stay value-free
+    where third-party text could embed credentials or private paths; the
+    configured database path itself is owner-visible and safe to name.
+    """
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return ("A required dependency is missing. Run engraphis-init --check to see "
+                "which optional extra provides it.")
+    if isinstance(exc, sqlite3.Error):
+        return ("Could not open the Engraphis database — run engraphis-init --check "
+                "to verify the configured database path.")
+    if isinstance(exc, OSError):
+        return (f"File or permission error while starting the service "
+                f"({type(exc).__name__}). Run engraphis-init --check for diagnostics.")
+    if isinstance(exc, RuntimeError):
+        # Backend/provider RuntimeErrors can embed proxy credentials, certificate
+        # paths, or endpoint URLs. Redact to the exception type so operator output
+        # stays value-free.
+        return ("Service initialization failed during backend/model setup. "
+                "Run engraphis-init --check for diagnostics.")
+    return f"Command failed ({type(exc).__name__})."
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -400,11 +442,23 @@ def main() -> None:
     p.set_defaults(func=cmd_review_approve)
 
     args = parser.parse_args()
-    _emit_update_notice()
     try:
         args.func(args)
     except ValidationError as exc:
         print(f"Error: {exc}")
+        sys.exit(1)
+    except _ServiceStartupError as exc:
+        # Construction-phase failures keep the redacted, actionable
+        # startup guidance (missing extra, bad database path, backend setup).
+        print(f"Error: {_startup_error(exc.original)}")
+        sys.exit(1)
+    except (sqlite3.Error, OSError, ImportError, RuntimeError) as exc:
+        # Command-phase failures of the same builtin types: the service is up,
+        # so startup advice would mislead. Stay value-free — type name plus a
+        # bare strerror never echoes the offending path or credential text.
+        detail = getattr(exc, "strerror", "") or ""
+        suffix = f": {detail}" if detail else ""
+        print(f"Error: command failed ({type(exc).__name__}){suffix}.")
         sys.exit(1)
 
 

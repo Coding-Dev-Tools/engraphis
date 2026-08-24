@@ -221,6 +221,7 @@ engraphis-graph-server = "scripts.graph_server:main"
 engraphis-import = "scripts.importer:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
+engraphis-sync = "scripts.sync:main"
 
 [tool.setuptools]
 include-package-data = false

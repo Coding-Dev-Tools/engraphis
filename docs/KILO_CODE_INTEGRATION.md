@@ -226,11 +226,12 @@ class, and the appropriate executor revalidates all of it before running.
 preserves the former 34-tool surface below; new Kilo Code installations should keep the zero-config
 Smart command shown above.
 
-### Classic 34-tool inventory
+### Classic 35-tool inventory
 
 | Category | Tool | What it does |
 |---|---|---|
 | **Write** | `engraphis_remember` | Store a fact; deterministically resolved to add / reinforce (noop) / supersede (invalidate). |
+| Write | `engraphis_remember_many` | Store a fan-out batch of facts in one transaction; within-batch dedup/supersession, plus evidence-labeled edges between siblings sharing a `subject_key` or declared `evidence_source`. |
 | Write | `engraphis_record_event` | Append one raw occurrence to an event ledger; event rows are not recalled, deduplicated, or consolidated as memories. |
 | Write | `engraphis_link` | Explicitly connect two related memories (e.g. a bug ↔ its fix). |
 | Write | `engraphis_ingest` | Store raw/undistilled text; extracts discrete facts first when an LLM extractor is configured. |
