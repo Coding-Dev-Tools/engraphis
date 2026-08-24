@@ -279,7 +279,7 @@ globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT
 globalThis.GHILITE = globalThis.GHOVERSET = null;
 globalThis.GRAPH_FULL = scenario === 'all-loaded' || scenario === 'all-runtime-failed';
 if (globalThis.GRAPH_FULL) globalThis.EngraphisGraph = { create() {} };
-if (scenario === 'all-runtime-failed') globalThis.EngraphisAllGraph = { create() {} };
+if (scenario === 'all-runtime-failed') globalThis.EngraphisEveryGraph = { create() {} };
 /* All mode intentionally has no vendor global: its renderer must remain self-contained. */
 if (!globalThis.GRAPH_FULL) globalThis.ForceGraph = function () {};
 
@@ -295,7 +295,7 @@ if (scenario === 'all-runtime-failed') {
   /* loadGraphEngine(true) chains the already-ready core through one microtask before it
      requests the optional all-node asset. */
   Promise.resolve().then(() => {
-    globalThis.EngraphisAllGraph = { create() {} }; pending.onload(); finish();
+    globalThis.EngraphisEveryGraph = { create() {} }; pending.onload(); finish();
   });
 } else {
   if (scenario === 'loads' || scenario === 'classic') {
@@ -409,7 +409,7 @@ def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
     # A 200 that never registers the global is a corrupt asset, not a success.
     assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
     assert "ALL_GRAPH_ENGINE_LOADING.catch(()=>{})" in source
-    assert "graphFull&&typeof EngraphisAllGraph==='undefined'" in source
+    assert "graphFull&&typeof EngraphisEveryGraph==='undefined'" in source
 
 
 def test_force_graph_loader_rejects_a_success_without_the_vendor_global() -> None:

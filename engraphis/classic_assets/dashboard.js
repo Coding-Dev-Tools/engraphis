@@ -1224,12 +1224,12 @@ function loadForceGraph(){
 }
 let GRAPH_ENGINE_LOADING=null,ALL_GRAPH_ENGINE_LOADING=null;
 function loadAllGraphEngine(){
- if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
+ if(typeof EngraphisEveryGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
    const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260823-every-19';
-   script.onload=()=>{typeof EngraphisAllGraph==='undefined'?reject(new Error('All-node graph asset loaded without registering EngraphisAllGraph')):resolve()};
-   script.onerror=()=>reject(new Error('All-node graph asset could not load'));
+   script.onload=()=>{typeof EngraphisEveryGraph==='undefined'?reject(new Error('Every-node graph asset loaded without registering EngraphisEveryGraph')):resolve()};
+   script.onerror=()=>reject(new Error('Every-node graph asset could not load'));
    document.head.appendChild(script);
   });
   ALL_GRAPH_ENGINE_LOADING.catch(()=>{});
@@ -1264,7 +1264,7 @@ function graphRender(fit=true,reheat=true){
  const graphFull=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
     `?graph-engine=next` deep link costs one round trip rather than two. */
- const engineMissing=typeof EngraphisGraph==='undefined'||(graphFull&&typeof EngraphisAllGraph==='undefined');
+ const engineMissing=typeof EngraphisGraph==='undefined'||(graphFull&&typeof EngraphisEveryGraph==='undefined');
  /* All mode owns a dedicated bounded renderer and must remain available after a quality-renderer
     runtime failure. The quality failure latch only authorizes the small legacy overview. */
  const enginePending=(graphFull||(!GRAPH_ENGINE_FAILED&&graphEngineEnabled()))&&engineMissing?loadGraphEngine(graphFull):null;
