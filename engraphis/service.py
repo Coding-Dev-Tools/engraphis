@@ -8515,8 +8515,10 @@ class MemoryService:
             "), visibility_groups AS ("
             "SELECT visibility_edge.repo_id, visibility_edge.src, visibility_edge.dst, "
             "MAX(CASE "
-            "WHEN visibility_support.edge_id IS NULL THEN 1 "
-            "WHEN visibility_memory.id IS NOT NULL "
+            "WHEN NOT EXISTS (SELECT 1 FROM edge_supports visibility_any_support "
+            "WHERE visibility_any_support.edge_id=visibility_edge.id) THEN 1 "
+            "WHEN visibility_support.edge_id IS NOT NULL "
+            "AND visibility_memory.id IS NOT NULL "
             "AND COALESCE(visibility_memory.scope, 'workspace')!='session' THEN 1 "
             "ELSE 0 END) AS public_edge "
             "FROM edges visibility_edge "
@@ -8526,14 +8528,62 @@ class MemoryService:
             "ON visibility_dst.id=visibility_edge.dst "
             "LEFT JOIN edge_supports visibility_support "
             "ON visibility_support.edge_id=visibility_edge.id "
+        )
+        # A live scene must count only the same temporal edge/support/memory rows
+        # that the later edge query can render. History intentionally keeps the
+        # broader public relation set so closed rows remain available as ghosts.
+        if not include_history:
+            visibility_sql += (
+                "AND (visibility_support.valid_from IS NULL "
+                "OR visibility_support.valid_from<=?) "
+                "AND (visibility_support.valid_to IS NULL "
+                "OR ?<visibility_support.valid_to "
+                "OR (visibility_support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<visibility_support.valid_to_recorded_at)) "
+                "AND (visibility_support.ingested_at IS NULL "
+                "OR visibility_support.ingested_at<=?) "
+                "AND (visibility_support.expired_at IS NULL "
+                "OR ?<visibility_support.expired_at) "
+            )
+            visibility_params.extend((t, t, t, known_t, known_t))
+        visibility_sql += (
             "LEFT JOIN memories visibility_memory "
             "ON visibility_memory.id=visibility_support.memory_id "
-            "WHERE visibility_edge.workspace_id=? "
         )
+        if not include_history:
+            visibility_sql += (
+                "AND visibility_memory.workspace_id=? "
+                "AND (visibility_memory.valid_from IS NULL "
+                "OR visibility_memory.valid_from<=?) "
+                "AND (visibility_memory.valid_to IS NULL "
+                "OR ?<visibility_memory.valid_to "
+                "OR (visibility_memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<visibility_memory.valid_to_recorded_at)) "
+                "AND (visibility_memory.ingested_at IS NULL "
+                "OR visibility_memory.ingested_at<=?) "
+                "AND (visibility_memory.expired_at IS NULL "
+                "OR ?<visibility_memory.expired_at) "
+            )
+            visibility_params.extend((wid, t, t, t, known_t, known_t))
+        visibility_sql += "WHERE visibility_edge.workspace_id=? "
         visibility_params.append(wid)
         if repo_id:
             visibility_sql += "AND (visibility_edge.repo_id=? OR visibility_edge.repo_id IS NULL) "
             visibility_params.append(repo_id)
+        if not include_history:
+            visibility_sql += (
+                "AND (visibility_edge.valid_from IS NULL "
+                "OR visibility_edge.valid_from<=?) "
+                "AND (visibility_edge.valid_to IS NULL "
+                "OR ?<visibility_edge.valid_to "
+                "OR (visibility_edge.valid_to_recorded_at IS NOT NULL "
+                "AND ?<visibility_edge.valid_to_recorded_at)) "
+                "AND (visibility_edge.ingested_at IS NULL "
+                "OR visibility_edge.ingested_at<=?) "
+                "AND (visibility_edge.expired_at IS NULL "
+                "OR ?<visibility_edge.expired_at) "
+            )
+            visibility_params.extend((t, t, t, known_t, known_t))
         visibility_sql += (
             "GROUP BY visibility_edge.id, visibility_edge.repo_id, "
             "visibility_edge.src, visibility_edge.dst) "

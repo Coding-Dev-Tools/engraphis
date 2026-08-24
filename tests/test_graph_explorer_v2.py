@@ -3871,6 +3871,19 @@ def test_visibility_classification_caps_edge_scan_without_giant_allocation(monke
         service.graph_scene(workspace="acme", level="complete", include_memory_nodes=False)
 
 
+def test_live_visibility_cap_ignores_closed_relations(monkeypatch):
+    """Closed history must not consume the ordinary live visibility budget."""
+    service, _alpha, _beta, _gamma = _seed_service()
+    service.store.invalidate_edge("edge_ab", at=time.time())
+    monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
+
+    scene = service.graph_scene(
+        workspace="acme", level="complete", include_memory_nodes=False,
+    )
+
+    assert {edge["id"] for edge in scene["edges"]} == {"edge_bg"}
+
+
 def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
     """Private-only groups are filtered before the public visibility cap."""
     service = MemoryService.create(":memory:", graph_extractor="none")
