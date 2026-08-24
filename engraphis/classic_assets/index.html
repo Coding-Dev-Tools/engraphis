@@ -6,7 +6,7 @@
 <link rel="icon" type="image/x-icon" href="/classic-assets/engraphis.ico">
 <link rel="icon" type="image/png" sizes="32x32" href="/classic-assets/favicon-32.png">
 <title>Engraphis</title>
-<link rel="stylesheet" href="/classic-assets/dashboard.css?v=20260810-galaxy-gravity">
+<link rel="stylesheet" href="/classic-assets/dashboard.css?v=20260815-merge-ready-1">
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -147,14 +147,13 @@
 <label class="gx-chip"><input type="checkbox" id="graph-include-code" data-onchange="h24">Overlay code</label>
 <div data-csp-style="s25">
 <input class="input" id="graph-search" placeholder="Find entity…" data-onkeydown="h25" data-csp-style="s26">
-<button class="gx-io" title="Fit to view" data-onclick="h26">⤢</button>
-<button class="gx-io" title="Re-run layout" data-onclick="h27">↻</button>
-<button class="gx-io" title="Reload data" data-onclick="h28">⟳</button>
+<button class="gx-io" title="Fit to view" aria-label="Fit to view" data-onclick="h26">⤢</button>
+<button class="gx-io" title="Re-run layout" aria-label="Re-run layout" data-onclick="h27">↻</button>
+<button class="gx-io" title="Reload data" aria-label="Reload data" data-onclick="h28">⟳</button>
 </div>
 </div>
 <div class="gx-body">
 <label class="gx-chip" data-csp-style="s197" title="Include entities that have no relations (unlinked nodes). Shown by default."><input type="checkbox" id="graph-show-iso" data-onchange="h49" checked><span class="gx-dot" data-csp-style="s198"></span>Show unlinked nodes</label>
-<button class="btn btn-ghost btn-sm" id="graph-show-all" type="button" data-onclick="h152" aria-pressed="false" title="Load every node, including unconnected entities, for this graph view">Show all nodes</button>
 <div class="gx-h">Layout</div>
 <div class="gx-cards">
 <button class="gx-card" data-preset-card="compact" data-onclick="h29"><canvas class="gx-thumb" data-preset="compact" width="76" height="48"></canvas><span>Compact</span></button>
@@ -350,6 +349,6 @@
      graph view. dashboard.js fetches both on demand from graphRender(); see loadForceGraph()
      and loadGraphEngine(). scripts/externalize_dashboard_assets.py enforces both halves:
      they stay out of this file, and the lazy references still have to resolve. -->
-<script src="/classic-assets/dashboard.js?v=20260819-tuned-physics-final"></script>
+<script src="/classic-assets/dashboard.js?v=20260815-merge-ready-1"></script>
 </body>
 </html>
