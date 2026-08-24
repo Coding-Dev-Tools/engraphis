@@ -18,6 +18,7 @@
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
+    graphDataPreset: 'galaxy',
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
     graphDataAsOf: null,
@@ -175,6 +176,7 @@
     radial: 'Radial',
     constellation: 'Constellation',
     galaxy: 'Galaxy gravity',
+    every: 'Every node',
   };
   const GRAPH_STYLE_NOTES = {
     cyber: 'Iridescent PVD over graphite — cyan, violet, and magenta across each node.',
@@ -418,12 +420,12 @@
   }
 
   function ensureGraphAllAsset() {
-    if (window.EngraphisAllGraph) return Promise.resolve();
+    if (window.EngraphisEveryGraph) return Promise.resolve();
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-all.js?v=20260815-merge-ready-1'),
-        'EngraphisAllGraph', controller.signal,
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260823-every-19'),
+        'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
       graphAllAssetsController = controller;
@@ -435,10 +437,16 @@
   }
 
   function ensureGraphAssets(loadAll = false) {
-    /* Complete scenes always use the worker/WebGL renderer. Galaxy hierarchy is already
-       encoded in canonical server coordinates; loading ForceGraph here would restore the
-       duplicate live simulation that Show all is specifically designed to avoid. */
-    if (loadAll) return ensureGraphAllAsset();
+    /* The complete profile is an independent worker/WebGL renderer. Galaxy is the exception:
+       its solar-system view needs the authoritative hierarchical orbit integrator, so a full
+       Galaxy request uses the quality engine with the complete payload instead of the static
+       all-node worker. The factory decision is data-sensitive, not toolbar-sensitive: the
+       Every-node chip changes the preset to "every" before the scene arrives, and a fast click
+       can race the overview load. Keep both candidates available so an authored star/planet
+       scene cannot select an engine whose asset is still in flight. */
+    if (loadAll) {
+      return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
+    }
     const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
     if (!coreReady && !graphAssetsPromise) {
       const controller = new AbortController();
@@ -1135,6 +1143,7 @@
     state.workspace = name;
     state.graphWorkspace = '';
     state.graphData = null;
+    state.graphDataPreset = 'galaxy';
     state.graphDataIncludeCode = false;
     state.graphDataShowUnlinked = false;
     state.graphDataRepo = '';
@@ -2031,13 +2040,18 @@
     }));
   }
 
+  function graphEndpoint(value) {
+    if (value && typeof value === 'object') return value.id ?? value;
+    return value;
+  }
+
   function graphLinks(payload) {
     const source = payload.edges || payload.links || [];
     return source.map((item, index) => ({
       ...item,
       id: item.id || `edge-${index}`,
-      source: item.from || (item.source && (item.source.id || item.source)),
-      target: item.to || (item.target && (item.target.id || item.target)),
+      source: item.from ?? graphEndpoint(item.source),
+      target: item.to ?? graphEndpoint(item.target),
       label: item.label || item.relation || 'related',
       layer: item.layer || 'semantic',
       valid_from: item.valid_from,
@@ -2049,7 +2063,8 @@
       ghost: item.ghost === true,
       bridge: item.bridge === true,
       visible_by_default: item.visible_by_default !== false,
-    })).filter(item => item.source && item.target);
+    })).filter(item => item.source !== undefined && item.source !== null
+      && item.target !== undefined && item.target !== null);
   }
 
   function revealGraphNode(id, label = 'Selected entity') {
@@ -2159,7 +2174,7 @@
   }
 
   async function showGraphConnectionMemories(item, includeHistory = false) {
-    if (!item || !item.id || !state.workspace) return;
+    if (!item || item.id === undefined || item.id === null || !state.workspace) return;
     cancelGraphConnectionMemoryLoad();
     const request = ++state.graphConnectionsRequest;
     const workspace = state.workspace;
@@ -2235,8 +2250,12 @@
   }
 
   function openGraphConnections(item) {
-    if (!item || !item.id) return;
+    if (!item || item.id === undefined || item.id === null) return;
     cancelGraphConnectionMemoryLoad();
+    state.graphConnectionsFocusId = String(item.id);
+    state.graphConnectionsFocusLabel = item.name || item.label || item.id;
+    const focusButton = byId('graph-connections-focus');
+    if (focusButton) focusButton.hidden = !state.graphEngine;
     const dialog = byId('graph-connections-dialog');
     const entries = graphConnectionEntries(item);
     const title = item.name || item.label || item.id;
@@ -2295,7 +2314,7 @@
     ['graph-min-degree', 'graph-tune-min-degree', 'graph-collapse', 'graph-depth',
       'graph-show-unlinked', 'graph-flow', 'graph-flow-speed'].forEach(id => {
       const control = byId(id);
-      if (control) control.disabled = false;
+      if (control) { control.disabled = false; control.title = ''; }
     });
     all('[data-graph-layer="code"]').forEach(control => {
       control.disabled = false;
@@ -2303,6 +2322,16 @@
         ? 'Choose an exact repository first, then add its code overlay within the All Nodes capacity.'
         : '';
     });
+    /* Focus-depth and auto-collapse are not implemented in the Every-node engine yet.
+       Disable them honestly instead of leaving controls that silently do nothing. */
+    if (full && byId('graph-preset').value === 'every') {
+      ['graph-collapse', 'graph-depth'].forEach(id => {
+        const control = byId(id);
+        if (!control) return;
+        control.disabled = true;
+        control.title = 'Not yet available in the Every-node view.';
+      });
+    }
     const lodNote = byId('graph-lod-note');
     if (lodNote) lodNote.hidden = !full;
     byId('graph-reheat').textContent = full ? 'Reflow layout' : 'Reheat layout';
@@ -2316,12 +2345,6 @@
     updateGraphGalaxyControls();
     const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Galaxy gravity';
     byId('graph-mode').textContent = `${full ? 'All nodes · LOD' : 'High quality'} · ${preset}`;
-    const toggle = byId('graph-show-all');
-    if (toggle) {
-      toggle.textContent = 'All nodes';
-      toggle.setAttribute('aria-pressed', String(full));
-      toggle.title = full ? 'Return to the High quality graph' : `Load up to ${GRAPH_ALL_NODE_LIMIT.toLocaleString()} entities and ${GRAPH_ALL_EDGE_LIMIT.toLocaleString()} relationships with progressive LOD rendering`;
-    }
   }
 
   function graphIsGalaxy() {
@@ -3154,11 +3177,13 @@
   }
 
   function setGraphLoadControlsBusy(busy, disableRetry = true) {
-    const controls = disableRetry ? ['graph-show-all', 'graph-retry'] : ['graph-show-all'];
+    const controls = disableRetry ? ['graph-retry'] : [];
     controls.forEach(id => {
       const control = byId(id);
       if (control) control.disabled = busy;
     });
+    const every = document.querySelector('[data-graph-preset-choice="every"]');
+    if (every) every.disabled = busy;
     const retry = byId('graph-retry');
     if (retry && ((busy && disableRetry) || !busy)) {
       retry.textContent = busy ? 'Reloading graph…' : 'Reload data';
@@ -3290,10 +3315,10 @@
         candidateHost = null;
       };
       const timeout = window.setTimeout(() => {
-        if (!fullGraph && (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime)) {
+        if (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime) {
           releaseGraphAssetsAttempt(graphAssetsPromise);
         }
-        if (fullGraph && !window.EngraphisAllGraph) {
+        if (fullGraph && !window.EngraphisEveryGraph) {
           releaseGraphAllAssetsAttempt(graphAllAssetsPromise);
         }
         if (!controller.signal.aborted) controller.abort();
@@ -3361,7 +3386,15 @@
         candidateHost.classList.add('graph-canvas-candidate');
         candidateHost.setAttribute('aria-hidden', 'true');
         oldHost.insertAdjacentElement('afterend', candidateHost);
-        const graphFactory = fullGraph ? window.EngraphisAllGraph : window.EngraphisGraph;
+        /* Authored-Galaxy detection must key off scene markers, not the toolbar preset:
+           entering Every via its chip sets the preset to 'every', but a complete scene
+           with system anchors still needs the hierarchical orbit engine and overlay. */
+        const galaxyQuality = fullGraph
+          && data.nodes.some(node => node.anchor_role === 'community'
+            && (node.system_anchor_id !== undefined
+              || Number.isFinite(Number(node.galactic_radius))));
+        const graphFactory = galaxyQuality ? window.EngraphisGraph
+          : fullGraph ? window.EngraphisEveryGraph : window.EngraphisGraph;
         if (!graphFactory || typeof graphFactory.create !== 'function') {
           throw new Error(fullGraph
             ? 'all-node graph engine asset is unavailable'
@@ -3433,12 +3466,12 @@
         }, false, false);
         candidateEngine.setData(data);
         candidateEngine.freeze(fullGraph ? false : state.graphFrozen);
-        if (!fullGraph && window.EngraphisSpacetime
+        if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime
           && window.EngraphisSpacetime.create) {
           candidateOverlay = window.EngraphisSpacetime.create(
             candidateHost, candidateEngine
           );
-          candidateOverlay.setEnabled(graphIsGalaxy());
+          candidateOverlay.setEnabled(galaxyQuality || graphIsGalaxy());
         }
         if (typeof candidateEngine.whenReady === 'function') {
           await Promise.race([candidateEngine.whenReady(), timeoutPromise]);
@@ -3459,6 +3492,7 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
+        state.graphDataPreset = byId('graph-preset').value;
         state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
@@ -3500,9 +3534,14 @@
           : fullGraph && (error.status === 413 || error.code === 'GRAPH_CAPACITY')
             ? `All nodes exceed the server capacity. Enter an exact repository filter or reduce the workspace graph. (${error.message})`
           : `Graph unavailable: ${error.message}. Choose Reload data to try again.`;
-        if (state.graphData && state.graphDataMode !== targetMode) {
-          state.graphMode = state.graphDataMode;
+        if (state.graphData) {
+          if (state.graphDataMode !== targetMode) state.graphMode = state.graphDataMode;
+          /* The toolbar preset changes before a replacement request begins. Restore the
+             committed preset together with the committed renderer so a failed Every-node
+             transition cannot leave aria-pressed and the active engine disagreeing. */
+          byId('graph-preset').value = state.graphDataPreset || 'galaxy';
           updateGraphModeControls();
+          syncGraphChoices();
         }
         // Restore the committed renderer's freeze/overlay state. The old engine survived
         // because we never mutated state.graphEngine on the failure path.
@@ -4663,6 +4702,67 @@
   });
   all('[data-graph-preset-choice]').forEach(control => control.addEventListener('click', () => {
     const preset = control.dataset.graphPresetChoice;
+    /* Every node is its own presentation: selecting the Every node chip loads the
+       complete LOD scene; the Show-all toggle remains the canonical exit that
+       restores overview filters. Other layout presets while in Every-node re-run
+       the seeded Every-node layout without leaving the presentation. */
+    if (preset === 'every') {
+      if (state.graphMode !== 'full') {
+        byId('graph-preset').value = preset;
+        clearGraphSavedView();
+        syncGraphChoices();
+        saveGraphPreferences();
+        /* Every node means every node: entering the map clears the unlinked/degree
+           filters that the overview uses, but remembers them so leaving restores the
+           person's overview exactly as they had configured it. */
+        if (!state.everyPriorFilters) {
+          state.everyPriorFilters = {
+            minDegree: Number(byId('graph-min-degree').value) || 0,
+            unlinked: byId('graph-show-unlinked').getAttribute('aria-pressed') === 'true',
+          };
+        }
+        setGraphMinDegree(0, false);
+        setGraphShowUnlinked(true, false);
+        cancelGraphRepositoryReload();
+        state.graphMode = 'full';
+        updateGraphModeControls();
+        loadGraph({ force: true });
+      } else {
+        // Clicking Every node while already in Every-node exits back to overview,
+        // mirroring the old Show-all toggle but now via the layout chip.
+        if (state.everyPriorFilters) {
+          const prior = state.everyPriorFilters;
+          state.everyPriorFilters = null;
+          setGraphMinDegree(prior.minDegree, false);
+          setGraphShowUnlinked(prior.unlinked, false);
+        }
+        byId('graph-preset').value = 'galaxy';
+        cancelGraphRepositoryReload();
+        state.graphMode = 'overview';
+        clearGraphSavedView();
+        syncGraphChoices();
+        saveGraphPreferences();
+        updateGraphModeControls();
+        loadGraph({ force: true });
+      }
+      return;
+    }
+    if (state.graphMode === 'full') {
+      byId('graph-preset').value = preset;
+      clearGraphSavedView();
+      syncGraphChoices();
+      saveGraphPreferences();
+      if (state.graphEngine && state.graphEngine.setPreset) {
+        const result = state.graphEngine.setPreset(preset);
+        if (result && typeof result === 'object') syncGraphTuning(result);
+      } else {
+        syncGraphTuning(graphPresetTuning(preset));
+      }
+      updateGraphModeControls();
+      if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
+      if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+      return;
+    }
     const resumeLayout = state.graphFrozen;
     byId('graph-preset').value = preset;
     if (state.graphEngine && resumeLayout) {
@@ -4717,11 +4817,6 @@
     clearGraphSavedView();
     saveGraphPreferences();
     if (state.graphMode !== 'full') loadGraph({ force: true });
-  });
-  byId('graph-show-all').addEventListener('click', () => {
-    cancelGraphRepositoryReload();
-    state.graphMode = state.graphMode === 'full' ? 'overview' : 'full';
-    loadGraph({ force: true });
   });
   byId('graph-tune-min-degree').addEventListener('input', event => {
     setGraphMinDegree(event.target.value);
@@ -4834,6 +4929,12 @@
     exportGraphJson();
   });
   byId('graph-connections-close').addEventListener('click', closeGraphConnections);
+  byId('graph-connections-focus').addEventListener('click', () => {
+    const id = state.graphConnectionsFocusId;
+    if (!id) return;
+    closeGraphConnections();
+    revealGraphNode(id, state.graphConnectionsFocusLabel || 'Selected entity');
+  });
   byId('graph-connections-dialog').addEventListener('click', event => {
     if (event.target === event.currentTarget) closeGraphConnections();
   });
