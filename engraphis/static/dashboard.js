@@ -1222,7 +1222,7 @@ function loadForceGraph(){
  });
  return FORCE_GRAPH_LOADING;
 }
- let GRAPH_ENGINE_LOADING=null,ALL_GRAPH_ENGINE_LOADING=null;
+let GRAPH_ENGINE_LOADING=null,ALL_GRAPH_ENGINE_LOADING=null;
 function loadAllGraphEngine(){
  if(typeof EngraphisAllGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
