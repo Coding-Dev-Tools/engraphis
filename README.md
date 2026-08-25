@@ -16,7 +16,7 @@
   <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
 
-**Grounded, not guessed.** Memory with receipts. Local by default. [Explore the proof gallery](https://github.com/Coding-Dev-Tools/engraphis/tree/main/docs/advertising) or [read the campaign guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/advertising/campaign.md).
+**Grounded, not guessed.** Memory with receipts. Local by default.
 
 ---
 

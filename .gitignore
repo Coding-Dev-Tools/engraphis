@@ -132,3 +132,8 @@ uv.lock
 /stats_pm2.txt
 /venv_status.txt
 /r3.txt
+
+# Local Command Code session-transcript analysis prompts — inspect private
+# ~/.commandcode/ session data, never commit these.
+/pROMPT_SESSION_TRANSCRIPT_ANALYSIS.md
+/session_transcript_query_prompt.md
