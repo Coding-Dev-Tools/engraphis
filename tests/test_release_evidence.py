@@ -1143,6 +1143,30 @@ def test_release_evidence_accepts_grype_0110_nested_db_status_shape(tmp_path):
     }
 
 
+def test_release_evidence_rejects_grype_0110_database_marked_invalid(tmp_path):
+    root = _root(tmp_path)
+    dist = _dist(root)
+    inputs = _release_inputs(root, dist)
+    report = json.loads(inputs["image_scan"].read_text(encoding="utf-8"))
+    report["descriptor"]["db"] = {
+        "status": {
+            "schemaVersion": "v6.1.9",
+            "from": (
+                "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.9_"
+                "2026-08-25T00:17:00Z_1787638635.tar.zst"
+                "?checksum=sha256%3A" + "f" * 64
+            ),
+            "built": "2026-08-25T06:17:15Z",
+            "path": "/home/runner/.cache/grype/db/6/vulnerability.db",
+            "valid": False,
+        },
+    }
+    inputs["image_scan"].write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(EvidenceError, match="marked invalid"):
+        _build(root, dist, inputs=inputs)
+
+
 def test_repair_run_candidates_are_newest_first_and_bound_to_tag_commit_event():
     runs = [
         {
