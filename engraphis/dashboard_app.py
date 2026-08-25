@@ -242,6 +242,24 @@ async def _dashboard_consolidation_loop(service: MemoryService) -> None:
             logger.error("Dashboard consolidation loop error (%s)", type(exc).__name__)
 
 
+async def _dashboard_heartbeat_loop() -> None:
+    """Periodic heartbeat log to keep pm2 log capture active across rotations.
+
+    pm2-logrotate rotates logs at midnight; without periodic output the captured
+    stdout/stderr stream goes silent and the new log file stays 0 bytes. A lightweight
+    INFO heartbeat every 5 minutes ensures the log file receives fresh content.
+    """
+    HEARTBEAT_INTERVAL = 300  # 5 minutes
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            logger.info("Dashboard heartbeat - service healthy")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - heartbeat must not kill the server
+            pass
+
+
 class _FreshStaticFiles(StaticFiles):
     """Revalidate local dashboard assets so a running UI cannot pin an old renderer.
 
@@ -384,6 +402,7 @@ def create_app() -> FastAPI:
     @_contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
         background_task = None
+        heartbeat_task = None
         try:  # one-line "update available" notice (background, fail-silent, opt-out)
             import logging as _logging
 
@@ -397,6 +416,9 @@ def create_app() -> FastAPI:
                 "Dashboard consolidation loop started (interval=%ds)",
                 settings.loop_interval,
             )
+        # Always start heartbeat to keep pm2 log capture alive across rotations
+        heartbeat_task = asyncio.create_task(_dashboard_heartbeat_loop())
+        logger.info("Dashboard heartbeat loop started (interval=300s)")
         try:
             if _mcp_asgi is not None and _mcp_mgr is not None:
                 async with _mcp_mgr.run():
@@ -409,6 +431,12 @@ def create_app() -> FastAPI:
                     background_task.cancel()
                     try:
                         await background_task
+                    except asyncio.CancelledError:
+                        pass
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
                     except asyncio.CancelledError:
                         pass
             finally:
