@@ -133,7 +133,8 @@ uv.lock
 /venv_status.txt
 /r3.txt
 
-# Local Command Code session-transcript analysis prompts — inspect private
-# ~/.commandcode/ session data, never commit these.
-/pROMPT_SESSION_TRANSCRIPT_ANALYSIS.md
-/session_transcript_query_prompt.md
+# Local Command Code session-transcript analysis prompts - inspect private
+# ~/.commandcode/ session data, never commit these. Character classes keep
+# mixed-case variants from slipping through on case-insensitive machines.
+/[Pp][Rr][Oo][Mm][Pp][Tt]_[Ss][Ee][Ss][Ss][Ii][Oo][Nn]_[Tt][Rr][Aa][Nn][Ss][Cc][Rr][Ii][Pp][Tt]_[Aa][Nn][Aa][Ll][Yy][Ss][Ii][Ss].md
+/[Ss][Ee][Ss][Ss][Ii][Oo][Nn]_[Tt][Rr][Aa][Nn][Ss][Cc][Rr][Ii][Pp][Tt]_[Qq][Uu][Ee][Rr][Yy]_[Pp][Rr][Oo][Mm][Pp][Tt].md
