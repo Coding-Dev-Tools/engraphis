@@ -1110,6 +1110,42 @@ def test_why_and_timeline_history_respect_known_time_but_keep_closed_records():
     ]
 
 
+def test_why_and_timeline_default_snapshot_hides_expired_and_future_records():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    far_past = time.time() - 10 * 86_400
+    future = time.time() + 10 * 86_400
+    records = (
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Default snapshot retention-expired record",
+            valid_from=far_past - 1.0, valid_to=far_past + 1.0,
+            ingested_at=far_past, expired_at=far_past + 2.0,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Default snapshot future-dated record",
+            valid_from=future, ingested_at=future,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Default snapshot live closed-interval record",
+            valid_from=1.0, valid_to=time.time() + 3_600.0, ingested_at=1.0,
+        ),
+    )
+    for record in records:
+        eng.store.add_memory(record)
+
+    timeline = eng.timeline("default snapshot", workspace_id=wid, repo_id=rid)
+    why = eng.why("default snapshot", workspace_id=wid, repo_id=rid)
+
+    assert [record.content for record in timeline] == [
+        "Default snapshot live closed-interval record",
+    ]
+    assert why["supersedes"] == []
+
+
 def test_temporal_supersession_closes_at_effective_time_and_keeps_vectors():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
