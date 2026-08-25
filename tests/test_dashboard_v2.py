@@ -914,6 +914,7 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
             assert behavior in script.text
         assert "syncGraphSpacetimeTuning(" in script.text
         assert "state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy())" in script.text
+        assert 'id="editor-memory-importance" type="range" min="0" max="1" step="0.025"' in page.text
 
 
 def test_code_overlay_scopes_only_to_known_repositories(monkeypatch, tmp_path):
@@ -940,6 +941,7 @@ def test_all_nodes_mode_preserves_scope_preferences_and_bounds_heavy_work(monkey
         assert "if (loadAll) {" in script.text
         assert "return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);" in script.text
         assert "const graphFactory = galaxyQuality ? window.EngraphisGraph" in script.text
+        assert "const galaxyWithinLiveLimit = data.nodes.length <= GRAPH_INITIAL_NODE_LIMIT" in script.text
         assert "scopeControl.disabled = full" not in script.text
         assert "graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false)" in script.text
         assert "const includeCode = targetIncludeCode ? '&include_code=true' : '';" in script.text

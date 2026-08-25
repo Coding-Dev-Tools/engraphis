@@ -420,7 +420,8 @@ def test_ledger_routes_the_every_layout_and_restores_filters() -> None:
 
 def test_ledger_keeps_authored_galaxy_scenes_on_the_hierarchical_engine() -> None:
     ledger = LEDGER.read_text(encoding="utf-8")
-    assert "const galaxyQuality = fullGraph\n          && data.nodes.some" in ledger
+    assert "const galaxyQuality = fullGraph && galaxyWithinLiveLimit\n          && data.nodes.some" in ledger
+    assert "const galaxyWithinLiveLimit = data.nodes.length <= GRAPH_INITIAL_NODE_LIMIT" in ledger
     assert "candidateOverlay.setEnabled(galaxyQuality || graphIsGalaxy())" in ledger
     # The Every-node chip changes the toolbar preset before the complete scene arrives. Both
     # candidates must therefore be preloaded so a fast entry cannot select a missing Galaxy
