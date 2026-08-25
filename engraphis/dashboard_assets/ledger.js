@@ -3388,8 +3388,12 @@
         oldHost.insertAdjacentElement('afterend', candidateHost);
         /* Authored-Galaxy detection must key off scene markers, not the toolbar preset:
            entering Every via its chip sets the preset to 'every', but a complete scene
-           with system anchors still needs the hierarchical orbit engine and overlay. */
-        const galaxyQuality = fullGraph
+           with system anchors still needs the hierarchical orbit engine and overlay.
+           The live-limit guard keeps very large complete scenes on the lightweight
+           Every renderer instead of the full physics galaxy. */
+        const galaxyWithinLiveLimit = data.nodes.length <= GRAPH_INITIAL_NODE_LIMIT
+          && data.links.length <= GRAPH_INITIAL_EDGE_LIMIT;
+        const galaxyQuality = fullGraph && galaxyWithinLiveLimit
           && data.nodes.some(node => node.anchor_role === 'community'
             && (node.system_anchor_id !== undefined
               || Number.isFinite(Number(node.galactic_radius))));

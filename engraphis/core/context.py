@@ -115,8 +115,8 @@ class DeterministicContextPacker:
             excerpt = ""
             truncated = False
             reason = ""
-            if self._count(base) < budget:
-                available = budget - self._count(base)
+            available = max(0, budget - self._count(base))
+            if available:
                 excerpt, truncated, reason = self._excerpt(
                     query, candidate, available
                 )
