@@ -722,6 +722,10 @@ def container_scan_artifact(root: Path, path: Path) -> dict[str, Any]:
     # wrote built/schemaVersion/checksum|from directly on db. Accept both shapes.
     status = database.get("status")
     if isinstance(status, dict):
+        if status.get("valid") is False:
+            raise EvidenceError(
+                "container vulnerability database is marked invalid by the scanner"
+            )
         database = {**database, **status}
     built = database.get("built")
     schema_version = database.get("schemaVersion")
