@@ -718,6 +718,11 @@ def container_scan_artifact(root: Path, path: Path) -> dict[str, Any]:
     database = descriptor.get("db")
     if not isinstance(database, dict):
         raise EvidenceError("container vulnerability report must identify its database")
+    # Grype >= 0.110 nests the database identity under db.status; older releases
+    # wrote built/schemaVersion/checksum|from directly on db. Accept both shapes.
+    status = database.get("status")
+    if isinstance(status, dict):
+        database = {**database, **status}
     built = database.get("built")
     schema_version = database.get("schemaVersion")
     checksum = database.get("checksum")
