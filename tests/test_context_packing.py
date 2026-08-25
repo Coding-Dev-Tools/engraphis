@@ -147,6 +147,32 @@ def test_nonduplicate_title_remains_in_the_citation_header() -> None:
     assert chunks[0].excerpt == "Deploy only after signed checks."
 
 
+def test_compact_header_respects_nonadditive_counter_budget() -> None:
+    class HeaderOverheadCounter:
+        identity = "test.header-overhead"
+
+        def __call__(self, text: str) -> int:
+            count = len(text.split())
+            if text.startswith("[1]") and len(text) > 4:
+                count += 3 if text.splitlines()[0] != "[1]" else (
+                    1 if text == "[1]\nAlpha rest" else 0
+                )
+            return count
+
+    packer = DeterministicContextPacker(HeaderOverheadCounter())
+    candidate = _candidate(
+        "mem_compact_header",
+        "Alpha rest",
+        title="Alpha",
+    )
+
+    context, chunks, usage = packer.pack("alpha", [candidate], token_budget=3)
+
+    assert context.startswith("[1]\nAlpha")
+    assert chunks[0].excerpt.startswith("Alpha")
+    assert usage.context_tokens <= usage.budget_tokens == 3
+
+
 def test_sentence_excerpt_marks_omission_and_preserves_qualifying_evidence() -> None:
     packer = DeterministicContextPacker()
     candidate = _candidate(
