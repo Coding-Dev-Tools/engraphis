@@ -2783,13 +2783,16 @@ class MemoryEngine:
         records = self.store.list_memories(
             flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
         )
-        if include_invalid and flt.known_at is not None:
+        if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.
+            # Default to the current snapshot when the caller omitted known_at —
+            # same normalization RecallEngine.recall applies (core/recall.py).
+            system_time = flt.known_at if flt.known_at is not None else now_ts()
             records = [
                 rec for rec in records
-                if (rec.ingested_at is None or rec.ingested_at <= flt.known_at)
-                and (rec.expired_at is None or flt.known_at < rec.expired_at)
+                if (rec.ingested_at is None or rec.ingested_at <= system_time)
+                and (rec.expired_at is None or system_time < rec.expired_at)
             ]
         for rec in records:
             # Public history is model-adjacent just like ordinary recall: tool output
