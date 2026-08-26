@@ -743,14 +743,15 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
 
-Evaluated offline on the bundled retrieval gates (`eval/datasets/sample.jsonl`,
-`codemem.jsonl`, k=5): enabling the optional cross-encoder reranker kept hit@5 at 1.0 with
-zero per-question regressions, raised MRR@5 from 0.889→0.944 (sample) and 0.962→0.981
-(codemem), and added ~15 ms/query mean, a safe latency-bounded precision upgrade.
-
 See `.env.example` for the full variable inventory. Supply those values through the process
 environment or the trusted config file above; copying it to an arbitrary `./.env` does not make
 Engraphis load it.
+
+> **Reranker benchmark:** model-specific quality and latency numbers (MRR, hit@5,
+> ms/query) are intentionally not published in the README — they depend on the
+> exact reranker model, revision, hardware, and command. Reproduce them on your
+> own install via `python -m eval.ablation` (or `python -m eval.reinforcement` for
+> retention trajectories) and register the evidence before quoting results.
 
 ---
 
