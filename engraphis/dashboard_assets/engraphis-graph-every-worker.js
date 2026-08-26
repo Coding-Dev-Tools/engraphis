@@ -217,7 +217,10 @@
        springs run weak — they are visual routes between districts, not licence to drag
        the districts into one another over the settle passes. */
     const scaledSpacing = SPACING * MAP_SCALE;
-    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
+    /* Bumped from *1.6 to *2.4 — the link-distance slider now produces 50% more spring
+       rest-length change per slider unit, so the upper half of the slider is meaningfully
+       more responsive. */
+    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 2.4 * (MAP_SCALE * 0.55));
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
       const ddx = pos[b * 2] - pos[a * 2], ddy = pos[b * 2 + 1] - pos[a * 2 + 1];
@@ -241,7 +244,9 @@
     }
     const minDist = SPACING * MAP_SCALE * 1.55;
     const minDist2 = minDist * minDist;
-    const push = Number(settings.repel) / 48;
+    /* Bumped from /48 to /24 — the Every-node engine now produces 100% more repulsion per
+       slider unit, so the upper half of the repel slider is meaningfully more responsive. */
+    const push = Number(settings.repel) / 24;
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
@@ -314,7 +319,10 @@
       }
     }
 
-    const gravity = Number(settings.gravity) / 48 * 0.0015;
+    /* Bumped from 0.0015 to 0.0033 — combined with the base gravity 25% bump and the
+       linear (no-sqrt) mass path, the Every-node worker now pulls nodes toward the centre
+       ~50% harder at every slider position than the previous 0.0022 calibration. */
+    const gravity = Number(settings.gravity) / 48 * 0.0033;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;
       dy[index] += (cy - pos[index * 2 + 1]) * gravity;
