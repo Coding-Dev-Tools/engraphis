@@ -311,26 +311,36 @@ def test_reworded_number_correction_invalidates_without_claim_key():
 
 
 def test_reworded_marker_correction_invalidates_across_phrasings():
-    neighbor = _rec("Deploy schedule runs on Fridays at 5pm.", id="mem_deploy_slot")
-    res = resolve("Deploy schedule moved to Tuesday mornings.", [(0.6, neighbor)])
+    # A bare change marker ("moved", "grew") is not sufficient on its own
+    # — common words leak into every sentence. The marker leg now requires
+    # the candidate to also exhibit a value_swap on the same shared
+    # subject, so the rewrite is "same fact, new value" rather than a
+    # different fact about a similar topic.
+    neighbor = _rec("Deploy schedule runs at 5pm on Fridays.", id="mem_deploy_slot")
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.", [(0.6, neighbor)])
     assert res.op == ResolutionOp.INVALIDATE
     assert res.target_id == "mem_deploy_slot"
 
     neighbor2 = _rec("The pilot cohort has 25 users.", id="mem_pilot")
-    res2 = resolve("The pilot cohort grew to 120 users.", [(0.5, neighbor2)])
+    res2 = resolve("The pilot cohort has 120 users.", [(0.5, neighbor2)])
+    # No marker, but a clear value swap on the same subject.
     assert res2.op == ResolutionOp.INVALIDATE
     assert res2.target_id == "mem_pilot"
 
 
-def test_reworded_marker_without_shared_subject_does_not_invalidate():
-    """A change marker on a candidate that shares no subject with the neighbour
-    is not correction evidence — common words like "now" leak into sentences
-    that are about something different. The candidate must share at least
-    SUBJECT_TOKEN_JACCARD_MARKER_FLOOR folded subject tokens for the marker
-    to lift it to INVALIDATE.
+def test_reworded_marker_without_value_swap_does_not_invalidate():
+    """A change marker on a candidate that shares only loose subject nouns
+    with the neighbour is not correction evidence. Common words like "now"
+    leak into every sentence, and surface noun overlap ("production API")
+    does not imply predicate agreement ("uses Redis caching" vs "uses
+    three replicas"). The marker leg now requires a value_swap on the
+    same shared subject — predicate and value together, not just
+    predicate and marker.
     """
-    neighbor = _rec("Redis caches user sessions in production.", id="mem_cache")
-    res = resolve("We now run three replicas for high availability.", [(0.45, neighbor)])
+    neighbor = _rec("The production API uses Redis caching for user sessions.",
+                    id="mem_cache")
+    res = resolve("The production API now uses three replicas for high availability.",
+                  [(0.45, neighbor)])
     assert res.op != ResolutionOp.INVALIDATE
     assert res.target_id != "mem_cache"
 
@@ -434,26 +444,26 @@ def test_distinct_environment_values_never_invalidate_via_strong_branch_long_for
     assert res.op != ResolutionOp.INVALIDATE
 
 
-def test_marker_promotes_named_identifier_swap_to_invalidate():
-    # Without an explicit change marker, ProviderA->ProviderB+4->8 stays live
-    # (distinct infrastructure). With "switched", the operator is asserting a
-    # correction, so the marker upgrades the leg.
-    neighbor = _rec("CI runs on ProviderA with 4 workers.", id="mem_ci_workers")
-    res = resolve("We switched CI to run on ProviderB with 8 workers.",
-                  [(0.65, neighbor)])
+def test_marker_with_value_swap_invalidates():
+    # The marker leg now requires a value_swap on the same shared subject
+    # — marker + value is a real correction ("now runs 6pm" rewrites
+    # "runs 5pm"). A bare marker without a value change stays ADD.
+    neighbor = _rec("Deploy schedule runs at 5pm on Fridays.", id="mem_deploy_v")
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.",
+                  [(0.6, neighbor)])
     assert res.op == ResolutionOp.INVALIDATE
-    assert res.target_id == "mem_ci_workers"
+    assert res.target_id == "mem_deploy_v"
 
 
-def test_marker_promotes_heavy_noun_swap_to_invalidate():
-    # The pre-existing REST->GraphQL veto (no marker) stays RELATE. With a
-    # "migrated" marker, the operator asserts a true correction, so the
-    # rewrite_gate leg upgrades to INVALIDATE.
+def test_marker_alone_without_value_swap_does_not_invalidate():
+    # "We migrated the docs to cover the GraphQL interface" against
+    # "The docs cover the REST interface" has a marker and a heavy noun
+    # swap but no value_swap — different facts about a similar topic,
+    # not the same fact restated. Stays ADD.
     neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
     res = resolve("We migrated the docs to cover the GraphQL interface.",
                   [(0.9, neighbor)])
-    assert res.op == ResolutionOp.INVALIDATE
-    assert res.target_id == "mem_docs_rest"
+    assert res.op != ResolutionOp.INVALIDATE
 
 
 def test_closed_predecessor_supersedes_under_strong_evidence_regardless_of_prose():
@@ -462,10 +472,10 @@ def test_closed_predecessor_supersedes_under_strong_evidence_regardless_of_prose
     # is the backfill-and-supersede contract: "the chain wants this rewrite".
     closed = _memory_obj(
         id="mem_closed_old",
-        content="CI runs on ProviderA with 4 workers.",
+        content="Deploy schedule runs at 5pm on Fridays.",
         valid_to=1_000.0,
     )
-    res = resolve("We switched CI to run on ProviderB with 8 workers.",
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.",
                   [(0.9, closed)])
     assert res.op == ResolutionOp.INVALIDATE
     assert res.target_id == "mem_closed_old"

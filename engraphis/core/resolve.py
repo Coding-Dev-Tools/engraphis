@@ -44,12 +44,6 @@ RELATED_SIM_FLOOR = 0.15
 DUP_TOKEN_JACCARD = 0.85
 # Token Jaccard: at/above this (but below DUP) it's the same subject with new content.
 SUBJECT_TOKEN_JACCARD = 0.40
-# Bare change-marker words ("now", "actually", "no longer", ...) carry no subject
-# signal on their own and would otherwise let any candidate that mentions the
-# marker retire an unrelated fact. Require the candidate and the neighbour to
-# share at least this many folded subject tokens before a marker is treated as
-# correction evidence. Integers because evidence.shared_subject is a count.
-SUBJECT_TOKEN_JACCARD_MARKER_FLOOR = 2
 # Supersession without an explicit claim key is intentionally stricter than a
 STRONG_SUBJECT_TOKEN_JACCARD = 0.55
 STRONG_JOINT_EMBED_SIM = 0.45
@@ -93,6 +87,40 @@ _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
 })
+# Aliases for the same logical environment so a write of "prod" and a record
+# of "production" do not look like two distinct environments to the conflict
+# veto. Tokens map to a single canonical form; a non-empty intersection
+# between two canonical sets therefore means both sides refer to the same
+# environment, and the "env_conflict" veto only fires when the canonical
+# sets are non-empty on both sides AND disjoint.
+_ENV_ALIASES: dict[str, str] = {
+    "prod": "production",
+    "production": "production",
+    "dev": "development",
+    "development": "development",
+    "test": "test",
+    "testing": "test",
+    "qa": "qa",
+    "uat": "qa",
+    "staging": "staging",
+    "preview": "preview",
+    "sandbox": "sandbox",
+    "demo": "demo",
+    "local": "local",
+}
+
+
+def _canonical_env(tokens: set[str]) -> set[str]:
+    """Fold env aliases to one canonical form per logical environment.
+
+    A bare ``prod`` and a bare ``production`` are the same logical
+    environment; folding them prevents a legitimate correction ("Prod API
+    timeout is 30s" -> "Production API timeout increased to 90s") from being
+    vetoed by ``env_conflict``.
+    """
+    return {_ENV_ALIASES.get(token, token) for token in tokens}
+
+
 _MONTHS = frozenset({
     "january", "february", "march", "april", "may", "june", "july",
     "august", "september", "october", "november", "december",
@@ -336,8 +364,12 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # Clashing environment qualifiers (staging vs production) always veto,
         # matching the contract honoured by the rewrite_gate branch below: a
         # strong overlap between a staging fact and a production fact is two
-        # coexisting truths, not a single fact being corrected.
-        swap_veto = (evidence.heavy_swap or (evidence.proper_swap and not marker)
+        # coexisting truths, not a single fact being corrected. The marker
+        # override on proper_swap requires a value_swap alongside the marker
+        # so a bare "now" can never retire a fact it merely shares surface
+        # nouns with.
+        swap_veto = (evidence.heavy_swap
+                     or (evidence.proper_swap and not (marker and evidence.value_swap))
                      or evidence.env_conflict)
         if not swap_veto or temporal_splice or rec.valid_to is not None:
             return Resolution(ResolutionOp.INVALIDATE, target_id=rec.id,
@@ -352,7 +384,10 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # same subject.
         marker_corrected = (
             evidence.marker
-            and evidence.shared_subject >= SUBJECT_TOKEN_JACCARD_MARKER_FLOOR
+            and evidence.value_swap
+            and not evidence.proper_swap
+            and not evidence.heavy_swap
+            and evidence.shared_subject >= 2
         )
         value_corrected = (
             evidence.value_swap
@@ -464,7 +499,9 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
     rec_words = [token for token, _ in rec]
     env_a = {token for token, _ in cand if token in _ENV_QUALIFIERS}
     env_b = {token for token, _ in rec if token in _ENV_QUALIFIERS}
-    env_conflict = bool(env_a and env_b and env_a != env_b)
+    env_a_canon = _canonical_env(env_a)
+    env_b_canon = _canonical_env(env_b)
+    env_conflict = bool(env_a_canon and env_b_canon and env_a_canon.isdisjoint(env_b_canon))
 
     value_swap = False
     proper_swap = False
@@ -482,10 +519,20 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
             if any(named for _, named in [*old_pairs, *new_pairs]):
                 proper_swap = True
         elif old_pairs and new_pairs:
+            # Env-alias tokens (prod/production, dev/development, ...) fold
+            # to the same canonical form, so swapping one for the other is
+            # not a noun-for-noun replacement — exclude them from the
+            # heavy_swap count so legitimate corrections like "prod API
+            # timeout is 30s" -> "production API timeout increased to 90s"
+            # are not vetoed as coexisting facts.
             old_heavy = [token for token, _ in old_pairs
-                         if token not in _LIGHT_TOKENS and not _is_value(token)]
+                         if token not in _LIGHT_TOKENS
+                         and not _is_value(token)
+                         and token not in _ENV_QUALIFIERS]
             new_heavy = [token for token, _ in new_pairs
-                         if token not in _LIGHT_TOKENS and not _is_value(token)]
+                         if token not in _LIGHT_TOKENS
+                         and not _is_value(token)
+                         and token not in _ENV_QUALIFIERS]
             if old_heavy and new_heavy:
                 heavy_swap = True
 

@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -23,9 +21,13 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "install_cc_hook.py"
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("install_cc_hook_under_test", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    # ``spec.loader`` is typed as the abstract ``Loader`` base; the concrete
+    # file/source loaders we get here all implement ``exec_module``.
+    loader = spec.loader
+    exec_module = getattr(loader, "exec_module")
+    exec_module(module)
     return module
 
 
@@ -117,3 +119,65 @@ def test_uninstall_removes_only_our_entry(fake_settings) -> None:
     entries = payload["hooks"]["SessionStart"]
     assert len(entries) == 1
     assert entries[0]["hooks"][0]["command"] == "some-other-tool --flag"
+
+
+def test_install_preserves_sibling_hook_in_same_wrapper(fake_settings) -> None:
+    """A SessionStart wrapper that contains both our entry and a manually
+    added sibling inner hook must keep the sibling after a reinstall. The
+    old behaviour dropped the whole wrapper, silently deleting the
+    operator's unrelated hook.
+    """
+    module, settings_path = fake_settings
+    sibling = {
+        "type": "command",
+        "command": "some-other-tool --flag",
+        "timeout": 5,
+    }
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [sibling, module._hook_entry()]},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    module.install()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    entries = payload["hooks"]["SessionStart"]
+    # The original wrapper survives, now with [sibling, fresh_engraphis].
+    assert len(entries) == 1
+    inner = entries[0]["hooks"]
+    assert len(inner) == 2
+    assert inner[0]["command"] == "some-other-tool --flag"
+    assert inner[1]["command"] == module._hook_entry()["command"]
+
+
+def test_uninstall_preserves_sibling_hook_in_same_wrapper(fake_settings) -> None:
+    """uninstall() must not drop a sibling inner hook when stripping ours."""
+    module, settings_path = fake_settings
+    sibling = {
+        "type": "command",
+        "command": "some-other-tool --flag",
+        "timeout": 5,
+    }
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [sibling, module._hook_entry()]},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    module.uninstall()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    entries = payload["hooks"]["SessionStart"]
+    assert len(entries) == 1
+    assert entries[0]["hooks"] == [sibling]
