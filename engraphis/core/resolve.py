@@ -368,6 +368,7 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # override on proper_swap requires a value_swap alongside the marker
         # so a bare "now" can never retire a fact it merely shares surface
         # nouns with.
+        assert evidence is not None  # strong => evidence was computed above
         swap_veto = (evidence.heavy_swap
                      or (evidence.proper_swap and not (marker and evidence.value_swap))
                      or evidence.env_conflict)
@@ -375,7 +376,7 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             return Resolution(ResolutionOp.INVALIDATE, target_id=rec.id,
                               reason=f"supersedes {rec.id} (strong joint evidence: "
                                      f"token overlap={overlap:.2f}, similarity={sim:.2f})")
-    if rewrite_gate and not evidence.env_conflict:
+    if rewrite_gate and evidence is not None and not evidence.env_conflict:
         # A bare change marker ("now", "actually", ...) on a candidate that
         # shares no subject tokens with the neighbour is not correction
         # evidence — common words leak into every sentence. Require the
