@@ -1222,3 +1222,38 @@ def test_smart_gateway_unknown_exception_never_leaks_internals(monkeypatch):
     assert parsed["error"]["code"] == "E_INTERNAL"
     assert "SECRET" not in parsed["error"]["message"]
     assert "/home/user" not in parsed["error"]["message"]
+
+
+def test_classic_remember_persists_subject_key_and_claim_kind_to_chain(monkeypatch):
+    """Classic engraphis_remember must persist subject_key/claim_kind to the chain.
+
+    Regression guard for the class binding that powers every direct Command Code
+    caller: the SMART gateway now carries subject_key/claim_kind (PR #171) but the
+    classic binding had no end-to-end test that exercised these parameters. A
+    direct call must (a) return a memory id, not a delegation envelope, and
+    (b) round-trip the subject/claim metadata through the inspect chain.
+    """
+    srv = _module_with_memory_db(monkeypatch)
+
+    response = srv.engraphis_remember(
+        content="The deployment timeout is 30 seconds.",
+        workspace="w",
+        subject_key="deploy.timeout",
+        claim_kind="configured_value",
+    )
+    assert not response.startswith("Error:"), response
+    payload = json.loads(response)
+    assert payload["op"] == "add"
+    assert isinstance(payload.get("id"), str) and payload["id"]
+    # The id must be a memory id, not a Smart gateway delegation envelope.
+    assert not payload["id"].startswith("del_"), payload["id"]
+
+    fetched = srv.engraphis_get_memory(memory_id=payload["id"], workspace="w")
+    assert not fetched.startswith("Error:"), fetched
+    fetched_payload = json.loads(fetched)
+    assert fetched_payload["id"] == payload["id"]
+    assert fetched_payload["chain"], "inspect must return a non-empty chain"
+    head = fetched_payload["chain"][0]
+    assert head["id"] == payload["id"]
+    assert head["subject_key"] == "deploy.timeout"
+    assert head["claim_kind"] == "configured_value"
