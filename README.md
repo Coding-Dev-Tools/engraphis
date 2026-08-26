@@ -427,14 +427,14 @@ the JSON-RPC frame layer through an `asyncio.Lock`, so framework-level
 parallelism (eight sub-agents reasoning at once) is preserved while the
 underlying MCP transport remains one ordered stream. The only integration
 surface is `EngraphisPrimeAgent.register()` in
-`integrations/prime_agent/src/engraphis_prime_agent/agent.py` — that is the
+`integrations/prime_agent/src/engraphis_prime_agent/agent.py` -- that is the
 single adapter point to override if prime-agent's tool-registration API
 differs from the assumed `target.register_tool(name, fn, schema=...)`
 contract.
 
-The design — eight named sub-agents, one shared stdio subprocess,
+The design -- eight named sub-agents, one shared stdio subprocess,
 per-agent session bootstrap, and `ENGRAPHIS_*`-only environment forwarding
-to the gateway — is recorded in `~/.commandcode/plans/prime-agent-integration.md`
+to the gateway -- is recorded in `~/.commandcode/plans/prime-agent-integration.md`
 on the host where the integration was developed. When that host plan is not
 available (other contributor machines, CI), the same design is summarized in
 the PR description that introduced the integration and in the

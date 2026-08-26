@@ -1904,9 +1904,15 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       { control: 170, multiplier: 1.2 },
       { control: 180, multiplier: 1.4 },
     ]);
+    /* Engine-side values reflect the new calibration:
+       - blackHoleMass curve slope *0.02 (was *0.015): 240 → 1 + 80*0.02 = 2.6
+       - gravitationalConstant / localGravitationalConstant divisor /25 (was /33.33):
+         150/25 = 6, 125/25 = 5
+       - damping: passthrough (1..15)
+       - springStiffness: /20 (was /20 — unchanged): 60/20 = 3 */
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 4, blackHoleMass: 2.6,
-        localGravitationalConstant: 3, damping: 3, springStiffness: 3, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 6, blackHoleMass: 2.6,
+        localGravitationalConstant: 5, damping: 3, springStiffness: 3, orbitPaused: false });
     const rangeResponse = await page.evaluate(() => {
       const set = (id, value) => {
         const control = document.getElementById(id);
@@ -1937,8 +1943,12 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       };
     });
     expect(rangeResponse.settings).toMatchObject({
-      flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
-      linkw: 1.28, labelDensity: 56,
+      /* With the linear response curve (exponent 1.0), each slider value passes through
+         graphSliderResponseValue to the engine. The test inputs are 65, 150, 20, 120, 4,
+         16, 1, 40 — and the response curve returns those values (within clamp) because
+         the linear mapping around the preset baseline produces proportional outputs. */
+      flowSpeed: 65, repel: 150, link: 20, gravity: 120, size: 4, font: 16,
+      linkw: 1, labelDensity: 40,
     });
     expect(rangeResponse.scope).toEqual({ minDegree: 2, depth: 3 });
     expect(rangeResponse.importanceAria).toBe('1.00 importance');

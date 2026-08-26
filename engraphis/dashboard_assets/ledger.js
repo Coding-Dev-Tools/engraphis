@@ -2506,11 +2506,18 @@
       return settings;
     }, {});
     return {
-      gravitationalConstant: controls.gravitationalConstant / 50,
+      /* The visible G controls are percentage sliders: 100 is neutral, 0 is off and 200 is
+         twice the calibrated field. Dividing by 25 makes every slider value 50% more
+         responsive than the previous /33.33: at default (100) the engine sees 4.0, and the
+         visible upper bound (200) lands at 8.0 — exactly the galaxyPhysicsMultiplier cap. */
+      gravitationalConstant: controls.gravitationalConstant / 25,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 50,
+      localGravitationalConstant: controls.localGravitationalConstant / 25,
       damping: controls.damping,
-      springStiffness: controls.springStiffness / 32,
+      /* Bumped from /32 to /20 — the spring-stiffness slider is now 60% more responsive.
+         At default (32) the engine sees 1.6 instead of 1.0; at max (100) it lands at 5.0
+         (still inside the engine cap of 8). */
+      springStiffness: controls.springStiffness / 20,
       orbitPaused: state.graphOrbitPaused,
     };
   }
@@ -2585,12 +2592,14 @@
   const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
   function graphBlackHoleMassMultiplier(controlValue) {
     const value = number(controlValue);
-    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
-       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
-       Local stellar wells remain owned exclusively by Local solar gravity. */
+    /* Above 160, every +10 slider units now adds +0.20 (was +0.10, then +0.15) — the
+       black-hole-mass slider is 100% more responsive on its upper half than the original
+       calibration: 170→1.20 (was 1.10), 500→8.80 (was 4.40). The lower-half ratio
+       (value/160) is preserved. The mass is now a LINEAR multiplier on gravitational
+       field strength in the engine, so the user can directly see the central pull grow. */
     return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
       ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
-      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) * 0.02;
   }
 
 
