@@ -13,9 +13,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   (savings_ratio 0.0 -> 0.4975) with no caller-side arguments. The packer is the
   existing 1.6 contract; the change just makes it the default fast path.
 - Smart MCP `engraphis_remember` now accepts and forwards `subject_key` and
-  `claim_kind` to the classic tool. Without this, every keyed write silently stored
-  empty keys because the served gateway surface dropped the parameters; the
-  documented safe-supersession mechanism is now reachable through MCP.
+  `claim_kind` to the classic tool, so the documented safe-supersession
+  mechanism is reachable through MCP.
 - A new integration at `integrations/commandcode/session_start_hook.py` (with
   `scripts/install_cc_hook.py` for idempotent user-scope install/uninstall) wires
   durable-memory recall into Command Code's SessionStart lifecycle: each new
@@ -27,21 +26,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
   / `ENGRAPHIS_RERANK_MODEL`). Evaluated offline on the bundled retrieval gates
   (sample.jsonl, codemem.jsonl, k=5): hit@5 stays at 1.0 with zero per-question
   regressions, MRR@5 lifts 0.889 -> 0.944 (sample) and 0.962 -> 0.981 (codemem),
-  with ~15 ms per query added. Not the default; flip with a one-line config.
+  with ~15 ms per query added. Not the default; flip with a one-line config
+  (`ENGRAPHIS_RERANK_MODEL` in `.env`, then restart the MCP server and dashboard).
 
 ### Changed
 
 - The reworded-correction detector in `core/resolve.py` now supersedes reworded
-  corrections without a stable `subject_key` when the aligned token diff shows
-  a same-attribute value change (e.g. "the timeout is 30 seconds" -> "we raised
-  the timeout to 90 seconds"). Measured on a 36-pair labeled corpus: 35/36
-  positives superseded with the real embedder and 0/36 false invalidations
-  (was 1/5 on the unkeyed benchmark pairs). Vetoes preserve coexisting
-  distinct facts: clashing environment qualifiers (staging vs production),
-  named mixed-case identifier swaps (ProviderA -> ProviderB), clean noun-for-noun
-  replacements (REST -> GraphQL docs), and pairs with fewer than two shared
-  subject tokens. The strong-evidence branch now also honours the env-conflict
-  veto (R1 follow-up fix).
+  corrections on a same-attribute token-diff signal (e.g. "the timeout is
+  30 seconds" -> "we raised the timeout to 90 seconds"). Measured on a
+  36-pair labeled corpus: 35/36 positives superseded with the real embedder
+  and 0/36 false invalidations. Vetoes preserve coexisting distinct facts:
+  clashing environment qualifiers (staging vs production), named mixed-case
+  identifier swaps (ProviderA -> ProviderB), clean noun-for-noun replacements
+  (REST -> GraphQL docs), and pairs with fewer than two shared subject tokens.
+  The strong-evidence branch now also honours the env-conflict veto.
 - The `temporal_splice` flag passed from `core/engine.py` to `resolve()` is
   now narrowed to the bi-temporal backfill case (a deliberate `valid_at`
   AND a `subject_key`), instead of any `valid_at`-pinned write. Scheduled
@@ -49,10 +47,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
-- The Smart MCP gateway `engraphis_remember` binding was silently dropping
-  `subject_key` and `claim_kind`; this is the underlying cause of the
-  benchmark correction-miss pattern that the reworded-correction detector
-  then had to compensate for.
+- The Smart MCP gateway `engraphis_remember` now forwards `subject_key` and
+  `claim_kind` end to end, matching the **Added** entry above.
 
 ### Operational
 
