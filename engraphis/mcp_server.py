@@ -35,11 +35,12 @@ from dataclasses import dataclass
 from typing import Any, Annotated, Callable, List, Optional
 
 try:
-    from pydantic import Field, StrictBool, StrictInt
+    from pydantic import BeforeValidator, Field, StrictBool, StrictInt
 except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
     Field = None  # type: ignore[assignment,misc]
     StrictBool = None  # type: ignore[assignment,misc]
     StrictInt = None  # type: ignore[assignment,misc]
+    BeforeValidator = None  # type: ignore[assignment,misc]
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -673,7 +674,7 @@ def engraphis_recall_context(
         description="Optional active session; includes its repo/workspace ancestors.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(
         description="Optional memory types: semantic/episodic/procedural/working.")] = None,
-    k: Annotated[int, Field(description="Max candidate memories (1-50).", ge=1, le=50)] = 8,
+    k: Annotated[int, Field(description="Max candidate memories (1-50).", ge=1, le=50)] = 50,
     token_budget: Annotated[int, Field(
         description="Hard packed-context budget under the reported token counter.",
         ge=0, le=32_768)] = 1024,
@@ -758,6 +759,13 @@ def engraphis_recall_context(
             sources.append(source)
         payload["sources"] = sources
         payload = _apply_response_budget(payload, max_response_tokens)
+        usage = payload.get("usage") or {}
+        logger.info(
+            "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
+            workspace, k, token_budget,
+            usage.get("packed_count"), usage.get("omitted_count"),
+            usage.get("emitted_ms") or 0.0,
+        )
         return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -2533,6 +2541,21 @@ smart_mcp = FastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
                     log_level="WARNING")
 
 
+def _normalize_session_action(value: Any) -> Any:
+    """Tolerate callers that pass the full tool name as the session action.
+
+    The Command Code harness translates AGENTS.md's ``engraphis_start_session``
+    shorthand into ``engraphis_session(action="start_session")``; normalize that
+    to ``start`` (and ``end_session`` to ``end``) before the pattern constraint
+    is applied, so the call succeeds instead of raising a validation error.
+    """
+    if value == "start_session":
+        return "start"
+    if value == "end_session":
+        return "end"
+    return value
+
+
 @smart_mcp.tool(
     name="engraphis_session",
     annotations={"title": "Start or end a memory session", "readOnlyHint": False,
@@ -2540,8 +2563,12 @@ smart_mcp = FastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
     structured_output=False,
 )
 def engraphis_session(
-    action: Annotated[str, Field(description="start to resume work, or end to save its handoff.",
-                                 pattern="^(start|end)$")] = "start",
+    action: Annotated[
+        str,
+        BeforeValidator(_normalize_session_action),
+        Field(description="start to resume work, or end to save its handoff.",
+              pattern="^(start|end)$"),
+    ] = "start",
     workspace: Annotated[str, Field(description="Workspace for a started session.", max_length=200)] = "default",
     repo: Annotated[Optional[str], Field(description="Optional repository scope.", max_length=200)] = None,
     agent: Annotated[str, Field(description="Optional agent name.", max_length=200)] = "",
@@ -2559,6 +2586,12 @@ def engraphis_session(
                                       le=32_768)] = 512,
 ) -> str:
     """Start/resume a session or end it with its next-session handoff."""
+    # Direct (non-protocol) callers bypass Pydantic's BeforeValidator, so
+    # normalize the shorthand tool-name forms here too.
+    if action == "start_session":
+        action = "start"
+    elif action == "end_session":
+        action = "end"
     if action == "end":
         if not session_id:
             return _gateway_error("session_id_required")
@@ -2606,7 +2639,7 @@ def smart_recall_context(
     workspace: Annotated[Optional[str], Field(description="Optional workspace.", max_length=200)] = None,
     repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
-    k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 8,
+    k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
     token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
                                       le=32_768)] = 1024,
 ) -> str:
@@ -2635,11 +2668,19 @@ def smart_remember(
     mtype: Annotated[str, Field(description="semantic, episodic, procedural, or working.")] = "semantic",
     importance: Annotated[float, Field(description="Salience from 0 to 1.", ge=0.0,
                                        le=1.0)] = 0.0,
+    subject_key: Annotated[str, Field(
+        description="Optional stable claim subject (for example 'api.rate_limit'). "
+                    "Matching keys make supersession safer and deterministic.",
+        max_length=1_000)] = "",
+    claim_kind: Annotated[str, Field(
+        description="Optional claim predicate/category (for example 'configured_value').",
+        max_length=200)] = "",
 ) -> str:
     """Store a routine durable memory with safe default provenance and deduplication."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,
+        subject_key=subject_key, claim_kind=claim_kind,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)
