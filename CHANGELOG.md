@@ -65,6 +65,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - The new `engraphis_recall_context` tool emits one `INFO` log per call with
   workspace, k, budget, packed/omitted counts, and the call's measured ms.
   Operators get visibility without changing the on-the-wire contract.
+  The standalone \engraphis-mcp-http\ launcher only configures the root logger when
+  \ENGRAPHIS_MCP_LOG\ is set to a truthy value (\ / \	rue\ / \yes\ / \info\ /
+  \on\); the default stays silent so the CLI keeps its quiet profile.
 
 - The graph's "Show all nodes" toggle is replaced by a dedicated **Every node** layout built
   on a new ultra-performance engine (`engraphis-graph-every.js` +

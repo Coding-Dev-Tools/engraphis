@@ -60,6 +60,7 @@ def _hook_entry() -> dict:
     return {
         "type": "command",
         "command": f"python \"{HOOK_PATH}\"",
+        "name": HOOK_KEY,
         "timeout": 5,
     }
 
@@ -68,31 +69,72 @@ def _entry_command() -> str:
     return _hook_entry()["command"]
 
 
+def _is_our_entry(entry: dict) -> bool:
+    """Match by stable ``name`` (HOOK_KEY) first, then fall back to command string.
+
+    The command path can vary across installations, so a stable identifier is the
+    primary key; the command match stays as a backstop for legacy entries written
+    by older versions of this script.
+    """
+    if entry.get("name") == HOOK_KEY:
+        return True
+    return entry.get("command", "") == _entry_command()
+
+
 def _session_start_has_our_entry(hooks: list) -> bool:
     """Each SessionStart entry is ``{"hooks": [{"command": ...}, ...]}``."""
-    target = _entry_command()
     for wrapper in hooks:
         for entry in wrapper.get("hooks", []) or []:
-            if entry.get("command", "") == target:
+            if _is_our_entry(entry):
                 return True
     return False
+
+
+def _strip_our_entries(wrapper: dict) -> dict | None:
+    """Return a new wrapper with our inner entries removed.
+
+    Returns ``None`` if the wrapper becomes empty after stripping (caller drops
+    it). Preserves every sibling inner entry the operator added manually.
+    """
+    remaining = [
+        entry for entry in wrapper.get("hooks", []) or []
+        if not _is_our_entry(entry)
+    ]
+    if not remaining:
+        return None
+    return {"hooks": remaining}
+
+
+def _refresh_existing_wrappers(hooks: list) -> bool:
+    """Replace any of our inner entries in-place inside matching wrappers.
+
+    Returns ``True`` if at least one wrapper already contained our entry (so the
+    caller knows a fresh append is not required). Sibling inner entries are
+    preserved; a wrapper that contained only our entry is replaced with the
+    fresh entry instead of being kept as an empty wrapper.
+    """
+    refreshed = False
+    for i, wrapper in enumerate(hooks):
+        inner = wrapper.get("hooks", []) or []
+        if not any(_is_our_entry(e) for e in inner):
+            continue
+        refreshed = True
+        siblings = [e for e in inner if not _is_our_entry(e)]
+        # Re-add the fresh entry alongside the siblings so the original
+        # wrapper is preserved verbatim except for our entry being replaced.
+        hooks[i] = {"hooks": [*siblings, _hook_entry()]}
+    return refreshed
 
 
 def install() -> None:
     settings = _read_settings(SETTINGS_PATH)
     hooks = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    # Remove any prior copy of our entry (idempotency), then append a fresh one.
-    # Each entry is a wrapper of one or more inner hook objects; inspect the
-    # inner "command" so the filter matches the shape uninstall() uses.
-    if _session_start_has_our_entry(hooks):
-        hooks[:] = [
-            wrapper for wrapper in hooks
-            if not any(
-                entry.get("command", "") == _entry_command()
-                for entry in wrapper.get("hooks", []) or []
-            )
-        ]
-    hooks.append({"hooks": [_hook_entry()]})
+    # Idempotency: refresh our entry in-place inside any wrapper that already
+    # contains it, so a manually-added sibling inner hook is preserved and we
+    # do not append a second wrapper. Only fall through to a fresh append when
+    # no prior wrapper mentions us.
+    if not _refresh_existing_wrappers(hooks):
+        hooks.append({"hooks": [_hook_entry()]})
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
     print(f"installed SessionStart hook into {SETTINGS_PATH}")
@@ -103,13 +145,12 @@ def uninstall() -> None:
     if "hooks" not in settings or "SessionStart" not in settings["hooks"]:
         print(f"no SessionStart hook entry in {SETTINGS_PATH}")
         return
-    settings["hooks"]["SessionStart"] = [
-        h for h in settings["hooks"]["SessionStart"]
-        if not any(
-            e.get("command", "") == _entry_command()
-            for e in h.get("hooks", [])
-        )
-    ]
+    cleaned: list = []
+    for wrapper in settings["hooks"]["SessionStart"]:
+        stripped = _strip_our_entries(wrapper)
+        if stripped is not None:
+            cleaned.append(stripped)
+    settings["hooks"]["SessionStart"] = cleaned
     if not settings["hooks"]["SessionStart"]:
         del settings["hooks"]["SessionStart"]
     if not settings["hooks"]:
