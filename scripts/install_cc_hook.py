@@ -64,11 +64,34 @@ def _hook_entry() -> dict:
     }
 
 
+def _entry_command() -> str:
+    return _hook_entry()["command"]
+
+
+def _session_start_has_our_entry(hooks: list) -> bool:
+    """Each SessionStart entry is ``{"hooks": [{"command": ...}, ...]}``."""
+    target = _entry_command()
+    for wrapper in hooks:
+        for entry in wrapper.get("hooks", []) or []:
+            if entry.get("command", "") == target:
+                return True
+    return False
+
+
 def install() -> None:
     settings = _read_settings(SETTINGS_PATH)
     hooks = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
     # Remove any prior copy of our entry (idempotency), then append a fresh one.
-    hooks[:] = [h for h in hooks if h.get("command", "") != _hook_entry()["command"]]
+    # Each entry is a wrapper of one or more inner hook objects; inspect the
+    # inner "command" so the filter matches the shape uninstall() uses.
+    if _session_start_has_our_entry(hooks):
+        hooks[:] = [
+            wrapper for wrapper in hooks
+            if not any(
+                entry.get("command", "") == _entry_command()
+                for entry in wrapper.get("hooks", []) or []
+            )
+        ]
     hooks.append({"hooks": [_hook_entry()]})
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
@@ -83,7 +106,7 @@ def uninstall() -> None:
     settings["hooks"]["SessionStart"] = [
         h for h in settings["hooks"]["SessionStart"]
         if not any(
-            e.get("command", "") == _hook_entry()["command"]
+            e.get("command", "") == _entry_command()
             for e in h.get("hooks", [])
         )
     ]

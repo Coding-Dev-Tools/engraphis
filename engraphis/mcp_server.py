@@ -28,6 +28,7 @@ import hmac
 import json
 import logging
 import re
+import time
 import secrets
 import math
 
@@ -709,6 +710,7 @@ def engraphis_recall_context(
     ``semantic_support`` flags as ``engraphis_recall``.
     """
     try:
+        _recall_started = time.monotonic()
         payload = service().recall(
             query,
             workspace=workspace,
@@ -760,11 +762,15 @@ def engraphis_recall_context(
         payload["sources"] = sources
         payload = _apply_response_budget(payload, max_response_tokens)
         usage = payload.get("usage") or {}
+        # The recall usage dict only carries token and packing counters; latency
+        # is captured here so the operational log reports the real per-call
+        # cost of the recall (not a fixed zero from a non-existent field).
+        elapsed_ms = (time.monotonic() - _recall_started) * 1000.0
         logger.info(
             "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
             workspace, k, token_budget,
             usage.get("packed_count"), usage.get("omitted_count"),
-            usage.get("emitted_ms") or 0.0,
+            elapsed_ms,
         )
         return _ok(payload)
     except Exception as exc:  # noqa: BLE001
