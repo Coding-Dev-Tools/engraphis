@@ -106,6 +106,11 @@ class EngraphisMcpClient:
         async with self._connect_lock:
             if self._session is not None:
                 return self._session
+            # Capture the generation so a concurrent close() (which bumps
+            # _lifecycle) invalidates this connect. The post-await check
+            # below closes the freshly-opened stack and discards the session
+            # instead of publishing a live subprocess after shutdown.
+            generation = self._lifecycle
             self._diagnostic = ""
             stack = AsyncExitStack()
             try:
@@ -145,6 +150,17 @@ class EngraphisMcpClient:
                         "Engraphis 1.5.x Smart MCP is required; the server is "
                         f"missing: {', '.join(missing)}."
                     )
+                # If close() ran while we were awaiting, abort — don't
+                # publish a session that the caller has already decided to
+                # discard. The local stack is closed before the raise so the
+                # subprocess is reaped.
+                if self._lifecycle != generation:
+                    await stack.aclose()
+                    self._stderr_file = None
+                    self._stderr_path = None
+                    raise EngraphisMcpToolError(
+                        "Engraphis client was closed before the connect completed."
+                    )
                 self._session = session
                 self._stack = stack
                 self._tools_cache = tools
@@ -167,22 +183,27 @@ class EngraphisMcpClient:
             pass
 
     async def close(self) -> None:
-        self._lifecycle += 1
-        stack = self._stack
-        self._stack = None
-        self._session = None
-        self._tools_cache = None
-        # Reset stderr-temp-file handles. The actual file close + unlink are
-        # registered as AsyncExitStack callbacks in connect(), so they fire
-        # when `stack.aclose()` runs below. We just need to drop the Python
-        # references so a subsequent connect() can recreate them cleanly.
-        self._stderr_file = None
-        self._stderr_path = None
-        if stack is not None:
-            try:
-                await stack.aclose()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                _logger.debug("ignored error while closing MCP stack", exc_info=True)
+        # Hold the connect lock so any in-flight connect() either completes
+        # before us (and is then torn down) or aborts via the post-await
+        # generation check. Without this, a concurrent close() can return
+        # while a connect() is still mid-await, leaving a live subprocess.
+        async with self._connect_lock:
+            self._lifecycle += 1
+            stack = self._stack
+            self._stack = None
+            self._session = None
+            self._tools_cache = None
+            # Reset stderr-temp-file handles. The actual file close + unlink are
+            # registered as AsyncExitStack callbacks in connect(), so they fire
+            # when `stack.aclose()` runs below. We just need to drop the Python
+            # references so a subsequent connect() can recreate them cleanly.
+            self._stderr_file = None
+            self._stderr_path = None
+            if stack is not None:
+                try:
+                    await stack.aclose()
+                except Exception:  # noqa: BLE001 — best-effort teardown
+                    _logger.debug("ignored error while closing MCP stack", exc_info=True)
 
     async def __aenter__(self) -> "EngraphisMcpClient":
         await self.connect()

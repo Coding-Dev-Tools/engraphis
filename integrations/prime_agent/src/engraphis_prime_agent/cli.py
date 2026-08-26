@@ -15,11 +15,8 @@ import argparse
 import asyncio
 import base64
 import json
-import os
-import runpy
 import shutil
 import sys
-from pathlib import Path
 from typing import Any
 
 from .agent import PrimeAgentFleet
@@ -231,52 +228,24 @@ def _register(as_json: bool) -> int:
 
 
 def _install(uninstall: bool = False, config_path: str | None = None) -> int:
-    """Delegate to the top-level ``scripts/install_prime_agent.py``.
+    """Invoke the package-distributed installer.
 
-    ``runpy.run_path`` is the standard-library way to execute a script by
-    path while sharing the current process — preferred over a subprocess so
-    the installer can validate the file path next to the package without a
-    hard dependency on the script being on PATH.
+    The installer lives at ``engraphis_prime_agent.installer`` so it ships
+    with the wheel and works after ``pip install engraphis-prime-agent``
+    (the previous runpy-based path required the source-tree layout).
     """
-    script = Path(__file__).resolve().parents[4] / "scripts" / "install_prime_agent.py"
-    if not script.exists():
-        message = f"installer not found at {script}"
-        print(f"error: {message}", file=sys.stderr)
-        _print_json({"ok": False, "error": message, "action": "install" if not uninstall else "uninstall"})
-        return EXIT_INSTALL_FAILED
+    from .installer import (
+        _resolve_config_path,
+        install as _installer_install,
+        uninstall as _installer_uninstall,
+    )
 
-    # The installer reads sys.argv, so we set it before invoking and restore
-    # on the way out (success or failure) so callers see a clean process.
-    saved_argv = sys.argv
-    saved_env = os.environ.get("PRIME_AGENT_CONFIG_PATH")
-    argv: list[str] = ["install_prime_agent.py"]
+    path = _resolve_config_path(config_path)
     if uninstall:
-        argv.append("--uninstall")
-    if config_path:
-        argv.extend(["--config-path", config_path])
-        os.environ["PRIME_AGENT_CONFIG_PATH"] = config_path
-    sys.argv = argv
-    try:
-        runpy.run_path(str(script), run_name="__main__")
-        return 0
-    except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-        if code != 0:
-            print(
-                f"error: installer exited with status {code}",
-                file=sys.stderr,
-            )
-        return code
-    except Exception as exc:  # noqa: BLE001 — surface to user
-        print(f"error: installer raised {type(exc).__name__}: {exc}", file=sys.stderr)
-        return EXIT_INSTALL_FAILED
-    finally:
-        sys.argv = saved_argv
-        if config_path is not None:
-            if saved_env is None:
-                os.environ.pop("PRIME_AGENT_CONFIG_PATH", None)
-            else:
-                os.environ["PRIME_AGENT_CONFIG_PATH"] = saved_env
+        _installer_uninstall(path)
+    else:
+        _installer_install(path)
+    return 0
 
 
 def _version() -> int:

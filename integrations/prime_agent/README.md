@@ -104,8 +104,7 @@ async def main():
         pending = await fleet["documenter"].call("engraphis_remember", {
             "content": "Prefer sqlite-vec KNN for <=1M vectors; rebuild after model swap.",
             "importance": 0.7,
-            "subject_key": "vector.backend",
-            "claim_kind": "configured_value",
+            "mtype": "semantic",
         })
 
         # 4. The reviewer scans the inbox for any new conflicts.

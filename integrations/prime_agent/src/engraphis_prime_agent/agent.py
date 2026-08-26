@@ -46,11 +46,21 @@ class EngraphisPrimeAgent:
         self.config = config
         # Workspace precedence: explicit per-agent kwarg > config default.
         self.workspace = workspace or config.default_workspace
-        # Default repo = the sub-agent role, matching the plan. This means a
-        # fleet of N agents in workspace "W" gets N distinct repos by default
-        # ("researcher", "coder", ...), so a workspace is effectively a
-        # multi-repo boundary. Override with `repo="shared"` to opt out.
-        self.repo = repo if repo is not None else self.name
+        # Repo precedence: explicit per-agent kwarg > config default > sub-agent
+        # name. A single effective repo must be used for both session creation
+        # and the tool-call defaults — a session opened in `researcher` while
+        # tools send `api` is rejected by MemoryService with "session_id does
+        # not belong to that workspace/repo". When ENGRAPHIS_REPO sets a
+        # fleet-wide default, every sub-agent's session and every tool call
+        # use that same repo; only when no default is configured does the
+        # sub-agent name double as the repo, giving per-role isolation by
+        # default.
+        if repo is not None:
+            self.repo = repo
+        elif config.default_repo is not None:
+            self.repo = config.default_repo
+        else:
+            self.repo = self.name
         self.goal = goal
         self.token_budget = token_budget
         self._session_id: str | None = None
@@ -189,6 +199,13 @@ class EngraphisPrimeAgent:
         The assumed contract is ``target.register_tool(name, fn, schema=...)``
         (LangChain/CrewAI-style). If prime-agent's actual API differs, this
         is the single function the implementer needs to adjust.
+
+        The framework may invoke the registered callables directly rather
+        than going through ``EngraphisPrimeAgent.call()``, so each registered
+        tool is wrapped to lazily start the session on first invocation.
+        Without this wrapper, the advertised registration path would never
+        create or inject a per-agent session, and MemoryService would reject
+        every call.
         """
         # Validate both presence and that it's actually a method (hasattr
         # would otherwise accept an attribute that happens to be a string
@@ -201,8 +218,32 @@ class EngraphisPrimeAgent:
                 "See agent.py for the adapter point."
             )
         for fn, meta in self.tools():
-            register_tool(meta["name"], fn, schema=meta)
+            register_tool(meta["name"], self._wrap_for_registration(fn, meta["name"]),
+                          schema=meta)
         return target
+
+    def _wrap_for_registration(
+        self, bound_fn: ToolFn, tool_name: str
+    ) -> ToolFn:
+        """Return a callable that lazily starts a session, then delegates.
+
+        Mirrors the lazy-start behaviour of ``EngraphisPrimeAgent.call()`` so
+        that frameworks which invoke the registered tool directly (bypassing
+        ``call()``) still get a per-agent session injected.
+        """
+        agent = self
+
+        async def _wrapper(args: dict[str, Any]) -> dict[str, Any]:
+            if not agent._session_id:
+                await agent.start_session()
+                # start_session() rebuilds the bound tools with the new
+                # session_id, so re-fetch the fresh binding for the current
+                # call.
+                fresh_fn, _schema = agent.get_tool(tool_name)
+                return await fresh_fn(args)
+            return await bound_fn(args)
+
+        return _wrapper
 
     def status(self) -> dict[str, Any]:
         return {
