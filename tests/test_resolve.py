@@ -311,15 +311,28 @@ def test_reworded_number_correction_invalidates_without_claim_key():
 
 
 def test_reworded_marker_correction_invalidates_across_phrasings():
-    neighbor = _rec("Deployment happens on Fridays at 5pm.", id="mem_deploy_slot")
-    res = resolve("Deploys moved to Tuesday mornings.", [(0.6, neighbor)])
+    neighbor = _rec("Deploy schedule runs on Fridays at 5pm.", id="mem_deploy_slot")
+    res = resolve("Deploy schedule moved to Tuesday mornings.", [(0.6, neighbor)])
     assert res.op == ResolutionOp.INVALIDATE
     assert res.target_id == "mem_deploy_slot"
 
     neighbor2 = _rec("The pilot cohort has 25 users.", id="mem_pilot")
-    res2 = resolve("The pilot grew to 120 users.", [(0.5, neighbor2)])
+    res2 = resolve("The pilot cohort grew to 120 users.", [(0.5, neighbor2)])
     assert res2.op == ResolutionOp.INVALIDATE
     assert res2.target_id == "mem_pilot"
+
+
+def test_reworded_marker_without_shared_subject_does_not_invalidate():
+    """A change marker on a candidate that shares no subject with the neighbour
+    is not correction evidence — common words like "now" leak into sentences
+    that are about something different. The candidate must share at least
+    SUBJECT_TOKEN_JACCARD_MARKER_FLOOR folded subject tokens for the marker
+    to lift it to INVALIDATE.
+    """
+    neighbor = _rec("Redis caches user sessions in production.", id="mem_cache")
+    res = resolve("We now run three replicas for high availability.", [(0.45, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id != "mem_cache"
 
 
 def test_date_swap_correction_invalidates_when_attribute_is_shared():

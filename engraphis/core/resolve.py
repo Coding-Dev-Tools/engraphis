@@ -44,6 +44,12 @@ RELATED_SIM_FLOOR = 0.15
 DUP_TOKEN_JACCARD = 0.85
 # Token Jaccard: at/above this (but below DUP) it's the same subject with new content.
 SUBJECT_TOKEN_JACCARD = 0.40
+# Bare change-marker words ("now", "actually", "no longer", ...) carry no subject
+# signal on their own and would otherwise let any candidate that mentions the
+# marker retire an unrelated fact. Require the candidate and the neighbour to
+# share at least this many folded subject tokens before a marker is treated as
+# correction evidence. Integers because evidence.shared_subject is a count.
+SUBJECT_TOKEN_JACCARD_MARKER_FLOOR = 2
 # Supersession without an explicit claim key is intentionally stricter than a
 STRONG_SUBJECT_TOKEN_JACCARD = 0.55
 STRONG_JOINT_EMBED_SIM = 0.45
@@ -338,12 +344,27 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
                               reason=f"supersedes {rec.id} (strong joint evidence: "
                                      f"token overlap={overlap:.2f}, similarity={sim:.2f})")
     if rewrite_gate and not evidence.env_conflict:
-        corrected = evidence.marker or (
-            evidence.value_swap and evidence.shared_subject >= 2
-            and not evidence.proper_swap and not evidence.heavy_swap
+        # A bare change marker ("now", "actually", ...) on a candidate that
+        # shares no subject tokens with the neighbour is not correction
+        # evidence — common words leak into every sentence. Require the
+        # same shared-subject floor that the value-swap branch uses, so the
+        # marker can only lift a candidate that already overlaps on the
+        # same subject.
+        marker_corrected = (
+            evidence.marker
+            and evidence.shared_subject >= SUBJECT_TOKEN_JACCARD_MARKER_FLOOR
         )
-        if corrected:
-            kind = "change marker" if evidence.marker else "value change"
+        value_corrected = (
+            evidence.value_swap
+            and evidence.shared_subject >= 2
+            and not evidence.proper_swap
+            and not evidence.heavy_swap
+        )
+        if marker_corrected or value_corrected:
+            if marker_corrected:
+                kind = "change marker"
+            else:
+                kind = "value change"
             return Resolution(
                 ResolutionOp.INVALIDATE, target_id=rec.id,
                 reason=f"supersedes {rec.id} (reworded correction by {kind}: "
