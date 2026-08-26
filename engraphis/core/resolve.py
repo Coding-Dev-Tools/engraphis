@@ -132,7 +132,7 @@ _NUMBER_WORDS = frozenset({
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "eleven", "twelve", "hundred", "thousand", "million", "billion",
 })
-_ORDINAL_RE = re.compile(r"\d+(?:st|nd|rd|th)")
+_ORDINAL_RE = re.compile(r"\d{1,10}(?:st|nd|rd|th)\Z")
 
 
 def _normalise_claim_text(value: str) -> str:
