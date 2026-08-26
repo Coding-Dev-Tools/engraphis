@@ -10632,6 +10632,56 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
 
 
 @requires_node
+def test_flow_speed_slider_has_a_visible_range_in_compat_engine() -> None:
+    """The compat engine's flow-speed slider must produce a visibly larger particle speed at
+    the top of the range than at the bottom. Earlier the speed formula
+    `0.002 + (flowSpeed/100)*0.008` produced a 5x range (0.002..0.01) that was too small to be
+    noticeable end-to-end. The fix widens that to a 34x range
+    (`0.0005 + (flowSpeed/100)*0.025` -> 0.00075..0.0255). The test snapshots the per-link
+    speed closure at the two ends of the slider and asserts the high end is materially
+    larger than the low end.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('compact');
+        api.setData(chain(40));
+        const linkForSample = { layer: 'semantic' };
+        const sample = (flowSpeed) => {
+          api.setSettings({ flowSpeed, flow: true });
+          // linkDirectionalParticleSpeed is a chainable setter; the engine has stored a
+          // per-link function on the stub. Sample it on a non-suggested, non-ghost link.
+          const speedFn = store.linkDirectionalParticleSpeed;
+          return typeof speedFn === 'function' ? speedFn(linkForSample) : null;
+        };
+        const low = sample(1);
+        const mid = sample(50);
+        const high = sample(100);
+        const stop = sample(0);
+        emit({ low, mid, high, stop });
+        """
+    )
+    # At flowSpeed=0 the engine short-circuits the closure to 0 (particles do not move).
+    assert report["stop"] == 0, (
+        f"flowSpeed=0 must yield particle speed 0 (compat engine stop-at-zero), "
+        f"got {report['stop']}"
+    )
+    # At flowSpeed=1 the closure must return a non-zero, low-end value.
+    assert report["low"] > 0, f"flowSpeed=1 must yield non-zero speed, got {report['low']}"
+    # End-to-end the slider must show a wide range: high is materially larger than low.
+    # The fix targets a 34x range; allow some headroom for d3 stub arithmetic.
+    assert report["high"] >= report["low"] * 10, (
+        f"flowSpeed slider must produce a visible range (>=10x low-to-high). "
+        f"low={report['low']} high={report['high']}"
+    )
+    # Monotonicity: low < mid < high.
+    assert report["low"] < report["mid"] < report["high"], (
+        f"flow speed must be monotonic in the slider value: low={report['low']} "
+        f"mid={report['mid']} high={report['high']}"
+    )
+
+
+@requires_node
 def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
     """Full mode must not turn a normal large workspace into a pinned, inert ring.
 
