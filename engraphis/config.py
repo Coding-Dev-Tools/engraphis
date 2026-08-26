@@ -29,7 +29,10 @@ from engraphis.private_state import (
 
 _logger = logging.getLogger("engraphis.config")
 
-_MAX_CONFIG_ENV_BYTES = 1024 * 1024
+#: Public cap for trusted-env parsing/rewriting; routes and tooling import this so the
+#: limit lives in exactly one place.
+MAX_CONFIG_ENV_BYTES = 1024 * 1024
+_MAX_CONFIG_ENV_BYTES = MAX_CONFIG_ENV_BYTES
 _CONFIG_ENV_ASSIGNMENT = re.compile(
     r"(?:export[ \t]+)?([A-Z][A-Z0-9_]*)[ \t]*=(.*)"
 )
@@ -162,6 +165,57 @@ def _load_trusted_dotenv() -> None:
 
 _load_trusted_dotenv()
 
+#: Drive roots preferred for first-run data placement on Windows, in order. A
+#: second internal drive beats crowding the system drive; both must be opt-out.
+_WINDOWS_PREFERRED_DATA_DRIVES = ("D", "E")
+
+
+def _default_data_dir(*, os_name: Optional[str] = None, platform: Optional[str] = None,
+                      environ: Optional[dict] = None, home: Optional[Path] = None) -> Path:
+    """Default root for Engraphis-owned persisted state (database, exports, caches).
+
+    ``ENGRAPHIS_DATA_DIR`` wins when set, so relocating everything to another drive is
+    one setting. Otherwise: on Windows prefer ``<D|E>:\\EngraphisData`` when such a
+    drive exists (keeps multi-GB databases off the system disk by default) and fall
+    back to the platform user-data directory; macOS and XDG platforms keep their
+    established locations so existing installs never silently change.
+    """
+    os_name = os.name if os_name is None else os_name
+    platform = sys.platform if platform is None else platform
+    environment = os.environ if environ is None else environ
+    home = Path.home() if home is None else home
+    configured = environment.get("ENGRAPHIS_DATA_DIR", "").strip()
+    if configured:
+        expanded = Path(configured).expanduser()
+        if (expanded.is_absolute()
+                or PurePosixPath(configured).is_absolute()
+                or PureWindowsPath(configured).is_absolute()):
+            # Preserve explicit spelling (including Windows drive paths checked from
+            # any host OS) instead of anchoring it to the caller's home.
+            return expanded
+        return home / expanded
+    if os_name == "nt":
+        for drive in _WINDOWS_PREFERRED_DATA_DRIVES:
+            drive_root = "%s:\\" % drive
+            try:
+                present = os.path.exists(drive_root)
+            except OSError:
+                present = False
+            if present:
+                return PureWindowsPath(drive_root) / "EngraphisData"
+        win_home = PureWindowsPath(str(home))
+        base = PureWindowsPath(
+            environment.get("LOCALAPPDATA") or (win_home / "AppData" / "Local")
+        )
+        return base / "engraphis"
+    posix_home = PurePosixPath(str(home).replace("\\", "/"))
+    if platform == "darwin":
+        return posix_home / "Library" / "Application Support" / "engraphis"
+    return PurePosixPath(
+        environment.get("XDG_DATA_HOME") or (posix_home / ".local" / "share")
+    ) / "engraphis"
+
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_NOTICES = set()
 _WINDOWS_LOCK_RETRY_SECONDS = 0.05
@@ -182,20 +236,12 @@ def _default_db_path(root: Path = _PROJECT_ROOT, *, os_name: Optional[str] = Non
     platform = sys.platform if platform is None else platform
     environment = os.environ if environ is None else environ
     home = Path.home() if home is None else home
-    if os_name == "nt":
-        win_home = PureWindowsPath(str(home))
-        base = PureWindowsPath(
-            environment.get("LOCALAPPDATA") or (win_home / "AppData" / "Local")
-        )
-    elif platform == "darwin":
-        posix_home = PurePosixPath(str(home).replace("\\", "/"))
-        base = posix_home / "Library" / "Application Support"
-    else:
-        posix_home = PurePosixPath(str(home).replace("\\", "/"))
-        base = PurePosixPath(
-            environment.get("XDG_DATA_HOME") or (posix_home / ".local" / "share")
-        )
-    return str(base / "engraphis" / "engraphis.db")
+    # One data-root policy for every platform (ENGRAPHIS_DATA_DIR, Windows second-drive
+    # preference, then the established user-data directories) so the database default
+    # and Settings.data_dir can never disagree.
+    return str(_default_data_dir(
+        os_name=os_name, platform=platform, environ=environment, home=home,
+    ) / "engraphis.db")
 
 
 def _db_notice(key: str, message: str) -> None:
@@ -884,6 +930,13 @@ class Settings:
 
     db_path: str = field(
         default_factory=_configured_db_path
+    )
+
+    # Root for Engraphis-owned persisted state. Drives the default database location
+    # above and surfaces in the dashboard Storage panel; an explicit
+    # ENGRAPHIS_DB_PATH still wins over any default derived from it.
+    data_dir: str = field(
+        default_factory=lambda: str(_default_data_dir())
     )
 
     embed_model: str = field(

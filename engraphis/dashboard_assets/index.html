@@ -612,6 +612,19 @@
                 <p>The preference stays on this device and is shared with Classic.</p>
                 <label>Theme<select id="theme-select"><option value="slate">Slate (dark)</option><option value="midnight">Midnight</option><option value="paper">Paper (light)</option><option value="matrix">Matrix</option></select></label>
               </section>
+              <section class="setting-card storage-setting-card">
+                <p class="eyebrow">Storage</p>
+                <h2>Where memory lives</h2>
+                <div id="storage-summary" class="storage-summary"><p class="empty-state">Checking storage…</p></div>
+                <label for="storage-dir-input">Folder for the database</label>
+                <input id="storage-dir-input" type="text" inputmode="text" autocomplete="off"
+                       spellcheck="false" placeholder="e.g. D:\\EngraphisData">
+                <p id="storage-hint" class="storage-hint">Moving copies the database, verifies it, then switches over. The choice is saved for every app that uses Engraphis.</p>
+                <div class="storage-actions">
+                  <button id="storage-move-btn" class="primary-button" type="button">Save &amp; move database</button>
+                  <span id="storage-result" class="storage-result" role="status" aria-live="polite"></span>
+                </div>
+              </section>
               <section class="setting-card">
                 <p class="eyebrow">Pro · hosted account</p>
                 <h2>Engraphis Cloud</h2>

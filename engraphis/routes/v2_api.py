@@ -15,12 +15,13 @@ import hmac
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
 import urllib.request
 import weakref
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 from urllib.parse import quote
 
@@ -29,7 +30,15 @@ from pydantic import BaseModel, Field, StrictInt
 from starlette.concurrency import run_in_threadpool
 
 from engraphis import licensing
-from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.config import (
+    DEFAULT_RELAY_URL,
+    MAX_CONFIG_ENV_BYTES,
+    _backup_sqlite,
+    canonicalize_relay_url,
+    settings,
+    trusted_env_path,
+)
+from engraphis.private_state import atomic_private_text, read_private_text
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
 from engraphis.service import (
@@ -113,22 +122,27 @@ def _sanitized_http_exception(status_code: object) -> HTTPException:
     return HTTPException(status_code=500, detail={"error": "internal server error"})
 
 
+def _build_service(db_path: str) -> MemoryService:
+    """Construct the process-default service for *db_path* (shared by lazy bind + moves)."""
+    return MemoryService.create(
+        db_path, embed_model=settings.embed_model,
+        embed_revision=getattr(settings, "embed_revision", "") or None,
+        require_immutable_models=bool(
+            getattr(settings, "require_immutable_models", False)
+        ),
+        embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
+        vector_backend=settings.vector_backend,
+        rerank_model=getattr(settings, "rerank_model", "") or None,
+        rerank_revision=getattr(settings, "rerank_revision", "") or None,
+    )
+
+
 def service() -> MemoryService:
     """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
     global _service
     with _SERVICE_LOCK:
         if _service is None:
-            _service = MemoryService.create(
-                settings.db_path, embed_model=settings.embed_model,
-                embed_revision=getattr(settings, "embed_revision", "") or None,
-                require_immutable_models=bool(
-                    getattr(settings, "require_immutable_models", False)
-                ),
-                embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
-                vector_backend=settings.vector_backend,
-                rerank_model=getattr(settings, "rerank_model", "") or None,
-                rerank_revision=getattr(settings, "rerank_revision", "") or None,
-            )
+            _service = _build_service(settings.db_path)
         return _service
 
 
@@ -579,6 +593,8 @@ def bootstrap():
         "workspaces": wss,
         "stats": bootstrap_stats,
         "embedder": emb,
+        # Where data lives right now; the Settings -> Storage card renders from this.
+        "storage": _storage_snapshot(),
         # Non-blocking best-known update snapshot; the dashboard renders an "update
         # available" banner from this and a background refresh warms the cache.
         "update": _update_snapshot(),
@@ -3714,6 +3730,234 @@ def hosted_license_only():
 def hosted_trial_status(claim_id: str):
     del claim_id
     raise HTTPException(status_code=501, detail=_hosted_license_detail())
+
+
+# ── Storage location (dashboard Settings → Storage) ───────────────────────────────
+# The database lives wherever ENGRAPHIS_DB_PATH (trusted config.env) points, defaulting
+# through config._default_data_dir(). These routes expose that location and provide a
+# guided move: validate destination -> stop-the-world copy via the SQLite backup API ->
+# atomically persist the new absolute path in config.env so every entrypoint follows.
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
+def _storage_snapshot() -> dict:
+    """Best-effort view of where data lives and what it costs on disk."""
+    db = Path(settings.db_path).expanduser()
+    entry = {
+        "db_path": str(db),
+        "db_exists": False,
+        "db_bytes": 0,
+        "data_dir": settings.data_dir,
+        "state_dir": os.environ.get("ENGRAPHIS_STATE_DIR", "").strip(),
+        "config_env": str(trusted_env_path()),
+        "writable": False,
+    }
+    try:
+        entry["db_exists"] = db.is_file()
+        if entry["db_exists"]:
+            entry["db_bytes"] = db.stat().st_size
+            sidecars = sum(
+                side.stat().st_size
+                for side in (Path(str(db) + "-wal"), Path(str(db) + "-shm"))
+                if side.is_file()
+            )
+            entry["db_bytes"] += sidecars
+        target = db.parent if db.parent.exists() else Path(settings.data_dir)
+        probe = target / ".engraphis-write-probe"
+        probe.write_text("")
+        probe.unlink()
+        entry["writable"] = True
+    except OSError:
+        pass
+    return entry
+
+
+@router.get("/storage")
+def storage_info():
+    """Owner-facing storage snapshot for the dashboard Settings panel."""
+    return _storage_snapshot()
+
+
+class _StorageMoveReq(BaseModel):
+    destination_dir: str = Field(min_length=1)
+
+
+def _looks_like_windows_system_drive(text: str) -> bool:
+    """True when *text* names a path on the Windows system drive (C:).
+
+    Parsed with Windows semantics regardless of host OS, so a dashboard running on
+    POSIX still recognizes "C:\\Users" as the system drive instead of a relative
+    folder literally named "C:".
+    """
+    win = PureWindowsPath(text.replace("/", "\\"))
+    drive = win.drive
+    return win.is_absolute() and len(drive) >= 2 and drive[1] == ":" and drive[0].upper() == "C"
+
+
+def _resolve_move_destination(raw: str) -> Path:
+    text = raw.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Destination directory is empty.")
+    if _looks_like_windows_system_drive(text):
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to move onto the system drive (C:) — that is what this "
+                   "move exists to escape.",
+        )
+    if PureWindowsPath(text).is_absolute():
+        # A Windows drive path keeps its spelling on every host OS: resolving it with
+        # POSIX rules would silently turn "D:/X" into "<cwd>/D:/X".
+        return Path(str(PureWindowsPath(text)))
+    candidate = Path(text).expanduser()
+    if not (candidate.is_absolute() or PurePosixPath(text).is_absolute()):
+        candidate = Path.home() / candidate
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid destination: {exc}")
+    return resolved
+
+
+@router.post("/storage/db-path")
+async def move_database(req: _StorageMoveReq):
+    """Relocate the active SQLite store to another directory and persist the choice.
+
+    Stop-the-world copy: readers/writers are drained first, then a validated backup-API
+    copy is published with ``os.replace`` (atomic on the same volume; cross-volume moves
+    fall back to copy+delete after verification). The chosen absolute path is written to
+    the trusted config file so MCP servers, CLI runs, and future dashboard starts all
+    follow it. A failure at any stage leaves the original database untouched.
+    """
+    dest_dir = _resolve_move_destination(req.destination_dir)
+    source = Path(settings.db_path).expanduser()
+    if not source.is_file():
+        raise HTTPException(status_code=409, detail="No existing database to move.")
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot create destination: {exc}")
+    if not os.access(dest_dir, os.W_OK):
+        raise HTTPException(status_code=400, detail="Destination is not writable.")
+    target = dest_dir / source.name
+
+    if source.resolve() == target.resolve():
+        raise HTTPException(status_code=400,
+                            detail="Database already lives at that location.")
+    if target.exists():
+        raise HTTPException(
+            status_code=409,
+            detail="A file named %s already exists in the destination." % target.name,
+        )
+
+    # 1. Quiesce first so WAL content is checkpointed into the main file and no
+    #    connection can write mid-copy. set_service() closes under the same lock the
+    #    lazy binder uses, so nothing can reopen until step 4 publishes a new binding.
+    global _service
+    with _SERVICE_LOCK:
+        current = _service
+        if current is not None:
+            close = getattr(current, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 - busy workers abort the move
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Database is busy (background work did not stop in "
+                               "time): " + type(exc).__name__,
+                    )
+            _service = None
+
+    # 2. Copy to a randomized stage beside the DESTINATION and verify it.
+    try:
+        _backup_sqlite(source, target)
+    except FileExistsError:
+        with _SERVICE_LOCK:
+            _service = _build_service(str(source))
+        raise HTTPException(status_code=409, detail="Move already in progress.")
+    except Exception as exc:  # noqa: BLE001 - restore service, report
+        with _SERVICE_LOCK:
+            _service = _build_service(str(source))
+        raise HTTPException(status_code=500,
+                            detail="Copy failed; original untouched (%s)." % type(exc).__name__)
+    check_conn = sqlite3.connect(str(target), timeout=30)
+    try:
+        row = check_conn.execute("PRAGMA quick_check").fetchone()
+    finally:
+        check_conn.close()
+    if not row or row[0] != "ok":
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        with _SERVICE_LOCK:
+            _service = _build_service(str(source))
+        raise HTTPException(
+            status_code=500,
+            detail="Copied database failed its integrity check; original kept.",
+        )
+
+    # 3. Publish. Same volume: atomic replace of the original. Cross volume: the verified
+    #    copy is authoritative, so remove the source after success (sidecars included).
+    try:
+        os.replace(str(source), str(target))
+        replaced_in_place = True
+    except OSError:
+        replaced_in_place = False
+    stale_original = None
+    if not replaced_in_place:
+        try:
+            source.unlink()
+        except OSError as exc:
+            # The new database is complete and verified; only the stale original lingers.
+            stale_original = str(exc)
+    for sidecar in ("-wal", "-shm"):
+        try:
+            Path(str(source) + sidecar).unlink()
+        except OSError:
+            pass
+
+    settings.db_path = str(target)
+
+    # 4. Rebind immediately so this process serves the new location without a restart.
+    with _SERVICE_LOCK:
+        _service = _build_service(str(target))
+    if stale_original is not None:
+        return {"ok": True, "moved_to": str(target), "persisted": None,
+                "note": "New database is live; could not delete the old file (%s). "
+                        "Delete it manually." % stale_original}
+
+    env_path = trusted_env_path()
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_text = ""
+        if env_path.is_file():
+            raw_text = read_private_text(env_path, max_bytes=MAX_CONFIG_ENV_BYTES,
+                                         allow_missing=True) or ""
+        lines = [
+            line for line in raw_text.splitlines()
+            if not line.strip().startswith("ENGRAPHIS_DB_PATH=")
+        ]
+        lines.append("ENGRAPHIS_DB_PATH=%s" % target)
+        atomic_private_text(env_path, "\n".join(lines) + "\n")
+    except Exception as exc:  # noqa: BLE001 - DB moved; surface only the persistence error
+        return {"ok": True, "moved_to": str(target),
+                "persisted": False,
+                "persist_error": "Set ENGRAPHIS_DB_PATH=%s manually (%s)" % (target, exc)}
+    return {"ok": True, "moved_to": str(target), "persisted": True}
 
 
 @router.post("/ops/backup")

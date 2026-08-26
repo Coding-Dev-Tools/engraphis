@@ -3771,7 +3771,7 @@
 
   async function loadManageTab(tab) {
     if (tab === 'workspaces') renderWorkspaceList();
-    if (tab === 'settings') await loadSettings();
+    if (tab === 'settings') { await loadSettings(); await loadStoragePanel(); }
     if (tab === 'plans') await loadPlans();
     if (tab === 'analytics') await loadHosted('analytics');
     if (tab === 'automation') await loadHosted('automation');
@@ -4394,6 +4394,89 @@
     }
   }
 
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+  }
+
+  async function loadStoragePanel() {
+    const summary = byId('storage-summary');
+    if (!summary) return;
+    try {
+      const storage = await api('/storage');
+      state.storage = storage;
+      if (storage.db_exists) {
+        const p = node('p', '', '');
+        p.append('Database: ');
+        const strong = document.createElement('strong');
+        strong.textContent = storage.db_path;
+        p.append(strong, ` (${formatBytes(storage.db_bytes)})`);
+        const meta = node('p', '', '');
+        meta.textContent = `Configured data root: ${storage.data_dir}`;
+        const cfg = node('p', '', '');
+        cfg.textContent = `Settings file: ${storage.config_env}`;
+        const health = node('p', '', '');
+        health.textContent = storage.writable
+          ? 'Location is writable.'
+          : 'Warning: current location is not writable.';
+        summary.replaceChildren(p, meta, cfg, health);
+      } else {
+        const p = node('p', '', '');
+        p.textContent = `Database file not created yet (${storage.db_path}). `
+          + 'The first memory will create it.';
+        summary.replaceChildren(p);
+      }
+    } catch (error) {
+      summary.replaceChildren(empty(`Storage info unavailable: ${error.message}`));
+    }
+  }
+
+  async function moveDatabase() {
+    const input = byId('storage-dir-input');
+    const result = byId('storage-result');
+    const destination = (input.value || '').trim();
+    result.dataset.tone = '';
+    result.textContent = '';
+    if (!destination) {
+      result.dataset.tone = 'error';
+      result.textContent = 'Enter a folder path first.';
+      return;
+    }
+    const confirmed = window.confirm(
+      `Move the Engraphis database to ${destination}? `
+      + 'The app pauses briefly while the database is copied and verified. '
+      + 'The original stays untouched until the copy passes its integrity check.',
+    );
+    if (!confirmed) return;
+    const moveButton = byId('storage-move-btn');
+    moveButton.disabled = true;
+    result.textContent = 'Moving and verifying…';
+    try {
+      const outcome = await api('/storage/db-path', { method: 'POST', body: { destination_dir: destination } });
+      if (outcome.persisted === false) {
+        result.dataset.tone = 'error';
+        result.textContent = outcome.persist_error || 'Moved, but saving the choice failed.';
+      } else if (outcome.note) {
+        result.dataset.tone = 'ready';
+        result.textContent = outcome.note;
+      } else {
+        result.dataset.tone = 'ready';
+        result.textContent = `Database moved to ${outcome.moved_to}.`;
+      }
+      await loadStoragePanel();
+      await refreshBootstrap();
+    } catch (error) {
+      result.dataset.tone = 'error';
+      result.textContent = error.message;
+    } finally {
+      moveButton.disabled = false;
+    }
+  }
+
   async function loadSettings() {
     try {
       state.license = await api('/license');
@@ -4582,6 +4665,8 @@
   }));
   all('[data-provenance-tab]').forEach(control => control.addEventListener('click', () => switchProvenanceTab(control.dataset.provenanceTab)));
   all('[data-manage-tab]').forEach(control => control.addEventListener('click', () => switchManageTab(control.dataset.manageTab)));
+  const storageMoveButton = byId('storage-move-btn');
+  if (storageMoveButton) storageMoveButton.addEventListener('click', () => moveDatabase());
   function wireTabKeyboard(selector, dataKey, activate) {
     const controls = all(selector);
     controls.forEach((control, index) => {

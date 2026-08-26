@@ -1320,3 +1320,12 @@ div[data-graph-style]:focus-visible {
   outline: 2px solid var(--c-acc);
   outline-offset: -2px;
 }
+
+/* Storage card — location summary + move control */
+.storage-setting-card .storage-summary { margin: 0; padding: 8px 10px; border: 1px solid var(--c-line); border-radius: 10px; background: var(--c-surface); color: var(--c-mid); font-size: .84rem; }
+.storage-setting-card .storage-summary strong { color: var(--c-fg); word-break: break-all; }
+.storage-setting-card label { font-size: .82rem; color: var(--c-mid); }
+.storage-setting-card input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid var(--c-line2); border-radius: 8px; background: var(--c-bg); color: var(--c-fg); font: inherit; }
+.storage-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.storage-result[data-tone="error"] { color: var(--c-bad); font-size: .84rem; }
+.storage-result[data-tone="ready"] { color: var(--c-fg); font-size: .84rem; }
