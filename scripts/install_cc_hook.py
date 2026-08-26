@@ -20,7 +20,6 @@ from pathlib import Path
 SETTINGS_PATH = Path(os.environ.get("COMMANDCODE_SETTINGS_PATH")
                      or Path.home() / ".commandcode" / "settings.json")
 HOOK_PATH = Path(__file__).resolve().parent.parent / "integrations" / "commandcode" / "session_start_hook.py"
-HOOK_KEY = "cc-engraphis-session-start"
 
 
 def _utc_stamp() -> str:
