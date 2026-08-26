@@ -20,6 +20,7 @@ from pathlib import Path
 SETTINGS_PATH = Path(os.environ.get("COMMANDCODE_SETTINGS_PATH")
                      or Path.home() / ".commandcode" / "settings.json")
 HOOK_PATH = Path(__file__).resolve().parent.parent / "integrations" / "commandcode" / "session_start_hook.py"
+HOOK_KEY = "cc-engraphis-session-start"
 
 
 def _utc_stamp() -> str:
@@ -67,29 +68,6 @@ def _entry_command() -> str:
     return _hook_entry()["command"]
 
 
-def _strip_our_entry(wrapper: dict) -> tuple[dict | None, bool]:
-    """Remove our inner entry from a wrapper; return (new_wrapper, removed).
-
-    ``new_wrapper`` is ``None`` if the wrapper should be dropped entirely
-    (no remaining inner entries). Otherwise the wrapper keeps its sibling
-    inner entries verbatim so a manually-added sibling hook is preserved.
-    """
-    target = _entry_command()
-    inner = wrapper.get("hooks", []) or []
-    kept = [
-        entry for entry in inner
-        if entry.get("command", "") != target
-    ]
-    if len(kept) == len(inner):
-        # Our entry wasn't here; leave the wrapper untouched.
-        return wrapper, False
-    if not kept:
-        return None, True
-    new_wrapper = dict(wrapper)
-    new_wrapper["hooks"] = kept
-    return new_wrapper, True
-
-
 def _session_start_has_our_entry(hooks: list) -> bool:
     """Each SessionStart entry is ``{"hooks": [{"command": ...}, ...]}``."""
     target = _entry_command()
@@ -100,51 +78,21 @@ def _session_start_has_our_entry(hooks: list) -> bool:
     return False
 
 
-def _strip_our_entries(hooks: list) -> list:
-    """Return a new SessionStart list with our inner entry removed per wrapper.
-
-    Wrappers that contained our entry alongside a sibling inner entry keep
-    the sibling intact; wrappers that contained only our entry are dropped.
-    Wrappers that did not contain our entry are returned verbatim.
-    """
-    new_hooks: list = []
-    for wrapper in hooks:
-        stripped, removed = _strip_our_entry(wrapper)
-        if not removed:
-            new_hooks.append(wrapper)
-        elif stripped is not None:
-            new_hooks.append(stripped)
-    return new_hooks
-
-
 def install() -> None:
     settings = _read_settings(SETTINGS_PATH)
     hooks = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    # Remove any prior copy of our entry (idempotency) per wrapper, then
-    # add our entry. If a stripped wrapper still has sibling inner entries
-    # (the operator had a manually-added hook in the same wrapper), append
-    # our entry to that same wrapper so we don't end up with two
-    # single-entry wrappers that are effectively one logical SessionStart
-    # entry.
+    # Remove any prior copy of our entry (idempotency), then append a fresh one.
+    # Each entry is a wrapper of one or more inner hook objects; inspect the
+    # inner "command" so the filter matches the shape uninstall() uses.
     if _session_start_has_our_entry(hooks):
-        new_hooks: list = []
-        reattach_target: dict | None = None
-        for wrapper in hooks:
-            stripped, removed = _strip_our_entry(wrapper)
-            if not removed:
-                new_hooks.append(wrapper)
-            elif stripped is not None:
-                # Wrapper had siblings; remember it as the target to
-                # reattach our entry to.
-                reattach_target = stripped
-                new_hooks.append(stripped)
-        hooks[:] = new_hooks
-        if reattach_target is not None:
-            reattach_target["hooks"] = list(reattach_target.get("hooks", [])) + [_hook_entry()]
-        else:
-            hooks.append({"hooks": [_hook_entry()]})
-    else:
-        hooks.append({"hooks": [_hook_entry()]})
+        hooks[:] = [
+            wrapper for wrapper in hooks
+            if not any(
+                entry.get("command", "") == _entry_command()
+                for entry in wrapper.get("hooks", []) or []
+            )
+        ]
+    hooks.append({"hooks": [_hook_entry()]})
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
     print(f"installed SessionStart hook into {SETTINGS_PATH}")
@@ -155,7 +103,13 @@ def uninstall() -> None:
     if "hooks" not in settings or "SessionStart" not in settings["hooks"]:
         print(f"no SessionStart hook entry in {SETTINGS_PATH}")
         return
-    settings["hooks"]["SessionStart"] = _strip_our_entries(settings["hooks"]["SessionStart"])
+    settings["hooks"]["SessionStart"] = [
+        h for h in settings["hooks"]["SessionStart"]
+        if not any(
+            e.get("command", "") == _entry_command()
+            for e in h.get("hooks", [])
+        )
+    ]
     if not settings["hooks"]["SessionStart"]:
         del settings["hooks"]["SessionStart"]
     if not settings["hooks"]:
@@ -166,8 +120,7 @@ def uninstall() -> None:
 
 
 def main() -> int:
-    description = __doc__.split("\n\n", 1)[0] if __doc__ else None
-    parser = argparse.ArgumentParser(description=description)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove the Engraphis SessionStart hook from the user settings.")
     args = parser.parse_args()
