@@ -26,8 +26,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   / `ENGRAPHIS_RERANK_MODEL`). Evaluated offline on the bundled retrieval gates
   (sample.jsonl, codemem.jsonl, k=5): hit@5 stays at 1.0 with zero per-question
   regressions, MRR@5 lifts 0.889 -> 0.944 (sample) and 0.962 -> 0.981 (codemem),
-  with ~15 ms per query added. Not the default; flip with a one-line config
-  (`ENGRAPHIS_RERANK_MODEL` in `.env`, then restart the MCP server and dashboard).
+  with ~15 ms per query added. Not the default; set the value in the trusted
+  config file (`~/.engraphis/config.env` on the operator account, or as a
+  process environment variable) — Engraphis deliberately does not read the
+  CWD `.env`, so editing `./.env` and restarting leaves the identity
+  reranker active. Restart the MCP server and dashboard after the change.
 
 ### Changed
 
