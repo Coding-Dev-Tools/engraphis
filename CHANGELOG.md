@@ -34,14 +34,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - The reworded-correction detector in `core/resolve.py` now supersedes reworded
   corrections without a stable `subject_key` when the aligned token diff shows
   a same-attribute value change (e.g. "the timeout is 30 seconds" -> "we raised
-  the timeout to 90 seconds"). Measured on a 36-pair labeled corpus: 35/36
-  positives superseded with the real embedder and 0/36 false invalidations
-  (was 1/5 on the unkeyed benchmark pairs). Vetoes preserve coexisting
-  distinct facts: clashing environment qualifiers (staging vs production),
-  named mixed-case identifier swaps (ProviderA -> ProviderB), clean noun-for-noun
-  replacements (REST -> GraphQL docs), and pairs with fewer than two shared
-  subject tokens. The strong-evidence branch now also honours the env-conflict
-  veto (R1 follow-up fix).
+  the timeout to 90 seconds"). The strong-evidence branch and the rewrite_gate
+  branch both require a change marker (e.g. "now", "raised") to be accompanied
+  by a value_swap on the same shared subject, so a bare "now" can never retire
+  a fact it merely shares surface nouns with. Vetoes preserve coexisting
+  distinct facts: clashing environment qualifiers (staging vs production,
+  folded through `prod`/`production` and `dev`/`development` aliases so a
+  legitimate correction across short forms does not get vetoed),
+  named mixed-case identifier swaps (ProviderA -> ProviderB), and clean
+  noun-for-noun replacements (REST -> GraphQL docs). Measured on the
+  reproducible corpus shipped at
+  `eval/datasets/resolver_reworded_corrections.jsonl` (44 pairs, 38
+  positives + 6 negatives); reproduce locally with
+  `python -m eval.resolver_reworded_corrections` or
+  `python -m eval.resolver_reworded_corrections --strict` in CI.
 - The `temporal_splice` flag passed from `core/engine.py` to `resolve()` is
   now narrowed to the bi-temporal backfill case (a deliberate `valid_at`
   AND a `subject_key`), instead of any `valid_at`-pinned write. Scheduled
