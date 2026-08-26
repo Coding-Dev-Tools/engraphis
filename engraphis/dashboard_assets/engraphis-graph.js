@@ -613,6 +613,25 @@
   const MAX_AUTO_FIT_ZOOM = 4;
   const SETTINGS_ALPHA_TARGET = 0.12;
   const ALPHA_TARGET_HOLD_MS = 180;
+  /* Inline utility: bound a value to [min, max]. The dashboard pipeline does not expose
+     a shared math helper, so this lives here alongside the spacetime tuners that need it. */
+  function clamp(value, min, max) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return min;
+    return Math.max(min, Math.min(max, n));
+  }
+  /* Mirror of graphBlackHoleMassMultiplier in ledger.js — kept inline so the d3-force
+     d3-install path in this file does not need to cross reference the ledger module. The
+     formula is identical: baseline 160 below which the multiplier is value/160, above which
+     it climbs linearly at 0.02/unit (so 500 -> 8.80, 1000 -> 21.80). */
+  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
+  function blackHoleMassMultiplier(controlValue) {
+    const value = Number(controlValue);
+    if (!Number.isFinite(value)) return 1;
+    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
+      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) * 0.02;
+  }
 
   /* Physics is allowed to respond live, but one bad force update must never turn a
      settled graph into a high-speed slingshot. Keep the bounds in world units so they
@@ -7968,15 +7987,32 @@
         charge = d3.forceManyBody();
         fg.d3Force('charge', charge);
       }
-      if (charge && charge.strength) charge.strength(-(mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel));
+      /* Spacetime-tuned multipliers: the user reaches these via the Galactic gravity, Black hole
+         mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
+         only consumer, so the multipliers must reach the d3 forces directly. Each map is a
+         bounded monotonic curve so the user can move the slider from end to end and see the
+         intended effect on every node on the next tick. */
+      const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant || 0) / 100, 0, 2);
+      const massMultiplier = clamp(blackHoleMassMultiplier(Number(state.settings.blackHoleMass ?? 160)), 0.25, 4);
+      const localMultiplier = clamp(Number(state.settings.localGravitationalConstant || 0) / 100, 0, 2);
+      const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
+      if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
       if (link && link.distance) link.distance(s.link);
       if (link && link.strength) link.strength(edge => {
         const source = typeof edge.source === 'object' ? edge.source : layoutById.get(linkEndpoint(edge, 'source'));
         const target = typeof edge.target === 'object' ? edge.target : layoutById.get(linkEndpoint(edge, 'target'));
-        return 1 / Math.max(1, Math.min(
+        const base = 1 / Math.max(1, Math.min(
           source && source.degree || 1, target && target.degree || 1
         ));
+        return base * localMultiplier;
       });
+      /* velocityDecay is the d3 equivalent of the space-damping slider: high damping makes the
+         layout settle fast, low damping keeps nodes oscillating. Bounded 0.05..0.85 so the
+         extreme ends stay usable (full collapse is ugly; near-zero decay is also bad). */
+      if (fg.velocityDecay) {
+        const damping = clamp(Number(state.settings.damping ?? 1), 1, 15);
+        fg.velocityDecay(0.05 + (damping - 1) * (0.80 / 14));
+      }
       if (typeof d3 === 'undefined') {
         installVelocityGuard();
         return;
@@ -8007,15 +8043,16 @@
         });
         /* A gentle origin-based centering keeps the layout coherent without fighting a
            drag; the community grid is still visible through the charge/repel and link
-           structure installed above. */
-        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100);
+           structure installed above. Black-hole mass multiplies the centering strength so
+           the slider visibly pulls nodes toward the origin. */
+        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100) * massMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       } else if (mode === 'radial' && d3.forceRadial) {
         const outerRadius = Math.max(180, Math.min(360, Math.sqrt(Math.max(1, layoutNodes.length)) * 18 + (Number(s.link) || 16) * 4));
         const degreeScale = Math.max(1, maxOf(layoutNodes.map(node => node.degree || 0), 1));
-        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
-        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500)));
+        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
+        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
         fg.d3Force('radial', d3.forceRadial(node => {
           const hubness = Math.max(0, Math.min(1, (node.degree || 0) / degreeScale));
           return 34 + (outerRadius - 34) * (1 - hubness);
