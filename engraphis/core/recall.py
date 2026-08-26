@@ -195,6 +195,18 @@ class RecallEngine:
             max(1, int(resolved_cap)) if resolved_cap is not None else None
         )
         self._planner_slot = threading.BoundedSemaphore(1)
+        # Latency knob: an operator may opt in to a narrower prompt-only first
+        # arm for small-k callers (k <= 20) where the B2 P2 latency tier
+        # widened the search by candidate_k + min(250, candidate_k*3).  Setting
+        # ``ENGRAPHIS_RECALL_NARROW_ARM`` to any non-empty, non-zero value
+        # switches the formula to ``min(50, candidate_k * 2)`` which is ~2x
+        # less work at k=8 (16 vs 32).  This is a recall-quality trade-off:
+        # the default wider arm remains untouched unless the operator opts in.
+        # The narrow arm is gated on k <= 20 because the regression that
+        # motivated the wider arm only showed up on small-k callers, and the
+        # larger-k callers need the full widening to find approved evidence.
+        narrow_raw = os.environ.get("ENGRAPHIS_RECALL_NARROW_ARM", "").strip()
+        self._narrow_arm_opt_in = bool(narrow_raw) and narrow_raw not in ("0", "false", "no")
         # "ppr" (default) = Personalized PageRank over entities+links (multi-hop);
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
         self.graph_mode = graph_mode
@@ -315,28 +327,24 @@ class RecallEngine:
         candidate_ceiling = candidate_k
         arm_candidate_k = candidate_k
         if prompt_only:
-            arm_candidate_k = candidate_k + min(250, candidate_k * 3)
-            # Latency knob (see __init__ and ``ARM_CANDIDATE_K_DEFAULT``).
-            # The effective cap clamps the widened first page so the common
-            # case stays cheap; the escalation ceiling below is intentionally
-            # NOT clamped by it. Escalation only fires when the first page came
-            # back saturated yet short on prompt-eligible records (the
-            # untrusted-heavy vault), so the extra scan is paid only when the
-            # trusted evidence would otherwise be unreachable. The ceiling
-            # itself stays bounded by PROMPT_ONLY_MAX_CANDIDATES.
-            # Clamp the widened first arm to the effective cap, but never
-            # below the caller's requested candidate_k so a small scope
-            # still searches at least as deep as requested.
+            narrow_arm_active = bool(
+                self._narrow_arm_opt_in and max(1, int(k)) <= 20
+            )
+            if narrow_arm_active:
+                arm_candidate_k = max(max(1, int(k)), min(50, candidate_k * 2))
+                ceiling_bound = min(
+                    PROMPT_ONLY_MAX_CANDIDATES, candidate_k * 4
+                )
+            else:
+                arm_candidate_k = candidate_k + min(250, candidate_k * 3)
+                ceiling_bound = min(
+                    PROMPT_ONLY_MAX_CANDIDATES,
+                    max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
+                )
             arm_candidate_k = max(
                 candidate_k, min(arm_cap, arm_candidate_k)
             )
-            ceiling_bound = min(
-                PROMPT_ONLY_MAX_CANDIDATES,
-                max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
-            )
             if self._arm_candidate_k_cap is not None:
-                # Explicit operator override: every index query, including the
-                # escalation pass, respects it.
                 ceiling_bound = min(ceiling_bound, self._arm_candidate_k_cap)
             candidate_ceiling = max(arm_candidate_k, ceiling_bound)
         run_configs = [
