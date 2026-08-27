@@ -503,9 +503,18 @@ def test_server_identity_and_tools_registered():
     assert classic["engraphis_recall_context"].inputSchema["properties"][
         "token_budget"
     ]["default"] == 1024
+    # The candidate pool must be wide enough that the token budget (not the pool
+    # size) binds by default — otherwise context-packing savings stay ~0%.
+    assert classic["engraphis_recall_context"].inputSchema["properties"][
+        "k"
+    ]["default"] == 50
     assert {"planning", "mtype_limits"} <= set(
         classic["engraphis_recall_context"].inputSchema.get("properties", {})
     )
+    smart = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    assert smart["engraphis_recall_context"].inputSchema["properties"][
+        "k"
+    ]["default"] == 50
     assert "as_of" in classic["engraphis_recall_grounded"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
             "response_mode", "planning", "mtype_limits"} <= set(
