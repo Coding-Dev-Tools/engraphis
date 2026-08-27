@@ -23,9 +23,20 @@ CONTEXT_FOOTER = "\nUse mcp__engraphis__ tools for more recall."
 # Localhost server; never route through a configured system proxy.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+# Header name the MCP spec uses for the stateful session id. The bundled
+# dashboard /mcp endpoint issues one on initialize and rejects subsequent
+# requests that omit it; stateless servers ignore it.
+MCP_SESSION_HEADER = "Mcp-Session-Id"
 
-def post(url, payload, timeout):
-    """POST one JSON-RPC message; return its decoded JSON or SSE response."""
+
+def post(url, payload, timeout, session_id: str | None = None):
+    """POST one JSON-RPC message; return (decoded_body, response_session_id).
+
+    The response_session_id is the Mcp-Session-Id returned by the server (or
+    echoed from the request if the server didn't issue a new one) so the
+    caller can thread the same value into subsequent requests on a
+    stateful transport.
+    """
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -35,10 +46,17 @@ def post(url, payload, timeout):
         },
         method="POST",
     )
+    if session_id:
+        # State transports (the dashboard /mcp endpoint in particular) reject
+        # requests that arrive without the session id they issued at
+        # initialize. Forward the id so notifications/initialized and
+        # tools/call stay on the same session.
+        request.add_header(MCP_SESSION_HEADER, session_id)
     with OPENER.open(request, timeout=timeout) as response:
         body = response.read().decode("utf-8", errors="replace")
+        response_session_id = response.headers.get(MCP_SESSION_HEADER) or session_id
     try:
-        return json.loads(body)
+        return json.loads(body), response_session_id
     except ValueError:
         pass
     candidates = []
@@ -51,29 +69,44 @@ def post(url, payload, timeout):
         except ValueError:
             continue
     responses = [c for c in candidates if isinstance(c, dict) and "result" in c]
-    return responses[-1] if responses else None
+    return (responses[-1] if responses else None), response_session_id
 
 
-def rpc(method, params, rpc_id, deadline):
-    """Issue one JSON-RPC request within the shared time budget."""
+def rpc(method, params, rpc_id, deadline, session_id: str | None = None):
+    """Issue one JSON-RPC request within the shared time budget.
+
+    ``session_id`` is threaded into the Mcp-Session-Id header on every
+    request after initialize; stateful transports require it.
+    """
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
         raise TimeoutError("time budget exhausted")
-    response = post(MCP_URL, {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params}, remaining)
+    response, _ = post(
+        MCP_URL,
+        {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
+        remaining,
+        session_id=session_id,
+    )
     if isinstance(response, dict) and "result" in response:
-        return response["result"]
-    return None
+        return response["result"], session_id
+    return None, session_id
 
 
-def notify_initialized(deadline):
+def notify_initialized(deadline, session_id: str | None = None):
     """Best-effort notifications/initialized; stateless servers reply 202/empty."""
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
-        return
+        return session_id
     try:
-        post(MCP_URL, {"jsonrpc": "2.0", "method": "notifications/initialized"}, remaining)
+        _, response_session_id = post(
+            MCP_URL,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            remaining,
+            session_id=session_id,
+        )
+        return response_session_id
     except Exception:
-        pass
+        return session_id
 
 
 def extract_context(result):
@@ -94,8 +127,14 @@ def extract_context(result):
 
 
 def session_context(repo, workspace, deadline):
-    """initialize -> initialized -> tools/call engraphis_session(action=start)."""
-    rpc(
+    """initialize -> initialized -> tools/call engraphis_session(action=start).
+
+    The Mcp-Session-Id returned by initialize is threaded into every
+    subsequent request so a stateful transport (e.g. the dashboard /mcp
+    endpoint) keeps the connection open and recognises the tool call as
+    part of the same session.
+    """
+    _, session_id = rpc(
         "initialize",
         {
             "protocolVersion": "2025-03-26",
@@ -105,8 +144,8 @@ def session_context(repo, workspace, deadline):
         1,
         deadline,
     )
-    notify_initialized(deadline)
-    result = rpc(
+    session_id = notify_initialized(deadline, session_id=session_id) or session_id
+    result, _ = rpc(
         "tools/call",
         {
             "name": "engraphis_session",
@@ -123,6 +162,7 @@ def session_context(repo, workspace, deadline):
         },
         2,
         deadline,
+        session_id=session_id,
     )
     return extract_context(result)
 
