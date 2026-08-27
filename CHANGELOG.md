@@ -7,6 +7,68 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Added
 
+- Smart MCP `engraphis_recall_context` default `k` raised 8 -> 50 so the token-budget
+  packer binds on realistic stores by default. Measured at budget=1024 against a
+  49-fact store: 100% labelled-relevance retention and ~50% of the store withheld
+  (savings_ratio 0.0 -> 0.4975) with no caller-side arguments. The packer is the
+  existing 1.6 contract; the change just makes it the default fast path.
+- Smart MCP `engraphis_remember` now accepts and forwards `subject_key` and
+  `claim_kind` to the classic tool. Without this, every keyed write silently stored
+  empty keys because the served gateway surface dropped the parameters; the
+  documented safe-supersession mechanism is now reachable through MCP.
+- A new integration at `integrations/commandcode/session_start_hook.py` (with
+  `scripts/install_cc_hook.py` for idempotent user-scope install/uninstall) wires
+  durable-memory recall into Command Code's SessionStart lifecycle: each new
+  session's first turn receives bounded relevant context as `additionalContext`.
+  Fail-open and silent on any error. Override workspace via
+  `ENGRAPHIS_HOOK_WORKSPACE`; override the MCP URL via `ENGRAPHIS_MCP_URL`.
+- Cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is now
+  reachable as an opt-in config knob (`rerank_model=` on `MemoryEngine.create`
+  / `ENGRAPHIS_RERANK_MODEL`). Evaluated offline on the bundled retrieval gates
+  (sample.jsonl, codemem.jsonl, k=5): hit@5 stays at 1.0 with zero per-question
+  regressions, MRR@5 lifts 0.889 -> 0.944 (sample) and 0.962 -> 0.981 (codemem),
+  with ~15 ms per query added. Not the default; flip with a one-line config.
+
+### Changed
+
+- The reworded-correction detector in `core/resolve.py` now supersedes reworded
+  corrections without a stable `subject_key` when the aligned token diff shows
+  a same-attribute value change (e.g. "the timeout is 30 seconds" -> "we raised
+  the timeout to 90 seconds"). The strong-evidence branch and the rewrite_gate
+  branch both require a change marker (e.g. "now", "raised") to be accompanied
+  by a value_swap on the same shared subject, so a bare "now" can never retire
+  a fact it merely shares surface nouns with. Vetoes preserve coexisting
+  distinct facts: clashing environment qualifiers (staging vs production,
+  folded through `prod`/`production` and `dev`/`development` aliases so a
+  legitimate correction across short forms does not get vetoed),
+  named mixed-case identifier swaps (ProviderA -> ProviderB), and clean
+  noun-for-noun replacements (REST -> GraphQL docs). Measured on the
+  reproducible corpus shipped at
+  `eval/datasets/resolver_reworded_corrections.jsonl` (44 pairs, 38
+  positives + 6 negatives); reproduce locally with
+  `python -m eval.resolver_reworded_corrections` or
+  `python -m eval.resolver_reworded_corrections --strict` in CI.
+- The `temporal_splice` flag passed from `core/engine.py` to `resolve()` is
+  now narrowed to the bi-temporal backfill case (a deliberate `valid_at`
+  AND a `subject_key`), instead of any `valid_at`-pinned write. Scheduled
+  future writes stay on the present-time veto contract.
+
+### Fixed
+
+- The Smart MCP gateway `engraphis_remember` binding was silently dropping
+  `subject_key` and `claim_kind`; this is the underlying cause of the
+  benchmark correction-miss pattern that the reworded-correction detector
+  then had to compensate for.
+
+### Operational
+
+- The new `engraphis_recall_context` tool emits one `INFO` log per call with
+  workspace, k, budget, packed/omitted counts, and the call's measured ms.
+  Operators get visibility without changing the on-the-wire contract.
+  The standalone \engraphis-mcp-http\ launcher only configures the root logger when
+  \ENGRAPHIS_MCP_LOG\ is set to a truthy value (\ / \	rue\ / \yes\ / \info\ /
+  \on\); the default stays silent so the CLI keeps its quiet profile.
+
 - The graph's "Show all nodes" toggle is replaced by a dedicated **Every node** layout built
   on a new ultra-performance engine (`engraphis-graph-every.js` +
   `engraphis-graph-every-worker.js`, WebGL2-only): all geometry is uploaded once and camera
@@ -178,7 +240,17 @@ All notable changes to Engraphis are documented here. Format loosely follows
   now guards an unknown baseline instead of reporting spurious misses, denial-guard
   supersession binds digests computed from the parsed record rather than raw input,
   import-job finalization is generation-guarded so a stale worker cannot finalize over a
-  newer attempt, and the finalized-state check completes in constant time.
+   newer attempt, and the finalized-state check completes in constant time.
+- Smart MCP `engraphis_session` now accepts `action="start_session"` and `action="end_session"`
+  (the full tool-name forms the Command Code harness sends when translating the AGENTS.md
+  `engraphis_start_session`/`engraphis_end_session` shorthand), normalizing them to `start`/`end`
+  before the pattern validation instead of rejecting them with a 400.
+
+### Documentation
+
+- `docs/LLM_PROVIDERS.md` now warns Windows users that `cmd` may resolve to `cmd.exe`
+  (the built-in Windows command interpreter) instead of the Command Code CLI, and explains
+  how to diagnose and work around the PATH collision.
 
 ### Security
 

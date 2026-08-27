@@ -96,7 +96,7 @@ Return one hard-budget packed context plus compact source identities, without re
 bodies already represented in `context`.
 
 - `query (str)`; `workspace (str, None)`; `repo (str, None)`; `session_id (str, None)`;
-  `mtypes (list[str], None)`; `k (int, 8)`.
+  `mtypes (list[str], None)`; `k (int, 50)`.
 - `token_budget (int, 1024)`: hard packed-context budget, `0..32768`.
 - `retrieval_profile (str, "balanced")`: `balanced` is the default legacy hybrid; `auto` is
   explicit opt-in, with `fast`, `lexical`, `graph`, and `code` available for deliberate routing. The
@@ -471,8 +471,8 @@ or mismatched schemas and enforce the declared side-effect boundary.
 
 The two overlapping names deliberately have smaller Smart schemas than their Classic sections
 above. Smart `engraphis_remember` accepts only `content`, `workspace`, `repo`, `session_id`,
-`mtype`, and `importance`; safe provenance and deduplication are fixed internally. Smart
-`engraphis_recall_context` accepts only `query`, `workspace`, `repo`, `session_id`, `k`, and
+`mtype`, `importance`, `subject_key`, and `claim_kind`; safe provenance is fixed internally.
+Smart `engraphis_recall_context` accepts only `query`, `workspace`, `repo`, `session_id`, `k`, and
 `token_budget`; advanced planning/profile controls are discoverable rather than routine.
 
 ### `engraphis_session`
