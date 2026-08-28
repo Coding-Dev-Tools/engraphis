@@ -57,7 +57,7 @@ _RECALL_CONTEXT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "query": {"type": "string", "minLength": 1, "maxLength": 100000},
-        "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 8},
+        "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
         "session_id": {"type": ["string", "null"], "default": None},
         "token_budget": {
             "type": "integer",
@@ -261,25 +261,61 @@ def apply_scope_defaults(
     params: dict[str, Any],
     config: EngraphisRuntimeConfig,
     extra: dict[str, Any] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Translate of integrations/pi/src/tool-schemas.ts::applyScopeDefaults.
 
-    Model-supplied values win. Workspace/repo defaults from the runtime config
-    are only injected when the caller has not already set them and the chosen
-    workspace matches the configured default (mirrors Pi behaviour).
+    Model-supplied values win. Workspace/repo defaults from the runtime
+    config are only injected when the caller has not already set them,
+    the chosen workspace matches the configured default, and the tool's
+    declared schema actually accepts the field. Six Smart tools
+    (discovery, both executors, get/update memory, conflict review) do
+    not declare ``session_id`` / ``workspace`` / ``repo``, so passing
+    them is rejected as an unexpected argument; the schema gate
+    prevents that regression.
     """
     result: dict[str, Any] = dict(extra or {})
     result.update(params)
-    if "workspace" not in result and config.default_workspace:
+    declared = set(_declared_property_names(schema)) if schema else None
+    if (
+        "workspace" not in result
+        and config.default_workspace
+        and (declared is None or "workspace" in declared)
+    ):
         result["workspace"] = config.default_workspace
     if (
         "repo" not in result
         and config.default_repo
         and config.default_workspace
         and result.get("workspace") == config.default_workspace
+        and (declared is None or "repo" in declared)
     ):
         result["repo"] = config.default_repo
+    if (
+        "session_id" not in result
+        and (declared is None or "session_id" in declared)
+    ):
+        # session_id is the only injected value that does not come from
+        # the runtime config defaults — it is propagated only by the
+        # caller, so no default is set here. This branch is kept for
+        # explicit symmetry with the workspace/repo handling.
+        pass
     return result
+
+
+def _declared_property_names(schema: dict[str, Any] | None) -> set[str]:
+    """Return the set of parameter names declared in a JSON-Schema dict.
+
+    Used by ``apply_scope_defaults`` so injected values only land on tools
+    that accept them. Returns an empty set for empty/missing schemas
+    (the caller can decide to skip the gate by passing ``schema=None``).
+    """
+    if not schema:
+        return set()
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return set()
+    return {name for name in properties if isinstance(name, str)}
 
 
 # --- lightweight schema validation ------------------------------------------
@@ -486,7 +522,7 @@ def build_tool(
         # visible in stack traces / introspection while signalling that
         # it is intentionally unused. The signature stays compatible
         # with agent.py's `await fn(args, ctx)` call site.
-        params = apply_scope_defaults(args, config)
+        params = apply_scope_defaults(args, config, schema=schemas[name])
         # Precedence: caller-supplied session_id wins over the bound one.
         if session_id and "session_id" not in params:
             params["session_id"] = session_id

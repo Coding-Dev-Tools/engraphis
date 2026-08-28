@@ -163,20 +163,50 @@ class EngraphisPrimeAgent:
         # the second waiter will see self._tools already populated.
         # Note: a synchronous lock is fine because this method is sync;
         # we just need mutual exclusion against other sync call sites.
+        #
+        # Build tools with the agent's effective scope. An agent created
+        # with explicit ``workspace=`` / ``repo=`` overrides keeps those
+        # values for both the session and every tool call; without this
+        # the apply_scope_defaults path would inject config.default_*
+        # alongside the explicit values, which MemoryService rejects.
+        effective_config = self._effective_config()
         with self._tools_lock:
             if self._tools is None:
                 self._tools = {
                     meta["name"]: build_tool(
                         meta["name"],
                         self.client,
-                        self.config,
+                        effective_config,
                         session_id=self._session_id,
                     )
                     for _fn, meta in all_tools(
-                        self.client, self.config, session_id=self._session_id
+                        self.client, effective_config, session_id=self._session_id
                     )
                 }
         return self._tools
+
+    def _effective_config(self) -> EngraphisRuntimeConfig:
+        """A copy of ``self.config`` with the agent's effective workspace/repo.
+
+        ``apply_scope_defaults`` reads workspace/repo defaults from the
+        passed-in config, so an agent that overrides these scopes must
+        build a config whose defaults match the override. Otherwise
+        MemoryService rejects the call with "session_id does not belong
+        to that workspace/repo".
+        """
+        if (
+            self.workspace == self.config.default_workspace
+            and self.repo == self.config.default_repo
+        ):
+            return self.config
+        return EngraphisRuntimeConfig(
+            command=self.config.command,
+            args=self.config.args,
+            cwd=self.config.cwd,
+            default_workspace=self.workspace,
+            default_repo=self.repo,
+            environment=dict(self.config.environment),
+        )
 
     def tools(self) -> list[tuple[ToolFn, dict[str, Any]]]:
         bindings = self._ensure_tools()
@@ -229,19 +259,22 @@ class EngraphisPrimeAgent:
 
         Mirrors the lazy-start behaviour of ``EngraphisPrimeAgent.call()`` so
         that frameworks which invoke the registered tool directly (bypassing
-        ``call()``) still get a per-agent session injected.
+        ``call()``) still get a per-agent session injected. Re-fetches the
+        current binding on every invocation so a session-id refresh in
+        ``start_session`` (which invalidates the cached tool map) is
+        honoured on the next call, not only the first one.
         """
         agent = self
 
-        async def _wrapper(args: dict[str, Any]) -> dict[str, Any]:
+        async def _wrapper(args: dict[str, Any], ctx: Any = None) -> dict[str, Any]:
             if not agent._session_id:
                 await agent.start_session()
-                # start_session() rebuilds the bound tools with the new
-                # session_id, so re-fetch the fresh binding for the current
-                # call.
-                fresh_fn, _schema = agent.get_tool(tool_name)
-                return await fresh_fn(args)
-            return await bound_fn(args)
+            # Re-fetch on every invocation. start_session() rebuilds the
+            # bound tool map, so the originally-captured ``bound_fn``
+            # closure holds a stale session_id and would otherwise leak
+            # operations into the wrong agent session.
+            fresh_fn, _schema = agent.get_tool(tool_name)
+            return await fresh_fn(args)
 
         return _wrapper
 
