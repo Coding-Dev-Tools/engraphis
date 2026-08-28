@@ -40,9 +40,8 @@ _SESSION_SCHEMA: dict[str, Any] = {
         "summary": {"type": "string", "maxLength": 100000, "default": ""},
         "outcome": {"type": "string", "maxLength": 1000, "default": ""},
         "open_threads": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {"type": "string"},
-            "nullable": True,
             "default": None,
         },
         "token_budget": {"type": "integer", "minimum": 0, "maximum": 32768, "default": 512},
