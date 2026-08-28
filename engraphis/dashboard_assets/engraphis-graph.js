@@ -93,6 +93,9 @@
   const GALAXY_GRAVITY_MAXIMUM = 400;
   const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.5;
   const GALAXY_GRAVITY_STRENGTH_GAIN_START = 200;
+  /* Keep the visible Galaxy gravity setting at its established default (96), but make the
+     resting base field 50% stronger so the default scene carries less empty space. */
+  const GALAXY_BASE_GRAVITY_MULTIPLIER = 1.5;
   /* The emergency acceleration cap follows the full visible strength range. Direct callers can
      still pass pathological values, but those values clamp to the same 0..400 physics ceiling. */
   const GALAXY_GRAVITY_CAP_REFERENCE = GALAXY_GRAVITY_MAXIMUM;
@@ -127,9 +130,10 @@
       + 0.25 * galaxySmoothstep((value - 48) / 52);
     /* Gravity was tuned against the v8-era compact layout, where a 48 setting produced
        comfortable orbital spacing. The galaxy-v12 compact-orbits algorithm places systems
-       tighter, so the same setting now reads as too loose. Scale the final constant 20%
-       upward so the default (and every other position) feels like the reference layout. */
-    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0;
+       tighter, so the calibrated field remains doubled before the independent 1.5x base
+       default-density multiplier is applied. */
+    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0
+      * GALAXY_BASE_GRAVITY_MULTIPLIER;
   }
   /* Gravity strength is the galaxy-wide black-hole control. Its explicit zero endpoint selects
      the shallow carrier floor; local stellar wells are supplied independently by the calibrated

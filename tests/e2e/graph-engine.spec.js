@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260815-merge-ready-1';
+const stellarOrbitAssetVersion = '20260828-galaxy-default-gravity-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1843,8 +1843,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
-      expect(diagnostics.localGravity).toBeCloseTo(240, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(4846.027295963026, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(360, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
@@ -1856,6 +1856,7 @@ for (const reducedMotion of [false, true]) {
       const servedSource = await servedAsset.text();
       expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;');
       expect(servedSource).toContain('const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;');
+      expect(servedSource).toContain('const GALAXY_BASE_GRAVITY_MULTIPLIER = 1.5;');
       expect(servedSource).toContain('const BASE_NODE_RADIUS_SCALE = 1.2;');
       expect(servedSource).toContain('preserveSystemRadii: true,');
       expect(session.pageErrors).toEqual([]);
@@ -2761,13 +2762,13 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(344.27076923076925, 8);
+    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(516.4061538461539, 8);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
     expect(after.diagnostics.globalGravityFloorActive).toBe(true);
     expect(after.diagnostics.systemGravity).toMatchObject({
       gravitySetting: 0,
       stellarGravityFloorSetting: 48,
-      stellarGravity: 5070,
+      stellarGravity: 7605,
       eligibleStellarAnchors: 1,
       fallbackAnchors: 0,
       globalAnchors: 0,
@@ -3333,25 +3334,25 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
 
   expect(baseline.curve.setting).toBe(48);
   expect(strong.curve.setting).toBe(200);
-  expect(baseline.curve.baseline).toBe(480);
-  expect(baseline.curve.maximum).toBeCloseTo(5486.7692307692305, 12);
-  expect(baseline.curve.localBaseline).toBe(240);
-  expect(baseline.curve.localMaximum).toBeCloseTo(2743.3846153846152, 12);
+  expect(baseline.curve.baseline).toBe(720);
+  expect(baseline.curve.maximum).toBeCloseTo(8230.153846153846, 12);
+  expect(baseline.curve.localBaseline).toBe(360);
+  expect(baseline.curve.localMaximum).toBeCloseTo(4115.076923076923, 12);
   expect(baseline.curve.localBaseline).toBe(baseline.curve.baseline * 0.5);
   expect(baseline.curve.localMaximum).toBe(baseline.curve.maximum * 0.5);
   expect(baseline.curve.maximum / baseline.curve.baseline).toBeCloseTo(
     11.430769230769231, 12,
   );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
-  expect(baseline.before.diagnostics.effectiveGravity).toBe(480);
-  expect(baseline.before.diagnostics.blackHoleGravity).toBe(480);
-  expect(baseline.before.diagnostics.localGravity).toBe(240);
+  expect(baseline.before.diagnostics.effectiveGravity).toBe(720);
+  expect(baseline.before.diagnostics.blackHoleGravity).toBe(720);
+  expect(baseline.before.diagnostics.localGravity).toBe(360);
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
-  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(5486.7692307692305, 12);
-  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(5486.7692307692305, 12);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(8230.153846153846, 12);
+  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(8230.153846153846, 12);
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
-  expect(strong.before.diagnostics.localGravity).toBe(240);
+  expect(strong.before.diagnostics.localGravity).toBe(360);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
   expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
   expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);
