@@ -60,12 +60,18 @@ async def test_call_tool_passes_arguments(fake_mcp_server, mcp_client) -> None:
 
 
 def test_read_only_tools_classification() -> None:
-    assert "engraphis_recall_context" in READ_ONLY_TOOLS
+    # engraphis_recall_context is intentionally NOT in READ_ONLY_TOOLS:
+    # the Smart gateway appends a receipt on every successful call, so a
+    # transport-level retry would create duplicate accounting records
+    # for one logical user request. The class is the opposite: tools
+    # whose server-side contract is purely read-only and idempotent.
     assert "engraphis_get_memory" in READ_ONLY_TOOLS
     assert "engraphis_conflict_review" in READ_ONLY_TOOLS
     assert "engraphis_discover_actions" in READ_ONLY_TOOLS
+    assert "engraphis_execute_read" in READ_ONLY_TOOLS
     # Writes and side-effect tools are not in the read-only set, so the
     # client's call_tool will not retry them on transport failure.
+    assert "engraphis_recall_context" not in READ_ONLY_TOOLS
     assert "engraphis_remember" not in READ_ONLY_TOOLS
     assert "engraphis_execute_action" not in READ_ONLY_TOOLS
     assert "engraphis_session" not in READ_ONLY_TOOLS

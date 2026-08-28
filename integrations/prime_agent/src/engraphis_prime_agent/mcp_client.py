@@ -31,11 +31,17 @@ TOOL_REQUEST_TIMEOUT_S = 5 * 60
 CONNECT_TIMEOUT_S = 60
 STDERR_BUFFER_BYTES = 4 * 1024
 
+# Tools whose server-side contract is idempotent. A transport failure
+# can be safely retried because the server will produce the same result.
+# ``engraphis_recall_context`` is intentionally NOT in this set: the
+# Smart gateway appends a receipt on each successful call, so retrying
+# after a transport-level failure would create duplicate accounting
+# records for one logical user request.
 READ_ONLY_TOOLS = frozenset({
-    "engraphis_recall_context",
     "engraphis_get_memory",
     "engraphis_conflict_review",
     "engraphis_discover_actions",
+    "engraphis_execute_read",
 })
 
 
@@ -125,8 +131,13 @@ class EngraphisMcpClient:
                 # the session is torn down.
                 err_fd, err_path = tempfile.mkstemp(prefix="engraphis-prime-agent-", suffix=".err")
                 err_file = os.fdopen(err_fd, mode="w", encoding="utf-8", buffering=1)
-                stack.callback(err_file.close)
+                # Register the unlink BEFORE the close. AsyncExitStack
+                # runs callbacks in LIFO order, so the first-registered
+                # (unlink) fires last, after the file handle has been
+                # closed — required on Windows where an open file cannot
+                # be unlinked.
                 stack.callback(self._safe_unlink, err_path)
+                stack.callback(err_file.close)
                 self._stderr_file = err_file
                 self._stderr_path = err_path
                 read, write = await asyncio.wait_for(
@@ -311,8 +322,36 @@ class EngraphisMcpClient:
         ).strip()
         declared_error = re.match(r"^Error:\s*([a-z0-9_]+)\s*$", text, re.I)
         server_error = text.lower().startswith("error:")
+        # The Smart gateway emits a structured JSON envelope on tool
+        # validation / scope / not-found failures (``engraphis/mcp_server.py::
+        # _smart_error``): ``{"code": "...", "message": "...", "retryable": false}``.
+        # Detect that envelope inside any text block and forward its code,
+        # message, and retryable flag so agent hosts can distinguish caller
+        # errors from retryable/internal failures as the Smart contract
+        # intends, rather than collapsing every error to the same generic
+        # message.
+        envelope: dict[str, Any] | None = None
+        for block in content:
+            if block.get("type") != "text" or not isinstance(block.get("text"), str):
+                continue
+            try:
+                parsed = json.loads(block["text"])
+            except (ValueError, TypeError):
+                continue
+            if (
+                isinstance(parsed, dict)
+                and isinstance(parsed.get("code"), str)
+                and isinstance(parsed.get("message"), str)
+            ):
+                envelope = parsed
+                break
         if is_error or server_error:
-            if declared_error:
+            if envelope is not None:
+                msg = (
+                    f"Engraphis rejected the request: "
+                    f"{envelope.get('code', 'unknown')}: {envelope.get('message', '')}"
+                )
+            elif declared_error:
                 msg = f"Engraphis rejected the request: {declared_error.group(1)}."
             else:
                 msg = (

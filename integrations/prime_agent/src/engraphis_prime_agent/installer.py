@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import json
 import os
@@ -191,7 +192,11 @@ def install(
 ) -> None:
     path = path or _settings_path()
     cfg = _read(path)
-    before = dict(cfg)
+    # Deep-copy so the dry-run snapshot does not observe the mutations
+    # below: ``cfg.setdefault("tools", {})`` would otherwise return a
+    # reference to the same nested dict that we then overwrite with the
+    # new entry, mutating ``before`` as well.
+    before = copy.deepcopy(cfg)
     tools = cfg.setdefault("tools", {})
     entry = _entry()
     if merge and isinstance(tools.get(TOOL_KEY), dict):
@@ -216,7 +221,11 @@ def uninstall(
 ) -> None:
     path = path or _settings_path()
     cfg = _read(path)
-    before = dict(cfg)
+    # Deep-copy so the dry-run snapshot does not observe the deletions
+    # below: ``tools.pop(TOOL_KEY)`` mutates the same nested mapping that
+    # ``before`` still points at, so the printed "before" would show the
+    # already-removed key.
+    before = copy.deepcopy(cfg)
     tools = cfg.get("tools", {})
     if TOOL_KEY not in tools:
         if dry_run:
