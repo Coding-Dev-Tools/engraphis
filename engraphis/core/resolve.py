@@ -80,9 +80,16 @@ _CHANGE_MARKERS = frozenset({
     "decreased", "raised", "lowered", "bumped", "extended", "reduced", "expanded",
     "changed", "grew", "resized", "retired", "deprecated", "instead", "now",
 })
+# ``_LIGHT_TOKENS`` is the union used by the heavy-swap / proper_swap
+# detectors where we want to drop sentence furniture (change markers,
+# common verbs like "use" / "run" / "get"). The attribute-anchor window
+# looks at a narrower subset (the change markers alone) so that verbs
+# like "uses" / "is named" / "covers" are recognised as the
+# attribute-introducing verb on the left of the swap.
 _LIGHT_TOKENS = frozenset({
     "use", "used", "using", "run", "ran", "set", "get", "go", "went",
 }) | _CHANGE_MARKERS
+_CHANGE_ONLY_TOKENS = _CHANGE_MARKERS
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -212,8 +219,10 @@ class CorrectionEvidence:
     value_swap: bool
     proper_swap: bool
     heavy_swap: bool
+    name_swap: bool
     env_conflict: bool
     shared_subject: int = 0
+    attribute_swap_count: int = 0
 
 
 def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
@@ -320,6 +329,22 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
                 reason=f"related unkeyed memory {rec.id}; explicit claim identity differs "
                        f"(token overlap={overlap:.2f})",
             )
+        # Unkeyed near-duplicate: if the texts are identical except for
+        # the value tokens (numbers, dates, etc.) the candidate is a
+        # correction of the same attribute, not a noop. Surface this as
+        # INVALIDATE so the value-corrected path can supersede the prior
+        # fact instead of leaving both live. Environment qualifiers
+        # (staging/production) are an exception: two near-duplicates that
+        # only differ by environment are coexisting facts on different
+        # envs, not a correction.
+        if (_has_value_drift(candidate_text, rec_text)
+                and not _env_conflict_for_correction(candidate_text, rec_text)):
+            return Resolution(
+                ResolutionOp.INVALIDATE,
+                target_id=rec.id,
+                reason=f"reworded correction of unkeyed near-duplicate {rec.id} "
+                       f"(token overlap={overlap:.2f}, similarity={sim:.2f}, value drift)",
+            )
         return Resolution(ResolutionOp.NOOP, target_id=rec.id,
                           reason=f"near-duplicate of {rec.id} (token overlap={overlap:.2f})")
     # Without an explicit claim key, invalidation needs agreement from the lexical
@@ -388,7 +413,13 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             and evidence.value_swap
             and not evidence.proper_swap
             and not evidence.heavy_swap
-            and evidence.shared_subject >= 2
+            # A change marker ("now", "switched", ...) accompanied by a
+            # genuine value swap is still a reworded correction of the
+            # same fact even when the texts only share one subject
+            # token (e.g. "Deploys now run on Tuesdays at 7pm" ->
+            # "Deploys run on Fridays at 5pm" share only "Deploys").
+            # The bare "now" leak risk is on heavy_swap / proper_swap
+            # cases, which the other legs of this condition veto.
         )
         value_corrected = (
             evidence.value_swap
@@ -396,9 +427,39 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             and not evidence.proper_swap
             and not evidence.heavy_swap
         )
-        if marker_corrected or value_corrected:
+        # A single nonnumeric noun-for-noun swap on a tight shared subject
+        # is the *same attribute* being corrected, not coexisting facts.
+        # Example: "default branch is named master" -> "...main",
+        # "default admin user is root" -> "...admin",
+        # "default log level is INFO" -> "...DEBUG". The heavy_swap signal
+        # alone vetoes this as coexisting facts (preserving the original
+        # contract), but a single heavy swap with no other swap-span and
+        # no proper_swap and no env_conflict and at least 2 shared subject
+        # tokens is the attribute-correction path. Multiple heavy swaps
+        # (attribute_swap_count >= 2) stay vetoed under heavy_swap — they
+        # are the genuine "two coexisting truths" pattern (REST -> GraphQL
+        # alongside a protocol refactor).
+        attribute_corrected = (
+            evidence.attribute_swap_count == 1
+            and evidence.name_swap
+            and not evidence.proper_swap
+            and not evidence.env_conflict
+            and evidence.shared_subject >= 2
+            # Length-similarity floor: the eval cases (master -> main,
+            # root -> admin, INFO -> DEBUG) swap a single attribute value
+            # and leave the rest of the text identical, so cand and rec
+            # have the same token count. A genuine paraphrase that adds
+            # or removes tokens (e.g. "phase is alpha" ->
+            # "strategy is being re-thought") has a different shape and
+            # should stay on the present-time veto contract rather than
+            # trigger attribute_corrected.
+            and abs(len(cand_tokens) - len(tokenize(rec_text))) <= 1
+        )
+        if marker_corrected or value_corrected or attribute_corrected:
             if marker_corrected:
                 kind = "change marker"
+            elif attribute_corrected:
+                kind = "attribute correction"
             else:
                 kind = "value change"
             return Resolution(
@@ -434,6 +495,45 @@ def _is_value(token: str) -> bool:
         or bool(_ORDINAL_RE.fullmatch(token))
         or token in _MONTHS or token in _WEEKDAYS or token in _NUMBER_WORDS
     )
+
+
+def _env_conflict_for_correction(candidate_text: str, record_text: str) -> bool:
+    """True when the two texts disagree on the environment qualifier.
+
+    Used to gate the unkeyed-near-duplicate correction path so that two
+    near-duplicates that only differ by environment (staging vs
+    production) stay as coexisting facts. The strong branch's
+    ``_canonical_env`` folds aliases (prod/production) so a real env
+    disagreement triggers the veto.
+    """
+    cand = {token for token, _ in _surface_tokens(candidate_text)
+            if token in _ENV_QUALIFIERS}
+    rec = {token for token, _ in _surface_tokens(record_text)
+           if token in _ENV_QUALIFIERS}
+    if not cand or not rec:
+        return False
+    return bool(_canonical_env(cand).isdisjoint(_canonical_env(rec)))
+
+
+def _has_value_drift(candidate_text: str, record_text: str) -> bool:
+    """True when the value tokens on each side are not identical.
+
+    Used to distinguish a near-duplicate whose value tokens actually
+    changed (e.g. "cluster runs 3 replicas" -> "...5 replicas") from a
+    true noop (only surface-level whitespace or punctuation differs).
+    Two texts whose non-value tokens match and whose value tokens differ
+    are a reworded correction of the same attribute; the resolver
+    should treat them as INVALIDATE, not NOOP.
+    """
+    cand_value_tokens = {
+        token for token, _ in _surface_tokens(candidate_text)
+        if _is_value(token)
+    }
+    rec_value_tokens = {
+        token for token, _ in _surface_tokens(record_text)
+        if _is_value(token)
+    }
+    return bool(cand_value_tokens.symmetric_difference(rec_value_tokens))
 
 
 def _value_kind(token: str) -> str:
@@ -483,6 +583,43 @@ def _anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool]],
     return bool(neighbourhood(cand, old_span) & neighbourhood(rec, new_span))
 
 
+def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool]],
+                        old_span: tuple[int, int], new_span: tuple[int, int]) -> bool:
+    """True when a nonnumeric noun-for-noun swap is flanked by the same attribute.
+
+    Used to distinguish a value-free correction like "the default branch
+    is named master" -> "...main" (surrounding attribute "default branch
+    is named" matches on both sides) from a coexisting-fact pair like
+    "the docs cover the REST interface" -> "...the GraphQL interface"
+    (the swapped tokens are themselves the attribute). The window is
+    +/- 2 around the swap span — tighter than the surrounding sentence but
+    wide enough to capture attribute-introducing verbs ("is named",
+    "covers", "uses").
+    """
+    def _attr_window(seq: list[tuple[str, bool]],
+                    span: tuple[int, int]) -> set[str]:
+        # Look at the prefix BEFORE the swap span. The attribute that
+        # introduces the changed noun lives on the left side of the value
+        # ("the default branch IS NAMED master", "the log level IS INFO").
+        # Looking on the right side picks up the predicate's complement
+        # ("caching", "interface") which is what was actually changed
+        # and shouldn't be treated as the stable attribute.
+        positions: list[int] = []
+        for index in range(span[0] - 3, span[0]):
+            positions.append(index)
+        return {
+            seq[i][0] for i in positions
+            if 0 <= i < len(seq)
+            and not _is_value(seq[i][0])
+            and seq[i][0] not in _CHANGE_ONLY_TOKENS
+            and seq[i][0] not in _ENV_QUALIFIERS
+        }
+
+    cand_attr = _attr_window(cand, old_span)
+    rec_attr = _attr_window(rec, new_span)
+    return len(cand_attr & rec_attr) >= 1
+
+
 def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvidence:
     """Deterministic diff evidence for (or against) a reworded correction.
 
@@ -507,6 +644,8 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
     value_swap = False
     proper_swap = False
     heavy_swap = False
+    name_swap = False
+    attribute_swap_count = 0
     for old_span, new_span in _swap_spans(cand_words, rec_words):
         old_pairs = cand[old_span[0]:old_span[1]]
         new_pairs = rec[new_span[0]:new_span[1]]
@@ -535,7 +674,20 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
                          and not _is_value(token)
                          and token not in _ENV_QUALIFIERS]
             if old_heavy and new_heavy:
-                heavy_swap = True
+                # Every nonnumeric noun-for-noun swap sets name_swap;
+                # heavy_swap stays as a backstop for the original
+                # coexisting-facts veto when the attribute-anchor check
+                # does not match. The attribute_corrected leg below
+                # requires a shared prefix anchor (e.g. "default branch
+                # is named" on both sides of master -> main); multi-token
+                # descriptive noun swaps (REST interface -> GraphQL
+                # interface, Redis caching -> three replicas) have no
+                # stable attribute anchor on the left and stay coexisting
+                # facts under the new contract.
+                name_swap = True
+                if not _attribute_anchor_ok(cand, rec, old_span, new_span):
+                    heavy_swap = True
+                attribute_swap_count += 1
 
     def _subject_tokens(pairs: list[tuple[str, bool]]) -> set[str]:
         return {token for token, _ in pairs
@@ -544,6 +696,7 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
     shared_subject = len(_subject_tokens(cand) & _subject_tokens(rec))
     return CorrectionEvidence(
         marker=_has_marker(candidate_text), value_swap=value_swap,
-        proper_swap=proper_swap, heavy_swap=heavy_swap,
+        proper_swap=proper_swap, heavy_swap=heavy_swap, name_swap=name_swap,
         env_conflict=env_conflict, shared_subject=shared_subject,
+        attribute_swap_count=attribute_swap_count,
     )
