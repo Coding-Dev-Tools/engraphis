@@ -12,9 +12,17 @@ import sys
 import time
 import urllib.request
 
-MCP_URL = os.environ.get("ENGRAPHIS_MCP_URL", "http://127.0.0.1:8711/mcp")
-BUDGET_SECONDS = float(os.environ.get("ENGRAPHIS_HOOK_BUDGET_S", "4.0"))
-MAX_CONTEXT_CHARS = int(os.environ.get("ENGRAPHIS_HOOK_MAX_CHARS", "1500"))
+MCP_URL_DEFAULT = "http://127.0.0.1:8711/mcp"
+BUDGET_SECONDS_DEFAULT = 4.0
+MAX_CONTEXT_CHARS_DEFAULT = 1500
+# Backwards-compatible aliases. The module-level constants previously
+# crashed import when these env vars held malformed values; both are now
+# resolved lazily inside main() so the hook keeps its fail-open
+# contract. Tests and external callers that referenced the old names
+# keep working.
+MCP_URL = MCP_URL_DEFAULT
+BUDGET_SECONDS = BUDGET_SECONDS_DEFAULT
+MAX_CONTEXT_CHARS = MAX_CONTEXT_CHARS_DEFAULT
 CONTEXT_HEADER = (
     "Durable memory (engraphis, workspace {workspace}) relevant to this repo:\n"
 )
@@ -22,6 +30,32 @@ CONTEXT_FOOTER = "\nUse mcp__engraphis__ tools for more recall."
 
 # Localhost server; never route through a configured system proxy.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse an env-var as float, falling back on any conversion error.
+
+    The conversion happens inside the fail-open boundary so a malformed
+    ENGRAPHIS_HOOK_BUDGET_S cannot crash the module at import time and
+    cause every SessionStart to fail.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 # Header name the MCP spec uses for the stateful session id. The bundled
 # dashboard /mcp endpoint issues one on initialize and rejects subsequent
@@ -72,34 +106,45 @@ def post(url, payload, timeout, session_id: str | None = None):
     return (responses[-1] if responses else None), response_session_id
 
 
-def rpc(method, params, rpc_id, deadline, session_id: str | None = None):
+def rpc(method, params, rpc_id, deadline, session_id: str | None = None,
+         url: str = MCP_URL_DEFAULT):
     """Issue one JSON-RPC request within the shared time budget.
 
     ``session_id`` is threaded into the Mcp-Session-Id header on every
-    request after initialize; stateful transports require it.
+    request after initialize; stateful transports require it. When the
+    server issues a fresh ``Mcp-Session-Id`` in the response (initialize
+    is the canonical case), the returned id is propagated so the caller
+    threads it into every subsequent request on the same session.
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
         raise TimeoutError("time budget exhausted")
-    response, _ = post(
-        MCP_URL,
+    response, response_session_id = post(
+        url,
         {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
         remaining,
         session_id=session_id,
     )
+    # ``post`` echoes the request id when the server did not issue a new
+    # one; otherwise the response carries the freshly-issued id. Forward
+    # whichever the server gave us so stateful transports keep their
+    # session open across the initialize -> initialized -> tools/call
+    # handshake.
+    next_session_id = response_session_id or session_id
     if isinstance(response, dict) and "result" in response:
-        return response["result"], session_id
-    return None, session_id
+        return response["result"], next_session_id
+    return None, next_session_id
 
 
-def notify_initialized(deadline, session_id: str | None = None):
+def notify_initialized(deadline, session_id: str | None = None,
+                     url: str = MCP_URL_DEFAULT):
     """Best-effort notifications/initialized; stateless servers reply 202/empty."""
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
         return session_id
     try:
         _, response_session_id = post(
-            MCP_URL,
+            url,
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             remaining,
             session_id=session_id,
@@ -126,7 +171,7 @@ def extract_context(result):
     return ""
 
 
-def session_context(repo, workspace, deadline):
+def session_context(repo, workspace, deadline, mcp_url: str = MCP_URL_DEFAULT):
     """initialize -> initialized -> tools/call engraphis_session(action=start).
 
     The Mcp-Session-Id returned by initialize is threaded into every
@@ -143,8 +188,11 @@ def session_context(repo, workspace, deadline):
         },
         1,
         deadline,
+        url=mcp_url,
     )
-    session_id = notify_initialized(deadline, session_id=session_id) or session_id
+    session_id = (
+        notify_initialized(deadline, session_id=session_id, url=mcp_url) or session_id
+    )
     result, _ = rpc(
         "tools/call",
         {
@@ -163,6 +211,7 @@ def session_context(repo, workspace, deadline):
         2,
         deadline,
         session_id=session_id,
+        url=mcp_url,
     )
     return extract_context(result)
 
@@ -179,20 +228,25 @@ def resolve_workspace(cwd, env):
     return os.path.basename(os.path.normpath(str(cwd)))
 
 
-def build_additional_context(context, workspace):
+def build_additional_context(context, workspace, max_context_chars=None):
+    if max_context_chars is None:
+        max_context_chars = MAX_CONTEXT_CHARS
     header = CONTEXT_HEADER.format(workspace=workspace)
     footer = CONTEXT_FOOTER
-    body_budget = MAX_CONTEXT_CHARS - len(header) - len(footer)
+    body_budget = max_context_chars - len(header) - len(footer)
     if body_budget <= 0:
         # Header+footer already exceed the budget. Truncate the header so the
-        # final payload stays within MAX_CONTEXT_CHARS and the agent still gets
+        # final payload stays within the limit and the agent still gets
         # a recognisable prompt header for the workspace.
-        return (header + footer)[:MAX_CONTEXT_CHARS]
-    return (header + context[:body_budget] + footer)[:MAX_CONTEXT_CHARS]
+        return (header + footer)[:max_context_chars]
+    return (header + context[:body_budget] + footer)[:max_context_chars]
 
 
 def main():
-    deadline = time.monotonic() + BUDGET_SECONDS
+    mcp_url = os.environ.get("ENGRAPHIS_MCP_URL") or MCP_URL_DEFAULT
+    budget_seconds = _env_float("ENGRAPHIS_HOOK_BUDGET_S", BUDGET_SECONDS_DEFAULT)
+    max_context_chars = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS_DEFAULT)
+    deadline = time.monotonic() + budget_seconds
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except Exception:
@@ -206,7 +260,7 @@ def main():
     repo = os.path.basename(os.path.normpath(str(cwd)))
     workspace = resolve_workspace(cwd, os.environ)
     try:
-        context = session_context(repo, workspace, deadline)
+        context = session_context(repo, workspace, deadline, mcp_url=mcp_url)
     except Exception:
         return 0
     if not context:
@@ -215,7 +269,9 @@ def main():
         "suppressOutput": False,
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": build_additional_context(context, workspace),
+            "additionalContext": build_additional_context(
+                context, workspace, max_context_chars
+            ),
         },
     }
     sys.stdout.write(json.dumps(output))

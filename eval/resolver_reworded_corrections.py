@@ -117,10 +117,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit non-zero if any positive is missed or any negative is "
-        "false-invalidated. The default is to report and exit 0 so this "
-        "script can be run in CI as an audit log without flaking on "
-        "regressions; use --strict to gate the build.",
+        help="(Deprecated, now the default.) Exit non-zero if any positive is "
+        "missed or any negative is false-invalidated. The default mode is "
+        "strict so the eval can be run in CI as an audit log without flaking "
+        "on regressions.",
+    )
+    parser.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Report and exit 0 even on labeled regressions. Use this only "
+        "for ad-hoc inspection where the eval is the audit log; CI must "
+        "not pass --audit-only.",
     )
     args = parser.parse_args(argv)
 
@@ -143,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  missed corrections:  {summary['missed_correction_ids']}")
     if summary["false_invalidation_ids"]:
         print(f"  false invalidations: {summary['false_invalidation_ids']}")
-    if args.strict and (superseded < positives or false_inv > 0):
+    # Default: strict — labeled regressions fail the run. CI must invoke
+    # this script with no flags so the build gates on labeled quality.
+    if args.audit_only:
+        return 0
+    if superseded < positives or false_inv > 0:
         return 1
     return 0
 
