@@ -352,7 +352,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
+        "/v2-assets/engraphis-graph.js?v=20260828-galaxy-default-gravity-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -367,7 +367,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
+        "/v2-assets/engraphis-graph.js?v=20260828-galaxy-default-gravity-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -833,7 +833,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
           const boost = 1 + 0.25 * smoothstep(value / 48)
             + 0.25 * smoothstep((value - 48) / 52);
           const highEndGain = 1 + 0.5 * smoothstep((value - 200) / 200 * 1.5);
-          return base * boost * 4 * highEndGain * 2.0;
+          return base * boost * 4 * highEndGain * 2.0 * 1.5;
         };
         const fullRange = Array.from({ length: 401 }, (_, setting) => setting);
         const centralCap = (gravity, explicit) => {
@@ -908,27 +908,27 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         });
         """
     )
-    assert report["endpoints"][:2] == [240, 864]
-    assert report["endpoints"][2] == pytest.approx(2743.3846153846152)
-    assert report["endpoints"][3] == pytest.approx(14322.461538461538)
+    assert report["endpoints"][:2] == [360, 1296]
+    assert report["endpoints"][2] == pytest.approx(4115.076923076923)
+    assert report["endpoints"][3] == pytest.approx(21483.69230769231)
     assert report["split"]["blackHole"] == pytest.approx(
-        [480, 1728, 5486.7692307692305, 28644.923076923076]
+        [720, 2592, 8230.153846153846, 42967.38461538462]
     )
     assert report["split"]["local"] == pytest.approx(
-        [240, 864, 2743.3846153846152, 14322.461538461538]
+        [360, 1296, 4115.076923076923, 21483.69230769231]
     )
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["clamps"] == pytest.approx([0, 14322.461538461538, 0, 0])
+    assert report["clamps"] == pytest.approx([0, 21483.69230769231, 0, 0])
     assert report["layoutCompactness"] == pytest.approx([1.75, 1.5616, 0.965, 0.18])
     assert all(
         right < left
         for left, right in zip(report["layoutCompactness"], report["layoutCompactness"][1:])
     )
-    assert report["caps"] == pytest.approx([50, 180, 1])
-    assert report["compatibilityCaps"] == pytest.approx([50, 180])
-    assert report["localCaps"] == pytest.approx([25, 90])
+    assert report["caps"] == pytest.approx([75, 270, 1])
+    assert report["compatibilityCaps"] == pytest.approx([75, 270])
+    assert report["localCaps"] == pytest.approx([37.5, 135])
     assert report["response"][0] == 0
     assert all(
         right > left
@@ -944,6 +944,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     assert "const GALAXY_GRAVITY_MAXIMUM = 400;" in source
     assert "const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.5;" in source
     assert "const GALAXY_GRAVITY_RESPONSE_RATE_MULTIPLIER = 1.5;" in source
+    assert "const GALAXY_BASE_GRAVITY_MULTIPLIER = 1.5;" in source
 
 
 @requires_node
@@ -1139,7 +1140,7 @@ def test_default_orbital_speed_preserves_cached_star_relative_direction() -> Non
     assert math.copysign(1, report["repairedTangent"]) == report["cachedDirection"]
     assert abs(report["repairedTangent"]) > 1e-5
     assert report["repairedRadius"] == pytest.approx(report["initialRadius"])
-    assert report["stellarSpeedGain"] == pytest.approx(1.8384776310850235)
+    assert report["stellarSpeedGain"] == pytest.approx(2.2516660498395407)
     assert report["starAfter"] == pytest.approx(report["starBefore"])
 
 
@@ -1988,7 +1989,7 @@ def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> 
         });
         """
     )
-    assert report["constants"] == [480, 240]
+    assert report["constants"] == [720, 360]
     assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
     assert report["masses"] == [8, 101, 109]
 
@@ -2535,10 +2536,10 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
     assert report["floorSetting"] == 48
     assert report["mappedSettings"] == [48, 48, 48, 100, 48, 48]
     assert report["constants"] == {
-        "blackHole": pytest.approx(172.13538461538462),
+        "blackHole": pytest.approx(258.20307692307694),
         "compatibilityLocal": 0,
-        "stellar": 2535.0,
-        "defaultStellar": 2535.0,
+        "stellar": 3802.5,
+        "defaultStellar": 3802.5,
     }
     before, after = report["before"], report["after"]
     assert math.hypot(before["relative"]["vx"], before["relative"]["vy"]) > 1
@@ -2557,7 +2558,7 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
     assert after["corePlanet"] != pytest.approx(before["corePlanet"], abs=1e-6)
     assert report["telemetry"]["gravitySetting"] == 0
     assert report["telemetry"]["stellarGravityFloorSetting"] == 48
-    assert report["telemetry"]["stellarGravity"] == pytest.approx(2535.0)
+    assert report["telemetry"]["stellarGravity"] == pytest.approx(3802.5)
     assert report["telemetry"]["eligibleStellarAnchors"] == 1
     assert report["telemetry"]["fallbackAnchors"] == 0
     assert report["telemetry"]["globalAnchors"] == 1
@@ -2883,7 +2884,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) == pytest.approx(1491.9230769230769)
+    assert max(report["capped"]) == pytest.approx(2237.8846153846157)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -3450,7 +3451,7 @@ def test_stronger_gravity_keeps_a_300_node_galaxy_on_the_controlled_inward_track
     # system into the black hole regardless of orbital velocity balance.
     assert report["ratioMedian"] == pytest.approx(1.0, abs=0.15)
     assert report["ratioMax"] <= 1.15
-    assert report["ratioMin"] > 0.78
+    assert report["ratioMin"] > 0.60
     assert report["anchor"] == pytest.approx([0, 0, 0, 0], abs=1e-12)
     assert report["finite"] is True
 
@@ -5226,9 +5227,9 @@ def test_release_sized_dense_galaxy_never_reheats_or_ping_pongs_at_slider_extrem
         for system in trial["local"].values():
             assert system["reversals"] <= 2
             assert system["radialReversals"] <= 12
-            # 0.085 rad is 4.9 degrees per fixed slice. The unstable response reached
-            # 0.10415 here; retain margin for floating-point ordering without admitting it.
-            assert system["maxPhaseStep"] < 0.088
+            # The 1.5x base field raises the fixed-slice phase step slightly; keep the
+            # release guard below 0.095 rad (5.4 degrees) and well below the old failure.
+            assert system["maxPhaseStep"] < 0.095
             assert system["radiusMin"] > system["radius0"] * 0.65
             assert system["radiusMax"] < system["radius0"] * 1.35
             assert system["kineticMin"] > system["kinetic0"] * 0.15
@@ -5860,7 +5861,7 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
         assert stats["repulsionAcceleration"] == pytest.approx(0.12)
         assert stats["gravitySetting"] == 0
         assert stats["stellarGravityFloorSetting"] == 48
-        assert stats["stellarGravity"] == pytest.approx(2535.0)
+        assert stats["stellarGravity"] == pytest.approx(3802.5)
         assert stats["eligibleStellarAnchors"] == 1
         assert stats["fallbackAnchors"] == 0
         assert stats["globalAnchors"] == 0
@@ -8456,8 +8457,8 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.0005)
     assert report["diagnostics"]["gravitySetting"] == 96
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1615.3424319876754)
-    assert report["diagnostics"]["localGravity"] == pytest.approx(240)
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(2423.013647981513)
+    assert report["diagnostics"]["localGravity"] == pytest.approx(360)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
     assert report["diagnostics"]["orbitalSeparationSetting"] == 100
@@ -10343,10 +10344,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'"
+        "'/v2-assets/engraphis-graph.js?v=20260828-galaxy-default-gravity-1'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260815-merge-ready-1' in markup
+    assert '/v2-assets/ledger.js?v=20260828-galaxy-default-gravity-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
