@@ -540,3 +540,31 @@ def _memory_obj(id: str, content: str, *, valid_to=None):
         subject_key="", claim_kind="", keywords=(), metadata={},
         provenance={"source": "agent", "trusted": True, "review_state": "approved"},
     )
+
+
+def test_unkeyed_facts_with_distinct_subjects_about_same_attribute_both_live():
+    """Two live facts describing parallel subjects in the same scope
+    must not be collapsed by the strong branch when each one carries
+    its own subject (``Customer alpha`` vs ``Customer beta``). The
+    shared prefix "Customer [subject] default admin user is" makes
+    every replacement pass ``_attribute_anchor_ok``, but the subjects
+    differ, so the two facts are coexisting truths and should both
+    stay live.
+    """
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        alpha = eng.remember_with_resolution(
+            "Customer alpha default admin user is root.",
+            workspace_id=wid, repo_id=rid)
+        beta = eng.remember_with_resolution(
+            "Customer beta default admin user is admin.",
+            workspace_id=wid, repo_id=rid)
+        # Both facts should remain live (no supersession).
+        assert beta["op"] in ("add", "relate")
+        assert eng.store.get_memory(alpha["id"]).valid_to is None
+        assert eng.store.get_memory(beta["id"]).valid_to is None
+    finally:
+        eng.store.close()

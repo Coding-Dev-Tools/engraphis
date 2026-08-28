@@ -2175,15 +2175,20 @@ class MemoryEngine:
             for sim, rec in extra_neighbors:
                 if rec.id not in known_ids:
                     neighbors.append((sim, rec))
-        # Bi-temporal backfill only: anchored writes (valid_at pinned AND a
-        # subject_key is present) assert explicit chain membership and may
-        # supersede a live neighbour even when prose alone would suggest two
-        # coexisting facts. Other valid_at-pinned writes (e.g. scheduled
-        # future writes) stay on the present-time veto contract.
+        # Bi-temporal backfill: any anchored write (valid_at pinned to a
+        # past or present timestamp) asserts explicit chain membership and
+        # may supersede a live neighbour even when prose alone would
+        # suggest two coexisting facts. The previous contract also
+        # required a subject_key, which silently dropped unkeyed
+        # historical backfills (e.g. "Customer alpha default admin user
+        # is root" at t=1000 followed by "Customer beta default admin
+        # user is admin" at t=3000); both facts should stay live under
+        # the bi-temporal record. Scheduled future writes
+        # (valid_at > now) stay on the present-time veto contract.
         decision = resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
             candidate_content=content,
-            temporal_splice=valid_at is not None and bool(subject_key),
+            temporal_splice=valid_at is not None and valid_at <= now_ts(),
         )
         # Repair trigger: when the resolver cannot safely supersede (INVALIDATE/NOOP),
         # surface a genuine high-severity contradiction as a persisted relation instead
