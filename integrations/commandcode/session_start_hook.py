@@ -63,7 +63,7 @@ def _env_int(name: str, default: int) -> int:
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 
 
-def post(url, payload, timeout, session_id: str | None = None):
+def post(url, payload, timeout, session_id=None):
     """POST one JSON-RPC message; return (decoded_body, response_session_id).
 
     The response_session_id is the Mcp-Session-Id returned by the server (or
@@ -106,8 +106,8 @@ def post(url, payload, timeout, session_id: str | None = None):
     return (responses[-1] if responses else None), response_session_id
 
 
-def rpc(method, params, rpc_id, deadline, session_id: str | None = None,
-         url: str = MCP_URL_DEFAULT):
+def rpc(method, params, rpc_id, deadline, session_id=None,
+         url=MCP_URL_DEFAULT):
     """Issue one JSON-RPC request within the shared time budget.
 
     ``session_id`` is threaded into the Mcp-Session-Id header on every
@@ -136,8 +136,8 @@ def rpc(method, params, rpc_id, deadline, session_id: str | None = None,
     return None, next_session_id
 
 
-def notify_initialized(deadline, session_id: str | None = None,
-                     url: str = MCP_URL_DEFAULT):
+def notify_initialized(deadline, session_id=None,
+                     url=MCP_URL_DEFAULT):
     """Best-effort notifications/initialized; stateless servers reply 202/empty."""
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
@@ -171,7 +171,7 @@ def extract_context(result):
     return ""
 
 
-def session_context(repo, workspace, deadline, mcp_url: str = MCP_URL_DEFAULT):
+def session_context(repo, workspace, deadline, mcp_url=MCP_URL_DEFAULT):
     """initialize -> initialized -> tools/call engraphis_session(action=start).
 
     The Mcp-Session-Id returned by initialize is threaded into every
