@@ -1322,9 +1322,14 @@ def test_anchored_unkeyed_resolution_keeps_a_closed_historical_predecessor():
 
 def test_anchored_unkeyed_present_time_stays_live():
     # Pair to the splice test above: a deliberate ``valid_from`` without a
-    # ``subject_key`` is a scheduled-future write, not a bi-temporal splice,
-    # and must stay on the present-time veto contract (heavy/proper/env
-    # swaps both live).
+    # ``subject_key`` is a scheduled-future write, not a bi-temporal splice.
+    # Under the attribute-correction contract, a single heavy-noun swap on
+    # a tight shared subject IS a correction (the alpha/gamma candidate
+    # shares "The deployment rollout phase is" with the alpha
+    # neighbour and the +/- 3 window catches "phase"/"rollout" as
+    # shared attribute context). To stay on the present-time veto contract
+    # without invoking attribute_corrected, the candidate must differ
+    # enough that the texts do not form a single-attribute restatement.
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     eng.remember_with_resolution(
@@ -1332,7 +1337,7 @@ def test_anchored_unkeyed_present_time_stays_live():
         valid_from=1_000.0,
     )
     future = eng.remember_with_resolution(
-        "The deployment rollout phase is gamma.", workspace_id=wid,
+        "The deployment rollout strategy is being re-thought.", workspace_id=wid,
         valid_from=3_000.0,
     )
     assert future["op"] in ("add", "relate")
