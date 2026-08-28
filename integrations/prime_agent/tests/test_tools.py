@@ -285,6 +285,30 @@ async def test_session_id_not_injected_when_not_bound(client, fake_mcp_server) -
     assert "session_id" not in last_args or last_args.get("session_id") in (None, "")
 
 
+async def test_session_id_not_injected_for_tools_without_session_id_in_schema(
+    client, fake_mcp_server
+) -> None:
+    """A bound session_id must NOT be injected into tools whose declared
+    schema does not list ``session_id``; FastMCP would otherwise reject
+    the RPC for an unexpected argument. Covers discover_actions, both
+    executors, get_memory, update_memory, and conflict_review."""
+    for tool in (
+        "engraphis_discover_actions",
+        "engraphis_execute_action",
+        "engraphis_execute_read",
+        "engraphis_get_memory",
+        "engraphis_update_memory",
+        "engraphis_conflict_review",
+    ):
+        fn, _meta = build_tool(tool, client, client.config, session_id="ses_bound")
+        await fn({})  # any args; the server replies with the echoed payload
+        last_name, last_args = fake_mcp_server.call_log[-1]
+        assert last_name == tool
+        assert "session_id" not in last_args, (
+            f"session_id leaked into {tool!r} whose schema does not declare it"
+        )
+
+
 def test_all_tools_with_session_id_returns_independent_callables(client) -> None:
     """all_tools() must return 9 distinct callables, each with its own
     closure-captured name. Reusing a session_id must not collapse the

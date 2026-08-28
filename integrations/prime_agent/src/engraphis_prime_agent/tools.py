@@ -521,9 +521,15 @@ def build_tool(
         # visible in stack traces / introspection while signalling that
         # it is intentionally unused. The signature stays compatible
         # with agent.py's `await fn(args, ctx)` call site.
-        params = apply_scope_defaults(args, config, schema=schemas[name])
-        # Precedence: caller-supplied session_id wins over the bound one.
-        if session_id and "session_id" not in params:
+        schema = schemas[name]
+        params = apply_scope_defaults(args, config, schema=schema)
+        # Precedence: caller-supplied session_id wins over the bound one,
+        # but only when the tool's declared schema actually accepts it.
+        # Six Smart tools (discovery, both executors, get/update memory,
+        # conflict review) do not declare session_id; passing it would
+        # be rejected as an unexpected argument by FastMCP.
+        declared = _declared_property_names(schema)
+        if session_id and "session_id" not in params and "session_id" in declared:
             params["session_id"] = session_id
         return await client.call_tool(name, params)
 
